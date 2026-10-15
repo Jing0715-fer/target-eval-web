@@ -23,11 +23,14 @@ model EvaluationJob {
   reportPath  String? // 磁盘上的 HTML 报告路径
   logs        String? // JSON：终态时的日志快照（≤60 条）
   error       String?
+  ownerKey    String? // 创建者归属键（来源 IP 的 SHA-256 前 24 位；null=升级前历史记录）
+  ownerMask   String? // 创建者来源 IP 掩码（如 203.0.113.*，仅排障展示）
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   assets      ReportAsset[]
 
   @@index([createdAt])
+  @@index([ownerKey, createdAt])
 }
 
 // 评估表图片资产（胶图/SEC 等）— 文件存磁盘，DB 只存元数据

@@ -2,7 +2,17 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowRight, CircleAlert, History, LoaderCircle, Trash2 } from 'lucide-react'
+import { ArrowRight, CircleAlert, History, LoaderCircle, ShieldCheck, Trash2 } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -93,9 +103,25 @@ function EmptyHistoryState({ compact = false }: { compact?: boolean }) {
       </div>
       <p className="text-sm font-medium text-stone-600 dark:text-stone-400">暂无评估记录</p>
       <p className="text-xs text-stone-400 dark:text-stone-500">
-        完成第一次靶点评估后，记录将显示在此处
+        完成第一次靶点评估后，记录将显示在此处（仅你自己的记录可见）
       </p>
     </div>
+  )
+}
+
+/** 隐私隔离标识：按来源网络隔离的记录可见性提示 */
+function PrivacyBadge({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded-sm border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400',
+        className,
+      )}
+      title="评估记录按来源网络（IP）隔离，其他用户不可见"
+    >
+      <ShieldCheck className="size-3" aria-hidden />
+      仅自己可见
+    </span>
   )
 }
 
@@ -116,6 +142,7 @@ export function HistoryDialog({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<JobListItem | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -144,6 +171,7 @@ export function HistoryDialog({
       setError('删除失败，请稍后重试')
     } finally {
       setDeletingId(null)
+      setConfirmDelete(null)
     }
   }
 
@@ -154,8 +182,11 @@ export function HistoryDialog({
           <DialogTitle className="flex items-center gap-2 font-display">
             <History className="size-4 text-emerald-700 dark:text-emerald-500" />
             历史评估
+            <PrivacyBadge className="ml-1" />
           </DialogTitle>
-          <DialogDescription>最近的评估作业，点击记录加载结果或继续跟踪进度</DialogDescription>
+          <DialogDescription>
+            你最近的评估作业，点击记录加载结果或继续跟踪进度；记录按来源网络隔离，其他用户不可见
+          </DialogDescription>
         </DialogHeader>
 
         <div className="eval-scroll -mx-1 min-h-0 flex-1 overflow-y-auto px-1">
@@ -183,7 +214,7 @@ export function HistoryDialog({
                   key={j.id}
                   job={j}
                   onOpen={onOpenJob}
-                  onDelete={handleDelete}
+                  onDelete={(id) => setConfirmDelete(jobs.find((x) => x.id === id) ?? null)}
                   deleting={deletingId === j.id}
                 />
               ))}
@@ -191,6 +222,27 @@ export function HistoryDialog({
           )}
         </div>
       </DialogContent>
+
+      {/* 删除确认 */}
+      <AlertDialog open={confirmDelete != null} onOpenChange={(v) => !v && setConfirmDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除这条评估记录？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将删除「{confirmDelete?.proteinName || confirmDelete?.title || confirmDelete?.uniprotId || '未命名评估'}」的作业记录、生成的报告与上传的实验图片，且不可恢复。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-400/40"
+              onClick={() => confirmDelete && void handleDelete(confirmDelete.id)}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   )
 }
@@ -207,6 +259,8 @@ export function RecentEvaluations({
   onOpenHistory: () => void
 }) {
   const [jobs, setJobs] = useState<JobListItem[] | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<JobListItem | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -224,11 +278,15 @@ export function RecentEvaluations({
   }, [refreshKey])
 
   const handleDelete = async (id: string) => {
+    setDeletingId(id)
     try {
       await deleteJobById(id)
       setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
     } catch {
       // 忽略删除失败
+    } finally {
+      setDeletingId(null)
+      setConfirmDelete(null)
     }
   }
 
@@ -239,10 +297,11 @@ export function RecentEvaluations({
       transition={{ duration: 0.35, delay: 0.15, ease: 'easeOut' }}
       className="mt-10"
     >
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="flex items-center gap-2.5 text-sm font-semibold text-stone-700 dark:text-stone-300">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h2 className="flex flex-wrap items-center gap-2.5 text-sm font-semibold text-stone-700 dark:text-stone-300">
           <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">Recent</span>
           最近评估
+          <PrivacyBadge />
         </h2>
         <Button
           variant="ghost"
@@ -266,7 +325,13 @@ export function RecentEvaluations({
       ) : (
         <div className="flex flex-col gap-2">
           {jobs.slice(0, 5).map((j) => (
-            <JobRow key={j.id} job={j} onOpen={onOpenJob} onDelete={handleDelete} />
+            <JobRow
+              key={j.id}
+              job={j}
+              onOpen={onOpenJob}
+              onDelete={(id) => setConfirmDelete(jobs.find((x) => x.id === id) ?? null)}
+              deleting={deletingId === j.id}
+            />
           ))}
           {jobs.length > 5 && (
             <div className="flex justify-center pt-1">
@@ -277,6 +342,27 @@ export function RecentEvaluations({
           )}
         </div>
       )}
+
+      {/* 删除确认 */}
+      <AlertDialog open={confirmDelete != null} onOpenChange={(v) => !v && setConfirmDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除这条评估记录？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将删除「{confirmDelete?.proteinName || confirmDelete?.title || confirmDelete?.uniprotId || '未命名评估'}」的作业记录、生成的报告与上传的实验图片，且不可恢复。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-400/40"
+              onClick={() => confirmDelete && void handleDelete(confirmDelete.id)}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.section>
   )
 }

@@ -1,24 +1,29 @@
 /**
  * GET    /api/jobs/[id] — 作业详情（运行中：内存快照实时进度；终态：DB 重建）
  * DELETE /api/jobs/[id] — 取消运行中作业 / 删除作业（含磁盘资产与报告）
+ * 公网加固：仅创建者（ownerKey 匹配）可访问；他人访问返回 404（不暴露存在性）。
+ * pending 作业附带 queuePosition（前方排队数）供前端展示等待状态。
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { doneProgress, getJobSnapshot, markStatus } from '@/lib/eval/job-manager'
+import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
 import type { BlastHit, InputMode, JobStatus, JobSummary, LiteratureItem, ParsedImage, PdbEntry } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
+  const owner = getOwner(req)
   const job = await db.evaluationJob.findUnique({
     where: { id },
     include: { assets: { orderBy: { order: 'asc' } } },
   })
-  if (!job) return NextResponse.json({ error: '作业不存在' }, { status: 404 })
+  if (!job) return notFound()
+  if (!isOwnedBy(job, owner)) return notFound()
 
   const snap = getJobSnapshot(id)
   const status = (snap?.status ?? job.status) as JobStatus
@@ -52,6 +57,16 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     try { logs = JSON.parse(job.logs) } catch { /* ignore */ }
   }
 
+  // 排队中：计算前方待执行作业数（全局串行队列位置）
+  let queuePosition: number | undefined
+  if (status === 'pending') {
+    try {
+      queuePosition = await db.evaluationJob.count({
+        where: { status: 'pending', createdAt: { lt: job.createdAt } },
+      })
+    } catch { /* 计数失败不影响详情 */ }
+  }
+
   const assets: ParsedImage[] = job.assets.map(a => ({
     id: a.id,
     kind: a.kind as ParsedImage['kind'],
@@ -69,6 +84,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     goal: job.goal,
     progress: status === 'done' ? doneProgress() : (snap?.progress ?? null),
     logs,
+    queuePosition,
     summary,
     pdbs,
     blastHits,
@@ -78,10 +94,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   })
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
+  const owner = getOwner(req)
   const job = await db.evaluationJob.findUnique({ where: { id } })
   if (!job) return NextResponse.json({ ok: true, deleted: true })
+  if (!isOwnedBy(job, owner)) return notFound()
 
   // 运行中 → 中止
   const snap = getJobSnapshot(id)

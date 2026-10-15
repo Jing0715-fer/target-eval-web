@@ -526,7 +526,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           <AlertTitle>无法开始评估</AlertTitle>
           <AlertDescription>
             {submitError}
-            <span className="text-xs text-stone-500">（评估服务可能尚未就绪，请稍后重试）</span>
+            {!/上限|繁忙|排队|稍后再试|明日再试|正在或排队/.test(submitError) && (
+              <span className="text-xs text-stone-500">（评估服务可能尚未就绪，请稍后重试）</span>
+            )}
           </AlertDescription>
         </Alert>
       )}

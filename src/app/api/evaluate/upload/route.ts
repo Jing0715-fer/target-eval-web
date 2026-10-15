@@ -3,11 +3,20 @@
  * 解析文本（UniProt/序列/基因/目标语句）+ 提取归一化图片（胶图/SEC，含 EMF/WMF
  * 转换、大图降采样、VLM 类型识别）到磁盘。
  * 解析结果持久化到 db/reports/{uploadId}/parsed.json 供评估阶段复用。
+ *
+ * 公网加固（防 OOM / 防滥用）：
+ *  - 每 IP 24h 上传滑动窗口配额（MAX_UPLOADS_PER_DAY）
+ *  - 解析在全局并发信号量内执行（PARSE_CONCURRENCY；等待超限 429）
+ *    — mammoth 20MB 缓冲 + sharp + VLM 是内存峰值主源，必须有界
+ *  - 上传目录写入 owner.json（IP 哈希），供 insights / evaluate / assets 归属校验
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { DOCX_MAX_BYTES, parseDocx } from '@/lib/eval/docx'
+import { getOwner } from '@/lib/eval/request-guard'
+import { checkAndCountUpload, quotaResponse, withParseSlot, QuotaError } from '@/lib/eval/gatekeeper'
+import { writeOwnerFile } from '@/lib/eval/upload-owner'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -44,6 +53,8 @@ function cleanupExpiredUploads(): void {
 }
 
 export async function POST(req: Request) {
+  const owner = getOwner(req)
+
   let file: File | null = null
   try {
     const form = await req.formData()
@@ -62,11 +73,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: `文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB），上限 20MB` }, { status: 413 })
   }
 
+  // 每 IP 上传日配额（滑动窗口）
+  try {
+    checkAndCountUpload(owner.key)
+  } catch (e) {
+    if (e instanceof QuotaError) return quotaResponse(e)
+    throw e
+  }
+
   cleanupExpiredUploads()
 
   try {
     const buffer = Buffer.from(await file.arrayBuffer())
-    const { uploadId, parsed } = await parseDocx(buffer)
+    // 解析纳入全局并发信号量（内存峰值有界；繁忙时 429）
+    const { uploadId, parsed } = await withParseSlot(() => parseDocx(buffer))
     // 持久化解析结果（评估阶段读取 images/goalHints/fullText）。
     // 持久化失败必须报错（而非静默）：否则后续 insights 404、评估丢图。
     const parsedPath = path.join(process.cwd(), 'db', 'reports', uploadId, 'parsed.json')
@@ -81,6 +101,8 @@ export async function POST(req: Request) {
         throw new Error(`解析结果持久化失败：${e2 instanceof Error ? e2.message : String(e2)}（e1: ${e1 instanceof Error ? e1.message : String(e1)}）`)
       }
     }
+    // 归属标记（insights / evaluate / assets 校验用）
+    await writeOwnerFile(uploadId, owner)
 
     // 响应剥离 fullText（≤14KB，仅后端 LLM 解析用），保持响应轻量
     const { fullText: _ft, ...parsedLite } = parsed
@@ -97,6 +119,7 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ ok: true, uploadId, parsed: parsedLite })
   } catch (e) {
+    if (e instanceof QuotaError) return quotaResponse(e)
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ ok: false, error: `文档解析失败：${msg}` }, { status: 500 })
   }

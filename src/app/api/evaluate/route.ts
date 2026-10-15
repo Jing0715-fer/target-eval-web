@@ -1,10 +1,15 @@
 /**
  * POST /api/evaluate — 创建评估作业（串行队列执行）
+ * 公网加固：记录创建者归属（IP 哈希）、创建前配额检查（全局排队上限 /
+ * 每 IP 活跃与日配额）、上传目录归属校验、触发终态作业 TTL 清理。
  */
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { createJobSnapshot, enqueueJob, getJobSnapshot, makeReporter, setJobRunning, markStatus } from '@/lib/eval/job-manager'
 import { runPipeline } from '@/lib/eval/pipeline'
+import { getOwner } from '@/lib/eval/request-guard'
+import { checkJobQuota, quotaResponse, scheduleJobTtlCleanup, QuotaError } from '@/lib/eval/gatekeeper'
+import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import type { EvaluationOptions, InputMode } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
@@ -24,6 +29,8 @@ interface EvaluateBody {
 }
 
 export async function POST(req: Request) {
+  const owner = getOwner(req)
+
   let body: EvaluateBody
   try {
     body = (await req.json()) as EvaluateBody
@@ -50,13 +57,33 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: 'mode=docx 需要评估表中解析出的 uniprot 或 sequence（请先上传并选择）' }, { status: 400 })
   }
 
+  // 上传目录归属校验（防跨用户引用他人上传的评估表/图片）
+  if (uploadId) {
+    if (!isUploadId(uploadId)) {
+      return NextResponse.json({ ok: false, error: 'uploadId 无效' }, { status: 400 })
+    }
+    const owned = await uploadOwnedBy(uploadId, owner)
+    if (!owned) {
+      return NextResponse.json({ ok: false, error: '无权使用该上传（仅上传者本人可用）' }, { status: 403 })
+    }
+  }
+
+  // 并发/配额守卫（全局排队上限 + 每 IP 活跃上限 + 日配额）
+  try {
+    const quota = await checkJobQuota(owner.key)
+    if (!quota.ok && quota.error) throw quota.error
+  } catch (e) {
+    if (e instanceof QuotaError) return quotaResponse(e)
+    return NextResponse.json({ ok: false, error: '配额检查失败，请稍后重试' }, { status: 500 })
+  }
+
   const options: EvaluationOptions = {
     skipBlast: body.options?.skipBlast ?? false,
     forceBlast: body.options?.forceBlast ?? false,
     maxPdb: Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
   }
 
-  // 创建 DB 记录（pending）
+  // 创建 DB 记录（pending）— 记录归属（哈希键 + 掩码）
   const job = await db.evaluationJob.create({
     data: {
       status: 'pending',
@@ -65,8 +92,13 @@ export async function POST(req: Request) {
       uniprotId: uniprot?.toUpperCase() ?? null,
       goal: body.goal?.slice(0, 2000) ?? null,
       options: JSON.stringify(options),
+      ownerKey: owner.key,
+      ownerMask: owner.mask,
     },
   })
+
+  // 惰性触发终态作业 TTL 清理（fire-and-forget）
+  scheduleJobTtlCleanup()
 
   // 内存快照 + 串行队列
   createJobSnapshot(job.id)

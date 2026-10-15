@@ -2,11 +2,14 @@
  * POST /api/evaluate/insights — 对已上传的评估表执行 LLM 智能解析。
  * body: { uploadId } → 读取 parsed.json 的 fullText，提取目标/科学问题/实验要点，
  * 持久化到 insights.json 并返回（重复调用返回缓存）。
+ * 公网加固：仅上传者本人可对其上传执行解析（owner.json 归属校验）。
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { extractFormInsights } from '@/lib/eval/docx-llm'
+import { getOwner, forbidden } from '@/lib/eval/request-guard'
+import { isUploadId, uploadDir, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import type { FormInsights } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
@@ -25,6 +28,7 @@ interface StoredParsed {
 }
 
 export async function POST(req: Request) {
+  const owner = getOwner(req)
   let body: InsightsBody
   try {
     body = (await req.json()) as InsightsBody
@@ -33,11 +37,14 @@ export async function POST(req: Request) {
   }
 
   const uploadId = (body.uploadId ?? '').trim()
-  if (!/^[\w-]{4,64}$/.test(uploadId)) {
+  if (!isUploadId(uploadId)) {
     return NextResponse.json({ ok: false, error: 'uploadId 无效' }, { status: 400 })
   }
+  if (!(await uploadOwnedBy(uploadId, owner))) {
+    return forbidden()
+  }
 
-  const dir = path.join(process.cwd(), 'db', 'reports', uploadId)
+  const dir = uploadDir(uploadId)
   const insightsPath = path.join(dir, 'insights.json')
 
   // 缓存命中直接返回

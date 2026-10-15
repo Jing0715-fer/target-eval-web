@@ -2,6 +2,8 @@
 
 从 [pdb-tracker-web-v5](https://github.com/Jing0715-fer/pdb-tracker-web-v5) 拆分出的**蛋白靶点评估**独立 Web 应用：输入 UniProt ID、氨基酸序列或 Word 评估表，自动完成多数据库数据收集与可行性评分，生成含 LLM 分析的 HTML 评估报告。
 
+> **v1.5 公网加固**：多用户数据隔离（按来源 IP，仅创建者可见自己的记录/报告/实验图片）+ 并发/配额限制（全局排队上限、每 IP 活跃与日配额、docx 解析并发信号量、终态作业 TTL 自动清理），详见[公网部署](#公网部署)。
+
 ## 功能特性
 
 ### 三种输入方式
@@ -62,9 +64,12 @@
 - 顶栏字标随时可点返回首页，结果页顶部/底部均有「新建评估」入口，长流程不迷路
 - 评估表上传后 **AI 智能解析要点**卡片即时展示（目标可点击回填、科学问题编号列表、实验要点折叠展开）
 
-### 轻量化与内存优化（4GB 沙箱可流畅运行）
-- 评估作业**全局串行执行**，任意时刻最多 1 个作业占用资源
+### 轻量化与内存优化（4GB 沙箱 / 小型云主机可流畅运行）
+- 评估作业**全局串行执行**，任意时刻最多 1 个作业占用资源；**全局排队上限 8**、**每 IP 同时活跃（排队+运行）≤ 2**、**每 IP 24h 创建 ≤ 30 次评估**，超限 429 + 中文提示（带 Retry-After）
+- docx 解析（mammoth + sharp + VLM）**全局并发信号量 ≤ 2**（等待队列 ≤ 4，超限 429）— 上传解析是内存峰值主源，必须有界
+- 上传限流：**每 IP 24h ≤ 20 份文档**（滑动窗口）；单文件 ≤ 20MB
 - 作业注册表 **LRU ≤ 20**，终态作业超限即逐出（历史从 SQLite 重建）
+- **终态作业 TTL 自动清理**（默认 7 天，每至多 1h 惰性触发一次，DB 行 + 磁盘报告目录一并回收）；上传目录 TTL 24h
 - 外部 API 响应 **LRU 缓存（≤100 条 / ≤5MB）**
 - PDB 详情分批拉取（并发 5，默认上限 150 条）；图片资产：原始单张 ≤6MB → 处理后每张有界（长边 ≤1600px、>800KB 再压 JPEG），每报告 ≤12 张、报告内嵌 ≤8 张 / 总预算 ≤6MB
 - 图片处理有界：EMF/WMF 转换 soffice 单次批量（≤45s 超时）；VLM 逐图识别限前 6 张、小并发 2、单图 ≤25s（失败回退关键词分类）
@@ -91,18 +96,59 @@ bun run dev                   # http://localhost:3000
 
 > 首次启动即用内置 Z.ai 引擎，无需任何 Key；需要切换供应商时在页面右上角⚙️「LLM 分析引擎配置」中填入对应 API Key。
 
+## 公网部署（v1.5 加固）
+
+面向公网多用户场景的安全与稳定性设计：
+
+### 数据隔离（按来源 IP）
+- **归属键**：请求来源 IP 的 SHA-256 前 24 位（DB 不落明文 IP；仅存掩码如 `203.0.113.*` 供排障）
+- 作用范围：**作业列表**只返回本人记录；**作业详情 / 取消删除 / HTML 报告 / 评估表图片 / 智能解析 / docx 评估引用**均需归属匹配，他人访问一律 404/403（不暴露资源存在性）
+- 上传目录写入 `owner.json`（IP 哈希）标记归属；实验图片（胶图/SEC）属涉密数据，跨用户访问一律拒绝
+- 前端「历史评估 / 最近评估」标题处展示「仅自己可见」标识；页脚标注隔离与保留策略
+
+### 并发与配额（防 OOM / 防滥用）
+
+| 限制项 | 默认值 | 环境变量 | 超限行为 |
+|---|---|---|---|
+| 全局排队中作业上限 | 8 | `EVAL_MAX_QUEUE` | 429 服务器繁忙 |
+| 每 IP 同时活跃（排队+运行）作业 | 2 | `EVAL_MAX_ACTIVE_PER_IP` | 429 提示等待 |
+| 每 IP 24h 创建评估数 | 30 | `EVAL_MAX_JOBS_PER_DAY` | 429 明日再试 |
+| 每 IP 24h 上传文档数 | 20 | `EVAL_MAX_UPLOADS_PER_DAY` | 429 明日再试 |
+| docx 解析全局并发 | 2 | `EVAL_PARSE_CONCURRENCY` | 排队；等待超限 429 |
+| 解析等待队列上限 | 4 | `EVAL_PARSE_WAIT_LIMIT` | 429 解析繁忙 |
+| 终态作业保留天数 | 7 | `EVAL_JOB_TTL_DAYS` | 自动清理（DB+磁盘） |
+
+### 部署检查清单
+1. **置于反向代理之后**（Caddy/Nginx/云网关）并传递真实 IP：
+   ```caddy
+   example.com {
+     reverse_proxy localhost:3000 {
+       header_up X-Forwarded-For {remote_host}
+       header_up X-Real-IP {remote_host}
+     }
+   }
+   ```
+   > 未接代理时所有直连请求同属 `direct` 归属组（本地开发联机调试够用；公网必须接代理隔离用户）
+2. HTTPS（Caddy 自动签发）；报告预览允许 iframe 嵌入（`frame-ancestors *`，资源已按归属隔离）
+3. `db/custom.db` 与 `db/reports/` 均含用户数据，注意宿主磁盘权限与备份策略；终态记录 7 天自动清理
+4. 外部 LLM API Key 明文存本地 SQLite，公网开放给不可信人群前建议改用内置引擎或为配置面板加访问控制
+5. 操作系统层建议配套：内存限制（systemd `MemoryMax` / 容器 memory limit）、磁盘告警（报告与上传产物占空间）
+
 ## API 一览
+
+> 所有涉及用户数据的接口均按来源 IP 隔离（仅创建者可访问自己的资源）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/evaluate` | 创建评估作业（mode: uniprot / sequence / docx；uniprot 模式可附 sequence 伴随序列） |
-| POST | `/api/evaluate/upload` | 上传 Word 评估表（multipart `file`） |
-| POST | `/api/evaluate/insights` | 评估表 LLM 智能解析（目标/科学问题/实验要点，结果缓存） |
-| GET | `/api/jobs` | 最近作业列表 |
-| GET | `/api/jobs/{id}` | 作业详情 / 进度轮询（2s） |
-| DELETE | `/api/jobs/{id}` | 取消 / 删除作业（含磁盘产物） |
-| GET | `/api/jobs/{id}/report` | HTML 报告（`?download=1` 触发下载） |
-| GET | `/api/assets/{id}` | 评估表图片流 |
+| POST | `/api/evaluate` | 创建评估作业（mode: uniprot / sequence / docx；uniprot 模式可附 sequence 伴随序列）；配额超限 429 |
+| POST | `/api/evaluate/upload` | 上传 Word 评估表（multipart `file`）；解析并发信号量 + 每 IP 日配额 |
+| POST | `/api/evaluate/insights` | 评估表 LLM 智能解析（目标/科学问题/实验要点，结果缓存；仅上传者） |
+| GET | `/api/jobs` | 本人最近作业列表（按 IP 归属过滤） |
+| GET | `/api/jobs/{id}` | 作业详情 / 进度轮询（2s；pending 附 queuePosition） |
+| DELETE | `/api/jobs/{id}` | 取消 / 删除作业（含磁盘产物；仅创建者） |
+| GET | `/api/jobs/{id}/report` | HTML 报告（`?download=1` 触发下载；仅创建者） |
+| GET | `/api/assets/{id}` | 评估表图片流（仅归属者） |
+| GET | `/api` | 健康检查 + 服务器负载状态（队列/解析占用，无用户数据） |
 | GET/POST/DELETE | `/api/llm/config` | 读取 / 保存启用 / 重置 LLM 引擎配置（Key 脱敏返回） |
 | POST | `/api/llm/models` | 拉取供应商模型列表（服务端代发，Key 不落前端） |
 | POST | `/api/llm/test` | 测试引擎连通性（极小 prompt） |
@@ -126,15 +172,19 @@ src/
     docx-llm.ts               # 评估表 LLM 智能解析（目标/科学问题/实验要点提取）
     seq-compare.ts            # 轻量序列比对（同靶点判定 + 构建边界估计）
     llm-provider.ts           # 多供应商统一调用（zai/openai/anthropic/google）+ 配置 + 模型列表
+    request-guard.ts          # 公网隔离：来源 IP 解析 + 归属键（SHA-256）+ 掩码 + 访问判定
+    gatekeeper.ts             # 并发/配额守卫：队列与日配额 + 解析信号量 + 作业 TTL 清理
+    upload-owner.ts           # 上传目录归属标记（owner.json）与校验
     pipeline.ts               # 8 阶段评估管线（含合并评估/构建比对/insights 集成）
     job-manager.ts            # 串行队列 + 作业注册表 + 进度
     llm.ts / report.ts        # LLM 调用封装 + 三段式 LLM 报告编排
     report-html.ts            # 独立 HTML 报告渲染
-prisma/schema.prisma          # EvaluationJob + ReportAsset + LlmConfig
+prisma/schema.prisma          # EvaluationJob（含 ownerKey/ownerMask）+ ReportAsset + LlmConfig
 tests/make_test_docx.py       # 无图评估表测试文档生成脚本（真实 EGFR 激酶域序列）
 ```
 
 ## 说明
 - LLM 生成的「评估分析」章节基于检索数据上下文，可能存在解读偏差；关键决策请以原始数据库与文献为准
 - 仅支持 .docx（旧版 .doc 请先另存为 .docx）；BLAST 依赖 NCBI 队列，高峰期可能需要 1-5 分钟或超时跳过（不影响其余阶段）
-- 外部 LLM 的 API Key 明文存于本地 SQLite（`db/custom.db`），面向内网/单机沙箱场景设计；如需公网部署请自行加密或改用环境变量
+- 外部 LLM 的 API Key 明文存于本地 SQLite（`db/custom.db`），面向内网/单机沙箱场景设计；公网部署建议见[公网部署检查清单](#公网部署v15-加固)
+- 数据隔离基于来源 IP（无账号体系），同一出口 IP（公司/NAT）下的用户共享同一归属组；升级前创建的历史记录（ownerKey 为 null）不再出现在列表中，但仍可通过原链接访问

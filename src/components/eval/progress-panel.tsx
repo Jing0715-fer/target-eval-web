@@ -5,7 +5,9 @@ import {
   CircleCheckBig,
   CircleDashed,
   Clock,
+  Hourglass,
   LoaderCircle,
+  ShieldCheck,
   Terminal,
   WifiOff,
   XCircle,
@@ -94,7 +96,13 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
   const stages =
     progress?.stages && progress.stages.length > 0 ? progress.stages : FALLBACK_STAGES
   const percent = Math.min(100, Math.max(0, progress?.percent ?? 0))
-  const message = progress?.message?.trim() || '正在启动评估…'
+  const isQueued = job?.status === 'pending'
+  const queuePos = job?.queuePosition ?? 0
+  const message = isQueued
+    ? queuePos > 0
+      ? `排队等待中（前方还有 ${queuePos} 个作业）`
+      : '下一个执行，正在分配资源…'
+    : progress?.message?.trim() || '正在启动评估…'
 
   return (
     <div className="flex flex-col gap-6">
@@ -123,19 +131,31 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
       <Card className="gap-0 rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
         <CardContent className="flex flex-col gap-3.5 px-5 py-4">
           <div className="flex flex-wrap items-center gap-2">
-            <LoaderCircle className="size-4 animate-spin text-emerald-700 dark:text-emerald-500" />
+            {isQueued ? (
+              <Hourglass className="size-4 animate-pulse text-amber-600 dark:text-amber-400" />
+            ) : (
+              <LoaderCircle className="size-4 animate-spin text-emerald-700 dark:text-emerald-500" />
+            )}
             <span className="min-w-0 flex-1 truncate text-sm text-stone-600 dark:text-stone-300">
               {message}
             </span>
-            <span className="font-medium tabular-nums text-emerald-800 dark:text-emerald-400">
-              {percent}%
-            </span>
+            {!isQueued && (
+              <span className="font-medium tabular-nums text-emerald-800 dark:text-emerald-400">
+                {percent}%
+              </span>
+            )}
             <span className="ml-2 flex items-center gap-1.5 rounded-sm border border-stone-200 bg-stone-50 px-2 py-0.5 font-mono text-xs tabular-nums text-stone-600 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300">
               <Clock className="size-3" />
               {formatDuration(elapsedSec)}
             </span>
           </div>
-          <Progress value={percent} className="h-1.5 bg-stone-100 dark:bg-stone-800" />
+          <Progress value={isQueued ? 0 : percent} className="h-1.5 bg-stone-100 dark:bg-stone-800" />
+          {isQueued && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+              <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
+              服务器按队列依次执行评估以保障稳定性，你的作业即将开始。页面可保持打开，也可稍后从「历史评估」中查看结果。
+            </div>
+          )}
           {networkIssue && (
             <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
               <WifiOff className="mt-0.5 size-3.5 shrink-0" />

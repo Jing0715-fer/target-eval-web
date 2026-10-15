@@ -271,6 +271,8 @@ export interface JobDetail {
   goal: string | null
   progress: JobProgress | null
   logs: string[]
+  /** 排队中：前方待执行作业数（全局串行队列位置） */
+  queuePosition?: number
   summary: JobSummary | null
   pdbs: PdbEntry[] | null
   blastHits: BlastHit[] | null
