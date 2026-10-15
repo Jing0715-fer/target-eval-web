@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 靶点评估作业
+model EvaluationJob {
+  id          String        @id @default(cuid())
+  status      String // pending | running | done | error | canceled
+  mode        String // uniprot | sequence | docx
+  title       String? // 展示标题（蛋白名/序列标识/文件名）
+  uniprotId   String?
+  goal        String? // 客户目标/科学问题
+  options     String? // JSON
+  summary     String? // JSON 摘要（评分/计数等，小体积）
+  pdbs        String? // JSON PDB 列表（去重后精简字段）
+  blastHits   String? // JSON BLAST 命中列表
+  literature  String? // JSON 文献列表
+  reportPath  String? // 磁盘上的 HTML 报告路径
+  logs        String? // JSON：终态时的日志快照（≤60 条）
+  error       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  assets      ReportAsset[]
+
+  @@index([createdAt])
+}
+
+// 评估表图片资产（胶图/SEC 等）— 文件存磁盘，DB 只存元数据
+model ReportAsset {
+  id      String         @id @default(cuid())
+  jobId   String
+  job     EvaluationJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  kind    String // gel | sec | other
+  caption String?
+  mime    String
+  size    Int // bytes
+  path    String // 磁盘路径
+  order   Int @default(0)
+
+  @@index([jobId])
+}

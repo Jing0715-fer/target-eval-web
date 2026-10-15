@@ -1,0 +1,54 @@
+# dependencies
+node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+tsconfig.tsbuildinfo
+
+# production
+/build
+
+# runtime data（评估作业数据库与报告产物）
+/db/*.db
+/db/*.db-journal
+/db/reports/
+/upload/
+/download/
+
+# env
+.env
+.env*.local
+
+# misc
+.DS_Store
+*.pem
+
+# debug / logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev.log
+server.log
+
+# sandbox 开发辅助目录（非应用本体）
+/skills/
+/tests/
+/examples/
+/mini-services/
+/tool-results/
+/.zscripts/
+/agent-ctx/
+worklog.md
+Caddyfile
