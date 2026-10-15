@@ -430,7 +430,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                                     m === model ? 'text-emerald-800 dark:text-emerald-400' : 'text-stone-700 dark:text-stone-300',
                                   )}
                                 >
-                                  <span className="truncate">{m}</span>
+                                  <span className="min-w-0 truncate">{m}</span>
                                   {m === model && <Check className="size-3.5 shrink-0" />}
                                 </button>
                               ))}

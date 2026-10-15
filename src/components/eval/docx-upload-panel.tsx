@@ -191,7 +191,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               </span>
             ) : null}
             {insights?.proteinName && (
-              <span className="ml-auto truncate font-mono text-[11px] text-stone-400" title={insights.proteinName}>
+              <span
+                className="ml-auto min-w-0 truncate font-mono text-[11px] text-stone-400"
+                title={`${insights.proteinName}${insights.organism ? ` · ${insights.organism}` : ''}`}
+              >
                 {insights.proteinName}{insights.organism ? ` · ${insights.organism}` : ''}
               </span>
             )}
@@ -366,7 +369,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                 >
                   <div className="flex items-baseline gap-2">
                     {selected && <Dna className="size-3.5 shrink-0 self-center text-emerald-700 dark:text-emerald-500" aria-hidden />}
-                    <span className="truncate text-xs font-medium text-stone-700 dark:text-stone-300">
+                    <span className="min-w-0 truncate text-xs font-medium text-stone-700 dark:text-stone-300">
                       {s.header?.trim() || `序列 ${i + 1}`}
                     </span>
                     <span className="ml-auto shrink-0 text-[11px] text-emerald-700 dark:text-emerald-500">
@@ -434,10 +437,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-1 px-2 py-1.5">
-                  <FileCheck2 className="size-3 shrink-0 text-stone-400" />
+                <div className="flex items-start gap-1 px-2 py-1.5">
+                  <FileCheck2 className="mt-0.5 size-3 shrink-0 text-stone-400" />
                   <p
-                    className="truncate text-[11px] text-stone-500 dark:text-stone-500"
+                    className="line-clamp-2 text-[11px] leading-snug text-stone-500 dark:text-stone-500"
                     title={img.caption || `${img.sizeKB} KB`}
                   >
                     {img.caption?.trim() || `${img.mime || '图片'} · ${img.sizeKB}KB`}

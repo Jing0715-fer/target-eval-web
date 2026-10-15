@@ -28,8 +28,10 @@ const MAX_EDGE = 1600
 const SOFFICE_TIMEOUT_MS = 45_000
 /** VLM 单图超时 */
 const VLM_TIMEOUT_MS = 25_000
-/** VLM 分类图片数上限 */
-export const VLM_MAX_IMAGES = 6
+/** VLM 分类图片数上限（覆盖全部保留图片；与 docx MAX_IMAGES 对齐） */
+export const VLM_MAX_IMAGES = 12
+/** VLM 批量总时间预算（墙钟）：超时后剩余图片回退关键词分类，避免上传等待过久 */
+const VLM_TOTAL_BUDGET_MS = 90_000
 /** VLM 小并发 */
 const VLM_CONCURRENCY = 2
 
@@ -283,8 +285,9 @@ caption 需包含可判读的关键信息（泳道数/条带单一性/纯度估�
 }
 
 /**
- * 批量 VLM 识别（小并发，前 VLM_MAX_IMAGES 张）。
- * 返回与输入等长的数组（null = 未识别/失败），整体一次性失败会短路后续（SDK 不可用）。
+ * 批量 VLM 识别（小并发，前 VLM_MAX_IMAGES 张 + 总时间预算）。
+ * 返回与输入等长的数组（null = 未识别/失败/超预算），整体一次性失败会短路后续（SDK 不可用）。
+ * 预算耗尽后剩余图片不再排队，由调用方回退关键词分类 —— 保证任意张数（0/1/N）都能完成且上传耗时有界。
  */
 export async function classifyImagesVlm(
   images: Array<{ buf: Buffer; mime: string }>,
@@ -293,11 +296,13 @@ export async function classifyImagesVlm(
   const results: Array<VlmImageVerdict | null> = new Array(images.length).fill(null)
   if (n === 0) return results
   let sdkBroken = false // SDK 级失败（初始化/网络）→ 后续不再尝试
+  const deadline = Date.now() + VLM_TOTAL_BUDGET_MS
 
   let cursor = 0
   async function worker() {
     while (cursor < n) {
       if (sdkBroken) return
+      if (Date.now() > deadline) return // 预算耗尽 → 剩余回退关键词分类
       const i = cursor++
       const zai = await getZaiVlm()
       if (!zai) { sdkBroken = true; return }

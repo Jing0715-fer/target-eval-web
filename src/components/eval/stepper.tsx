@@ -46,7 +46,7 @@ export function Stepper({ step, className }: { step: number; className?: string 
               <span
                 aria-hidden
                 className={cn(
-                  'h-px min-w-3 flex-1 transition-colors duration-500',
+                  'h-px min-w-1 flex-1 transition-colors duration-500',
                   done ? 'bg-emerald-600/70 dark:bg-emerald-700/70' : 'bg-stone-200 dark:bg-stone-800'
                 )}
               />

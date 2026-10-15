@@ -280,11 +280,18 @@ export const STAGE_RANGES: Record<string, [number, number]> = {
   report: [85, 100],
 }
 
-/** UniProt accession 正则（6位规范 / 10位 isoform） */
-export const UNIPROT_RE = /[OPQ][0-9][A-Z0-9]{3}[0-9](?:-[0-9]+)?|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9])(?:-[0-9]+)?/g
+/**
+ * UniProt accession 正则：
+ *  - 6 位规范：[OPQ][0-9][A-Z0-9]{3}[0-9] / [A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]
+ *  - 10 位（TrEMBL/isoform 派生，如 A0A8G0KJC2）：6 位核心 + [A-Z0-9]{3}[0-9]
+ *  - isoform 后缀 -N
+ * 前后 guard（lookaround）防止匹配更长字母数字 token 的片段（如 "A0A8G0KJC2X" 整体不匹配）
+ */
+export const UNIPROT_RE =
+  /(?<![A-Z0-9])(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9])(?:[A-Z0-9]{3}[0-9])?(?:-[0-9]+)?(?![A-Z0-9])/g
 
 export function isValidUniprotId(s: string): boolean {
-  return /^[OPQ][0-9][A-Z0-9]{3}[0-9]$/.test(s) || /^[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]$/.test(s)
+  return /^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9])(?:[A-Z0-9]{3}[0-9])?(?:-[0-9]+)?$/i.test(s.trim())
 }
 
 /** 氨基酸序列清洗：仅保留标准 20 种 + 少数常见修饰字符 */

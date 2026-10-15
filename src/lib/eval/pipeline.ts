@@ -54,9 +54,9 @@ async function readUploadInsights(uploadId: string): Promise<FormInsights | null
   }
 }
 
-/** 从 BLAST 命中描述中解析 UniProt accession（sp|P04637|P53_HUMAN ...） */
+/** 从 BLAST 命中描述中解析 UniProt accession（sp|P04637|P53_HUMAN / tr|A0A8G0KJC2|...） */
 function uniprotFromBlastDesc(desc: string): string | null {
-  const m = desc.match(/(?:sp|tr)\|([A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]|[OPQ][0-9][A-Z0-9]{3}[0-9])\|/)
+  const m = desc.match(/(?:sp|tr)\|([A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]|[OPQ][0-9][A-Z0-9]{3}[0-9])(?:[A-Z0-9]{3}[0-9])?\|/)
   return m ? m[1] : null
 }
 
@@ -103,7 +103,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
 
   if (input.mode === 'uniprot') {
     const id = (input.uniprot ?? '').trim().toUpperCase()
-    if (!isValidUniprotId(id)) throw new Error(`UniProt ID 格式无效：${id}（应为 6 位，如 P00533）`)
+    if (!isValidUniprotId(id)) throw new Error(`UniProt ID 格式无效：${id}（应为 6 或 10 位 accession，如 P00533 / A0A8G0KJC2）`)
     uniprotIdInput = id
     // 伴随序列（可选）：同一靶点时合并为一次评估，避免重复评估
     if (input.sequence?.trim()) {

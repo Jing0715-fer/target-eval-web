@@ -69,10 +69,10 @@ export function logLevel(line: string): 'info' | 'warn' | 'error' {
 }
 
 /**
- * UniProt accession 校验：6 位（[OPQ]xxxx）或 10 位（spmisoform）格式
+ * UniProt accession 校验：6 位 / 10 位（TrEMBL，如 A0A8G0KJC2）/ isoform 后缀（-2）
  */
 const UNIPROT_RE =
-  /^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})$/i
+  /^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9])(?:[A-Z0-9]{3}[0-9])?(?:-[0-9]+)?$/i
 
 export function isValidUniprotId(value: string): boolean {
   return UNIPROT_RE.test(value.trim())

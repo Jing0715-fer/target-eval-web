@@ -68,7 +68,7 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
                     {it.journal && <span className="italic">{it.journal}</span>}
                     {it.year && <span>{it.journal ? '· ' : ''}{it.year}</span>}
                     {it.doi && (
-                      <span className="truncate font-mono text-[11px] text-stone-400" title={it.doi}>
+                      <span className="max-w-full truncate font-mono text-[11px] text-stone-400" title={it.doi}>
                         DOI: {it.doi}
                       </span>
                     )}

@@ -13,7 +13,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import mammoth from 'mammoth'
-import { cleanSequence, looksLikeProteinSequence, UNIPROT_RE, type AssetKind, type DocxParsed, type ParsedImage, type ParsedSequence } from './types'
+import { looksLikeProteinSequence, UNIPROT_RE, type AssetKind, type DocxParsed, type ParsedImage, type ParsedSequence } from './types'
 import { classifyImagesVlm, convertMetafilesToPng, normalizeRasterImage, SOURCE_IMAGE_MAX_BYTES } from './image-process'
 
 export const DOCX_MAX_BYTES = 20 * 1024 * 1024
@@ -47,15 +47,67 @@ export function extractUniprotIds(text: string): string[] {
 /** CJK / 全角字符 — 出现即判定该行不是序列行（FASTA 正文终止），防止中文段落中的拉丁词混入序列 */
 const CJK_RE = /[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef]/
 
-/** 提取 FASTA / 裸蛋白序列块 */
+/** 一次提取的序列条数上限（评估表通常 ≤ 4 条：靶点 + 抗体重轻链 + 构建） */
+const MAX_SEQUENCES = 6
+/** 裸序列单行最小长度（折行尾行可更短，由合并逻辑兜底） */
+const MIN_BARE_LEN = 30
+/** 典型折行宽度区间：上一行长度落在区间内 → 下一行视为同一序列的折行延续 */
+const WRAP_MIN = 55
+const WRAP_MAX = 110
+
+/**
+ * 裸序列候选行：仅字母 + 空格，允许结尾 1-2 个 `*`（终止符标记）。
+ * 数字/标点/CJK 出现即排除 —— 防止英文句子、构建描述（"EBOV GPΔMuc 33-308;490-656"）混入。
+ */
+function isBareSequenceLine(raw: string): boolean {
+  const s = raw.trim()
+  if (s === '' || CJK_RE.test(s)) return false
+  const stripped = s.replace(/\s/g, '')
+  if (stripped.length < MIN_BARE_LEN) return false
+  return /^[A-Za-z]+\*{0,2}$/.test(stripped)
+}
+
+/**
+ * 序列标签：取序列行上方最近的非空行。
+ * 合格标签：≤60 字、自身不是序列行、不含句读（。.！!？?）。
+ * 如 "1C9-Fc"、"EBOV GPΔMuc 33-308;490-656 -GCN 4 -His-SA"、"GP序列："。
+ */
+function findSequenceLabel(lines: string[], seqIdx: number): string {
+  for (let k = seqIdx - 1; k >= 0 && k >= seqIdx - 2; k--) {
+    const s = lines[k]?.trim()
+    if (!s) continue
+    if (isBareSequenceLine(s) || s.startsWith('>')) return ''
+    if (s.length > 60 || /[.。！!？?]/.test(s)) return ''
+    return s.replace(/[：:]\s*$/, '').slice(0, 60)
+  }
+  return ''
+}
+
+/** 提取 FASTA / 裸蛋白序列块（支持多条、折行合并、`*` 终止符、重复去重） */
 export function extractSequences(text: string): ParsedSequence[] {
   const out: ParsedSequence[] = []
+  const seen = new Set<string>() // 完整序列去重（文档重复粘贴）
   const lines = text.split(/\r?\n/)
+
+  const emit = (header: string, seqRaw: string): boolean => {
+    // 去掉结尾终止符/间隔符（BLAST 与比对均不接受 `*`）
+    const seq = seqRaw.toUpperCase().replace(/[\s]+/g, '').replace(/[*-]+$/, '')
+    if (seq.length < 30 || !looksLikeProteinSequence(seq)) return false
+    if (seen.has(seq)) return true // 重复序列：视为已处理，不再入列
+    seen.add(seq)
+    out.push({
+      header: (header.trim() || `sequence_${out.length + 1}`).slice(0, 80),
+      seq,
+      length: seq.length,
+    })
+    return true
+  }
+
   let i = 0
-  while (i < lines.length && out.length < 5) {
+  while (i < lines.length && out.length < MAX_SEQUENCES) {
     const line = lines[i].trim()
-    if (line.startsWith('>') ) {
-      // FASTA 头 + 后续序列行（遇到中文/全角内容行即终止）
+    if (line.startsWith('>')) {
+      // FASTA 头 + 后续序列行（遇到中文/全角内容行或下一个头即终止）
       const header = line.slice(1).trim().slice(0, 120)
       const body: string[] = []
       let j = i + 1
@@ -68,18 +120,38 @@ export function extractSequences(text: string): ParsedSequence[] {
         j++
         if (body.join('').replace(/\s/g, '').length > 60000) break
       }
-      const { seq } = cleanSequence(body.join(''))
-      if (seq.length >= 30) {
-        out.push({ header: header || `sequence_${out.length + 1}`, seq, length: seq.length })
-        i = j
+      if (!emit(header, body.join(''))) {
+        i = i + 1 // body 无效 → 逐行重扫（body 内可能有裸序列）
         continue
       }
-    } else if (line.replace(/\s/g, '').length >= 40 && /^[A-Za-z\s]+$/.test(line)) {
-      // 裸序列长行
-      const { seq } = cleanSequence(line)
-      if (seq.length >= 40 && looksLikeProteinSequence(line)) {
-        out.push({ header: `sequence_${out.length + 1}`, seq, length: seq.length })
+      i = j
+      continue
+    }
+    if (isBareSequenceLine(line)) {
+      // 裸序列块：连续候选行，若上一行长度是典型折行宽度（55-110）则视为同一序列折行合并；
+      // 更长的行（如完整序列）之后的候选行按新序列处理（防表格相邻单元格两条独立序列被误合并）
+      const block: string[] = [line]
+      const blockIdx: number[] = [i]
+      let j = i + 1
+      while (j < lines.length && out.length < MAX_SEQUENCES) {
+        const nxt = lines[j].trim()
+        if (!nxt || !isBareSequenceLine(nxt)) break // 空行/非候选行 → 块终止
+        const prevLen = block[block.length - 1].replace(/\s/g, '').length
+        if (prevLen < WRAP_MIN || prevLen > WRAP_MAX) break
+        block.push(nxt)
+        blockIdx.push(j)
+        j++
       }
+      const label = findSequenceLabel(lines, i)
+      if (!emit(label, block.join(''))) {
+        // 合并后不是蛋白序列（可能是被折行的英文段落）→ 逐行独立判定，保住真实的单行序列
+        block.forEach((ln, bi) => {
+          if (out.length >= MAX_SEQUENCES) return
+          if (ln.replace(/\s/g, '').length >= 40) emit(findSequenceLabel(lines, blockIdx[bi]), ln)
+        })
+      }
+      i = j
+      continue
     }
     i++
   }

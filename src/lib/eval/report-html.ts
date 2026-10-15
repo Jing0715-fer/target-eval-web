@@ -208,9 +208,10 @@ function litItemsHtml(lits: LiteratureItem[], pdbByPmid: Map<string, PdbEntry[]>
 }
 
 // ─── 图片内嵌（预算控制）──────────────────────────────────────────────────────
-
-const EMBED_MAX_COUNT = 8
-const EMBED_MAX_TOTAL = 6 * 1024 * 1024
+// 与 docx 提取上限（12 张）对齐：任意张数/任意类型组合（仅胶图、仅 SEC、多张混合）全部内嵌；
+// 体积预算超出时按 gel > sec > other 优先级截断（每张落盘前已软压 ≤800KB，典型总量 2-5MB）
+const EMBED_MAX_COUNT = 12
+const EMBED_MAX_TOTAL = 9 * 1024 * 1024
 
 export interface EmbeddedImage {
   meta: ParsedImage
