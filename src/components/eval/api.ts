@@ -3,6 +3,7 @@
  * 所有函数对失败抛出 Error，由调用方决定降级方式。
  */
 import type {
+  DocxParsed,
   InsightsResponse,
   JobListItem,
   LlmConfigResponse,
@@ -26,21 +27,137 @@ export async function deleteJobById(id: string): Promise<void> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
 }
 
-/** POST /api/evaluate/upload — 上传 Word 评估表（multipart: file） */
-export async function uploadEvaluateDocx(file: File): Promise<UploadResponse> {
-  const form = new FormData()
-  form.append('file', file)
-  const res = await fetch('/api/evaluate/upload', { method: 'POST', body: form })
-  let data: (UploadResponse & { error?: string }) | null = null
-  try {
-    data = (await res.json()) as UploadResponse & { error?: string }
-  } catch {
-    data = null
+/** 上传进度（分块上传 + 后台解析两阶段） */
+export interface UploadProgress {
+  /** uploading=分块传输中（0-100）；parsing=服务器解析中（不定进度） */
+  phase: 'uploading' | 'parsing'
+  /** 已上传字节 / 总字节（phase=parsing 时无意义） */
+  loaded: number
+  total: number
+}
+
+/** 分块大小（与服务端约定） */
+const CHUNK_SIZE = 2 * 1024 * 1024
+/** 单分块上传超时（网关 ALB ~30s 硬超时，留足余量） */
+const CHUNK_TIMEOUT_MS = 28_000
+/** 单分块最大重试次数 */
+const CHUNK_RETRIES = 3
+/** 解析轮询间隔 / 总预算 */
+const POLL_INTERVAL_MS = 1500
+const POLL_BUDGET_MS = 8 * 60_000
+
+/** 解析状态响应（GET /api/evaluate/upload/status） */
+interface SessionStatusResponse {
+  ok: boolean
+  uploadId: string
+  phase: 'uploading' | 'queued' | 'parsing' | 'done' | 'error'
+  parsed?: DocxParsed
+  error?: string
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/**
+ * 上传 Word 评估表 —— 分块 + 后台解析（公网网关 ~30s 超时对策）：
+ *  1. init 创建会话（毫秒级）
+ *  2. 2MB 分块 PUT（每块独立短请求，失败逐块重试）
+ *  3. complete 触发后台解析（毫秒级返回）
+ *  4. 轮询 status 直至 done/error
+ * 返回与旧直传接口同构的结果，调用方渲染逻辑不变。
+ */
+export async function uploadEvaluateDocx(
+  file: File,
+  onProgress?: (p: UploadProgress) => void,
+): Promise<UploadResponse> {
+  // ── 1. init ──
+  let uploadId = ''
+  let chunkSize = CHUNK_SIZE
+  {
+    const res = await fetch('/api/evaluate/upload/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, size: file.size }),
+    })
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; uploadId?: string; chunkSize?: number; error?: string } | null
+    if (!res.ok || !data?.ok || !data.uploadId) {
+      throw new Error(data?.error ?? `上传初始化失败（HTTP ${res.status}）`)
+    }
+    uploadId = data.uploadId
+    chunkSize = data.chunkSize && data.chunkSize > 0 ? data.chunkSize : CHUNK_SIZE
   }
-  if (!res.ok || !data || !data.ok || !data.parsed) {
-    throw new Error(data?.error ?? `上传解析失败（HTTP ${res.status}）`)
+
+  // ── 2. chunks（严格顺序，失败重试） ──
+  for (let offset = 0; offset < file.size; offset += chunkSize) {
+    const blob = file.slice(offset, Math.min(offset + chunkSize, file.size))
+    let lastErr: Error | null = null
+    for (let attempt = 1; attempt <= CHUNK_RETRIES; attempt++) {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), CHUNK_TIMEOUT_MS)
+      try {
+        const res = await fetch(
+          `/api/evaluate/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&offset=${offset}`,
+          { method: 'PUT', body: blob, signal: ctrl.signal },
+        )
+        const data = (await res.json().catch(() => null)) as { ok?: boolean; received?: number; error?: string } | null
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error ?? `分块上传失败（HTTP ${res.status}）`)
+        }
+        lastErr = null
+        break
+      } catch (e) {
+        lastErr = e instanceof Error ? e : new Error(String(e))
+        if (attempt < CHUNK_RETRIES) await sleep(800 * attempt)
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    if (lastErr) {
+      throw new Error(`分块上传失败（已重试 ${CHUNK_RETRIES} 次）：${lastErr.message}。请检查网络后重试`)
+    }
+    onProgress?.({ phase: 'uploading', loaded: Math.min(offset + chunkSize, file.size), total: file.size })
   }
-  return data
+
+  // ── 3. complete（触发后台解析） ──
+  {
+    const res = await fetch('/api/evaluate/upload/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uploadId }),
+    })
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null
+    if (!res.ok || !data?.ok) {
+      throw new Error(data?.error ?? `完成上传失败（HTTP ${res.status}）`)
+    }
+  }
+  onProgress?.({ phase: 'parsing', loaded: file.size, total: file.size })
+
+  // ── 4. poll status ──
+  const deadline = Date.now() + POLL_BUDGET_MS
+  for (;;) {
+    if (Date.now() > deadline) {
+      throw new Error('解析超时（超过 8 分钟），请稍后在历史中查看或重新上传')
+    }
+    await sleep(POLL_INTERVAL_MS)
+    let st: SessionStatusResponse | null = null
+    try {
+      const res = await fetch(`/api/evaluate/upload/status?uploadId=${encodeURIComponent(uploadId)}`, { cache: 'no-store' })
+      st = (await res.json()) as SessionStatusResponse
+      if (!res.ok || !st?.ok) {
+        throw new Error((st as { error?: string } | null)?.error ?? `状态查询失败（HTTP ${res.status}）`)
+      }
+    } catch (e) {
+      // 单次轮询失败（网络抖动）不致命，继续
+      void e
+      continue
+    }
+    if (st.phase === 'done' && st.parsed) {
+      return { ok: true, uploadId: st.uploadId, parsed: st.parsed, error: st.error }
+    }
+    if (st.phase === 'error') {
+      throw new Error(st.error ?? '文档解析失败')
+    }
+    // uploading/queued/parsing → 继续轮询
+  }
 }
 
 /** POST /api/evaluate/insights — 对已上传评估表执行 LLM 智能解析 */

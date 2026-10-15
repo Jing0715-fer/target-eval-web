@@ -157,13 +157,36 @@ export function parseLoad(): { active: number; waiting: number } {
  * 等待数超限立即 429。保证 mammoth/sharp/VLM 重负载有界。
  */
 export async function withParseSlot<T>(task: () => Promise<T>): Promise<T> {
-  if (parseSem.active >= PARSE_CONCURRENCY && parseSem.waiting >= PARSE_WAIT_LIMIT) {
+  const release = await acquireParseSlot(PARSE_WAIT_LIMIT)
+  try {
+    return await task()
+  } finally {
+    release()
+  }
+}
+
+/**
+ * 后台解析变体：与直传路由共享同一信号量（总并发恒 ≤ PARSE_CONCURRENCY），
+ * 但等待不设上限（无 429）—— 用于分块上传的异步解析队列，
+ * 由会话过期/墙钟超时兜底，保证不会无限堆积任务。
+ */
+export async function withParseSlotBg<T>(task: () => Promise<T>): Promise<T> {
+  const release = await acquireParseSlot(null)
+  try {
+    return await task()
+  } finally {
+    release()
+  }
+}
+
+/** 获取解析槽位；waitLimit=null 表示无上限等待（后台），否则等待数超限抛 429 */
+async function acquireParseSlot(waitLimit: number | null): Promise<() => void> {
+  if (parseSem.active >= PARSE_CONCURRENCY && waitLimit !== null && parseSem.waiting >= waitLimit) {
     throw new QuotaError(
       `文档解析繁忙（${parseSem.active} 个进行中、${parseSem.waiting} 个排队），请稍后重试`,
       90,
     )
   }
-  // 获取槽位
   await new Promise<void>((resolve) => {
     if (parseSem.active < PARSE_CONCURRENCY) {
       parseSem.active++
@@ -177,17 +200,12 @@ export async function withParseSlot<T>(task: () => Promise<T>): Promise<T> {
       })
     }
   })
-  // 释放时唤醒下一个等待者
   const release = () => {
     parseSem.active = Math.max(0, parseSem.active - 1)
     const next = parseWaiters.shift()
     if (next) next()
   }
-  try {
-    return await task()
-  } finally {
-    release()
-  }
+  return release
 }
 
 // ─── 终态作业 TTL 清理 ─────────────────────────────────────────────────────────

@@ -1,5 +1,11 @@
 /**
- * POST /api/evaluate/upload — 上传 Word 评估表（.docx）
+ * POST /api/evaluate/upload — 直传解析 Word 评估表（.docx，multipart file 字段）。
+ *
+ * ⚠️ 公网注意：本接口在单请求内同步完成「上传 + 解析」，总耗时可达 90s+，
+ * 会被平台 ALB（~30s 超时）掐断返回 502。前端已改走分块 + 后台解析流程：
+ *   init → chunk(2MB×N) → complete → status 轮询（见 upload/init|chunk|complete|status）。
+ * 本接口保留用于本地/内网快速联调与 API 兼容（小文件 + 快网络下正常）。
+ *
  * 解析文本（UniProt/序列/基因/目标语句）+ 提取归一化图片（胶图/SEC，含 EMF/WMF
  * 转换、大图降采样、VLM 类型识别）到磁盘。
  * 解析结果持久化到 db/reports/{uploadId}/parsed.json 供评估阶段复用。

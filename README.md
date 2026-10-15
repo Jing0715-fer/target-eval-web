@@ -2,7 +2,7 @@
 
 从 [pdb-tracker-web-v5](https://github.com/Jing0715-fer/pdb-tracker-web-v5) 拆分出的**蛋白靶点评估**独立 Web 应用：输入 UniProt ID、氨基酸序列或 Word 评估表，自动完成多数据库数据收集与可行性评分，生成含 LLM 分析的 HTML 评估报告。
 
-> **v1.5 公网加固**：多用户数据隔离（按来源 IP，仅创建者可见自己的记录/报告/实验图片）+ 并发/配额限制（全局排队上限、每 IP 活跃与日配额、docx 解析并发信号量、终态作业 TTL 自动清理），详见[公网部署](#公网部署)。
+> **v1.6 公网加固**：多用户数据隔离（按来源 IP）+ 并发/配额限制 + **分块上传与后台异步解析**（突破网关 ~30s 请求超时，修复公网 502），详见[公网部署](#公网部署)。
 
 ## 功能特性
 
@@ -96,9 +96,29 @@ bun run dev                   # http://localhost:3000
 
 > 首次启动即用内置 Z.ai 引擎，无需任何 Key；需要切换供应商时在页面右上角⚙️「LLM 分析引擎配置」中填入对应 API Key。
 
-## 公网部署（v1.5 加固）
+## 公网部署（v1.6 加固）
 
 面向公网多用户场景的安全与稳定性设计：
+
+### 网关超时对策（v1.6，修复公网 502）
+
+云平台/ALB 类网关通常对**单个 HTTP 请求有 ~30s 硬超时**（含请求体上传与服务端处理）。评估表直传单请求内同步完成「上传+解析」（多图 VLM 识别预算 90s，慢速上传 20MB 可达分钟级）必然被掐断返回 502。
+
+v1.6 起前端改走**分块上传 + 后台异步解析**，所有请求均为短请求：
+
+```
+init（毫秒级，建会话+配额检查）
+ → chunk ×N（2MB/块，原始二进制 PUT，逐块重试）
+ → complete（毫秒级，后台队列解析）
+ → status 每 1.5s 轮询（uploading/queued/parsing/done/error）
+```
+
+- 单块 2MB 在 100KB/s 慢速网络下约 20s，仍低于网关超时；失败自动重试 3 次
+- 解析在后台队列执行（与直传路由共享全局解析信号量，并发恒 ≤2，内存有界），
+  多图 VLM 识别耗时不再影响 HTTP 响应时长
+- 未完成会话 30min 自动回收；insights 智能解析 25s 墙钟兜底（超时回退规则提取，可重试）
+- 前端上传面板展示分块进度条与「后台解析中」提示
+- 旧直传接口 `POST /api/evaluate/upload` 保留（内网/快网络小文件兼容）
 
 ### 数据隔离（按来源 IP）
 - **归属键**：请求来源 IP 的 SHA-256 前 24 位（DB 不落明文 IP；仅存掩码如 `203.0.113.*` 供排障）
@@ -129,10 +149,11 @@ bun run dev                   # http://localhost:3000
    }
    ```
    > 未接代理时所有直连请求同属 `direct` 归属组（本地开发联机调试够用；公网必须接代理隔离用户）
-2. HTTPS（Caddy 自动签发）；报告预览允许 iframe 嵌入（`frame-ancestors *`，资源已按归属隔离）
-3. `db/custom.db` 与 `db/reports/` 均含用户数据，注意宿主磁盘权限与备份策略；终态记录 7 天自动清理
-4. 外部 LLM API Key 明文存本地 SQLite，公网开放给不可信人群前建议改用内置引擎或为配置面板加访问控制
-5. 操作系统层建议配套：内存限制（systemd `MemoryMax` / 容器 memory limit）、磁盘告警（报告与上传产物占空间）
+2. **确认网关超时配置**：若自建网关超时 < 60s，无需担心 —— 分块上传/后台解析流程下所有请求均为短请求；若仍使用旧直传接口需保证 ≥120s
+3. **EMF/WMF 矢量图依赖 LibreOffice**：服务器需安装 `soffice`（Debian/Ubuntu: `apt-get install libreoffice-core`；镜像部署见 Docker 示例），未安装时矢量图自动跳过（前端提示张数），不影响其余功能
+4. `db/custom.db` 与 `db/reports/` 均含用户数据，注意宿主磁盘权限与备份策略；终态记录 7 天自动清理
+5. 外部 LLM API Key 明文存本地 SQLite，公网开放给不可信人群前建议改用内置引擎或为配置面板加访问控制
+6. 操作系统层建议配套：内存限制（systemd `MemoryMax` / 容器 memory limit）、磁盘告警（报告与上传产物占空间）
 
 ## API 一览
 
@@ -141,8 +162,12 @@ bun run dev                   # http://localhost:3000
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/evaluate` | 创建评估作业（mode: uniprot / sequence / docx；uniprot 模式可附 sequence 伴随序列）；配额超限 429 |
-| POST | `/api/evaluate/upload` | 上传 Word 评估表（multipart `file`）；解析并发信号量 + 每 IP 日配额 |
-| POST | `/api/evaluate/insights` | 评估表 LLM 智能解析（目标/科学问题/实验要点，结果缓存；仅上传者） |
+| POST | `/api/evaluate/upload` | 直传解析（multipart `file`，单请求同步解析；内网/快网络用，公网请走下方分块流程） |
+| POST | `/api/evaluate/upload/init` | 分块上传①：创建会话（配额检查 + 归属标记）→ `{uploadId, chunkSize}` |
+| PUT | `/api/evaluate/upload/chunk?uploadId&offset` | 分块上传②：追加原始二进制块（2MB/块，顺序上传，逐块重试） |
+| POST | `/api/evaluate/upload/complete` | 分块上传③：校验完整性并触发**后台异步解析**（毫秒级返回） |
+| GET | `/api/evaluate/upload/status?uploadId` | 分块上传④：轮询解析状态（done 时返回与直传同构的 parsed 载荷） |
+| POST | `/api/evaluate/insights` | 评估表 LLM 智能解析（目标/科学问题/实验要点，结果缓存；仅上传者；25s 墙钟兜底） |
 | GET | `/api/jobs` | 本人最近作业列表（按 IP 归属过滤） |
 | GET | `/api/jobs/{id}` | 作业详情 / 进度轮询（2s；pending 附 queuePosition） |
 | DELETE | `/api/jobs/{id}` | 取消 / 删除作业（含磁盘产物；仅创建者） |

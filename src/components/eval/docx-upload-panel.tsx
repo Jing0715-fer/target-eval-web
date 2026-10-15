@@ -20,11 +20,14 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { KindBadge } from './badges'
+import type { UploadProgress } from './api'
 import type { FormInsights, UploadResponse } from './types'
 
 export interface DocxUploadPanelProps {
   upload: UploadResponse | null
   uploading: boolean
+  /** 分块上传/后台解析进度（null = 未开始或旧流程） */
+  uploadProgress: UploadProgress | null
   uploadError: string | null
   selectionReady: boolean
   selectedUniprot: string | null
@@ -49,6 +52,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
   const {
     upload,
     uploading,
+    uploadProgress,
     uploadError,
     selectionReady,
     selectedUniprot,
@@ -111,8 +115,23 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             <FileUp className="size-7 text-stone-400 dark:text-stone-500" />
           )}
           <div className="text-sm font-medium text-stone-700 dark:text-stone-300">
-            {uploading ? '正在解析评估表（含图片 AI 识别）…' : '拖拽 Word 评估表到此处，或点击选择文件'}
+            {uploading
+              ? uploadProgress?.phase === 'uploading'
+                ? `正在上传评估表… ${Math.min(100, Math.round((uploadProgress.loaded / Math.max(1, uploadProgress.total)) * 100))}%`
+                : '正在解析评估表（含图片 AI 识别）…'
+              : '拖拽 Word 评估表到此处，或点击选择文件'}
           </div>
+          {uploading && uploadProgress?.phase === 'uploading' && (
+            <div className="h-1.5 w-full max-w-72 overflow-hidden rounded-full bg-stone-200 dark:bg-stone-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((uploadProgress.loaded / Math.max(1, uploadProgress.total)) * 100)}>
+              <div
+                className="h-full rounded-full bg-emerald-600 transition-all"
+                style={{ width: `${Math.min(100, (uploadProgress.loaded / Math.max(1, uploadProgress.total)) * 100)}%` }}
+              />
+            </div>
+          )}
+          {uploading && uploadProgress?.phase === 'parsing' && (
+            <div className="text-[11px] text-stone-400 dark:text-stone-500">分块上传完成，服务器后台解析中（多图识别约需 10–90 秒）…</div>
+          )}
           <div className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
             支持 .docx 格式（≤ 20MB），上传后自动解析 UniProt ID、序列与实验图片（自动区分 SDS-PAGE 胶图与 SEC 分子筛图），并由 AI 提取目标与科学问题
           </div>

@@ -99,6 +99,8 @@ export interface InsightsResponse {
   ok: boolean
   insights?: FormInsights
   cached?: boolean
+  /** 超时回退提示（规则提取结果，可重试获取 LLM 结果） */
+  note?: string
   error?: string
 }
 

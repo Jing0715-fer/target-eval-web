@@ -23,7 +23,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { countResidues, isValidUniprotId } from './format'
-import { fetchDocxInsights, uploadEvaluateDocx } from './api'
+import { fetchDocxInsights, uploadEvaluateDocx, type UploadProgress } from './api'
 import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
 import type { EvaluateOptions, EvaluateRequest, FormInsights, InputMode, UploadResponse } from './types'
 import type { StartResult } from './use-evaluation-flow'
@@ -66,6 +66,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   // Word 评估表上传
   const [upload, setUpload] = useState<UploadResponse | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [selectedUniprot, setSelectedUniprot] = useState<string | null>(null)
   const [selectedSequenceIndex, setSelectedSequenceIndex] = useState<number | null>(null)
@@ -118,11 +119,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       return
     }
     setUploading(true)
+    setUploadProgress(null)
     setUploadError(null)
     setInsights(null)
     setInsightsError(null)
     try {
-      const res = await uploadEvaluateDocx(file)
+      const res = await uploadEvaluateDocx(file, setUploadProgress)
       setUpload(res)
       // 默认选中第一个 UniProt，否则第一个序列
       if (res.parsed.uniprotIds.length > 0) {
@@ -141,6 +143,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       setUploadError(err instanceof Error ? err.message : '上传解析失败，请稍后重试')
     } finally {
       setUploading(false)
+      setUploadProgress(null)
     }
   }
 
@@ -149,6 +152,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     setSelectedUniprot(null)
     setSelectedSequenceIndex(null)
     setUploadError(null)
+    setUploadProgress(null)
     setInsights(null)
     setInsightsError(null)
   }
@@ -382,6 +386,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
               <DocxUploadPanel
                 upload={upload}
                 uploading={uploading}
+                uploadProgress={uploadProgress}
                 uploadError={uploadError}
                 selectionReady={docxReady}
                 selectedUniprot={selectedUniprot}
