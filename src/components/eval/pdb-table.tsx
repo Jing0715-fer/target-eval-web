@@ -123,7 +123,16 @@ export function PdbTable({ pdbs, ligandCount, literature }: PdbTableProps) {
                 <TableCell colSpan={8} className="h-28 text-center text-sm text-stone-400">
                   <span className="flex flex-col items-center gap-1.5">
                     <Inbox className="size-5" />
-                    当前筛选条件下暂无结构
+                    {pdbs.length === 0 ? (
+                      <>
+                        <span>该靶点暂无直接关联的 PDB 结构</span>
+                        <span className="text-xs text-stone-400/80 dark:text-stone-500">
+                          同源结构证据见下方「BLAST 同源结构」章节；可行性结论以文献与同源证据为主
+                        </span>
+                      </>
+                    ) : (
+                      '当前筛选条件下暂有 0 个结构，试试「全部」筛选'
+                    )}
                   </span>
                 </TableCell>
               </TableRow>

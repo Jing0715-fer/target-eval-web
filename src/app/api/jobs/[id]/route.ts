@@ -90,6 +90,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     blastHits,
     literature,
     assets,
+    /** LLM 评估报告 markdown（v1.7+ 作业；结果页内联展示） */
+    reportMarkdown: job.reportMarkdown ?? null,
     error: job.error,
   })
 }

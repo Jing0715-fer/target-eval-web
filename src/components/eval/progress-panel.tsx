@@ -6,6 +6,7 @@ import {
   CircleDashed,
   Clock,
   Hourglass,
+  Layers,
   LoaderCircle,
   ShieldCheck,
   Terminal,
@@ -18,6 +19,7 @@ import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
 import { formatDuration, logLevel, toLogLines } from './format'
 import type { JobDetail, StageInfo } from './types'
+import type { BatchState } from './use-evaluation-flow'
 
 /** 后端未返回 stages 时的兜底阶段列表 */
 const FALLBACK_STAGES: StageInfo[] = [
@@ -88,10 +90,12 @@ export interface ProgressPanelProps {
   networkIssue: boolean
   canceling: boolean
   onCancel: () => void
+  /** 批量评估（docx 多 UniProt）时的批量进度提示 */
+  batch?: BatchState | null
 }
 
 /** 进度视图（running）：总体进度 + 阶段列表 + 实时日志 + 计时/取消 */
-export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCancel }: ProgressPanelProps) {
+export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCancel, batch }: ProgressPanelProps) {
   const progress = job?.progress ?? null
   const stages =
     progress?.stages && progress.stages.length > 0 ? progress.stages : FALLBACK_STAGES
@@ -116,6 +120,15 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
           {job?.uniprotId && (
             <span className="ml-3 font-mono text-sm font-normal text-stone-400 dark:text-stone-500">
               {job.uniprotId}
+            </span>
+          )}
+          {batch && batch.total > 1 && (
+            <span className="ml-3 inline-flex items-center gap-1.5 rounded-sm border border-emerald-200 bg-emerald-50 px-2 py-0.5 align-middle font-mono text-xs font-medium text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-400">
+              <Layers className="size-3" aria-hidden />
+              批量 {batch.currentIndex + 1}/{batch.total}
+              <span className="hidden font-sans font-normal text-emerald-700/70 sm:inline dark:text-emerald-500/80">
+                {batch.items[batch.currentIndex]?.label}
+              </span>
             </span>
           )}
         </h1>

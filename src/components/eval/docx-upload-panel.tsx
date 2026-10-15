@@ -11,6 +11,7 @@ import {
   ImageOff,
   Lightbulb,
   LoaderCircle,
+  PillBottle,
   RefreshCw,
   ScanEye,
   Sparkles,
@@ -31,7 +32,10 @@ export interface DocxUploadPanelProps {
   uploadProgress: UploadProgress | null
   uploadError: string | null
   selectionReady: boolean
-  selectedUniprot: string | null
+  /** 已选 UniProt 靶点（多选，每个靶点一份独立报告） */
+  selectedUniprots: string[]
+  /** 可选靶点数上限 */
+  maxBatchUniprot: number
   selectedSequenceIndex: number | null
   /** LLM 智能解析结果（null = 尚未解析） */
   insights: FormInsights | null
@@ -39,7 +43,7 @@ export interface DocxUploadPanelProps {
   insightsError: string | null
   onFileSelected: (file: File) => void
   onClearUpload: () => void
-  onSelectUniprot: (id: string | null) => void
+  onToggleUniprot: (id: string) => void
   onSelectSequence: (index: number | null) => void
   onRetryInsights: () => void
   /** 将某条客户目标应用到目标输入框 */
@@ -56,14 +60,15 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
     uploadProgress,
     uploadError,
     selectionReady,
-    selectedUniprot,
+    selectedUniprots,
+    maxBatchUniprot,
     selectedSequenceIndex,
     insights,
     insightsLoading,
     insightsError,
     onFileSelected,
     onClearUpload,
-    onSelectUniprot,
+    onToggleUniprot,
     onSelectSequence,
     onRetryInsights,
     onApplyGoal,
@@ -155,7 +160,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
   }
 
   const { parsed } = upload
-  const hasBoth = Boolean(selectedUniprot && selectedSequenceIndex != null)
+  const hasBoth = Boolean(selectedUniprots.length > 0 && selectedSequenceIndex != null)
   // 要点文本渲染时省略长序列片段（兼容历史缓存 insights），并配合 break-words 防溢出
   const eGoals = (insights?.goals ?? []).map(elideSequenceRuns)
   const eQuestions = (insights?.scientificQuestions ?? []).map(elideSequenceRuns)
@@ -338,24 +343,33 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         </div>
       )}
 
-      {/* UniProt ID chips */}
+      {/* UniProt ID chips（多选：每个靶点一份独立评估报告） */}
       {parsed.uniprotIds.length > 0 && (
         <div>
-          <div className="mb-2 text-xs font-medium text-stone-600 dark:text-stone-400">
-            识别出的 UniProt ID（点选作为评估对象）
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-stone-600 dark:text-stone-400">
+            <span>识别出的 UniProt ID（可多选，全部将逐个评估并各生成一份报告）</span>
+            <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+              已选 {selectedUniprots.length}/{parsed.uniprotIds.length}
+            </span>
+            {selectedUniprots.length >= maxBatchUniprot && (
+              <span className="text-[11px] font-normal text-amber-600 dark:text-amber-400">（一次最多评估 {maxBatchUniprot} 个靶点）</span>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             {parsed.uniprotIds.map((id) => {
-              const selected = selectedUniprot === id
+              const selected = selectedUniprots.includes(id)
+              const disabled = !selected && selectedUniprots.length >= maxBatchUniprot
               return (
                 <button
                   key={id}
                   type="button"
+                  disabled={disabled}
                   onClick={() => {
-                    onSelectUniprot(selected ? null : id)
+                    onToggleUniprot(id)
                   }}
+                  title={disabled ? `已达一次 ${maxBatchUniprot} 个靶点上限` : selected ? '点击取消选择该靶点' : '点击选中该靶点'}
                   className={cn(
-                    'min-h-10 rounded-md border px-3.5 font-mono text-sm transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
+                    'min-h-10 rounded-md border px-3.5 font-mono text-sm transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 disabled:cursor-not-allowed disabled:opacity-40',
                     selected
                       ? 'border-emerald-700 bg-emerald-800 font-semibold text-white'
                       : 'border-stone-300 bg-white text-stone-700 hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:border-emerald-600 dark:hover:text-emerald-400'
@@ -369,17 +383,18 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         </div>
       )}
 
-      {/* 序列列表（已选 UniProt 时 → 构建对照序列，可叠加选择） */}
+      {/* 序列列表（可叠加选择作构建对照） */}
       {parsed.sequences.length > 0 && (
         <div>
           <div className="mb-2 text-xs font-medium text-stone-600 dark:text-stone-400">
-            {selectedUniprot
-              ? '识别出的序列（可选一条作为构建对照 — 与所选 UniProt 合并为一次评估，用于构建边界分析）'
+            {selectedUniprots.length > 0
+              ? `识别出的序列（可选一条作为构建对照 — 随每个所选 UniProt 提交，仅与同一靶点时合并为构建边界分析）`
               : '识别出的序列（点选作为评估对象）'}
           </div>
           <div className="flex flex-col gap-2">
             {parsed.sequences.map((s, i) => {
               const selected = selectedSequenceIndex === i
+              const isAntibody = s.role === 'antibody'
               return (
                 <button
                   key={`${s.header}-${i}`}
@@ -394,11 +409,20 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                       : 'border-stone-200 bg-white hover:border-emerald-400 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-700'
                   )}
                 >
-                  <div className="flex items-baseline gap-2">
+                  <div className="flex flex-wrap items-baseline gap-2">
                     {selected && <Dna className="size-3.5 shrink-0 self-center text-emerald-700 dark:text-emerald-500" aria-hidden />}
                     <span className="min-w-0 truncate text-xs font-medium text-stone-700 dark:text-stone-300">
                       {s.header?.trim() || `序列 ${i + 1}`}
                     </span>
+                    {isAntibody && (
+                      <span
+                        className="flex shrink-0 items-center gap-1 rounded-sm border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:border-violet-900 dark:bg-violet-950/40 dark:text-violet-400"
+                        title="检测为抗体序列（Fab/Fc/scFv 等）：BLAST 同源检索将自动跳过（抗体结构库命中众多但参考价值低）"
+                      >
+                        <PillBottle className="size-2.5" aria-hidden />
+                        抗体 · 跳过 BLAST
+                      </span>
+                    )}
                     <span className="ml-auto shrink-0 text-[11px] text-emerald-700 dark:text-emerald-500">
                       {s.length || s.seq?.length || 0} aa
                     </span>
@@ -501,10 +525,14 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         )}
       >
         {hasBoth
-          ? '将合并为一次评估：以 UniProt 为主，所选序列用于构建边界分析（系统会自动校验二者是否同一靶点）'
+          ? selectedUniprots.length > 1
+            ? `所选序列将作为 ${selectedUniprots.length} 个靶点的构建对照提交（系统逐个自动校验是否同一靶点，仅同靶点时合并为构建边界分析）`
+            : '将合并为一次评估：以 UniProt 为主，所选序列用于构建边界分析（系统会自动校验二者是否同一靶点）'
           : selectionReady
-            ? '已选择评估对象，可以开始评估'
-            : '请从上方点选一个 UniProt ID 或序列作为评估对象'}
+            ? selectedUniprots.length > 1
+              ? `已选择 ${selectedUniprots.length} 个 UniProt 靶点，将逐个评估并各生成一份报告`
+              : '已选择评估对象，可以开始评估'
+            : '请从上方点选 UniProt ID 或序列作为评估对象'}
       </p>
 
       {uploadError && <p className="text-xs text-red-600 dark:text-red-400">{uploadError}</p>}

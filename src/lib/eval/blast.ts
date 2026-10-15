@@ -88,9 +88,29 @@ export async function runBlastPdb(
     EXPECT: '1e-5',
     FILTER: 'F',
   })
-  const submitRes = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: AbortSignal.timeout(30_000) })
-  if (!submitRes.ok) throw new Error(`BLAST 提交失败 HTTP ${submitRes.status}`)
-  const submitText = await submitRes.text()
+  // 提交重试（2 次退避重试）：网络抖动/NCBI 瞬时 5xx 不应导致整个 BLAST 阶段放弃
+  let submitText: string | null = null
+  let lastSubmitErr: unknown = null
+  for (let attempt = 0; attempt < 3 && submitText === null; attempt++) {
+    try {
+      const res = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: AbortSignal.timeout(30_000) })
+      if (!res.ok) throw new Error(`BLAST 提交失败 HTTP ${res.status}`)
+      submitText = await res.text()
+    } catch (e) {
+      if (signal?.aborted || (e instanceof Error && e.name === 'TimeoutError')) {
+        // 超时也重试（AbortSignal.timeout 的 TimeoutError）；用户主动取消则直接抛出
+        if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      }
+      lastSubmitErr = e
+      if (attempt < 2) {
+        onProgress?.(`BLAST 提交失败（第 ${attempt + 1} 次），${2 + attempt * 3}s 后重试…`)
+        await sleep(2000 + attempt * 3000, signal)
+      }
+    }
+  }
+  if (submitText === null) {
+    throw lastSubmitErr instanceof Error ? lastSubmitErr : new Error('BLAST 提交失败（已重试 3 次）')
+  }
   const rid = submitText.match(/RID\s*=\s*(\S+)/)?.[1]
   const rtoe = parseInt(submitText.match(/RTOE\s*=\s*(\d+)/)?.[1] ?? '15', 10)
   if (!rid) throw new Error('BLAST 未返回 RID')

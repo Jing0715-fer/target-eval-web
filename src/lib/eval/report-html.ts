@@ -9,6 +9,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { BlastHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats } from './types'
+import { describeBlastStatus } from './types'
 import type { ReportContext } from './report'
 
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
@@ -305,7 +306,10 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   // 动态章节编号：一 llm / 二 scores / 三 pdbs / 后续按存在性编号
   const cnNums = ['一', '二', '三', '四', '五', '六', '七']
   let secNo = 3
-  const blastNo = ctx.blastHits.length ? ++secNo : 0
+  // v1.7+：BLAST 章节在 0 命中/跳过/失败时也渲染状态说明（不再凭空消失）
+  const blastRan = ctx.blastStatus && (ctx.blastStatus.status === 'ok' || ctx.blastStatus.status === 'no-hits')
+  const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus)
+  const blastNo = showBlastSec ? ++secNo : 0
   const litNo = ctx.literature.length ? ++secNo : 0
   const assetsNo = embedded.length ? ++secNo : 0
 
@@ -533,7 +537,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div><b>结构覆盖率</b> ${ctx.coverage ? ctx.coverage.coveragePercent + '%' : '—'}</div>
       <div><b>PDB 结构</b> ${pdbCountHtml}（X-ray ${methodStats.xrayCount} / Cryo-EM ${methodStats.cryoemCount} / NMR ${methodStats.nmrCount}）</div>
       <div><b>最佳分辨率</b> ${methodStats.bestResolution != null ? methodStats.bestResolution.toFixed(2) + ' Å' : '—'}</div>
-      <div><b>BLAST 同源</b> ${ctx.blastHits.length} 个</div>
+      <div><b>BLAST 同源</b> ${ctx.blastHits.length} 个${ctx.blastStatus && ctx.blastStatus.status !== 'ok' ? `（${esc(describeBlastStatus(ctx.blastStatus).split('—')[0].trim())}）` : ''}</div>
       <div><b>文献证据</b> ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构条目直接关联）` : ''}</div>
       ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
       <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
@@ -541,7 +545,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     </div>
     <div class="rpt-badges">
       <span class="badge">综合评分 ${ctx.scores.overall.score}/10 · ${esc(ctx.scores.overall.rating)}</span>
-      <span class="badge">数据源：UniProt · RCSB · PDBe${ctx.blastHits.length ? ' · BLAST' : ''}${ctx.literature.length ? ' · PubMed' : ''}</span>
+      <span class="badge">数据源：UniProt · RCSB · PDBe${blastRan ? ' · BLAST' : ''}${ctx.literature.length ? ' · PubMed' : ''}</span>
       ${input.llmOk ? '<span class="badge">LLM 分析：已完成</span>' : '<span class="badge amber">LLM 分析：失败（见数据区块）</span>'}
     </div>
   </header>
@@ -552,7 +556,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <li><a href="#llm">评估分析（摘要 / 目标可行性 / 研究全景 / 实验策略）</a></li>
       <li><a href="#scores">可行性评分</a></li>
       <li><a href="#pdbs">PDB 结构清单</a></li>
-      ${ctx.blastHits.length ? '<li><a href="#blast">BLAST 同源结构</a></li>' : ''}
+      ${showBlastSec ? '<li><a href="#blast">BLAST 同源结构</a></li>' : ''}
       ${ctx.literature.length ? '<li><a href="#literature">关键文献</a></li>' : ''}
       ${embedded.length ? '<li><a href="#assets">客户实验数据（评估表）</a></li>' : ''}
     </ol>
@@ -579,17 +583,18 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     : '<p>该靶点（或该 UniProt）暂无直接关联的 PDB 结构。同源结构请见 BLAST 章节。</p>'}
   </section>
 
-  ${ctx.blastHits.length ? `
+  ${showBlastSec ? `
   <section class="sec" id="blast">
     <h2>${cnNums[blastNo - 1]}、BLAST 同源结构<span class="sec-en">Homologs · ${ctx.blastHits.length}</span></h2>
-    <div class="tbl-wrap"><table class="tbl-data tbl-blast">
+    ${ctx.blastHits.length ? `<div class="tbl-wrap"><table class="tbl-data tbl-blast">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px">
       </colgroup>
       <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖(aa)</th><th>方法</th><th class="num">分辨率 (Å)</th></tr></thead>
       <tbody>${blastRowsHtml(ctx.blastHits)}</tbody>
-    </table></div>
+    </table></div>`
+    : `<p class="note">${esc(describeBlastStatus(ctx.blastStatus))}。同源结构证据在本报告中缺位，结论主要基于直接结构与文献证据；如需同源检索可重新评估并勾选「强制 BLAST」。</p>`}
   </section>` : ''}
 
   ${ctx.literature.length ? `
@@ -601,7 +606,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   ${imagesHtml}
 
   <footer class="rpt-foot">
-    <div>SOURCES — UniProt REST · RCSB PDB · PDBe (EBI) · NCBI BLAST (pdbaa) · PubMed eutils${ctx.images.length ? ' · 客户评估表' : ''}</div>
+    <div>SOURCES — UniProt REST · RCSB PDB · PDBe (EBI)${blastRan ? ' · NCBI BLAST (pdbaa)' : ''} · PubMed eutils${ctx.images.length ? ' · 客户评估表' : ''}</div>
     <div>本报告由 TargetEval 系统自动生成：数据区块为数据库实时检索结果；「评估分析」章节由大语言模型基于上述数据生成，可能存在解读偏差，关键决策请以原始数据库与文献为准。</div>
     <div>JOB ${esc(input.jobId)} · GENERATED ${(input.durationMs / 1000).toFixed(1)}s · ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC</div>
   </footer>

@@ -37,11 +37,13 @@ const EXAMPLE_UNIPROTS = [
 
 const MIN_SEQUENCE_LENGTH = 10
 const MIN_COMPANION_LENGTH = 30
+/** docx 批量评估的 UniProt 靶点数上限（串行执行，防止排队过久） */
+const MAX_BATCH_UNIPROT = 5
 
 export interface InputPanelProps {
   submitting: boolean
   submitError: string | null
-  onStart: (request: EvaluateRequest) => Promise<StartResult>
+  onStart: (requests: EvaluateRequest[]) => Promise<StartResult>
   onClearSubmitError: () => void
 }
 
@@ -68,7 +70,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  const [selectedUniprot, setSelectedUniprot] = useState<string | null>(null)
+  /** 已选 UniProt 靶点（多选：每个靶点生成一份独立评估报告） */
+  const [selectedUniprots, setSelectedUniprots] = useState<string[]>([])
   const [selectedSequenceIndex, setSelectedSequenceIndex] = useState<number | null>(null)
 
   // AI 智能解析
@@ -78,7 +81,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [goalAutoFilled, setGoalAutoFilled] = useState(false)
 
   const docxReady = Boolean(
-    upload && (selectedUniprot || (selectedSequenceIndex != null && upload.parsed.sequences[selectedSequenceIndex]))
+    upload && (selectedUniprots.length > 0 || (selectedSequenceIndex != null && upload.parsed.sequences[selectedSequenceIndex]))
   )
 
   // 客户目标
@@ -126,15 +129,15 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     try {
       const res = await uploadEvaluateDocx(file, setUploadProgress)
       setUpload(res)
-      // 默认选中第一个 UniProt，否则第一个序列
+      // 默认选中全部 UniProt（用户要求：表中的 UniProt 都要评估，不落下；上限 MAX_BATCH_UNIPROT 个）
       if (res.parsed.uniprotIds.length > 0) {
-        setSelectedUniprot(res.parsed.uniprotIds[0])
+        setSelectedUniprots(res.parsed.uniprotIds.slice(0, MAX_BATCH_UNIPROT))
         setSelectedSequenceIndex(null)
       } else if (res.parsed.sequences.length > 0) {
-        setSelectedUniprot(null)
+        setSelectedUniprots([])
         setSelectedSequenceIndex(0)
       } else {
-        setSelectedUniprot(null)
+        setSelectedUniprots([])
         setSelectedSequenceIndex(null)
       }
       // 后台执行 LLM 智能解析
@@ -149,7 +152,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
   const clearUpload = () => {
     setUpload(null)
-    setSelectedUniprot(null)
+    setSelectedUniprots([])
     setSelectedSequenceIndex(null)
     setUploadError(null)
     setUploadProgress(null)
@@ -169,6 +172,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         ? seqInfo.count >= MIN_SEQUENCE_LENGTH
         : docxReady
 
+  /** 切换 UniProt 靶点选中态（多选，上限 MAX_BATCH_UNIPROT） */
+  const toggleUniprot = (id: string) => {
+    setSelectedUniprots(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : prev.length < MAX_BATCH_UNIPROT ? [...prev, id] : prev,
+    )
+  }
+
   const handleStart = async () => {
     if (!inputReady || submitting) return
     onClearSubmitError()
@@ -178,19 +188,19 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       maxPdb,
     }
     const trimmedGoal = goal.trim() || undefined
-    let request: EvaluateRequest
+    let requests: EvaluateRequest[]
     if (mode === 'uniprot') {
       // 可选伴随序列：与同一靶点的 UniProt 合并为一次评估（构建边界分析）
       const companion = companionText.trim() && companionValid ? companionText.trim() : undefined
-      request = {
+      requests = [{
         mode: 'uniprot',
         uniprot: uniprot.trim().toUpperCase(),
         sequence: companion,
         goal: trimmedGoal,
         options,
-      }
+      }]
     } else if (mode === 'sequence') {
-      request = { mode: 'sequence', sequence: sequenceText.trim(), goal: trimmedGoal, options }
+      requests = [{ mode: 'sequence', sequence: sequenceText.trim(), goal: trimmedGoal, options }]
     } else if (!upload) {
       return
     } else {
@@ -198,20 +208,22 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         selectedSequenceIndex != null
           ? (upload.parsed.sequences[selectedSequenceIndex]?.seq ?? undefined)
           : undefined
-      request = {
-        mode: 'docx',
+      // 多 UniProt 靶点 → 每个靶点一份独立作业（串行执行，全部不落下）；
+      // 仅选序列时 → 单作业。伴随序列随每个作业提交，由后端同靶点校验决定是否合并
+      const targets = selectedUniprots.length > 0 ? selectedUniprots : [null]
+      requests = targets.map(u => ({
+        mode: 'docx' as const,
         // 契约字段 docxJobId + 兼容别名 uploadId（同值），后端取任一均可
         docxJobId: upload.uploadId,
         uploadId: upload.uploadId,
-        uniprotFromDocx: selectedUniprot ?? undefined,
-        // UniProt 与序列可同时选择 → 后端合并为一次评估（以 UniProt 为主）
+        uniprotFromDocx: u ?? undefined,
         sequence: selectedSeq,
         sequenceFromDocx: selectedSeq,
         goal: trimmedGoal,
         options,
-      }
+      }))
     }
-    await onStart(request)
+    await onStart(requests)
   }
 
   return (
@@ -389,14 +401,15 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                 uploadProgress={uploadProgress}
                 uploadError={uploadError}
                 selectionReady={docxReady}
-                selectedUniprot={selectedUniprot}
+                selectedUniprots={selectedUniprots}
+                maxBatchUniprot={MAX_BATCH_UNIPROT}
                 selectedSequenceIndex={selectedSequenceIndex}
                 insights={insights}
                 insightsLoading={insightsLoading}
                 insightsError={insightsError}
                 onFileSelected={handleFileSelected}
                 onClearUpload={clearUpload}
-                onSelectUniprot={setSelectedUniprot}
+                onToggleUniprot={toggleUniprot}
                 onSelectSequence={setSelectedSequenceIndex}
                 onRetryInsights={() => upload && void runInsights(upload.uploadId)}
                 onApplyGoal={applyGoal}
@@ -551,7 +564,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           ) : (
             <FileText className="size-4.5" />
           )}
-          {submitting ? '正在创建评估作业…' : '开始评估'}
+          {submitting
+            ? '正在创建评估作业…'
+            : mode === 'docx' && selectedUniprots.length > 1
+              ? `开始评估（${selectedUniprots.length} 个靶点）`
+              : '开始评估'}
         </Button>
         <p className="text-center font-mono text-[11px] text-stone-400 dark:text-stone-500">
           UNIPROT — RCSB — PDBE — PUBMED — BLAST — LLM ANALYSIS

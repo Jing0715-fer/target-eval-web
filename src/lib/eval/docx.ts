@@ -14,6 +14,7 @@ import * as path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import mammoth from 'mammoth'
 import { looksLikeProteinSequence, UNIPROT_RE, type AssetKind, type DocxParsed, type ParsedImage, type ParsedSequence } from './types'
+import { detectAntibody } from './antibody'
 import { classifyImagesVlm, convertMetafilesToPng, normalizeRasterImage, SOURCE_IMAGE_MAX_BYTES } from './image-process'
 
 export const DOCX_MAX_BYTES = 20 * 1024 * 1024
@@ -95,10 +96,13 @@ export function extractSequences(text: string): ParsedSequence[] {
     if (seq.length < 30 || !looksLikeProteinSequence(seq)) return false
     if (seen.has(seq)) return true // 重复序列：视为已处理，不再入列
     seen.add(seq)
+    // 序列角色标记：抗体序列（Fab/Fc/scFv/VHH 等）自动跳过 BLAST，UI 徽标展示
+    const ab = detectAntibody(seq, header)
     out.push({
       header: (header.trim() || `sequence_${out.length + 1}`).slice(0, 80),
       seq,
       length: seq.length,
+      role: ab.isAntibody ? 'antibody' : 'antigen',
     })
     return true
   }

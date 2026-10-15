@@ -134,6 +134,40 @@ export interface MethodStats {
 
 // ─── 作业汇总（前端 JobSummary）──────────────────────────────────────────────
 
+/** BLAST 执行状态（结果页空态说明 / 报告注记的数据源） */
+export type BlastStatusCode =
+  | 'ok'            // 已执行且有命中
+  | 'no-hits'       // 已执行但 0 命中
+  | 'skipped-covered'    // 结构覆盖充分自动跳过
+  | 'skipped-disabled'   // 用户关闭 BLAST
+  | 'skipped-antibody'   // 检测到抗体序列，自动跳过
+  | 'failed'             // 执行失败（网络/NCBI 侧）
+
+export interface BlastStatusInfo {
+  status: BlastStatusCode
+  /** 附注（失败原因 / 跳过依据） */
+  note?: string
+}
+
+/** BLAST 状态 → 中文描述（结果页与报告共用） */
+export function describeBlastStatus(info: BlastStatusInfo | undefined | null): string {
+  if (!info) return '本作业未记录 BLAST 执行状态（可能为历史版本作业）'
+  switch (info.status) {
+    case 'ok':
+      return `已完成同源检索${info.note ? `（${info.note}）` : ''}`
+    case 'no-hits':
+      return '已执行同源检索，未检索到显著同源结构（E ≤ 1e-5）'
+    case 'skipped-covered':
+      return '结构覆盖充分（直接结构 ≥5 个且覆盖率 ≥50%），无需同源检索'
+    case 'skipped-disabled':
+      return '已在高级选项中关闭 BLAST 同源检索'
+    case 'skipped-antibody':
+      return `检测到抗体序列，已跳过同源检索${info.note ? `（依据：${info.note}）` : ''} — 抗体结构库命中众多但参考价值低` 
+    case 'failed':
+      return `同源检索失败${info.note ? `：${info.note}` : ''} — 可重新评估并勾选「强制 BLAST」重试`
+  }
+}
+
 export interface JobSummary {
   uniprot: {
     uniprotId: string
@@ -154,6 +188,10 @@ export interface JobSummary {
   durationMs: number
   /** 合并评估（UniProt+序列同靶点）时的构建信息 */
   construct?: ConstructInfo
+  /** BLAST 执行状态（v1.7+ 作业存在；历史作业缺省） */
+  blast?: BlastStatusInfo
+  /** LLM 报告生成是否至少部分成功（v1.7+） */
+  reportLlmOk?: boolean
 }
 
 // ─── docx 解析 ────────────────────────────────────────────────────────────────
@@ -162,6 +200,8 @@ export interface ParsedSequence {
   header: string
   seq: string
   length: number
+  /** 序列角色（v1.7+）：antibody = 检测为抗体序列（自动跳过 BLAST）；antigen = 靶点/构建序列 */
+  role?: 'antibody' | 'antigen'
 }
 
 export interface ParsedImage {

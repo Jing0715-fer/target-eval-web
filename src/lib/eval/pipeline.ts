@@ -14,8 +14,9 @@ import { computeScores } from './score'
 import { generateReportSections, type ReportContext } from './report'
 import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
+import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
-import { isValidUniprotId, type BlastHit, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
+import { isValidUniprotId, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
   jobId: string
@@ -163,10 +164,11 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       comparison = compareSequences(providedSequence, info.sequence)
       if (comparison.sameTarget) {
         log(`序列比对：${describeComparison(comparison)} → 判定同一靶点，合并评估（以 UniProt ${info.uniprotId} 为主，序列用于构建分析）`)
+        sequence = providedSequence // BLAST 与构建分析使用客户构建序列
       } else {
-        log(`序列比对：相似度 ${comparison.identity}% 低于同靶点阈值（85%）→ 按 UniProt ${info.uniprotId} 评估；提供序列可能为不同靶点/同源蛋白，已避免重复评估`, 'warn')
+        log(`序列比对：相似度 ${comparison.identity}% 低于同靶点阈值（85%）→ 按 UniProt ${info.uniprotId} 评估；提供序列可能为不同靶点/同源蛋白或抗体，已避免重复评估`, 'warn')
+        sequence = info.sequence // 提供序列疑似不同靶点（如抗原靶点 + 抗体序列）：BLAST 回退用 UniProt 全长
       }
-      sequence = providedSequence // BLAST 与构建分析使用客户构建序列
     } else if (!sequence) {
       sequence = info.sequence
     }
@@ -235,10 +237,24 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
 
   // ─── 阶段 5：BLAST ────────────────────────────────────────────────────────
   let blastHits: BlastHit[] = []
+  let blastStatus: BlastStatusInfo = { status: 'ok' }
   const coveragePct = coverage?.coveragePercent ?? 0
-  const shouldBlast = !input.options.skipBlast
-    && (input.options.forceBlast || !uniprotInfo || directPdbs.length < 5 || coveragePct < 50)
-  if (shouldBlast) {
+  const abVerdict = detectAntibody(sequence)
+  const coverageSufficient = uniprotInfo && directPdbs.length >= 5 && coveragePct >= 50
+  if (input.options.skipBlast) {
+    blastStatus = { status: 'skipped-disabled' }
+    report('blast', '已按选项跳过 BLAST', 1)
+    log('跳过 BLAST：已在高级选项中关闭')
+  } else if (abVerdict.isAntibody && !input.options.forceBlast) {
+    // 抗体序列：BLAST pdbaa 会命中海量抗体恒定区结构，对靶点可行性评估无增量价值
+    blastStatus = { status: 'skipped-antibody', note: abVerdict.evidence.slice(0, 2).join('；') }
+    report('blast', '抗体序列 — 已跳过 BLAST 同源检索', 1)
+    log(`跳过 BLAST：检测到抗体序列（${abVerdict.evidence.join('；')}）— 抗体结构库命中众多但参考价值低`)
+  } else if (coverageSufficient && !input.options.forceBlast) {
+    blastStatus = { status: 'skipped-covered' }
+    report('blast', '结构覆盖充分，跳过 BLAST', 1)
+    log(`跳过 BLAST：直接结构 ${directPdbs.length} 个且覆盖率 ${coveragePct}%，结构证据已充分`)
+  } else {
     report('blast', '提交 BLASTp（NCBI pdbaa）…', 0.05)
     try {
       const rawHits = await runBlastPdb(sequence, msg => {
@@ -247,6 +263,10 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       const directSet = new Set(directPdbs.map(p => p.pdbId))
       const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
       blastHits = await enrichBlastHits(filtered, directSet)
+      blastStatus = {
+        status: blastHits.length > 0 ? 'ok' : 'no-hits',
+        note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
+      }
       log(`BLAST 完成：${rawHits.length} 个命中，去重/排除直接命中后 ${blastHits.length} 个`)
       // 序列模式且尚未识别 UniProt：从最佳命中回填
       if (!uniprotInfo && blastHits.length > 0) {
@@ -266,6 +286,10 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
               directPdbs = r.entries
               const directSet2 = new Set(directPdbs.map(p => p.pdbId))
               blastHits = (await enrichBlastHits(filtered, directSet2)).filter(h => !directSet2.has(h.pdbId))
+              blastStatus = {
+                status: blastHits.length > 0 ? 'ok' : 'no-hits',
+                note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
+              }
             }
             report('pdbe', '补算 PDBe 覆盖率…', 0.5)
             try {
@@ -280,12 +304,11 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       report('blast', `BLAST 完成（${blastHits.length} 个同源结构）`, 1)
     } catch (e) {
       if (signal.aborted) throw e
-      log(`BLAST 失败：${e instanceof Error ? e.message : e}（继续后续阶段）`, 'warn')
-      report('blast', 'BLAST 不可用（跳过）', 1)
+      const msg = e instanceof Error ? e.message : String(e)
+      blastStatus = { status: 'failed', note: msg.slice(0, 120) }
+      log(`BLAST 失败：${msg}（继续后续阶段）`, 'warn')
+      report('blast', 'BLAST 不可用（已跳过）', 1)
     }
-  } else {
-    report('blast', input.options.skipBlast ? '已按选项跳过 BLAST' : '结构覆盖充分，跳过 BLAST', 1)
-    log('跳过 BLAST（结构覆盖充分或用户关闭）')
   }
 
   // ─── 阶段 6：PubMed 文献 ──────────────────────────────────────────────────
@@ -363,6 +386,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       : undefined,
     directPdbs,
     blastHits,
+    blastStatus,
     coverage,
     coverageText,
     gapText,
@@ -424,6 +448,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     literatureCount: literature.length,
     imageCount: images.length,
     durationMs,
+    blast: blastStatus,
+    reportLlmOk: generated.ok,
     construct: comparison
       ? {
           providedLength: comparison.providedLength,
@@ -447,6 +473,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       blastHits: JSON.stringify(blastHits),
       literature: JSON.stringify(literature),
       reportPath,
+      reportMarkdown: generated.fullMarkdown?.trim() ? generated.fullMarkdown : null,
       error: null,
       updatedAt: new Date(),
     },

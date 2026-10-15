@@ -10,6 +10,7 @@ import { InputPanel } from '@/components/eval/input-panel'
 import { ProgressPanel } from '@/components/eval/progress-panel'
 import { ErrorPanel } from '@/components/eval/error-panel'
 import { ResultView } from '@/components/eval/result-view'
+import { BatchBar } from '@/components/eval/batch-bar'
 import { HistoryDialog, RecentEvaluations } from '@/components/eval/history'
 import { LlmConfigPanel } from '@/components/eval/llm-config-panel'
 import { useEvaluationFlow } from '@/components/eval/use-evaluation-flow'
@@ -114,6 +115,7 @@ export default function Home() {
                   elapsedSec={flow.elapsedSec}
                   networkIssue={flow.networkIssue}
                   canceling={flow.canceling}
+                  batch={flow.batch && !flow.batch.done ? flow.batch : null}
                   onCancel={() => void flow.cancelJob()}
                 />
               </motion.div>
@@ -131,7 +133,16 @@ export default function Home() {
             )}
 
             {flow.phase === 'done' && flow.job && (
-              <motion.div key="done" {...viewMotion}>
+              <motion.div key={`done-${flow.job.id}`} {...viewMotion}>
+                {flow.batch && flow.batch.items.length > 1 && (
+                  <div className="mb-6">
+                    <BatchBar
+                      batch={flow.batch}
+                      currentJobId={flow.job.id}
+                      onSelect={(id) => void flow.loadJob(id)}
+                    />
+                  </div>
+                )}
                 <ResultView job={flow.job} onNewEvaluation={handleNewEvaluation} />
               </motion.div>
             )}

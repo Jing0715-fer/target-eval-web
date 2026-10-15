@@ -2,8 +2,12 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
+  AlertTriangle,
   ArrowLeft,
+  BookOpenText,
   Database,
   Download,
   ExternalLink,
@@ -12,18 +16,20 @@ import {
   Loader2,
   Printer,
   RotateCcw,
+  SearchX,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+import { describeBlastStatus } from '@/lib/eval/types'
 import { RatingBadge } from './badges'
 import { formatDuration, formatPercent, formatResolution, scoreLevel } from './format'
 import { PdbTable } from './pdb-table'
 import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { AssetGallery } from './asset-gallery'
-import type { JobDetail, ScoreItem } from './types'
+import type { BlastStatusCode, JobDetail, ScoreItem } from './types'
 
 /* ---------------- 通用小组件 ---------------- */
 
@@ -96,14 +102,16 @@ function SectionHeader({
   title,
   en,
   count,
+  right,
 }: {
   no: string
   title: string
   en: string
   count?: string
+  right?: React.ReactNode
 }) {
   return (
-    <div className="flex items-baseline gap-2.5 border-b border-stone-200 pb-2 dark:border-stone-800">
+    <div className="flex flex-wrap items-baseline gap-2.5 border-b border-stone-200 pb-2 dark:border-stone-800">
       <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">{no}</span>
       <h2 className="font-display text-lg font-bold text-stone-900 dark:text-stone-50">{title}</h2>
       <span className="eval-eyebrow hidden text-stone-400 dark:text-stone-500 sm:inline">{en}</span>
@@ -112,6 +120,83 @@ function SectionHeader({
           {count}
         </span>
       )}
+      {right}
+    </div>
+  )
+}
+
+/* ---------------- LLM 报告 markdown 渲染 ---------------- */
+
+/** 与站点编辑风一致的 markdown 样式映射（react-markdown + remark-gfm 表格支持） */
+const mdComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
+  h2: ({ children }) => (
+    <h2 className="mt-8 mb-3 border-b border-stone-200 pb-2 font-display text-base font-bold text-stone-900 first:mt-0 dark:border-stone-800 dark:text-stone-50">
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mt-5 mb-2 text-sm font-semibold text-stone-800 dark:text-stone-200">{children}</h3>
+  ),
+  h4: ({ children }) => (
+    <h4 className="mt-4 mb-1.5 text-sm font-semibold text-stone-700 dark:text-stone-300">{children}</h4>
+  ),
+  p: ({ children }) => <p className="mb-3 text-sm leading-7 text-stone-600 last:mb-0 dark:text-stone-300">{children}</p>,
+  ul: ({ children }) => <ul className="mb-3 ml-5 list-disc space-y-1.5 text-sm leading-relaxed text-stone-600 marker:text-stone-400 last:mb-0 dark:text-stone-300 dark:marker:text-stone-500">{children}</ul>,
+  ol: ({ children }) => <ol className="mb-3 ml-5 list-decimal space-y-1.5 text-sm leading-relaxed text-stone-600 marker:text-stone-400 last:mb-0 dark:text-stone-300 dark:marker:text-stone-500">{children}</ol>,
+  li: ({ children }) => <li className="pl-1 [>&p]:mb-0">{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold text-stone-800 dark:text-stone-100">{children}</strong>,
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="font-medium text-emerald-700 underline-offset-2 hover:underline dark:text-emerald-400">
+      {children}
+    </a>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="mb-3 rounded-sm border-l-2 border-emerald-600 bg-emerald-50/50 px-3.5 py-2.5 text-sm leading-relaxed text-stone-600 dark:bg-emerald-950/20 dark:text-stone-300">{children}</blockquote>
+  ),
+  table: ({ children }) => (
+    <div className="eval-scroll mb-4 overflow-x-auto rounded-md border border-stone-200 dark:border-stone-800">
+      <table className="w-full border-collapse text-xs">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-stone-50 dark:bg-stone-900/80">{children}</thead>,
+  th: ({ children }) => (
+    <th className="eval-eyebrow border-b border-stone-200 px-2.5 py-2 text-left font-medium whitespace-nowrap text-stone-500 dark:border-stone-800 dark:text-stone-400">{children}</th>
+  ),
+  td: ({ children }) => (
+    <td className="border-b border-stone-100 px-2.5 py-2 align-top leading-relaxed text-stone-600 dark:border-stone-800/60 dark:text-stone-300">{children}</td>
+  ),
+  hr: () => <hr className="my-6 border-stone-200 dark:border-stone-800" />,
+  code: ({ children }) => (
+    <code className="rounded-sm bg-stone-100 px-1.5 py-0.5 font-mono text-[11px] text-stone-700 dark:bg-stone-800 dark:text-stone-200">{children}</code>
+  ),
+}
+
+/** BLAST 空态说明框（0 命中/跳过/失败原因 — 不再凭空消失） */
+function BlastStatusBox({ status, note }: { status?: BlastStatusCode; note?: string }) {
+  const info = status ? describeBlastStatus({ status, note }) : describeBlastStatus(null)
+  const tone =
+    status === 'failed'
+      ? 'border-amber-200 bg-amber-50/60 dark:border-amber-900/60 dark:bg-amber-950/20'
+      : status === 'skipped-antibody'
+        ? 'border-violet-200 bg-violet-50/60 dark:border-violet-900/60 dark:bg-violet-950/20'
+        : 'border-stone-200 bg-stone-50/60 dark:border-stone-800 dark:bg-stone-900/40'
+  const iconTone =
+    status === 'failed'
+      ? 'text-amber-600 dark:text-amber-400'
+      : status === 'skipped-antibody'
+        ? 'text-violet-600 dark:text-violet-400'
+        : 'text-stone-400 dark:text-stone-500'
+  return (
+    <div className={cn('flex items-start gap-3 rounded-lg border px-4 py-5', tone)}>
+      <SearchX className={cn('mt-0.5 size-4.5 shrink-0', iconTone)} aria-hidden />
+      <div className="min-w-0 text-sm leading-relaxed text-stone-600 dark:text-stone-300">
+        {info}
+        {status !== 'failed' && (
+          <p className="mt-1.5 text-xs text-stone-400 dark:text-stone-500">
+            可行性结论主要基于直接结构与文献证据；如需同源检索，可在高级选项中开启「强制 BLAST」后重新评估。
+          </p>
+        )}
+      </div>
     </div>
   )
 }
@@ -167,6 +252,9 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const literature = job.literature ?? []
   const assets = job.assets ?? []
   const ms = summary.methodStats
+  const blastInfo = summary.blast ?? null
+  const reportMd = job.reportMarkdown?.trim() || null
+  const reportLlmFailed = summary.reportLlmOk === false
 
   const downloadReport = () => {
     window.open(`/api/jobs/${job.id}/report?download=1`, '_blank')
@@ -177,10 +265,22 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const nextNo = () => String(++secNo).padStart(2, '0')
 
   const scoreNo = nextNo()
+  const reportNo = nextNo()
   const assetsNo = assets.length > 0 ? nextNo() : null
   const pdbNo = nextNo()
-  const blastNo = blastHits.length > 0 ? nextNo() : null
+  const blastNo = nextNo()
   const litNo = literature.length > 0 ? nextNo() : null
+
+  /** 规格栅 BLAST 单元注释：按状态给出简短说明（不再是干巴巴的 0） */
+  const blastSubMap: Record<string, string> = {
+    ok: 'NCBI BLAST 已完成',
+    'no-hits': '无显著同源命中',
+    'skipped-covered': '覆盖充分，未运行',
+    'skipped-disabled': '已在选项中关闭',
+    'skipped-antibody': '抗体序列，已跳过',
+    failed: '检索失败，可重试',
+  }
+  const blastSub = (blastInfo ? blastSubMap[blastInfo.status] : undefined) ?? 'NCBI BLAST'
 
   return (
     <div className="flex flex-col gap-8">
@@ -285,7 +385,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         <SpecCell
           label="BLAST 同源"
           value={String(summary.blastHitCount ?? blastHits.length)}
-          sub="NCBI BLAST"
+          sub={blastSub}
         />
         <SpecCell
           label="最佳分辨率"
@@ -324,15 +424,23 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.18, ease: 'easeOut' }}
-        className="flex flex-col gap-4 rounded-lg border border-emerald-700/25 bg-emerald-50/60 px-5 py-4 sm:flex-row sm:items-center dark:border-emerald-700/30 dark:bg-emerald-950/20"
+        className={cn(
+          'flex flex-col gap-4 rounded-lg border px-5 py-4 sm:flex-row sm:items-center',
+          reportLlmFailed
+            ? 'border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/20'
+            : 'border-emerald-700/25 bg-emerald-50/60 dark:border-emerald-700/30 dark:bg-emerald-950/20'
+        )}
       >
         <div className="flex items-center gap-3">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-emerald-800 text-white dark:bg-emerald-700">
-            <FileCheck2 className="size-4.5" />
+          <div className={cn(
+            'flex size-9 shrink-0 items-center justify-center rounded-md text-white',
+            reportLlmFailed ? 'bg-amber-600 dark:bg-amber-700' : 'bg-emerald-800 dark:bg-emerald-700'
+          )}>
+            {reportLlmFailed ? <AlertTriangle className="size-4.5" /> : <FileCheck2 className="size-4.5" />}
           </div>
           <div>
             <div className="text-sm font-semibold text-stone-900 dark:text-stone-100">
-              评估报告已生成
+              {reportLlmFailed ? '报告生成（LLM 部分失败）' : '评估报告已生成'}
             </div>
             <div className="font-mono text-[11px] text-stone-500 dark:text-stone-400">
               HTML · {formatDuration(Math.round((summary.durationMs ?? 0) / 1000))} · 可独立下载分享
@@ -358,7 +466,56 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </div>
       </motion.section>
 
-      {/* 5. 实验数据（胶图/SEC） */}
+      {/* 5. AI 评估报告（LLM 分析全文内联展示） */}
+      <motion.section
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: 0.21, ease: 'easeOut' }}
+        className="flex flex-col gap-3"
+        aria-labelledby="sec-report"
+      >
+        <div id="sec-report">
+          <SectionHeader
+            no={reportNo}
+            title="AI 评估报告"
+            en="LLM Analysis"
+            count={reportMd ? `${reportMd.length.toLocaleString()} 字` : undefined}
+          />
+        </div>
+        {reportLlmFailed && (
+          <div className="flex items-start gap-2.5 rounded-md border border-amber-200 bg-amber-50/70 px-3.5 py-2.5 text-xs leading-relaxed text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            LLM 报告生成失败或部分失败，以下可能仅包含成功生成的章节；结构化数据区块（评分 / PDB / 文献）不受影响，可重新评估以重试报告生成。
+          </div>
+        )}
+        {reportMd ? (
+          <Card className="rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
+            <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
+              <div className="mb-4 flex items-center gap-2 text-stone-400 dark:text-stone-500">
+                <BookOpenText className="size-3.5" aria-hidden />
+                <span className="eval-eyebrow">Analysis · 由大语言模型基于下方结构化数据生成，结论供参考</span>
+              </div>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                {reportMd}
+              </ReactMarkdown>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card className="rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
+            <CardContent className="flex flex-col items-center gap-2.5 px-6 py-8 text-center">
+              <BookOpenText className="size-5 text-stone-300 dark:text-stone-600" aria-hidden />
+              <p className="text-sm text-stone-500 dark:text-stone-400">
+                该作业未内联保存报告文本（历史版本作业）
+              </p>
+              <p className="text-xs text-stone-400 dark:text-stone-500">
+                可点击上方「在线预览报告」或「下载 HTML」查看完整报告
+              </p>
+            </CardContent>
+          </Card>
+        )}
+      </motion.section>
+
+      {/* 6. 实验数据（胶图/SEC） */}
       {assets.length > 0 && (
         <motion.section
           initial={{ opacity: 0, y: 12 }}
@@ -371,7 +528,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </motion.section>
       )}
 
-      {/* 6. PDB 结构表 */}
+      {/* 7. PDB 结构表 */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
@@ -382,20 +539,27 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} />
       </motion.section>
 
-      {/* 7. BLAST 同源表 */}
-      {blastHits.length > 0 && (
-        <motion.section
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.35, delay: 0.3, ease: 'easeOut' }}
-          className="flex flex-col gap-3"
-        >
-          <SectionHeader no={blastNo!} title="BLAST 同源结构" en="Homologs" count={`${blastHits.length} 条命中`} />
+      {/* 8. BLAST 同源表（0 命中/跳过/失败时展示状态说明，不再凭空消失） */}
+      <motion.section
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: 0.3, ease: 'easeOut' }}
+        className="flex flex-col gap-3"
+      >
+        <SectionHeader
+          no={blastNo}
+          title="BLAST 同源结构"
+          en="Homologs"
+          count={blastHits.length > 0 ? `${blastHits.length} 条命中` : blastInfo ? '未运行' : '—'}
+        />
+        {blastHits.length > 0 ? (
           <BlastTable hits={blastHits} />
-        </motion.section>
-      )}
+        ) : (
+          <BlastStatusBox status={blastInfo?.status} note={blastInfo?.note} />
+        )}
+      </motion.section>
 
-      {/* 8. 文献列表 */}
+      {/* 9. 文献列表 */}
       {literature.length > 0 && (
         <motion.section
           initial={{ opacity: 0, y: 12 }}

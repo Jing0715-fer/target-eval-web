@@ -21,6 +21,7 @@ model EvaluationJob {
   blastHits   String? // JSON BLAST 命中列表
   literature  String? // JSON 文献列表
   reportPath  String? // 磁盘上的 HTML 报告路径
+  reportMarkdown String? // LLM 评估报告 markdown（结果页内联展示；HTML 丢失时可恢复）
   logs        String? // JSON：终态时的日志快照（≤60 条）
   error       String?
   ownerKey    String? // 创建者归属键（来源 IP 的 SHA-256 前 24 位；null=升级前历史记录）

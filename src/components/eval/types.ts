@@ -4,6 +4,10 @@
  * 注意：后端并行开发中，字段可能缺失，所有可缺失字段均按可空处理。
  */
 
+import type { BlastStatusInfo } from '@/lib/eval/types'
+
+export type { BlastStatusInfo, BlastStatusCode } from '@/lib/eval/types'
+
 export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'canceled'
 
 export type InputMode = 'uniprot' | 'sequence' | 'docx'
@@ -50,6 +54,8 @@ export interface ParsedSequence {
   header: string
   seq: string
   length: number
+  /** 序列角色：antibody = 检测为抗体序列（自动跳过 BLAST） */
+  role?: 'antibody' | 'antigen'
 }
 
 export interface ParsedImage {
@@ -217,6 +223,10 @@ export interface JobSummary {
   imageCount: number
   durationMs: number
   construct?: ConstructInfo
+  /** BLAST 执行状态（v1.7+） */
+  blast?: BlastStatusInfo
+  /** LLM 报告生成是否至少部分成功（v1.7+） */
+  reportLlmOk?: boolean
 }
 
 export interface PdbEntry {
@@ -280,6 +290,8 @@ export interface JobDetail {
   blastHits: BlastHit[] | null
   literature: LiteratureItem[] | null
   assets: AssetItem[] | null
+  /** LLM 评估报告 markdown（v1.7+，结果页内联展示） */
+  reportMarkdown?: string | null
   error: string | null
 }
 

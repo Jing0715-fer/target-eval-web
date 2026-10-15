@@ -6,8 +6,9 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, FormInsights, LiteratureItem, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
+import type { BlastHit, BlastStatusInfo, FormInsights, LiteratureItem, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
+import { describeBlastStatus } from './types'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 
@@ -22,6 +23,8 @@ export interface ReportContext {
   providedSequence?: { sequence: string; comparison: SequenceComparison }
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
+  /** BLAST 执行状态（跳过/失败原因 — 供报告说明） */
+  blastStatus?: BlastStatusInfo
   coverage: PdbeCoverageResult | null
   coverageText: string
   gapText: string
@@ -166,6 +169,10 @@ function buildDigest(ctx: ReportContext): string {
     lines.push('| PDB | 描述 | Identity | E-value |')
     lines.push('|-----|------|----------|---------|')
     lines.push(blastTable(ctx.blastHits, 12))
+  } else if (ctx.blastStatus) {
+    // 0 命中/跳过/失败时向 LLM 明确说明，避免报告凭空描述同源结构
+    lines.push('')
+    lines.push(`【BLAST 同源结构】${describeBlastStatus(ctx.blastStatus)}（报告中请如实说明，不要虚构同源结构）`)
   }
 
   if (ctx.literature.length) {
