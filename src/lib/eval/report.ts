@@ -9,6 +9,7 @@
 import type { BlastHit, FormInsights, LiteratureItem, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
 import { llmChat } from './llm'
+import { elideSequenceRuns } from './seq-elide'
 
 export interface ReportContext {
   uniprot: UniprotInfo | null
@@ -114,16 +115,16 @@ function buildDigest(ctx: ReportContext): string {
   lines.push('')
   lines.push('【客户目标与科学问题】')
   lines.push(ctx.goal?.trim() || ctx.goalHints.join(' / ') || '（未提供明确目标 — 按通用结构解析可行性评估）')
-  if (!ctx.goal && ctx.goalHints.length) lines.push(`（评估表中提取的需求线索：${ctx.goalHints.slice(0, 4).join(' / ')}）`)
+  if (!ctx.goal && ctx.goalHints.length) lines.push(`（评估表中提取的需求线索：${ctx.goalHints.slice(0, 4).map(elideSequenceRuns).join(' / ')}）`)
   const ins = ctx.insights
   if (ins?.scientificQuestions?.length) {
     lines.push('待解决的科学问题（评估表提取）：')
-    lines.push(ins.scientificQuestions.map((q, i) => `  ${i + 1}. ${q}`).join('\n'))
+    lines.push(ins.scientificQuestions.map((q, i) => `  ${i + 1}. ${elideSequenceRuns(q)}`).join('\n'))
   }
-  if (ins?.experimentalSummary) lines.push(`实验数据要点（评估表提取）：${ins.experimentalSummary}`)
-  if (ins?.sequenceNotes) lines.push(`构建/序列说明（评估表提取）：${ins.sequenceNotes}`)
-  if (ins?.homologs) lines.push(`同源/参考信息（评估表提取）：${ins.homologs}`)
-  if (ins?.keyConcerns?.length) lines.push(`风险关注点（评估表提取）：${ins.keyConcerns.join('；')}`)
+  if (ins?.experimentalSummary) lines.push(`实验数据要点（评估表提取）：${elideSequenceRuns(ins.experimentalSummary)}`)
+  if (ins?.sequenceNotes) lines.push(`构建/序列说明（评估表提取）：${elideSequenceRuns(ins.sequenceNotes)}`)
+  if (ins?.homologs) lines.push(`同源/参考信息（评估表提取）：${elideSequenceRuns(ins.homologs)}`)
+  if (ins?.keyConcerns?.length) lines.push(`风险关注点（评估表提取）：${ins.keyConcerns.map(elideSequenceRuns).join('；')}`)
 
   if (ctx.providedSequence) {
     const cmp = ctx.providedSequence.comparison

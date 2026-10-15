@@ -9,6 +9,7 @@
  *  - 输入 ≤ 14KB 文本、输出 ≤ 4KB，内存有界
  */
 import { llmChat } from './llm'
+import { elideSequenceRuns } from './seq-elide'
 import type { FormInsights } from './types'
 
 const SYSTEM = `你是一位结构生物学 CRO 项目的评估分析师。用户给你一份蛋白靶点评估表（Word 文档提取的文本），请从中提取结构化信息。
@@ -24,7 +25,8 @@ const SYSTEM = `你是一位结构生物学 CRO 项目的评估分析师。用�
   "homologs": "文档中提及的同源蛋白/参考蛋白/已有结构信息（无则省略，≤200 字）",
   "keyConcerns": ["风险与关注点：样品量不足、蛋白不稳定、翻译后修饰等（最多 5 条，无则省略）"]
 }
-注意：goals 和 scientificQuestions 是两个不同维度——goals 是客户想要达成什么（如"解析 apo 与复合物结构"），scientificQuestions 是科学上待回答的问题（如"抑制活性氧还依赖的二聚化界面是否保守"）。只提取文档中真实存在的信息，禁止推测编造。`
+注意：goals 和 scientificQuestions 是两个不同维度——goals 是客户想要达成什么（如"解析 apo 与复合物结构"），scientificQuestions 是科学上待回答的问题（如"抑制活性氧还依赖的二聚化界面是否保守"）。只提取文档中真实存在的信息，禁止推测编造。
+任何字段都不要原样复述完整氨基酸/核苷酸序列（≥40 个连续字母的片段会被系统自动省略为占位标记）：序列相关内容只写边界（如 33-308）、截短、突变位点、标签、linker 与长度等要点。`
 
 /** 解析容错：抽取首个 JSON 对象（容忍 ```json 包裹与前后杂讯） */
 function extractJson(text: string): Record<string, unknown> | null {
@@ -43,20 +45,20 @@ function sanitizeStrArray(v: unknown, maxItems: number, maxLen: number): string[
   if (!Array.isArray(v)) return []
   return v
     .filter((x): x is string => typeof x === 'string')
-    .map(x => x.trim().replace(/\s+/g, ' ').slice(0, maxLen))
+    .map(x => elideSequenceRuns(x.trim().replace(/\s+/g, ' ').slice(0, maxLen)))
     .filter(Boolean)
     .slice(0, maxItems)
 }
 
 function sanitizeStr(v: unknown, maxLen: number): string | undefined {
   if (typeof v !== 'string') return undefined
-  const s = v.trim().replace(/\s+/g, ' ')
-  return s ? s.slice(0, maxLen) : undefined
+  const s = elideSequenceRuns(v.trim().replace(/\s+/g, ' ').slice(0, maxLen))
+  return s || undefined
 }
 
-/** 规则兜底（LLM 不可用时）：goalHints → goals */
+/** 规则兜底（LLM 不可用时）：goalHints → goals（同样省略长序列片段） */
 export function fallbackInsights(goalHints: string[]): FormInsights {
-  return { goals: goalHints.slice(0, 4), scientificQuestions: [], source: 'regex' }
+  return { goals: goalHints.slice(0, 4).map(elideSequenceRuns), scientificQuestions: [], source: 'regex' }
 }
 
 /**
@@ -109,7 +111,7 @@ ${trimmed.slice(0, 14000)}
 
   // LLM 提取为空时回退规则结果，保证 goals 至少有 goalHints
   if (!insights.goals.length && goalHints.length) {
-    insights.goals = goalHints.slice(0, 4)
+    insights.goals = goalHints.slice(0, 4).map(elideSequenceRuns)
   }
   return insights
 }

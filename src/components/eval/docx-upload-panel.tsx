@@ -19,6 +19,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import { elideSequenceRuns } from '@/lib/eval/seq-elide'
 import { KindBadge } from './badges'
 import type { UploadProgress } from './api'
 import type { FormInsights, UploadResponse } from './types'
@@ -155,6 +156,13 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
 
   const { parsed } = upload
   const hasBoth = Boolean(selectedUniprot && selectedSequenceIndex != null)
+  // 要点文本渲染时省略长序列片段（兼容历史缓存 insights），并配合 break-words 防溢出
+  const eGoals = (insights?.goals ?? []).map(elideSequenceRuns)
+  const eQuestions = (insights?.scientificQuestions ?? []).map(elideSequenceRuns)
+  const eExpSummary = elideSequenceRuns(insights?.experimentalSummary)
+  const eSeqNotes = elideSequenceRuns(insights?.sequenceNotes)
+  const eHomologs = elideSequenceRuns(insights?.homologs)
+  const eConcerns = (insights?.keyConcerns ?? []).map(elideSequenceRuns)
   return (
     <div className="flex flex-col gap-4 rounded-md border border-stone-200 bg-stone-50/50 p-4 dark:border-stone-800 dark:bg-stone-900/40">
       {/* 解析摘要 */}
@@ -240,19 +248,19 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
           {insights && (
             <div className="flex flex-col gap-2.5">
               {/* 客户目标 */}
-              {insights.goals.length > 0 && (
+              {eGoals.length > 0 && (
                 <div>
                   <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-stone-500 dark:text-stone-400">
                     <Target className="size-3 text-amber-600" />
                     客户目标（点击可填入下方目标输入框）
                   </div>
                   <div className="flex flex-col gap-1">
-                    {insights.goals.map((g, i) => (
+                    {eGoals.map((g, i) => (
                       <button
                         key={i}
                         type="button"
                         onClick={() => onApplyGoal(g)}
-                        className="rounded-sm border-l-2 border-amber-400 bg-amber-50/60 px-2.5 py-1.5 text-left text-xs leading-relaxed text-stone-700 transition-colors hover:bg-amber-100/80 dark:border-amber-600 dark:bg-amber-950/20 dark:text-stone-300 dark:hover:bg-amber-950/40"
+                        className="break-words rounded-sm border-l-2 border-amber-400 bg-amber-50/60 px-2.5 py-1.5 text-left text-xs leading-relaxed text-stone-700 transition-colors hover:bg-amber-100/80 dark:border-amber-600 dark:bg-amber-950/20 dark:text-stone-300 dark:hover:bg-amber-950/40"
                         title="点击填入客户目标"
                       >
                         {g}
@@ -263,31 +271,31 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               )}
 
               {/* 科学问题 */}
-              {insights.scientificQuestions.length > 0 && (
+              {eQuestions.length > 0 && (
                 <div>
                   <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-stone-500 dark:text-stone-400">
                     <HelpCircle className="size-3 text-emerald-700 dark:text-emerald-500" />
                     待解决的科学问题
                   </div>
                   <ol className="ml-4 list-decimal space-y-0.5">
-                    {insights.scientificQuestions.map((q, i) => (
-                      <li key={i} className="text-xs leading-relaxed text-stone-700 dark:text-stone-300">{q}</li>
+                    {eQuestions.map((q, i) => (
+                      <li key={i} className="break-words text-xs leading-relaxed text-stone-700 dark:text-stone-300">{q}</li>
                     ))}
                   </ol>
                 </div>
               )}
 
               {/* 实验数据要点 */}
-              {insights.experimentalSummary && (
+              {eExpSummary && (
                 <div>
                   <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-stone-500 dark:text-stone-400">
                     <FileCheck2 className="size-3 text-emerald-700 dark:text-emerald-500" />
                     实验数据要点
                   </div>
-                  <p className={cn('text-xs leading-relaxed text-stone-600 dark:text-stone-400', !expExpanded && 'line-clamp-3')}>
-                    {insights.experimentalSummary}
+                  <p className={cn('break-words text-xs leading-relaxed text-stone-600 dark:text-stone-400', !expExpanded && 'line-clamp-3')}>
+                    {eExpSummary}
                   </p>
-                  {insights.experimentalSummary.length > 90 && (
+                  {eExpSummary.length > 90 && (
                     <button
                       type="button"
                       onClick={() => setExpExpanded(v => !v)}
@@ -301,23 +309,23 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
 
               {/* 构建说明 / 同源 / 风险 */}
               <div className="flex flex-col gap-1.5">
-                {insights.sequenceNotes && (
-                  <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+                {eSeqNotes && (
+                  <p className="break-words text-xs leading-relaxed text-stone-500 dark:text-stone-400">
                     <span className="eval-eyebrow mr-1.5 text-stone-400">构建</span>
-                    {insights.sequenceNotes}
+                    {eSeqNotes}
                   </p>
                 )}
-                {insights.homologs && (
-                  <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+                {eHomologs && (
+                  <p className="break-words text-xs leading-relaxed text-stone-500 dark:text-stone-400">
                     <span className="eval-eyebrow mr-1.5 text-stone-400">同源</span>
-                    {insights.homologs}
+                    {eHomologs}
                   </p>
                 )}
-                {insights.keyConcerns && insights.keyConcerns.length > 0 && (
+                {eConcerns.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="eval-eyebrow text-stone-400">风险</span>
-                    {insights.keyConcerns.map((c, i) => (
-                      <span key={i} className="rounded-sm border border-amber-200 bg-amber-50/70 px-1.5 py-0.5 text-[11px] text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-400">
+                    {eConcerns.map((c, i) => (
+                      <span key={i} className="break-words rounded-sm border border-amber-200 bg-amber-50/70 px-1.5 py-0.5 text-[11px] text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-400">
                         <Lightbulb className="mr-0.5 inline size-2.5" aria-hidden />
                         {c}
                       </span>
