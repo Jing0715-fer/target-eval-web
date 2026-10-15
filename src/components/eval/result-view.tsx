@@ -1,13 +1,16 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
   ArrowLeft,
   Database,
   Download,
+  ExternalLink,
   Eye,
   FileCheck2,
+  Loader2,
+  Printer,
   RotateCcw,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -123,6 +126,22 @@ export interface ResultViewProps {
 /** 结果视图（done）：返回栏 → 刊头 → 规格格栅 → 评分 → 报告操作 → 实验数据 → PDB → BLAST → 文献 */
 export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewLoaded, setPreviewLoaded] = useState(false)
+  const [previewSlow, setPreviewSlow] = useState(false)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  const openPreview = () => {
+    setPreviewLoaded(false)
+    setPreviewSlow(false)
+    setPreviewOpen(true)
+  }
+
+  // 预览加载超过 12s 提供降级提示（新窗口打开 / 下载）
+  useEffect(() => {
+    if (!previewOpen || previewLoaded) return
+    const t = setTimeout(() => setPreviewSlow(true), 12_000)
+    return () => clearTimeout(t)
+  }, [previewOpen, previewLoaded])
 
   const summary = job.summary
   if (!summary?.uniprot) {
@@ -322,7 +341,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </div>
         <div className="flex flex-wrap gap-2 sm:ml-auto">
           <Button
-            onClick={() => setPreviewOpen(true)}
+            onClick={openPreview}
             className="h-10 gap-2 rounded-md bg-emerald-800 px-4 font-medium text-white hover:bg-emerald-700 dark:bg-emerald-700 dark:hover:bg-emerald-600"
           >
             <Eye className="size-4" />
@@ -401,25 +420,85 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </Button>
       </div>
 
-      {/* 报告在线预览（大窗口 iframe） */}
+      {/* 报告在线预览（大窗口 iframe + 加载态 + 新窗口/打印） */}
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         <DialogContent
           showCloseButton
           className="flex h-[88vh] w-full max-w-6xl flex-col gap-0 overflow-hidden rounded-lg p-0 sm:max-w-6xl"
         >
-          <DialogHeader className="border-b border-stone-200 px-5 py-3.5 dark:border-stone-800">
-            <DialogTitle className="flex items-center gap-2 font-display text-base">
-              评估报告 · {u.proteinName || u.uniprotId}
-            </DialogTitle>
-            <DialogDescription className="sr-only">
-              在内嵌窗口中预览完整 HTML 评估报告
-            </DialogDescription>
+          <DialogHeader className="flex-row items-center justify-between gap-4 border-b border-stone-200 px-5 py-3 pr-14 text-left dark:border-stone-800">
+            <div className="flex flex-col gap-0.5">
+              <DialogTitle className="flex items-center gap-2 font-display text-base">
+                评估报告 · {u.proteinName || u.uniprotId}
+              </DialogTitle>
+              <DialogDescription className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
+                完整 HTML 报告 · 可直接打印
+              </DialogDescription>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => iframeRef.current?.contentWindow?.print()}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Printer className="size-3.5" />
+                打印
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open(`/api/jobs/${job.id}/report`, '_blank')}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <ExternalLink className="size-3.5" />
+                新窗口
+              </Button>
+            </div>
           </DialogHeader>
-          <iframe
-            src={`/api/jobs/${job.id}/report`}
-            title="评估报告预览"
-            className="min-h-0 w-full flex-1 bg-white dark:bg-stone-950"
-          />
+          <div className="relative min-h-0 flex-1">
+            {!previewLoaded && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-white dark:bg-stone-950">
+                <Loader2 className="size-6 animate-spin text-emerald-700 dark:text-emerald-500" />
+                {previewSlow ? (
+                  <div className="flex max-w-xs flex-col items-center gap-3 px-4 text-center">
+                    <p className="text-xs text-stone-500 dark:text-stone-400">
+                      报告加载较慢（含内嵌图片时体积较大），也可选择其他方式查看：
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => window.open(`/api/jobs/${job.id}/report`, '_blank')}
+                        className="h-8 gap-1.5 rounded-md"
+                      >
+                        <ExternalLink className="size-3.5" />
+                        新窗口打开
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={downloadReport}
+                        className="h-8 gap-1.5 rounded-md"
+                      >
+                        <Download className="size-3.5" />
+                        下载
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="font-mono text-xs text-stone-400">报告加载中…</p>
+                )}
+              </div>
+            )}
+            <iframe
+              ref={iframeRef}
+              src={`/api/jobs/${job.id}/report`}
+              title="评估报告预览"
+              onLoad={() => setPreviewLoaded(true)}
+              className="h-full w-full bg-white dark:bg-stone-950"
+            />
+          </div>
         </DialogContent>
       </Dialog>
     </div>

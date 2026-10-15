@@ -103,10 +103,19 @@ function scoreBar(label: string, item: { score: number; rating: string }, color:
   </div>`
 }
 
-/** PDB 表格行（PMID 悬停显示关联文献标题） */
+/** 配体短显示："A1B6E (N-[4-(3-chloro…))" → 截断化学名保留编号（悬停可见全名） */
+function shortLigand(l: string, nameMax = 22): string {
+  const m = l.match(/^(\S+)\s*\((.*)\)\s*$/)
+  if (!m) return l.length > 32 ? l.slice(0, 31) + '…' : l
+  const [, id, name] = m
+  return name.length > nameMax ? `${id} (${name.slice(0, nameMax - 1)}…)` : `${id} (${name})`
+}
+
+/** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题） */
 function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, LiteratureItem>): string {
   return pdbs.slice(0, max).map(p => {
     const lit = p.pubmedId ? litByPmid.get(p.pubmedId) : undefined
+    const ligShow = p.ligands.slice(0, 2).map(l => shortLigand(l)).join('; ')
     return `
     <tr>
       <td class="td-id"><a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a></td>
@@ -114,8 +123,8 @@ function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, Liter
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
       <td class="t-title">${esc(p.title)}</td>
       <td class="num">${esc(p.releaseDate || '—')}</td>
-      <td class="t-lig">${esc(p.ligands.slice(0, 3).join(', ') || '—')}</td>
-      <td>${esc(p.journal || '—')}</td>
+      <td class="t-lig" title="${esc(p.ligands.slice(0, 5).join('; '))}">${ligShow ? esc(ligShow) : '—'}${p.ligands.length > 2 ? `<span class="lig-more"> 等${p.ligands.length}</span>` : ''}</td>
+      <td class="t-journal">${esc(p.journal || '—')}</td>
       <td class="td-id">${p.pubmedId
         ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${p.pubmedId}/" target="_blank" rel="noopener" title="${esc(lit ? `PMID ${p.pubmedId} · ${lit.title}` : `PubMed ${p.pubmedId}`)}">${p.pubmedId}${lit ? '<span class="lit-dot"></span>' : ''}</a>`
         : '—'}</td>
@@ -123,22 +132,30 @@ function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, Liter
   }).join('')
 }
 
+/** PDB 数据表 colgroup（固定列宽，杜绝长内容挤压/重叠；窄屏由 .tbl-wrap 横向滚动） */
+const PDB_COLGROUP = `<colgroup>
+  <col style="width:74px"><col style="width:62px"><col style="width:64px"><col>
+  <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:72px">
+</colgroup>`
+
 /** PDB 表格：前 preview 条直出，剩余放入 details 折叠 */
 function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid: Map<string, LiteratureItem>): string {
   const shown = pdbs.slice(0, max)
   const head = shown.slice(0, preview)
   const rest = shown.slice(preview)
   const headHtml = `
-  <div class="tbl-wrap"><table>
-    <thead><tr><th>PDB ID</th><th>方法</th><th>分辨率 (Å)</th><th>标题</th><th>释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
+  <div class="tbl-wrap"><table class="tbl-data">
+    ${PDB_COLGROUP}
+    <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
     <tbody>${pdbRowsHtml(head, preview, litByPmid)}</tbody>
   </table></div>`
   if (rest.length === 0) return headHtml
   return `${headHtml}
   <details class="fold">
     <summary>展开其余 ${rest.length} 条结构（共 ${shown.length} 条，打印时自动展开）</summary>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>PDB ID</th><th>方法</th><th>分辨率 (Å)</th><th>标题</th><th>释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
+    <div class="tbl-wrap"><table class="tbl-data">
+      ${PDB_COLGROUP}
+      <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
       <tbody>${pdbRowsHtml(rest, rest.length, litByPmid)}</tbody>
     </table></div>
   </details>`
@@ -155,11 +172,11 @@ function blastRowsHtml(hits: BlastHit[]): string {
   return hits.map(h => `
     <tr>
       <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
-      <td class="t-title">${esc(h.description)}</td>
+      <td class="t-desc">${esc(h.description)}</td>
       <td class="num">${h.identity.toFixed(1)}%</td>
       <td class="num">${esc(h.evalueRaw)}</td>
-      <td class="num">${h.queryCoverage || '—'}</td>
-      <td>${esc(h.method || '—')}</td>
+      <td class="num">${esc(h.queryCoverage != null ? String(h.queryCoverage) : '—')}</td>
+      <td class="t-nowrap">${esc(h.method || '—')}</td>
       <td class="num">${h.resolution != null ? h.resolution.toFixed(2) : '—'}</td>
     </tr>`).join('')
 }
@@ -340,6 +357,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   html { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   body { font-family:var(--serif); color:var(--ink); background:var(--bg); line-height:1.85; font-size:14.5px; }
   .mono { font-family:var(--mono); }
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#d6d3d1;border-radius:99px;border:3px solid var(--paper)}
+  ::-webkit-scrollbar-thumb:hover{background:#a8a29e}
+  ::-webkit-scrollbar-track{background:transparent}
+  html{scrollbar-width:thin;scrollbar-color:#d6d3d1 transparent}
   .page { max-width:920px; margin:0 auto; padding:56px 44px 72px; background:var(--paper); min-height:100vh; box-shadow:0 0 0 1px var(--hairline); }
   @media (max-width:640px){ .page{padding:28px 18px 40px} }
   @media print {
@@ -389,15 +411,23 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   /* ── 表格 ── */
   .tbl-wrap { overflow-x:auto; margin:12px 0 6px; }
   table { width:100%; border-collapse:collapse; font-size:12px; font-family:var(--mono); }
-  th { background:#f7f7f5; text-align:left; font-size:10px; letter-spacing:1px; text-transform:uppercase; color:var(--sub); font-weight:600; white-space:nowrap; }
+  /* 数据表（PDB/BLAST）：固定列宽防长串挤压重叠；窄屏由 .tbl-wrap 横向滚动 */
+  table.tbl-data { table-layout:fixed; min-width:760px; }
+  table.tbl-blast { min-width:640px; }
+  th { background:#f7f7f5; text-align:left; font-size:10px; letter-spacing:1px; text-transform:uppercase; color:var(--sub); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  th.num { text-align:right; }
   th, td { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:6px 8px; vertical-align:top; }
   thead th { border-top:none; border-bottom:1.5px solid #d6d3d1; }
   tbody tr:last-child td { border-bottom:none; }
-  tbody tr:hover td { background:#fbfaf9; }
+  tbody tr:nth-child(even) td { background:#fbfaf8; }
+  tbody tr:hover td { background:#f5f4ef; }
+  td { overflow-wrap:anywhere; }
   td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-  td.td-id a, .t-lig { white-space:nowrap; }
-  .t-title { max-width:300px; font-family:var(--serif); }
-  .t-lig { max-width:170px; font-size:11px; }
+  td.td-id a, .t-nowrap { white-space:nowrap; }
+  .t-title, .t-desc { font-family:var(--serif); overflow-wrap:break-word; }
+  .t-lig { font-size:11px; overflow-wrap:anywhere; }
+  .t-journal { font-size:11px; }
+  .lig-more { color:var(--faint); white-space:nowrap; }
   table a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
   table a:hover { border-bottom-color:var(--accent-2); }
   .lit-dot { display:inline-block; width:4px; height:4px; border-radius:99px; background:var(--accent-2); margin-left:4px; vertical-align:2px; }
@@ -424,6 +454,14 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .score-num { font-family:var(--mono); font-size:16px; font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
   .score-max { color:var(--faint); font-size:11px; font-weight:400; }
   .score-rating { font-size:12px; color:var(--sub); text-align:right; font-family:var(--mono); }
+  @media (max-width:560px){
+    .score-card{ padding:14px 16px; }
+    .score-row{ grid-template-columns:1fr auto; gap:5px 12px; }
+    .score-label{ grid-column:1; grid-row:1; }
+    .score-num{ grid-column:2; grid-row:1; }
+    .score-track{ grid-column:1 / -1; grid-row:2; }
+    .score-rating{ grid-column:1 / -1; grid-row:3; text-align:left; }
+  }
   .score-rationale { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--sub); line-height:2; }
   .note { font-size:12px; color:var(--sub); margin-top:6px; }
 
@@ -524,8 +562,12 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   ${ctx.blastHits.length ? `
   <section class="sec" id="blast">
     <h2>${cnNums[blastNo - 1]}、BLAST 同源结构<span class="sec-en">Homologs · ${ctx.blastHits.length}</span></h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>PDB ID</th><th>描述</th><th>Identity</th><th>E-value</th><th>覆盖(aa)</th><th>方法</th><th>分辨率 (Å)</th></tr></thead>
+    <div class="tbl-wrap"><table class="tbl-data tbl-blast">
+      <colgroup>
+        <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
+        <col style="width:74px"><col style="width:104px"><col style="width:74px">
+      </colgroup>
+      <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖(aa)</th><th>方法</th><th class="num">分辨率 (Å)</th></tr></thead>
       <tbody>${blastRowsHtml(ctx.blastHits)}</tbody>
     </table></div>
   </section>` : ''}

@@ -28,7 +28,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const headers: Record<string, string> = {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',
-    'X-Frame-Options': 'SAMEORIGIN', // 允许应用内 iframe 预览
+    // 注意：不能设置 X-Frame-Options: SAMEORIGIN ——
+    // 应用常被嵌入外部预览面板（外层 iframe 与本应用不同源），
+    // 该头会导致祖先链跨源时报告预览 iframe 被浏览器拦截（表现为预览空白、仅能下载）。
+    // 报告本身无敏感数据且 jobId 为不可猜测的 cuid，允许任意嵌入是安全的。
+    'Content-Security-Policy': 'frame-ancestors *;',
   }
   if (download) {
     const base = (job.uniprotId || (job.title ?? 'target') || 'target').replace(/[^\w-]+/g, '_').slice(0, 40)
