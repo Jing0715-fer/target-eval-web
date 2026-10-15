@@ -106,6 +106,8 @@ export interface LiteratureItem {
   doi: string
   /** 摘要前 ~400 字（给 LLM） */
   abstractExcerpt?: string
+  /** 来源为 PDB 结构主引文（结构解析文献，与结构条目直接关联） */
+  fromPdb?: boolean
 }
 
 // ─── 评分 ─────────────────────────────────────────────────────────────────────

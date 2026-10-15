@@ -188,8 +188,9 @@ export async function parseDocx(buffer: Buffer, opts: DocxParseOptions = {}): Pr
           const b64 = await image.readAsBase64String()
           const mime = String(image.contentType || 'image/png')
           const buf = Buffer.from(String(b64 || ''), 'base64')
-          const altRaw = image.altText
-          const alt = (typeof altRaw === 'string' ? altRaw : String((altRaw as { value?: string })?.value ?? '')).trim().slice(0, 80)
+          // mammoth Image 类型未声明 altText（部分版本存在），安全取值
+          const altRaw = (image as { altText?: { value?: string } | string }).altText
+          const alt = (typeof altRaw === 'string' ? altRaw : String(altRaw?.value ?? '')).trim().slice(0, 80)
           if (buf.length > 0 && buf.length <= IMAGE_MAX_BYTES && /^image\/(png|jpe?g|gif|webp|bmp|tiff)$/i.test(mime)) {
             images.push({ token, mime, buf, alt, idx })
           }

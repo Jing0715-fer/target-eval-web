@@ -76,22 +76,22 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             handleFile(e.dataTransfer.files?.[0])
           }}
           className={cn(
-            'flex min-h-40 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-8 text-center outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
+            'flex min-h-40 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border-2 border-dashed px-6 py-8 text-center outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
             dragOver
-              ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/40'
-              : 'border-stone-300 bg-stone-50/60 hover:border-emerald-400 hover:bg-emerald-50/30 dark:border-stone-700 dark:bg-stone-900/40 dark:hover:border-emerald-700',
+              ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/40'
+              : 'border-stone-300 bg-stone-50/60 hover:border-emerald-500 hover:bg-emerald-50/30 dark:border-stone-700 dark:bg-stone-900/40 dark:hover:border-emerald-600',
             uploading && 'pointer-events-none opacity-80'
           )}
         >
           {uploading ? (
-            <LoaderCircle className="size-8 animate-spin text-emerald-600" />
+            <LoaderCircle className="size-7 animate-spin text-emerald-700" />
           ) : (
-            <FileUp className="size-8 text-stone-400 dark:text-stone-500" />
+            <FileUp className="size-7 text-stone-400 dark:text-stone-500" />
           )}
           <div className="text-sm font-medium text-stone-700 dark:text-stone-300">
             {uploading ? '正在上传并解析评估表…' : '拖拽 Word 评估表到此处，或点击选择文件'}
           </div>
-          <div className="text-xs text-stone-500 dark:text-stone-500">
+          <div className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
             支持 .docx 格式（≤ 20MB），上传后自动解析 UniProt ID、序列与实验图片
           </div>
         </div>
@@ -114,10 +114,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
 
   const { parsed } = upload
   return (
-    <div className="flex flex-col gap-4 rounded-xl border border-stone-200 bg-stone-50/50 p-4 dark:border-stone-800 dark:bg-stone-900/40">
+    <div className="flex flex-col gap-4 rounded-md border border-stone-200 bg-stone-50/50 p-4 dark:border-stone-800 dark:bg-stone-900/40">
       {/* 解析摘要 */}
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <CircleCheckBig className="size-4 shrink-0 text-emerald-600" />
+        <CircleCheckBig className="size-4 shrink-0 text-emerald-700" />
         <span className="font-medium text-stone-800 dark:text-stone-200">评估表解析完成</span>
         <span className="text-xs text-stone-500 dark:text-stone-500">
           {parsed.uniprotIds.length} 个 UniProt · {parsed.sequences.length} 条序列 ·{' '}
@@ -168,10 +168,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                     }
                   }}
                   className={cn(
-                    'min-h-11 rounded-full border px-4 font-mono text-sm transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
+                    'min-h-10 rounded-md border px-3.5 font-mono text-sm transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
                     selected
-                      ? 'border-emerald-600 bg-emerald-600 font-semibold text-white shadow-sm'
-                      : 'border-stone-300 bg-white text-stone-700 hover:border-emerald-400 hover:text-emerald-700 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:border-emerald-700'
+                      ? 'border-emerald-700 bg-emerald-800 font-semibold text-white'
+                      : 'border-stone-300 bg-white text-stone-700 hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:border-emerald-600 dark:hover:text-emerald-400'
                   )}
                 >
                   {id}
@@ -204,10 +204,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                     }
                   }}
                   className={cn(
-                    'rounded-lg border p-3 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
+                    'rounded-md border p-3 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
                     selected
-                      ? 'border-emerald-600 bg-emerald-50 ring-1 ring-emerald-600 dark:border-emerald-700 dark:bg-emerald-950/40'
-                      : 'border-stone-200 bg-white hover:border-emerald-300 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-800'
+                      ? 'border-emerald-700 bg-emerald-50 ring-1 ring-emerald-700 dark:border-emerald-600 dark:bg-emerald-950/40'
+                      : 'border-stone-200 bg-white hover:border-emerald-400 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-700'
                   )}
                 >
                   <div className="flex items-baseline gap-2">

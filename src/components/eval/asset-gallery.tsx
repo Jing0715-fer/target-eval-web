@@ -27,7 +27,7 @@ export function AssetGallery({ assets }: { assets: AssetItem[] }) {
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.25, delay: Math.min(i * 0.05, 0.4), ease: 'easeOut' }}
             onClick={() => setActive(a)}
-            className="group overflow-hidden rounded-xl border border-stone-200 bg-white text-left shadow-sm transition-shadow hover:shadow-md focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 focus-visible:outline-none dark:border-stone-800 dark:bg-stone-900"
+            className="group overflow-hidden rounded-md border border-stone-200 bg-white text-left shadow-none transition-colors hover:border-emerald-300 focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 focus-visible:outline-none dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-700"
           >
             <div className="relative h-36 w-full overflow-hidden bg-stone-100 dark:bg-stone-800">
               <img
@@ -54,7 +54,7 @@ export function AssetGallery({ assets }: { assets: AssetItem[] }) {
       <Dialog open={active != null} onOpenChange={(open) => !open && setActive(null)}>
         <DialogContent className="sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-base">
+            <DialogTitle className="flex items-center gap-2 font-display text-base">
               <Images className="size-4 text-emerald-700 dark:text-emerald-500" />
               {active ? KIND_SECTION_TITLE[active.kind] || '实验数据图' : ''}
             </DialogTitle>

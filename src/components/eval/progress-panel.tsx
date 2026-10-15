@@ -10,7 +10,6 @@ import {
   WifiOff,
   XCircle,
 } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
@@ -37,7 +36,7 @@ function logLineClass(line: string): string {
   return 'text-stone-300'
 }
 
-/** 实时日志卡片（等宽字体、自动滚动到底部、自定义滚动条） */
+/** 实时日志卡片（终端风、自动滚动到底部、自定义滚动条） */
 export function LogCard({ logs, title = '实时日志' }: { logs: string[]; title?: string }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const lines = toLogLines(logs)
@@ -47,18 +46,18 @@ export function LogCard({ logs, title = '实时日志' }: { logs: string[]; titl
   }, [lines.length])
 
   return (
-    <Card className="gap-3 rounded-xl border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
+    <Card className="gap-3 rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
       <CardContent className="flex flex-col gap-2.5 px-5 py-4">
         <div className="flex items-center gap-2">
-          <Terminal className="size-4 text-stone-400" />
-          <h3 className="text-sm font-semibold text-stone-800 dark:text-stone-200">{title}</h3>
-          <Badge variant="secondary" className="ml-auto text-[10px] tabular-nums">
-            {lines.length} 条
-          </Badge>
+          <Terminal className="size-3.5 text-stone-400" />
+          <h3 className="eval-eyebrow text-stone-500 dark:text-stone-400">{title}</h3>
+          <span className="ml-auto font-mono text-[10px] tabular-nums text-stone-400 dark:text-stone-500">
+            {lines.length} lines
+          </span>
         </div>
         <div
           ref={scrollRef}
-          className="eval-scroll max-h-72 min-h-48 overflow-y-auto rounded-lg border border-stone-800/60 bg-stone-950 p-3 dark:border-stone-800"
+          className="eval-scroll max-h-72 min-h-48 overflow-y-auto rounded-md border border-stone-800/60 bg-stone-950 p-3 dark:border-stone-800"
         >
           {lines.length === 0 ? (
             <p className="font-mono text-[11px] text-stone-500">等待日志输出…</p>
@@ -89,7 +88,7 @@ export interface ProgressPanelProps {
   onCancel: () => void
 }
 
-/** 进度视图（running）：整体进度 + 阶段列表 + 实时日志 + 计时/取消 */
+/** 进度视图（running）：总体进度 + 阶段列表 + 实时日志 + 计时/取消 */
 export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCancel }: ProgressPanelProps) {
   const progress = job?.progress ?? null
   const stages =
@@ -98,43 +97,47 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
   const message = progress?.message?.trim() || '正在启动评估…'
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
+      {/* 刊头 */}
+      <header className="flex flex-col gap-3">
+        <p className="eval-eyebrow text-emerald-800 dark:text-emerald-500">
+          Evaluation in Progress
+        </p>
+        <h1 className="font-display text-2xl leading-snug font-bold text-stone-900 sm:text-3xl dark:text-stone-50">
+          评估进行中
+          {job?.uniprotId && (
+            <span className="ml-3 font-mono text-sm font-normal text-stone-400 dark:text-stone-500">
+              {job.uniprotId}
+            </span>
+          )}
+        </h1>
+        {job?.goal && (
+          <p className="max-w-2xl truncate text-sm text-stone-500 dark:text-stone-400" title={job.goal}>
+            <span className="eval-eyebrow mr-2 text-amber-700 dark:text-amber-500">GOAL</span>
+            {job.goal}
+          </p>
+        )}
+      </header>
+
       {/* 总体进度 */}
-      <Card className="gap-0 rounded-xl border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
+      <Card className="gap-0 rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
         <CardContent className="flex flex-col gap-3.5 px-5 py-4">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-emerald-50 dark:bg-emerald-950/60">
-              <LoaderCircle className="size-4.5 animate-spin text-emerald-600" />
+            <LoaderCircle className="size-4 animate-spin text-emerald-700 dark:text-emerald-500" />
+            <span className="min-w-0 flex-1 truncate text-sm text-stone-600 dark:text-stone-300">
+              {message}
             </span>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-stone-900 dark:text-stone-100">
-                评估进行中
-                {job?.uniprotId && (
-                  <span className="ml-1.5 font-mono text-xs font-normal text-stone-500">
-                    {job.uniprotId}
-                  </span>
-                )}
-              </div>
-              {job?.goal && (
-                <p className="truncate text-xs text-stone-500 dark:text-stone-500" title={job.goal}>
-                  目标：{job.goal}
-                </p>
-              )}
-            </div>
-            <div className="ml-auto flex items-center gap-1.5 rounded-lg bg-stone-100 px-2.5 py-1 text-sm tabular-nums text-stone-600 dark:bg-stone-800 dark:text-stone-300">
-              <Clock className="size-3.5" />
-              {formatDuration(elapsedSec)}
-            </div>
-          </div>
-          <Progress value={percent} className="h-2.5 bg-emerald-100/70 dark:bg-emerald-950/60" />
-          <div className="flex items-center justify-between gap-3 text-xs">
-            <span className="min-w-0 truncate text-stone-600 dark:text-stone-400">{message}</span>
-            <span className="shrink-0 font-medium tabular-nums text-emerald-700 dark:text-emerald-400">
+            <span className="font-medium tabular-nums text-emerald-800 dark:text-emerald-400">
               {percent}%
             </span>
+            <span className="ml-2 flex items-center gap-1.5 rounded-sm border border-stone-200 bg-stone-50 px-2 py-0.5 font-mono text-xs tabular-nums text-stone-600 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300">
+              <Clock className="size-3" />
+              {formatDuration(elapsedSec)}
+            </span>
           </div>
+          <Progress value={percent} className="h-1.5 bg-stone-100 dark:bg-stone-800" />
           {networkIssue && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+            <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
               <WifiOff className="mt-0.5 size-3.5 shrink-0" />
               网络连接不稳定，已连续多次获取进度失败，正在继续重试…
             </div>
@@ -144,24 +147,24 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
 
       {/* 阶段 + 日志 双栏 */}
       <div className="grid gap-5 lg:grid-cols-[1fr_1.25fr]">
-        <Card className="gap-3 rounded-xl border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
+        <Card className="gap-3 rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
           <CardContent className="flex flex-col gap-3 px-5 py-4">
-            <h3 className="text-sm font-semibold text-stone-800 dark:text-stone-200">评估阶段</h3>
-            <ol className="flex flex-col gap-1">
-              {stages.map((s) => (
+            <h3 className="eval-eyebrow text-stone-500 dark:text-stone-400">评估阶段 · Stages</h3>
+            <ol className="flex flex-col">
+              {stages.map((s, i) => (
                 <li
                   key={s.key}
                   className={cn(
-                    'flex min-h-11 items-center gap-3 rounded-lg px-2.5 transition-colors',
-                    s.state === 'active' && 'bg-emerald-50/80 dark:bg-emerald-950/30'
+                    'flex min-h-10 items-center gap-3 border-stone-100 px-1 dark:border-stone-800/60',
+                    i > 0 && 'border-t'
                   )}
                 >
                   {s.state === 'done' ? (
-                    <CircleCheckBig className="size-5 shrink-0 text-emerald-600" />
+                    <CircleCheckBig className="size-4 shrink-0 text-emerald-700 dark:text-emerald-500" />
                   ) : s.state === 'active' ? (
-                    <LoaderCircle className="size-5 shrink-0 animate-spin text-emerald-600" />
+                    <LoaderCircle className="size-4 shrink-0 animate-spin text-emerald-700 dark:text-emerald-500" />
                   ) : (
-                    <CircleDashed className="size-5 shrink-0 text-stone-300 dark:text-stone-600" />
+                    <CircleDashed className="size-4 shrink-0 text-stone-300 dark:text-stone-600" />
                   )}
                   <span
                     className={cn(
@@ -175,7 +178,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
                     {s.label}
                   </span>
                   {s.state === 'active' && s.percent > 0 && (
-                    <span className="ml-auto shrink-0 text-xs font-medium tabular-nums text-emerald-700 dark:text-emerald-400">
+                    <span className="ml-auto shrink-0 font-mono text-[11px] font-medium tabular-nums text-emerald-700 dark:text-emerald-400">
                       {s.percent}%
                     </span>
                   )}
@@ -190,16 +193,16 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
 
       {/* 底部操作 */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs text-stone-500 dark:text-stone-500">
+        <p className="text-xs text-stone-400 dark:text-stone-500">
           完整评估通常需要 1–3 分钟，可随时取消
         </p>
         <Button
           variant="outline"
           onClick={onCancel}
           disabled={canceling}
-          className="h-10 gap-2 border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-900/70 dark:text-red-400 dark:hover:bg-red-950/40"
+          className="h-9 gap-2 rounded-md border-stone-300 text-stone-500 text-xs hover:border-red-300 hover:bg-red-50 hover:text-red-700 dark:border-stone-700 dark:text-stone-400 dark:hover:border-red-900 dark:hover:bg-red-950/40 dark:hover:text-red-400"
         >
-          <XCircle className="size-4" />
+          <XCircle className="size-3.5" />
           {canceling ? '正在取消…' : '取消评估'}
         </Button>
       </div>

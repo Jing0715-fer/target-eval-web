@@ -56,7 +56,7 @@ function blastTable(hits: BlastHit[], n: number): string {
 
 function litTable(lits: LiteratureItem[], n: number): string {
   return lits.slice(0, n).map(l =>
-    `| ${l.pmid} | ${l.title.slice(0, 90)} | ${l.journal} ${l.year} |`,
+    `| ${l.pmid} | ${l.title.slice(0, 90)}${l.fromPdb ? '（结构解析文献，与 PDB 条目直接关联）' : ''} | ${l.journal} ${l.year} |`,
   ).join('\n')
 }
 

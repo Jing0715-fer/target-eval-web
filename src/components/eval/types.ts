@@ -164,6 +164,8 @@ export interface LiteratureItem {
   journal: string
   year: string
   doi: string
+  /** 来源为 PDB 结构主引文（结构解析文献，与结构条目直接关联） */
+  fromPdb?: boolean
 }
 
 export interface AssetItem {

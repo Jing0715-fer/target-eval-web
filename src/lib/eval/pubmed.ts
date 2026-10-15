@@ -41,8 +41,17 @@ export async function searchPubmed(
     pmids = j.esearchresult?.idlist ?? []
   }
   if (pmids.length === 0) return []
+  return efetchArticles(pmids)
+}
 
-  // 2) efetch（每批 20，批间 400ms 防 429）
+/** 按 PMID 批量拉取文献详情（用于 PDB 主引文并入文献列表） */
+export async function fetchPubmedByPmids(pmids: string[]): Promise<LiteratureItem[]> {
+  if (pmids.length === 0) return []
+  return efetchArticles(pmids)
+}
+
+// 2) efetch（每批 20，批间 400ms 防 429）
+async function efetchArticles(pmids: string[]): Promise<LiteratureItem[]> {
   const out: LiteratureItem[] = []
   for (let i = 0; i < pmids.length; i += 20) {
     const batch = pmids.slice(i, i + 20)

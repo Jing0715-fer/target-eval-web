@@ -41,7 +41,7 @@ function parseBlastXml(xml: string): BlastHit[] {
       pdbId: pdbIdMatch ? pdbIdMatch[1].toUpperCase() : '',
       description: def.replace(/<[^>]+>/g, '').slice(0, 160),
       identity,
-      evalue: parseFloat(evalue) || 0,
+      evalue: parseFloat(evalueRaw) || 0,
       evalueRaw,
       queryCoverage,
       method: '',

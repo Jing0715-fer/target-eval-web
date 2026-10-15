@@ -45,6 +45,7 @@ export default function Home() {
   const handleNewEvaluation = () => {
     flow.reset()
     setHistoryKey((k) => k + 1) // 刷新最近评估列表
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0 })
   }
 
   const openHistoryJob = (id: string) => {
@@ -52,15 +53,19 @@ export default function Home() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
-      <AppHeader onOpenHistory={() => setHistoryOpen(true)} />
+    <div className="flex min-h-screen flex-col bg-[#fafaf9] text-stone-900 dark:bg-stone-950 dark:text-stone-100">
+      <AppHeader
+        onOpenHistory={() => setHistoryOpen(true)}
+        onHome={handleNewEvaluation}
+        canGoHome={flow.phase !== 'idle' && !flow.loadingHistoryJob}
+      />
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 sm:py-8">
-        <Stepper step={step} className="mb-6 sm:mb-8" />
+        <Stepper step={step} className="mb-8 sm:mb-10" />
 
         {flow.loadingHistoryJob ? (
           <div className="flex items-center justify-center gap-2 py-24 text-sm text-stone-500">
-            <LoaderCircle className="size-5 animate-spin text-emerald-600" />
+            <LoaderCircle className="size-5 animate-spin text-emerald-700" />
             正在加载评估作业…
           </div>
         ) : (

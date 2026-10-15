@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowRight, CircleAlert, History, LoaderCircle, Trash2 } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -37,7 +36,7 @@ function JobRow({
           onOpen(job.id)
         }
       }}
-      className="flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-stone-200 bg-white px-4 py-3 transition-colors outline-none hover:border-emerald-300 hover:bg-emerald-50/40 focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-800 dark:hover:bg-emerald-950/20"
+      className="flex min-h-14 cursor-pointer items-center gap-3 rounded-md border border-stone-200 bg-white px-4 py-3 transition-colors outline-none hover:border-emerald-300 hover:bg-stone-50 focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-800 dark:hover:bg-stone-900/60"
     >
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-stone-800 dark:text-stone-200">
@@ -85,7 +84,7 @@ function EmptyHistoryState({ compact = false }: { compact?: boolean }) {
   return (
     <div
       className={cn(
-        'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-stone-300 text-center dark:border-stone-700',
+        'flex flex-col items-center justify-center gap-2 rounded-md border border-dashed border-stone-300 text-center dark:border-stone-700',
         compact ? 'py-8' : 'py-12'
       )}
     >
@@ -152,7 +151,7 @@ export function HistoryDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[82vh] w-full flex-col gap-3 overflow-hidden sm:max-w-xl">
         <DialogHeader className="text-left">
-          <DialogTitle className="flex items-center gap-2">
+          <DialogTitle className="flex items-center gap-2 font-display">
             <History className="size-4 text-emerald-700 dark:text-emerald-500" />
             历史评估
           </DialogTitle>
@@ -241,8 +240,8 @@ export function RecentEvaluations({
       className="mt-10"
     >
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-stone-700 dark:text-stone-300">
-          <History className="size-4 text-emerald-700 dark:text-emerald-500" />
+        <h2 className="flex items-center gap-2.5 text-sm font-semibold text-stone-700 dark:text-stone-300">
+          <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">Recent</span>
           最近评估
         </h2>
         <Button
@@ -271,9 +270,9 @@ export function RecentEvaluations({
           ))}
           {jobs.length > 5 && (
             <div className="flex justify-center pt-1">
-              <Badge variant="outline" className="border-stone-300 text-[11px] text-stone-500 dark:border-stone-700">
+              <span className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
                 共 {jobs.length} 条记录
-              </Badge>
+              </span>
             </div>
           )}
         </div>

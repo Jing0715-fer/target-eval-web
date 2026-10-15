@@ -9,7 +9,7 @@ import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput } f
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges } from './pdbe'
 import { runBlastPdb, enrichBlastHits } from './blast'
-import { buildLiteratureQuery, searchPubmed } from './pubmed'
+import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
 import { generateReportSections, type ReportContext } from './report'
 import { renderReportHtml } from './report-html'
@@ -238,6 +238,32 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     }
   } catch (e) {
     log(`PubMed 检索失败：${e instanceof Error ? e.message : e}`, 'warn')
+  }
+
+  // PDB 主引文（结构解析论文）并入文献列表，建立 PDB ↔ 文献关联
+  const structPmids: string[] = []
+  const seenPmid = new Set<string>(literature.map(l => String(l.pmid)))
+  for (const p of directPdbs) {
+    const pid = (p.pubmedId ?? '').trim()
+    if (pid && !seenPmid.has(pid)) {
+      seenPmid.add(pid)
+      structPmids.push(pid)
+    }
+    if (structPmids.length >= 20) break
+  }
+  if (structPmids.length > 0) {
+    report('pubmed', `拉取 ${structPmids.length} 篇 PDB 主引文文献详情…`, 0.7)
+    try {
+      const structLits = (await fetchPubmedByPmids(structPmids))
+        .map(l => ({ ...l, fromPdb: true as const }))
+        .filter(l => !literature.some(x => String(x.pmid) === String(l.pmid)))
+      // 结构解析文献置前（与结构条目直接关联），按年份降序
+      structLits.sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
+      literature = [...structLits, ...literature]
+      log(`PDB 主引文并入：${structLits.length} 篇结构解析文献（与结构条目直接关联）`)
+    } catch (e) {
+      log(`PDB 主引文拉取失败：${e instanceof Error ? e.message : e}`, 'warn')
+    }
   }
   report('pubmed', `文献检索完成（${literature.length} 篇）`, 1)
 
