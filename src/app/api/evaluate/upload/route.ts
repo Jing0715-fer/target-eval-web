@@ -1,6 +1,7 @@
 /**
  * POST /api/evaluate/upload — 上传 Word 评估表（.docx）
- * 解析文本（UniProt/序列/基因/目标语句）+ 提取图片（胶图/SEC）到磁盘。
+ * 解析文本（UniProt/序列/基因/目标语句）+ 提取归一化图片（胶图/SEC，含 EMF/WMF
+ * 转换、大图降采样、VLM 类型识别）到磁盘。
  * 解析结果持久化到 db/reports/{uploadId}/parsed.json 供评估阶段复用。
  */
 import { NextResponse } from 'next/server'
@@ -10,7 +11,37 @@ import { DOCX_MAX_BYTES, parseDocx } from '@/lib/eval/docx'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 120
+export const maxDuration = 180
+
+/** 上传目录 TTL（24h）：过期目录在后续上传时后台回收 */
+const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * 后台清理过期上传目录（db/reports/u_*，按目录 mtime > 24h）。
+ * fire-and-forget：失败静默；单次最多回收 40 个（防长尾）。
+ */
+function cleanupExpiredUploads(): void {
+  void (async () => {
+    try {
+      const root = path.join(process.cwd(), 'db', 'reports')
+      const entries = await fs.readdir(root, { withFileTypes: true })
+      const now = Date.now()
+      let removed = 0
+      for (const e of entries) {
+        if (removed >= 40) break
+        if (!e.isDirectory() || !e.name.startsWith('u_')) continue
+        const dir = path.join(root, e.name)
+        try {
+          const st = await fs.stat(dir)
+          if (now - st.mtimeMs > UPLOAD_TTL_MS) {
+            await fs.rm(dir, { recursive: true, force: true })
+            removed++
+          }
+        } catch { /* 单目录失败忽略 */ }
+      }
+    } catch { /* readdir 失败忽略 */ }
+  })()
+}
 
 export async function POST(req: Request) {
   let file: File | null = null
@@ -31,17 +62,25 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: `文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB），上限 20MB` }, { status: 413 })
   }
 
+  cleanupExpiredUploads()
+
   try {
     const buffer = Buffer.from(await file.arrayBuffer())
     const { uploadId, parsed } = await parseDocx(buffer)
-    // 持久化解析结果（评估阶段读取 images/goalHints/fullText）
+    // 持久化解析结果（评估阶段读取 images/goalHints/fullText）。
+    // 持久化失败必须报错（而非静默）：否则后续 insights 404、评估丢图。
+    const parsedPath = path.join(process.cwd(), 'db', 'reports', uploadId, 'parsed.json')
     try {
-      await fs.writeFile(
-        path.join(process.cwd(), 'db', 'reports', uploadId, 'parsed.json'),
-        JSON.stringify(parsed),
-        'utf-8',
-      )
-    } catch { /* 持久化失败不阻塞返回 */ }
+      await fs.writeFile(parsedPath, JSON.stringify(parsed), 'utf-8')
+    } catch (e1) {
+      // 重试一次（目录竞争等瞬态错误）
+      try {
+        await fs.mkdir(path.dirname(parsedPath), { recursive: true })
+        await fs.writeFile(parsedPath, JSON.stringify(parsed), 'utf-8')
+      } catch (e2) {
+        throw new Error(`解析结果持久化失败：${e2 instanceof Error ? e2.message : String(e2)}（e1: ${e1 instanceof Error ? e1.message : String(e1)}）`)
+      }
+    }
 
     // 响应剥离 fullText（≤14KB，仅后端 LLM 解析用），保持响应轻量
     const { fullText: _ft, ...parsedLite } = parsed

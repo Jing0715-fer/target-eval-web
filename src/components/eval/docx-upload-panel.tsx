@@ -8,9 +8,11 @@ import {
   FileCheck2,
   FileUp,
   HelpCircle,
+  ImageOff,
   Lightbulb,
   LoaderCircle,
   RefreshCw,
+  ScanEye,
   Sparkles,
   Target,
 } from 'lucide-react'
@@ -109,10 +111,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             <FileUp className="size-7 text-stone-400 dark:text-stone-500" />
           )}
           <div className="text-sm font-medium text-stone-700 dark:text-stone-300">
-            {uploading ? '正在上传并解析评估表…' : '拖拽 Word 评估表到此处，或点击选择文件'}
+            {uploading ? '正在解析评估表（含图片 AI 识别）…' : '拖拽 Word 评估表到此处，或点击选择文件'}
           </div>
           <div className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
-            支持 .docx 格式（≤ 20MB），上传后自动解析 UniProt ID、序列与实验图片，并由 AI 提取目标与科学问题
+            支持 .docx 格式（≤ 20MB），上传后自动解析 UniProt ID、序列与实验图片（自动区分 SDS-PAGE 胶图与 SEC 分子筛图），并由 AI 提取目标与科学问题
           </div>
         </div>
         <input
@@ -386,11 +388,27 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         </div>
       )}
 
-      {/* 图片缩略图网格 */}
+      {/* 图片缩略图网格（自动区分胶图 / SEC） */}
       {parsed.images.length > 0 && (
         <div>
-          <div className="mb-2 text-xs font-medium text-stone-600 dark:text-stone-400">
-            提取的实验图片
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-stone-600 dark:text-stone-400">
+            <span>提取的实验图片</span>
+            {parsed.images.some(im => im.vlmKind) ? (
+              <span className="eval-eyebrow flex items-center gap-1 rounded-sm bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                <ScanEye className="size-2.5" aria-hidden />
+                AI 视觉识别类型
+              </span>
+            ) : null}
+            {(() => {
+              const gel = parsed.images.filter(im => im.kind === 'gel').length
+              const sec = parsed.images.filter(im => im.kind === 'sec').length
+              if (!gel && !sec) return null
+              return (
+                <span className="text-stone-400 dark:text-stone-500">
+                  （{[gel ? `${gel} 张 SDS-PAGE 胶图` : null, sec ? `${sec} 张 SEC 分子筛图` : null].filter(Boolean).join(' · ')}）
+                </span>
+              )
+            })()}
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {parsed.images.map((img) => (
@@ -406,6 +424,15 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                     className="size-full object-contain"
                   />
                   <KindBadge kind={img.kind} className="absolute top-1.5 left-1.5" />
+                  {img.vlmKind && (
+                    <span
+                      className="absolute top-1.5 right-1.5 flex items-center gap-0.5 rounded-sm border border-emerald-300/80 bg-white/90 px-1 py-px font-mono text-[9px] font-semibold text-emerald-800 backdrop-blur-sm dark:border-emerald-800 dark:bg-stone-900/90 dark:text-emerald-400"
+                      title="类型由 AI 视觉识别判定"
+                    >
+                      <ScanEye className="size-2.5" aria-hidden />
+                      AI
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-1 px-2 py-1.5">
                   <FileCheck2 className="size-3 shrink-0 text-stone-400" />
@@ -419,7 +446,19 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               </div>
             ))}
           </div>
+          {parsed.skippedImages && parsed.skippedImages > 0 && (
+            <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+              <ImageOff className="mt-0.5 size-3 shrink-0" aria-hidden />
+              另有 {parsed.skippedImages} 张图片无法提取（格式不支持、损坏或超过 6MB），可将其另存为 PNG/JPG 后重新插入文档再上传
+            </p>
+          )}
         </div>
+      )}
+      {parsed.images.length === 0 && (parsed.skippedImages ?? 0) > 0 && (
+        <p className="flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-400">
+          <ImageOff className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          未能提取出可用图片（{parsed.skippedImages} 张格式不支持、损坏或超限）。可将图片另存为 PNG/JPG 后重新插入文档再上传。
+        </p>
       )}
 
       {/* 选择状态提示 */}

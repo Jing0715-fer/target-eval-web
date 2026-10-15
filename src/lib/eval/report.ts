@@ -179,9 +179,12 @@ function buildDigest(ctx: ReportContext): string {
 
   if (ctx.images.length) {
     lines.push('')
-    lines.push('【客户提供的实验数据（评估表）】')
-    lines.push(ctx.images.map(im => `- ${im.caption}`).join('\n'))
-    lines.push('（以上为 SDS-PAGE 胶图 / SEC 分子筛色谱图等图片数据，请基于图片标题与评估上下文进行判读）')
+    lines.push('【客户提供的实验数据（评估表图片）】')
+    lines.push(ctx.images.map(im => {
+      const tag = im.kind === 'gel' ? '[SDS-PAGE 胶图]' : im.kind === 'sec' ? '[SEC 分子筛色谱图]' : '[其他实验图]'
+      return `- ${tag} ${im.caption}${im.vlmKind ? '（类型与读数经 AI 视觉识别）' : ''}`
+    }).join('\n'))
+    lines.push('（以上图片已内嵌于报告图库；caption 中标注了 AI 视觉读数的条目请重点基于该读数判读：SDS-PAGE → 条带单一性/纯度估计/降解；SEC → 主峰比例/对称性/有无聚集峰/洗脱体积与预期分子量一致性）')
   }
 
   lines.push('')
@@ -266,8 +269,12 @@ function partCInstruction(ctx: ReportContext): string {
 
 ## 实验数据评估${hasImages ? '（客户评估表）' : ''}
 ${hasImages
-    ? `- 客户上传的评估表中包含 ${ctx.images.length} 张实验图（${ctx.images.map(i => i.caption).join('；')}）
-- 基于图片 caption 与评估上下文进行判读：SDS-PAGE 胶图 → 条带单一性/纯度估计/降解情况；SEC 色谱图 → 主峰比例/单分散性/是否有聚集峰/体积与预期分子量的一致性
+    ? `- 客户上传的评估表中包含 ${ctx.images.length} 张实验图：
+${ctx.images.map(i => {
+      const tag = i.kind === 'gel' ? 'SDS-PAGE 胶图' : i.kind === 'sec' ? 'SEC 分子筛色谱图' : '其他实验图'
+      return `  - ${tag}：${i.caption}`
+    }).join('\n')}
+- 基于图片 caption（含 AI 视觉读数）与评估上下文分图判读：SDS-PAGE 胶图 → 条带单一性/纯度估计/降解情况；SEC 色谱图 → 主峰比例/单分散性/是否有聚集峰/体积与预期分子量的一致性
 - 给出**样品质量结论**：当前样品是否达到结构解析级别（X-ray 需 >95% 纯度+单分散；Cryo-EM 需高浓度单分散+合适粒径分布）
 - 若图注信息不足以精确判读，给出"需要客户补充的信息"清单
 - 篇幅 300-500 字`

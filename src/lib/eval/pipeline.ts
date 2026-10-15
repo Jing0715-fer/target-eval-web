@@ -77,7 +77,12 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
 
   if (input.uploadId) {
     const parsed = await readUploadParsed(input.uploadId)
-    if (parsed?.goalHints?.length) goalHints = parsed.goalHints
+    if (parsed) {
+      if (parsed.goalHints?.length) goalHints = parsed.goalHints
+      images = parsed.images ?? []
+    } else {
+      log('评估表解析数据缺失（上传目录可能已过期清理），胶图/SEC 图片与目标提示不可用，建议重新上传评估表', 'warn')
+    }
     insights = await readUploadInsights(input.uploadId)
     // 用户未显式填目标时，自动采用 LLM 解析出的客户目标
     if (!goal && insights?.goals?.length) {
@@ -454,8 +459,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
       await db.reportAsset.upsert({
         where: { id: meta.id },
-        create: { id: meta.id, jobId: input.jobId, kind: meta.kind, caption: meta.caption, mime: meta.mime, size: meta.sizeKB * 1024, path: path.join(assetDir, `${meta.id}.${ext}`), order: i },
-        update: { jobId: input.jobId, order: i },
+        create: { id: meta.id, jobId: input.jobId, kind: meta.kind, caption: meta.caption, mime: meta.mime, size: meta.sizeKB * 1024, path: path.join(assetDir, `${meta.id}.${ext}`), order: i, vlm: meta.vlmKind ?? false },
+        update: { jobId: input.jobId, order: i, vlm: meta.vlmKind ?? false },
       }).catch(() => undefined)
     }
   }

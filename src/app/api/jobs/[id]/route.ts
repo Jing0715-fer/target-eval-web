@@ -58,6 +58,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     caption: a.caption ?? '',
     mime: a.mime,
     sizeKB: Math.round(a.size / 1024),
+    vlmKind: a.vlm,
   }))
 
   return NextResponse.json({
@@ -79,7 +80,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const job = await db.evaluationJob.findUnique({ where: { id }, include: { assets: true } })
+  const job = await db.evaluationJob.findUnique({ where: { id } })
   if (!job) return NextResponse.json({ ok: true, deleted: true })
 
   // 运行中 → 中止
@@ -89,19 +90,14 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     markStatus(id, 'canceled')
   }
 
-  // 删除磁盘资产（报告 + 图片）与 DB 记录
+  // 只删除本作业自己的报告目录（db/reports/{jobId}：report.html 等）+ DB 记录（级联删 assets 行）。
+  // 注意：不再级联删除上传目录（db/reports/u_*）与其中图片 ——
+  //  上传目录是共享资源（同一上传可发起多次评估、上传面板仍持有其状态），
+  //  级联删除会导致：上传面板「重新解析」404（未找到该上传的解析结果）、
+  //  后续评估丢失胶图/SEC 图片。上传目录生命周期由 TTL 统一回收（upload 路由触发）。
   try {
     const reportDir = path.join(process.cwd(), 'db', 'reports', id)
     await fs.rm(reportDir, { recursive: true, force: true })
-    const uploadIds = new Set<string>()
-    for (const a of job.assets) {
-      try { await fs.rm(a.path, { force: true }) } catch { /* ignore */ }
-      const m = a.path.match(/db[/\\]reports[/\\](u_[^/\\]+)[/\\]/)
-      if (m) uploadIds.add(m[1])
-    }
-    for (const uid of uploadIds) {
-      await fs.rm(path.join(process.cwd(), 'db', 'reports', uid), { recursive: true, force: true })
-    }
   } catch { /* 磁盘清理失败不阻塞 */ }
 
   await db.evaluationJob.delete({ where: { id } }).catch(() => undefined)

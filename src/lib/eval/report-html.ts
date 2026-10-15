@@ -324,18 +324,34 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     </div>
   </div>`
 
+  // 实验图分组展示：gel / sec / other 各成小组，类型一目了然
+  const figGroupDefs: Array<{ kind: 'gel' | 'sec' | 'other'; title: string; en: string }> = [
+    { kind: 'gel', title: 'SDS-PAGE 胶图', en: 'SDS-PAGE' },
+    { kind: 'sec', title: 'SEC 分子筛色谱图', en: 'SEC Profile' },
+    { kind: 'other', title: '其他实验图', en: 'Others' },
+  ]
+  const vlmCount = embedded.filter(e => e.meta.vlmKind).length
+  const figGroups = figGroupDefs
+    .map(g => ({ ...g, items: embedded.filter(e => e.meta.kind === g.kind) }))
+    .filter(g => g.items.length > 0)
+  let figNo = 0
   const imagesHtml = embedded.length ? `
   <section class="sec" id="assets">
-    <h2>${cnNums[assetsNo - 1]}、客户提供的实验数据（${embedded.length} 张）</h2>
+    <h2>${cnNums[assetsNo - 1]}、客户提供的实验数据（${embedded.length} 张）<span class="sec-en">${figGroups.map(g => `${g.en} × ${g.items.length}`).join(' · ')}${vlmCount ? ' · AI 识别' : ''}</span></h2>
+    ${figGroups.map(g => `
+    <h3 class="fig-group">${g.title}<span class="fig-group-count">${g.items.length} 张</span></h3>
     <div class="fig-grid">
-    ${embedded.map(({ meta, dataUri }, i) => `
-    <figure class="fig">
-      ${dataUri
-      ? `<img src="${dataUri}" alt="${esc(meta.caption)}" loading="lazy">`
-      : `<div class="fig-missing">图片体积超出内嵌预算，请通过系统查看</div>`}
-      <figcaption><span class="fig-tag fig-${meta.kind}">${meta.kind === 'gel' ? 'SDS-PAGE' : meta.kind === 'sec' ? 'SEC' : '图'}</span>图 ${i + 1}：${esc(meta.caption)}</figcaption>
-    </figure>`).join('')}
-    </div>
+    ${g.items.map(({ meta, dataUri }) => {
+      figNo += 1
+      return `
+      <figure class="fig">
+        ${dataUri
+        ? `<img src="${dataUri}" alt="${esc(meta.caption)}" loading="lazy">`
+        : `<div class="fig-missing">图片体积超出内嵌预算，请通过系统查看</div>`}
+        <figcaption><span class="fig-tag fig-${meta.kind}">${meta.kind === 'gel' ? 'SDS-PAGE' : meta.kind === 'sec' ? 'SEC' : '图'}</span>${meta.vlmKind ? '<span class="fig-tag fig-ai">AI 视觉识别</span>' : ''}图 ${figNo}：${esc(meta.caption)}</figcaption>
+      </figure>`
+    }).join('')}
+    </div>`).join('')}
   </section>` : ''
 
   const pdbCountHtml = `${ctx.directPdbs.length}${input.totalPdbFound > ctx.directPdbs.length ? ` / 检索命中 ${input.totalPdbFound}` : ''}`
@@ -491,6 +507,9 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .fig-gel { background:#ecfdf5; color:#065f46; }
   .fig-sec { background:#fef3c7; color:#92400e; }
   .fig-other { background:#f5f5f4; color:var(--sub); }
+  .fig-ai { background:#f0fdfa; color:#0f766e; border:1px solid #99f6e4; }
+  .fig-group { margin:18px 0 4px !important; font-size:14.5px !important; color:#064e3b; display:flex; align-items:baseline; gap:8px; }
+  .fig-group-count { font-family:var(--mono); font-size:10.5px; font-weight:500; color:var(--faint); letter-spacing:1px; }
 
   /* ── 页脚 ── */
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:var(--mono); }

@@ -41,6 +41,7 @@ model ReportAsset {
   size    Int // bytes
   path    String // 磁盘路径
   order   Int @default(0)
+  vlm     Boolean @default(false) // 类型由 VLM 视觉识别判定
 
   @@index([jobId])
 }

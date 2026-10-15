@@ -58,6 +58,8 @@ export interface ParsedImage {
   caption: string
   mime: string
   sizeKB: number
+  /** 类型由 VLM 视觉识别判定（缺省 = 关键词分类） */
+  vlmKind?: boolean
 }
 
 export interface DocxParsed {
@@ -66,6 +68,8 @@ export interface DocxParsed {
   genes: string[]
   docTextSummary: string
   images: ParsedImage[]
+  /** 无法提取的图片数（格式不支持/损坏/超限） */
+  skippedImages?: number
 }
 
 export interface UploadResponse {
@@ -255,6 +259,8 @@ export interface AssetItem {
   caption: string
   mime: string
   sizeKB: number
+  /** 类型由 VLM 视觉识别判定（缺省 = 关键词分类） */
+  vlmKind?: boolean
 }
 
 export interface JobDetail {

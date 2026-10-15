@@ -170,6 +170,8 @@ export interface ParsedImage {
   caption: string
   mime: string
   sizeKB: number
+  /** 类型由 VLM 视觉识别判定（false/缺省 = 关键词分类） */
+  vlmKind?: boolean
 }
 
 export interface DocxParsed {
@@ -178,6 +180,8 @@ export interface DocxParsed {
   genes: string[]
   docTextSummary: string
   images: ParsedImage[]
+  /** 无法提取的图片数（格式不支持/损坏/超限），仅在有跳过时存在 */
+  skippedImages?: number
   /** 提取出的客户目标/项目要求类文本（给 LLM） */
   goalHints: string[]
   /** 文档标题（首个非空行猜测，≤80 字，仅入 parsed.json 不返回前端） */
