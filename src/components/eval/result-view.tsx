@@ -219,6 +219,20 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             {job.goal}
           </p>
         )}
+        {summary.construct && (
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-stone-500 dark:text-stone-400">
+            <span className="eval-eyebrow text-stone-400">客户构建</span>
+            <span className="rounded-sm border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-400">
+              {summary.construct.providedLength.toLocaleString()} aa
+              {summary.construct.start != null && summary.construct.end != null
+                ? ` · 全长 ${summary.construct.start}–${summary.construct.end} 位`
+                : ` / 全长 ${summary.construct.fullLength.toLocaleString()} aa`}
+            </span>
+            <span className={summary.construct.sameTarget ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-500'}>
+              一致性 {summary.construct.identity}%{summary.construct.sameTarget ? ' · 已合并为单次评估（构建边界分析）' : ' · 疑似不同靶点，按 UniProt 评估'}
+            </span>
+          </p>
+        )}
       </motion.header>
 
       {/* 2. 规格格栅（hairline 网格） */}

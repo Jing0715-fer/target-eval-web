@@ -13,7 +13,9 @@ import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed
 import { computeScores } from './score'
 import { generateReportSections, type ReportContext } from './report'
 import { renderReportHtml } from './report-html'
-import { isValidUniprotId, type BlastHit, type EvaluationOptions, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type UniprotInfo } from './types'
+import { compareSequences, describeComparison } from './seq-compare'
+import { getEngineSummary } from './llm-provider'
+import { isValidUniprotId, type BlastHit, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
   jobId: string
@@ -32,10 +34,21 @@ export interface PipelineCallbacks {
 }
 
 /** 上传解析结果持久化文件 */
-async function readUploadParsed(uploadId: string): Promise<{ goalHints: string[] } | null> {
+async function readUploadParsed(uploadId: string): Promise<{ goalHints: string[]; images?: ParsedImage[] } | null> {
   try {
     const raw = await fs.readFile(path.join(process.cwd(), 'db', 'reports', uploadId, 'parsed.json'), 'utf-8')
-    return JSON.parse(raw) as { goalHints: string[] }
+    return JSON.parse(raw) as { goalHints: string[]; images?: ParsedImage[] }
+  } catch {
+    return null
+  }
+}
+
+/** 读取 LLM 智能解析结果（insights.json，可能不存在） */
+async function readUploadInsights(uploadId: string): Promise<FormInsights | null> {
+  try {
+    const raw = await fs.readFile(path.join(process.cwd(), 'db', 'reports', uploadId, 'insights.json'), 'utf-8')
+    const data = JSON.parse(raw) as FormInsights
+    return Array.isArray(data.goals) ? data : null
   } catch {
     return null
   }
@@ -56,12 +69,27 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   report('input', '解析输入…', 0.3)
   let goal = input.goal?.trim() || ''
   let goalHints: string[] = []
+  let insights: FormInsights | null = null
   let images: ParsedImage[] = []
   let assetDir = ''
+  let providedSequence = '' // 客户提供的伴随序列（合并评估：UniProt 为主 + 序列做构建边界分析）
+  let comparison: SequenceComparison | null = null
 
   if (input.uploadId) {
     const parsed = await readUploadParsed(input.uploadId)
     if (parsed?.goalHints?.length) goalHints = parsed.goalHints
+    insights = await readUploadInsights(input.uploadId)
+    // 用户未显式填目标时，自动采用 LLM 解析出的客户目标
+    if (!goal && insights?.goals?.length) {
+      goal = insights.goals.slice(0, 3).join('；')
+      log(`已自动采用评估表解析出的客户目标（${insights.goals.length} 条）`)
+      // 持久化到作业记录（结果页刊头展示）
+      void db.evaluationJob.update({
+        where: { id: input.jobId },
+        data: { goal: goal.slice(0, 2000) },
+      }).catch(() => undefined)
+    }
+    if (insights?.goals?.length) goalHints = [...new Set([...insights.goals, ...goalHints])]
   }
 
   let uniprotInfo: UniprotInfo | null = null
@@ -72,13 +100,35 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     const id = (input.uniprot ?? '').trim().toUpperCase()
     if (!isValidUniprotId(id)) throw new Error(`UniProt ID 格式无效：${id}（应为 6 位，如 P00533）`)
     uniprotIdInput = id
-    report('input', `输入 UniProt ID：${id}`, 0.8)
+    // 伴随序列（可选）：同一靶点时合并为一次评估，避免重复评估
+    if (input.sequence?.trim()) {
+      const norm = normalizeSequenceInput(input.sequence)
+      if (norm.ok) {
+        providedSequence = norm.seq
+        report('input', `UniProt ${id} + 伴随序列 ${norm.length} aa → 合并为单次评估（以 UniProt 为主）`, 0.9)
+      } else {
+        log(`伴随序列无效（识别到 ${norm.length} 个残基，需 ≥30），已忽略`, 'warn')
+        report('input', `输入 UniProt ID：${id}`, 0.8)
+      }
+    } else {
+      report('input', `输入 UniProt ID：${id}`, 0.8)
+    }
   } else if (input.mode === 'docx') {
-    // docx：优先用解析出的 UniProt（序列将从 UniProt 获取）；否则用评估表中的序列
+    // docx：优先用解析出的 UniProt（序列用于构建比对）；否则用评估表中的序列
     const id = (input.uniprot ?? '').trim().toUpperCase()
     if (id && isValidUniprotId(id)) {
       uniprotIdInput = id
-      report('input', `评估表解析出 UniProt ID：${id}`, 0.8)
+      if (input.sequence?.trim()) {
+        const norm = normalizeSequenceInput(input.sequence)
+        if (norm.ok) {
+          providedSequence = norm.seq
+          report('input', `评估表：UniProt ${id} + 序列 ${norm.length} aa → 合并单次评估`, 0.9)
+        } else {
+          report('input', `评估表解析出 UniProt ID：${id}`, 0.8)
+        }
+      } else {
+        report('input', `评估表解析出 UniProt ID：${id}`, 0.8)
+      }
     } else if (input.sequence) {
       const norm = normalizeSequenceInput(input.sequence)
       if (!norm.ok) throw new Error(`评估表中的序列无效：识别到 ${norm.length} 个残基（需 ≥30）`)
@@ -103,7 +153,18 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     const info = await fetchUniprotInfo(uniprotIdToFetch)
     if (!info) throw new Error(`UniProt ${uniprotIdToFetch} 查询失败（ID 不存在或网络错误）`)
     uniprotInfo = info
-    if (!sequence) sequence = info.sequence
+    if (providedSequence) {
+      // 合并评估：提供的序列 vs 全长序列 → 同靶点判定 + 构建边界估计
+      comparison = compareSequences(providedSequence, info.sequence)
+      if (comparison.sameTarget) {
+        log(`序列比对：${describeComparison(comparison)} → 判定同一靶点，合并评估（以 UniProt ${info.uniprotId} 为主，序列用于构建分析）`)
+      } else {
+        log(`序列比对：相似度 ${comparison.identity}% 低于同靶点阈值（85%）→ 按 UniProt ${info.uniprotId} 评估；提供序列可能为不同靶点/同源蛋白，已避免重复评估`, 'warn')
+      }
+      sequence = providedSequence // BLAST 与构建分析使用客户构建序列
+    } else if (!sequence) {
+      sequence = info.sequence
+    }
     log(`UniProt 元数据完成：${info.entryName}（${info.proteinName}，${info.sequenceLength} aa，${info.organism}）`)
     report('uniprot', 'UniProt 元数据完成', 1)
   } else {
@@ -281,14 +342,9 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
 
   // ─── 阶段 8：LLM 报告 ────────────────────────────────────────────────────
   report('report', '整理数据上下文…', 0.05)
-  // 收集评估表图片元数据（来自 uploadId 的 parsed.json）
+  // 图片元数据已在阶段 1 从 parsed.json 读取；这里仅定位资产目录
   if (input.uploadId) {
     assetDir = path.join(process.cwd(), 'db', 'reports', input.uploadId, 'assets')
-    try {
-      const raw = await fs.readFile(path.join(process.cwd(), 'db', 'reports', input.uploadId, 'parsed.json'), 'utf-8')
-      const parsed = JSON.parse(raw) as { images?: ParsedImage[] }
-      images = (parsed.images ?? []).slice(0, 12)
-    } catch { /* 无图片元数据 */ }
   }
 
   const reportCtx: ReportContext = {
@@ -296,6 +352,10 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     sequence,
     goal: goal || undefined,
     goalHints,
+    insights: insights ?? undefined,
+    providedSequence: providedSequence && comparison
+      ? { sequence: providedSequence, comparison }
+      : undefined,
     directPdbs,
     blastHits,
     coverage,
@@ -316,6 +376,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
 
   // HTML 渲染 + 落盘
   report('report', '组装 HTML 报告…', 0.95)
+  const engineSummary = await getEngineSummary()
   const html = await renderReportHtml({
     ctx: reportCtx,
     methodStats: scores.methodStats,
@@ -325,6 +386,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     jobId: input.jobId,
     durationMs: Date.now() - t0,
     totalPdbFound,
+    engineSummary,
     resolveImagePath: (meta) => {
       const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
       return path.join(assetDir, `${meta.id}.${ext}`)
@@ -357,6 +419,16 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     literatureCount: literature.length,
     imageCount: images.length,
     durationMs,
+    construct: comparison
+      ? {
+          providedLength: comparison.providedLength,
+          fullLength: comparison.fullLength,
+          identity: comparison.identity,
+          sameTarget: comparison.sameTarget,
+          start: comparison.start,
+          end: comparison.end,
+        }
+      : undefined,
   }
 
   await db.evaluationJob.update({

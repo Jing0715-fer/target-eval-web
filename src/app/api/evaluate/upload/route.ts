@@ -34,7 +34,7 @@ export async function POST(req: Request) {
   try {
     const buffer = Buffer.from(await file.arrayBuffer())
     const { uploadId, parsed } = await parseDocx(buffer)
-    // 持久化解析结果（评估阶段读取 images/goalHints）
+    // 持久化解析结果（评估阶段读取 images/goalHints/fullText）
     try {
       await fs.writeFile(
         path.join(process.cwd(), 'db', 'reports', uploadId, 'parsed.json'),
@@ -43,16 +43,20 @@ export async function POST(req: Request) {
       )
     } catch { /* 持久化失败不阻塞返回 */ }
 
+    // 响应剥离 fullText（≤14KB，仅后端 LLM 解析用），保持响应轻量
+    const { fullText: _ft, ...parsedLite } = parsed
+    void _ft
+
     if (parsed.uniprotIds.length === 0 && parsed.sequences.length === 0) {
       // 未识别出可用靶点信息也返回（用户可补填），但提示
       return NextResponse.json({
         ok: true,
         uploadId,
-        parsed,
+        parsed: parsedLite,
         error: '提示：未在评估表中识别出 UniProt ID 或蛋白序列，请检查文档内容或改用其他输入方式',
       })
     }
-    return NextResponse.json({ ok: true, uploadId, parsed })
+    return NextResponse.json({ ok: true, uploadId, parsed: parsedLite })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return NextResponse.json({ ok: false, error: `文档解析失败：${msg}` }, { status: 500 })

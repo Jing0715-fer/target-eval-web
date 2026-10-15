@@ -37,6 +37,9 @@ export function extractUniprotIds(text: string): string[] {
   return [...found]
 }
 
+/** CJK / 全角字符 — 出现即判定该行不是序列行（FASTA 正文终止），防止中文段落中的拉丁词混入序列 */
+const CJK_RE = /[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef]/
+
 /** 提取 FASTA / 裸蛋白序列块 */
 export function extractSequences(text: string): ParsedSequence[] {
   const out: ParsedSequence[] = []
@@ -45,12 +48,16 @@ export function extractSequences(text: string): ParsedSequence[] {
   while (i < lines.length && out.length < 5) {
     const line = lines[i].trim()
     if (line.startsWith('>') ) {
-      // FASTA 头 + 后续序列行
+      // FASTA 头 + 后续序列行（遇到中文/全角内容行即终止）
       const header = line.slice(1).trim().slice(0, 120)
       const body: string[] = []
       let j = i + 1
       while (j < lines.length && !lines[j].trim().startsWith('>')) {
-        body.push(lines[j])
+        const ln = lines[j].trim()
+        if (ln !== '') {
+          if (CJK_RE.test(ln)) break // 中文/全角行 → FASTA 正文结束
+          body.push(ln)
+        }
         j++
         if (body.join('').replace(/\s/g, '').length > 60000) break
       }
@@ -242,6 +249,8 @@ export async function parseDocx(buffer: Buffer, opts: DocxParseOptions = {}): Pr
     docTextSummary: fullText.replace(/\s+/g, ' ').trim().slice(0, 500),
     images: parsedImages,
     goalHints: extractGoalHints(fullText),
+    docTitle: fullText.split('\n').map(s => s.trim()).find(s => s.length >= 4 && s.length <= 80) ?? undefined,
+    fullText: fullText.slice(0, 14000),
   }
   return { uploadId, parsed }
 }

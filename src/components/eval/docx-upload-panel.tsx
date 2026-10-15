@@ -2,16 +2,23 @@
 
 import { useRef, useState } from 'react'
 import {
+  CircleAlert,
   CircleCheckBig,
+  Dna,
   FileCheck2,
   FileUp,
+  HelpCircle,
+  Lightbulb,
   LoaderCircle,
+  RefreshCw,
+  Sparkles,
+  Target,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { KindBadge } from './badges'
-import type { UploadResponse } from './types'
+import type { FormInsights, UploadResponse } from './types'
 
 export interface DocxUploadPanelProps {
   upload: UploadResponse | null
@@ -20,15 +27,22 @@ export interface DocxUploadPanelProps {
   selectionReady: boolean
   selectedUniprot: string | null
   selectedSequenceIndex: number | null
+  /** LLM 智能解析结果（null = 尚未解析） */
+  insights: FormInsights | null
+  insightsLoading: boolean
+  insightsError: string | null
   onFileSelected: (file: File) => void
   onClearUpload: () => void
   onSelectUniprot: (id: string | null) => void
   onSelectSequence: (index: number | null) => void
+  onRetryInsights: () => void
+  /** 将某条客户目标应用到目标输入框 */
+  onApplyGoal: (text: string) => void
 }
 
 const MAX_SIZE_BYTES = 20 * 1024 * 1024
 
-/** Word 评估表上传与解析结果展示（拖拽/点击上传 → UniProt/序列点选 → 图片网格） */
+/** Word 评估表上传与解析结果展示（拖拽/点击上传 → UniProt/序列点选 + AI 智能解析要点 → 图片网格） */
 export function DocxUploadPanel(props: DocxUploadPanelProps) {
   const {
     upload,
@@ -37,12 +51,18 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
     selectionReady,
     selectedUniprot,
     selectedSequenceIndex,
+    insights,
+    insightsLoading,
+    insightsError,
     onFileSelected,
     onClearUpload,
     onSelectUniprot,
     onSelectSequence,
+    onRetryInsights,
+    onApplyGoal,
   } = props
   const [dragOver, setDragOver] = useState(false)
+  const [expExpanded, setExpExpanded] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleFile = (file: File | undefined | null) => {
@@ -92,7 +112,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             {uploading ? '正在上传并解析评估表…' : '拖拽 Word 评估表到此处，或点击选择文件'}
           </div>
           <div className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
-            支持 .docx 格式（≤ 20MB），上传后自动解析 UniProt ID、序列与实验图片
+            支持 .docx 格式（≤ 20MB），上传后自动解析 UniProt ID、序列与实验图片，并由 AI 提取目标与科学问题
           </div>
         </div>
         <input
@@ -113,6 +133,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
   }
 
   const { parsed } = upload
+  const hasBoth = Boolean(selectedUniprot && selectedSequenceIndex != null)
   return (
     <div className="flex flex-col gap-4 rounded-md border border-stone-200 bg-stone-50/50 p-4 dark:border-stone-800 dark:bg-stone-900/40">
       {/* 解析摘要 */}
@@ -135,10 +156,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
       </div>
 
       {/* 基因名 */}
-      {parsed.genes.length > 0 && (
+      {(parsed.genes.length > 0 || (insights?.geneNames?.length ?? 0) > 0) && (
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-xs font-medium text-stone-500 dark:text-stone-500">基因名：</span>
-          {parsed.genes.map((g) => (
+          {[...new Set([...(parsed.genes ?? []), ...(insights?.geneNames ?? [])])].slice(0, 8).map((g) => (
             <Badge key={g} variant="secondary" className="font-mono text-[11px]">
               {g}
             </Badge>
@@ -146,11 +167,150 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         </div>
       )}
 
+      {/* AI 智能解析要点 */}
+      {insightsLoading && (
+        <div className="flex items-center gap-2.5 rounded-md border border-emerald-200 bg-emerald-50/60 px-3.5 py-3 text-xs text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300">
+          <LoaderCircle className="size-4 shrink-0 animate-spin text-emerald-700" />
+          AI 正在解析评估表：提取客户目标、待解决科学问题与实验数据要点…
+        </div>
+      )}
+      {!insightsLoading && (insights || insightsError) && (
+        <div className="rounded-md border border-emerald-200/80 bg-white/70 px-3.5 py-3 dark:border-emerald-900/70 dark:bg-stone-900/60">
+          <div className="mb-2 flex items-center gap-2">
+            <Sparkles className="size-3.5 shrink-0 text-emerald-700 dark:text-emerald-500" />
+            <span className="text-xs font-semibold text-stone-800 dark:text-stone-200">AI 智能解析要点</span>
+            {insights?.source === 'llm' ? (
+              <span className="eval-eyebrow rounded-sm bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                LLM 提取
+              </span>
+            ) : insights ? (
+              <span className="eval-eyebrow rounded-sm bg-stone-100 px-1.5 py-0.5 text-stone-500 dark:bg-stone-800 dark:text-stone-400">
+                规则提取（LLM 不可用）
+              </span>
+            ) : null}
+            {insights?.proteinName && (
+              <span className="ml-auto truncate font-mono text-[11px] text-stone-400" title={insights.proteinName}>
+                {insights.proteinName}{insights.organism ? ` · ${insights.organism}` : ''}
+              </span>
+            )}
+          </div>
+
+          {insightsError && !insights && (
+            <div className="flex flex-col gap-2 text-xs text-amber-700 dark:text-amber-400">
+              <span className="flex items-center gap-1.5">
+                <CircleAlert className="size-3.5 shrink-0" />
+                {insightsError}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onRetryInsights}
+                className="h-7 w-fit gap-1.5 rounded-md px-2.5 text-[11px]"
+              >
+                <RefreshCw className="size-3" />
+                重新解析
+              </Button>
+            </div>
+          )}
+
+          {insights && (
+            <div className="flex flex-col gap-2.5">
+              {/* 客户目标 */}
+              {insights.goals.length > 0 && (
+                <div>
+                  <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-stone-500 dark:text-stone-400">
+                    <Target className="size-3 text-amber-600" />
+                    客户目标（点击可填入下方目标输入框）
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {insights.goals.map((g, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => onApplyGoal(g)}
+                        className="rounded-sm border-l-2 border-amber-400 bg-amber-50/60 px-2.5 py-1.5 text-left text-xs leading-relaxed text-stone-700 transition-colors hover:bg-amber-100/80 dark:border-amber-600 dark:bg-amber-950/20 dark:text-stone-300 dark:hover:bg-amber-950/40"
+                        title="点击填入客户目标"
+                      >
+                        {g}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 科学问题 */}
+              {insights.scientificQuestions.length > 0 && (
+                <div>
+                  <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-stone-500 dark:text-stone-400">
+                    <HelpCircle className="size-3 text-emerald-700 dark:text-emerald-500" />
+                    待解决的科学问题
+                  </div>
+                  <ol className="ml-4 list-decimal space-y-0.5">
+                    {insights.scientificQuestions.map((q, i) => (
+                      <li key={i} className="text-xs leading-relaxed text-stone-700 dark:text-stone-300">{q}</li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              {/* 实验数据要点 */}
+              {insights.experimentalSummary && (
+                <div>
+                  <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-stone-500 dark:text-stone-400">
+                    <FileCheck2 className="size-3 text-emerald-700 dark:text-emerald-500" />
+                    实验数据要点
+                  </div>
+                  <p className={cn('text-xs leading-relaxed text-stone-600 dark:text-stone-400', !expExpanded && 'line-clamp-3')}>
+                    {insights.experimentalSummary}
+                  </p>
+                  {insights.experimentalSummary.length > 90 && (
+                    <button
+                      type="button"
+                      onClick={() => setExpExpanded(v => !v)}
+                      className="mt-0.5 font-mono text-[10px] text-emerald-700 hover:underline dark:text-emerald-500"
+                    >
+                      {expExpanded ? '－ 收起' : '＋ 展开全部'}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* 构建说明 / 同源 / 风险 */}
+              <div className="flex flex-col gap-1.5">
+                {insights.sequenceNotes && (
+                  <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+                    <span className="eval-eyebrow mr-1.5 text-stone-400">构建</span>
+                    {insights.sequenceNotes}
+                  </p>
+                )}
+                {insights.homologs && (
+                  <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+                    <span className="eval-eyebrow mr-1.5 text-stone-400">同源</span>
+                    {insights.homologs}
+                  </p>
+                )}
+                {insights.keyConcerns && insights.keyConcerns.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="eval-eyebrow text-stone-400">风险</span>
+                    {insights.keyConcerns.map((c, i) => (
+                      <span key={i} className="rounded-sm border border-amber-200 bg-amber-50/70 px-1.5 py-0.5 text-[11px] text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-400">
+                        <Lightbulb className="mr-0.5 inline size-2.5" aria-hidden />
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* UniProt ID chips */}
       {parsed.uniprotIds.length > 0 && (
         <div>
           <div className="mb-2 text-xs font-medium text-stone-600 dark:text-stone-400">
-            识别出的 UniProt ID（点选用于评估）
+            识别出的 UniProt ID（点选作为评估对象）
           </div>
           <div className="flex flex-wrap gap-2">
             {parsed.uniprotIds.map((id) => {
@@ -160,12 +320,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   key={id}
                   type="button"
                   onClick={() => {
-                    if (selected) {
-                      onSelectUniprot(null)
-                    } else {
-                      onSelectUniprot(id)
-                      onSelectSequence(null)
-                    }
+                    onSelectUniprot(selected ? null : id)
                   }}
                   className={cn(
                     'min-h-10 rounded-md border px-3.5 font-mono text-sm transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
@@ -182,11 +337,13 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         </div>
       )}
 
-      {/* 序列列表 */}
+      {/* 序列列表（已选 UniProt 时 → 构建对照序列，可叠加选择） */}
       {parsed.sequences.length > 0 && (
         <div>
           <div className="mb-2 text-xs font-medium text-stone-600 dark:text-stone-400">
-            识别出的序列（点选用于评估）
+            {selectedUniprot
+              ? '识别出的序列（可选一条作为构建对照 — 与所选 UniProt 合并为一次评估，用于构建边界分析）'
+              : '识别出的序列（点选作为评估对象）'}
           </div>
           <div className="flex flex-col gap-2">
             {parsed.sequences.map((s, i) => {
@@ -196,12 +353,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   key={`${s.header}-${i}`}
                   type="button"
                   onClick={() => {
-                    if (selected) {
-                      onSelectSequence(null)
-                    } else {
-                      onSelectSequence(i)
-                      onSelectUniprot(null)
-                    }
+                    onSelectSequence(selected ? null : i)
                   }}
                   className={cn(
                     'rounded-md border p-3 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
@@ -211,6 +363,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   )}
                 >
                   <div className="flex items-baseline gap-2">
+                    {selected && <Dna className="size-3.5 shrink-0 self-center text-emerald-700 dark:text-emerald-500" aria-hidden />}
                     <span className="truncate text-xs font-medium text-stone-700 dark:text-stone-300">
                       {s.header?.trim() || `序列 ${i + 1}`}
                     </span>
@@ -272,15 +425,17 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
       {/* 选择状态提示 */}
       <p
         className={cn(
-          'text-xs',
+          'text-xs leading-relaxed',
           selectionReady
             ? 'text-emerald-700 dark:text-emerald-400'
             : 'text-amber-600 dark:text-amber-400'
         )}
       >
-        {selectionReady
-          ? '已选择评估对象，可以开始评估'
-          : '请从上方点选一个 UniProt ID 或序列作为评估对象'}
+        {hasBoth
+          ? '将合并为一次评估：以 UniProt 为主，所选序列用于构建边界分析（系统会自动校验二者是否同一靶点）'
+          : selectionReady
+            ? '已选择评估对象，可以开始评估'
+            : '请从上方点选一个 UniProt ID 或序列作为评估对象'}
       </p>
 
       {uploadError && <p className="text-xs text-red-600 dark:text-red-400">{uploadError}</p>}

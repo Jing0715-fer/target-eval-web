@@ -1,5 +1,5 @@
-/** 底部信息条：细线 + 数据源说明 */
-export function AppFooter() {
+/** 底部信息条：细线 + 数据源说明（含当前 LLM 分析引擎） */
+export function AppFooter({ engineSummary }: { engineSummary?: string }) {
   return (
     <footer className="mt-auto border-t border-stone-200 bg-[#fafaf9] dark:border-stone-800 dark:bg-stone-950">
       <div className="mx-auto flex w-full max-w-6xl flex-col items-center gap-1 px-4 py-4 text-center sm:px-6">
@@ -12,6 +12,12 @@ export function AppFooter() {
         </div>
         <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
           数据源：UniProt · RCSB PDB · PDBe · PubMed · NCBI BLAST — LLM 生成的评估分析仅供参考
+          {engineSummary && (
+            <>
+              {' — '}
+              <span className="font-mono">引擎：{engineSummary}</span>
+            </>
+          )}
         </p>
       </div>
     </footer>

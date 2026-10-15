@@ -1,7 +1,7 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { ArrowLeft, History, Moon, Sun } from 'lucide-react'
+import { ArrowLeft, History, Moon, SlidersHorizontal, Sun } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -27,10 +27,14 @@ export interface AppHeaderProps {
   onHome?: () => void
   /** 当前是否处于非首页视图（显示返回按钮） */
   canGoHome?: boolean
+  /** 打开 LLM 引擎配置 */
+  onOpenLlmConfig: () => void
+  /** 当前是否为内置引擎（false 时配置按钮显示绿点） */
+  engineIsBuiltin?: boolean
 }
 
-/** 顶栏：衬线字标（可点击返回）+ 历史记录 + 主题切换 */
-export function AppHeader({ onOpenHistory, onHome, canGoHome }: AppHeaderProps) {
+/** 顶栏：衬线字标（可点击返回）+ 历史记录 + LLM 引擎配置 + 主题切换 */
+export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, engineIsBuiltin = true }: AppHeaderProps) {
   return (
     <header className="sticky top-0 z-40 border-b border-stone-200/90 bg-[#fafaf9]/90 backdrop-blur-md dark:border-stone-800/90 dark:bg-stone-950/90">
       {/* 顶部细线（期刊风双线） */}
@@ -74,6 +78,22 @@ export function AppHeader({ onOpenHistory, onHome, canGoHome }: AppHeaderProps) 
           >
             <History className="size-3.5" />
             <span className="hidden sm:inline">历史评估</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onOpenLlmConfig}
+            aria-label="LLM 分析引擎配置"
+            title="LLM 分析引擎配置"
+            className="relative size-9 rounded-md text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+          >
+            <SlidersHorizontal className="size-4" />
+            {!engineIsBuiltin && (
+              <span
+                className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-emerald-500"
+                aria-label="正在使用自定义 LLM 引擎"
+              />
+            )}
           </Button>
           <ThemeToggle />
         </div>

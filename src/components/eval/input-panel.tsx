@@ -5,9 +5,11 @@ import {
   ChevronDown,
   CircleAlert,
   CircleCheckBig,
+  Dna,
   FileText,
   LoaderCircle,
   Settings2,
+  Sparkles,
   Target,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -21,9 +23,9 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { countResidues, isValidUniprotId } from './format'
-import { uploadEvaluateDocx } from './api'
+import { fetchDocxInsights, uploadEvaluateDocx } from './api'
 import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
-import type { EvaluateOptions, EvaluateRequest, InputMode, UploadResponse } from './types'
+import type { EvaluateOptions, EvaluateRequest, FormInsights, InputMode, UploadResponse } from './types'
 import type { StartResult } from './use-evaluation-flow'
 
 type TabMode = InputMode
@@ -34,6 +36,7 @@ const EXAMPLE_UNIPROTS = [
 ]
 
 const MIN_SEQUENCE_LENGTH = 10
+const MIN_COMPANION_LENGTH = 30
 
 export interface InputPanelProps {
   submitting: boolean
@@ -50,6 +53,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [uniprot, setUniprot] = useState('')
   const uniprotValid = isValidUniprotId(uniprot)
 
+  // UniProt Tab 的可选伴随序列（合并评估）
+  const [companionOpen, setCompanionOpen] = useState(false)
+  const [companionText, setCompanionText] = useState('')
+  const companionInfo = useMemo(() => countResidues(companionText), [companionText])
+  const companionValid = companionInfo.count >= MIN_COMPANION_LENGTH
+
   // 序列输入
   const [sequenceText, setSequenceText] = useState('')
   const seqInfo = useMemo(() => countResidues(sequenceText), [sequenceText])
@@ -60,6 +69,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [selectedUniprot, setSelectedUniprot] = useState<string | null>(null)
   const [selectedSequenceIndex, setSelectedSequenceIndex] = useState<number | null>(null)
+
+  // AI 智能解析
+  const [insights, setInsights] = useState<FormInsights | null>(null)
+  const [insightsLoading, setInsightsLoading] = useState(false)
+  const [insightsError, setInsightsError] = useState<string | null>(null)
+  const [goalAutoFilled, setGoalAutoFilled] = useState(false)
+
   const docxReady = Boolean(
     upload && (selectedUniprot || (selectedSequenceIndex != null && upload.parsed.sequences[selectedSequenceIndex]))
   )
@@ -73,6 +89,28 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [forceBlast, setForceBlast] = useState(false)
   const [maxPdb, setMaxPdb] = useState(150)
 
+  /** 上传成功后自动执行 LLM 智能解析（不阻塞选择评估对象） */
+  const runInsights = async (uploadId: string) => {
+    setInsightsLoading(true)
+    setInsightsError(null)
+    setInsights(null)
+    try {
+      const res = await fetchDocxInsights(uploadId)
+      const data = res.insights
+      if (!data) throw new Error('解析结果为空')
+      setInsights(data)
+      // 目标输入框为空时自动填入解析出的客户目标
+      if (data.goals.length > 0 && goal.trim() === '') {
+        setGoal(data.goals.slice(0, 3).join('；'))
+        setGoalAutoFilled(true)
+      }
+    } catch (e) {
+      setInsightsError(e instanceof Error ? e.message : '智能解析失败')
+    } finally {
+      setInsightsLoading(false)
+    }
+  }
+
   const handleFileSelected = async (file: File) => {
     const invalid = validateDocxFile(file)
     if (invalid) {
@@ -81,6 +119,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     }
     setUploading(true)
     setUploadError(null)
+    setInsights(null)
+    setInsightsError(null)
     try {
       const res = await uploadEvaluateDocx(file)
       setUpload(res)
@@ -95,6 +135,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         setSelectedUniprot(null)
         setSelectedSequenceIndex(null)
       }
+      // 后台执行 LLM 智能解析
+      void runInsights(res.uploadId)
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : '上传解析失败，请稍后重试')
     } finally {
@@ -107,6 +149,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     setSelectedUniprot(null)
     setSelectedSequenceIndex(null)
     setUploadError(null)
+    setInsights(null)
+    setInsightsError(null)
+  }
+
+  const applyGoal = (text: string) => {
+    setGoal(text)
+    setGoalAutoFilled(false)
   }
 
   const inputReady =
@@ -127,7 +176,15 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     const trimmedGoal = goal.trim() || undefined
     let request: EvaluateRequest
     if (mode === 'uniprot') {
-      request = { mode: 'uniprot', uniprot: uniprot.trim().toUpperCase(), goal: trimmedGoal, options }
+      // 可选伴随序列：与同一靶点的 UniProt 合并为一次评估（构建边界分析）
+      const companion = companionText.trim() && companionValid ? companionText.trim() : undefined
+      request = {
+        mode: 'uniprot',
+        uniprot: uniprot.trim().toUpperCase(),
+        sequence: companion,
+        goal: trimmedGoal,
+        options,
+      }
     } else if (mode === 'sequence') {
       request = { mode: 'sequence', sequence: sequenceText.trim(), goal: trimmedGoal, options }
     } else if (!upload) {
@@ -143,6 +200,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         docxJobId: upload.uploadId,
         uploadId: upload.uploadId,
         uniprotFromDocx: selectedUniprot ?? undefined,
+        // UniProt 与序列可同时选择 → 后端合并为一次评估（以 UniProt 为主）
         sequence: selectedSeq,
         sequenceFromDocx: selectedSeq,
         goal: trimmedGoal,
@@ -231,13 +289,61 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                         key={ex.id}
                         type="button"
                         onClick={() => setUniprot(ex.id)}
-                        className="min-h-8 rounded-md border border-stone-200 bg-stone-50 px-2.5 font-mono text-[11px] text-stone-600 transition-colors hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-400 dark:hover:border-emerald-600 dark:hover:text-emerald-400"
+                        className="min-h-8 rounded-md border border-stone-200 bg-stone-50 px-2.5 font-mono text-[11px] text-stone-600 transition-colors hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300 dark:hover:border-emerald-600 dark:hover:text-emerald-400"
                       >
                         {ex.id} · {ex.name}
                       </button>
                     ))}
                   </div>
                 )}
+
+                {/* 可选伴随序列：与 UniProt 合并为一次评估 */}
+                <Collapsible open={companionOpen} onOpenChange={setCompanionOpen} className="mt-2.5">
+                  <div className="rounded-md border border-stone-200 dark:border-stone-800">
+                    <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 rounded-md px-3.5 py-2.5 text-xs font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60">
+                      <Dna className={cn('size-4', companionValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
+                      补充构建序列（可选）
+                      {companionValid && (
+                        <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                          {companionInfo.count.toLocaleString()} aa · 将合并评估
+                        </span>
+                      )}
+                      <span className="ml-auto font-mono text-[10px] font-normal text-stone-400 dark:text-stone-500">
+                        {companionValid ? '以 UniProt 为主 · 序列做构建边界分析' : '同一靶点时自动合并，避免重复评估'}
+                      </span>
+                      <ChevronDown
+                        className={cn(
+                          'size-4 shrink-0 text-stone-400 transition-transform duration-200',
+                          companionOpen && 'rotate-180'
+                        )}
+                      />
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-1">
+                      <div className="flex flex-col gap-2 border-t border-stone-100 px-3.5 py-3.5 dark:border-stone-800">
+                        <Textarea
+                          value={companionText}
+                          onChange={(e) => setCompanionText(e.target.value)}
+                          placeholder={'粘贴该靶点的构建序列（截短体/突变体，FASTA 或裸序列）。\n与 UniProt 属同一靶点时将合并为一次评估，并自动分析构建边界（对应全长区间）。'}
+                          className="min-h-24 resize-y rounded-md font-mono text-xs leading-relaxed"
+                          spellCheck={false}
+                          aria-label="补充构建序列（可选）"
+                        />
+                        {companionText.trim() !== '' && (
+                          <p className={cn(
+                            'flex items-center gap-1 text-xs',
+                            companionValid ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+                          )}>
+                            <CircleCheckBig className="size-3.5" />
+                            已识别 {companionInfo.count.toLocaleString()} 个残基
+                            {companionValid
+                              ? '，将与 UniProt 合并为一次评估'
+                              : `，少于 ${MIN_COMPANION_LENGTH} 个残基将被忽略`}
+                          </p>
+                        )}
+                      </div>
+                    </CollapsibleContent>
+                  </div>
+                </Collapsible>
               </div>
             </TabsContent>
 
@@ -280,10 +386,15 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                 selectionReady={docxReady}
                 selectedUniprot={selectedUniprot}
                 selectedSequenceIndex={selectedSequenceIndex}
+                insights={insights}
+                insightsLoading={insightsLoading}
+                insightsError={insightsError}
                 onFileSelected={handleFileSelected}
                 onClearUpload={clearUpload}
                 onSelectUniprot={setSelectedUniprot}
                 onSelectSequence={setSelectedSequenceIndex}
+                onRetryInsights={() => upload && void runInsights(upload.uploadId)}
+                onApplyGoal={applyGoal}
               />
             </TabsContent>
           </div>
@@ -304,19 +415,29 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           >
             客户目标 / 科学问题
           </Label>
-          <span className="eval-eyebrow rounded-sm bg-amber-100 px-1.5 py-0.5 text-amber-800 dark:bg-amber-900/50 dark:text-amber-400">
-            建议填写
-          </span>
+          {goalAutoFilled ? (
+            <span className="eval-eyebrow flex items-center gap-1 rounded-sm bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+              <Sparkles className="size-2.5" aria-hidden />
+              已从评估表自动填入
+            </span>
+          ) : (
+            <span className="eval-eyebrow rounded-sm bg-amber-100 px-1.5 py-0.5 text-amber-800 dark:bg-amber-900/50 dark:text-amber-400">
+              建议填写
+            </span>
+          )}
         </div>
         <Textarea
           id="goal-input"
           value={goal}
-          onChange={(e) => setGoal(e.target.value)}
-          placeholder="例如：解析 EGFR 激酶域与抑制剂复合物的冷冻电镜结构，评估 CRO 可行性"
+          onChange={(e) => {
+            setGoal(e.target.value)
+            setGoalAutoFilled(false)
+          }}
+          placeholder="例如：解析 EGFR 激酶域与抑制剂复合物的冷冻电镜结构，评估 CRO 可行性（上传评估表后 AI 将自动提取并填入）"
           className="min-h-20 resize-y rounded-md border-amber-200 bg-white/80 focus-visible:border-amber-400 focus-visible:ring-amber-500/20 dark:border-amber-900/60 dark:bg-stone-900/60"
         />
         <p className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">
-          明确的客户目标将直接用于 LLM 报告中的可行性结论与实验策略推荐（可选）
+          明确的客户目标将直接用于 LLM 报告中的可行性结论与实验策略推荐（可选；评估表中提取的目标会自动填入）
         </p>
       </section>
 

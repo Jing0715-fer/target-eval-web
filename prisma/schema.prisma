@@ -44,3 +44,16 @@ model ReportAsset {
 
   @@index([jobId])
 }
+
+// LLM 分析引擎配置（单行激活制：无激活行 = 使用内置 z-ai 引擎）
+model LlmConfig {
+  id          String   @id @default(cuid())
+  providerKey String // openai | anthropic | google | deepseek | qwen | zhipu | moonshot | minimax | doubao | xai | openrouter | ollama | custom
+  label       String // 展示名（如 "OpenAI · gpt-4o"）
+  baseUrl     String
+  apiKey      String? // 本地 SQLite 存储（沙箱内网应用；README 已提示风险）
+  model       String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

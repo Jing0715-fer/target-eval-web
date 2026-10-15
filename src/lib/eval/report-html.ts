@@ -243,6 +243,8 @@ export interface ReportRenderInput {
   jobId: string
   durationMs: number
   totalPdbFound: number
+  /** 分析引擎摘要（如 “Z.ai GLM-4.6（内置）” / “OpenAI · gpt-4o”） */
+  engineSummary: string
   /** 图片文件路径解析（由 pipeline 提供，图片存于 db/reports/{id}/assets/） */
   resolveImagePath: (meta: ParsedImage) => string
 }
@@ -275,6 +277,12 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const linkedLitCount = ctx.literature.filter(l => pdbByPmid.has(String(l.pmid).trim())).length
 
   const embedded = await embedImages(ctx.images, input.resolveImagePath)
+
+  // 构建信息（合并评估：UniProt+伴随序列）
+  const cmp = ctx.providedSequence?.comparison
+  const constructHtml = cmp
+    ? `${cmp.start != null && cmp.end != null ? `${cmp.start}–${cmp.end} 位 / 全长 ${cmp.fullLength} aa` : `${cmp.providedLength} / ${cmp.fullLength} aa`}${cmp.sameTarget ? ` · 一致性 ${cmp.identity}%` : ` · 相似度 ${cmp.identity}% 疑似不同靶点`}`
+    : ''
 
   // 动态章节编号：一 llm / 二 scores / 三 pdbs / 后续按存在性编号
   const cnNums = ['一', '二', '三', '四', '五', '六', '七']
@@ -469,6 +477,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div><b>最佳分辨率</b> ${methodStats.bestResolution != null ? methodStats.bestResolution.toFixed(2) + ' Å' : '—'}</div>
       <div><b>BLAST 同源</b> ${ctx.blastHits.length} 个</div>
       <div><b>文献证据</b> ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构条目直接关联）` : ''}</div>
+      ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
+      <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
       <div><b>报告日期</b> ${dateStr}</div>
     </div>
     <div class="rpt-badges">

@@ -23,7 +23,7 @@ export interface EvaluateRequest {
   mode: InputMode
   /** mode=uniprot 必填 */
   uniprot?: string
-  /** mode=sequence 必填（FASTA 或裸序列）；mode=docx 选择序列时也放在此字段 */
+  /** mode=sequence 必填（FASTA 或裸序列）；mode=uniprot 时为可选伴随序列（合并评估）；mode=docx 选择序列时也放在此字段 */
   sequence?: string
   /** mode=docx：上传解析返回的 uploadId（契约字段名） */
   docxJobId?: string
@@ -75,6 +75,76 @@ export interface UploadResponse {
   error?: string
 }
 
+// ─── 评估表 LLM 智能解析 ──────────────────────────────────────
+
+/** LLM 从评估表内容中提取的结构化要点 */
+export interface FormInsights {
+  proteinName?: string
+  geneNames?: string[]
+  organism?: string
+  goals: string[]
+  scientificQuestions: string[]
+  experimentalSummary?: string
+  sequenceNotes?: string
+  homologs?: string
+  keyConcerns?: string[]
+  source: 'llm' | 'regex'
+}
+
+export interface InsightsResponse {
+  ok: boolean
+  insights?: FormInsights
+  cached?: boolean
+  error?: string
+}
+
+// ─── LLM 引擎配置 ────────────────────────────────────────────
+
+export interface LlmProviderLite {
+  key: string
+  label: string
+  hint: string
+  baseUrl: string
+  needsKey: boolean
+  defaultModel: string
+  supportsModels: boolean
+  modelsNote: string
+}
+
+export interface LlmConfigState {
+  providerKey: string
+  label: string
+  baseUrl: string
+  apiKeyMasked: string
+  hasKey: boolean
+  model: string
+}
+
+export interface LlmConfigResponse {
+  ok: boolean
+  active: LlmConfigState | null
+  engineSummary: string
+  providers: LlmProviderLite[]
+}
+
+export interface LlmModelInfo {
+  id: string
+  label?: string
+}
+
+export interface LlmModelsResponse {
+  ok: boolean
+  models?: LlmModelInfo[]
+  error?: string
+}
+
+export interface LlmTestResponse {
+  ok: boolean
+  latencyMs?: number
+  reply?: string
+  error?: string
+}
+
 /** GET /api/jobs/[id] 作业详情 */
 export interface StageInfo {
   key: string
@@ -119,6 +189,16 @@ export interface MethodStats {
   bestResolution: number | null
 }
 
+/** 合并评估（UniProt+序列同靶点）时的构建信息 */
+export interface ConstructInfo {
+  providedLength: number
+  fullLength: number
+  identity: number
+  sameTarget: boolean
+  start: number | null
+  end: number | null
+}
+
 export interface JobSummary {
   uniprot: UniprotInfo
   directPdbCount: number
@@ -130,6 +210,7 @@ export interface JobSummary {
   literatureCount: number
   imageCount: number
   durationMs: number
+  construct?: ConstructInfo
 }
 
 export interface PdbEntry {

@@ -152,6 +152,8 @@ export interface JobSummary {
   literatureCount: number
   imageCount: number
   durationMs: number
+  /** 合并评估（UniProt+序列同靶点）时的构建信息 */
+  construct?: ConstructInfo
 }
 
 // ─── docx 解析 ────────────────────────────────────────────────────────────────
@@ -178,6 +180,61 @@ export interface DocxParsed {
   images: ParsedImage[]
   /** 提取出的客户目标/项目要求类文本（给 LLM） */
   goalHints: string[]
+  /** 文档标题（首个非空行猜测，≤80 字，仅入 parsed.json 不返回前端） */
+  docTitle?: string
+  /** 全文文本（截断 ≤14000 字，仅入 parsed.json 供 LLM 解析，不返回前端） */
+  fullText?: string
+}
+
+// ─── 评估表 LLM 智能解析（FormInsights）───────────────────────────────────
+
+/** LLM 从评估表内容中提取的结构化要点 */
+export interface FormInsights {
+  /** 靶点蛋白名（如“表皮生长因子受体”） */
+  proteinName?: string
+  geneNames?: string[]
+  organism?: string
+  /** 客户目标（项目目的/交付诉求） */
+  goals: string[]
+  /** 待解决的科学问题 */
+  scientificQuestions: string[]
+  /** 实验数据/样品状态要点（无图时的文本证据，如表达量、纯度描述） */
+  experimentalSummary?: string
+  /** 构建/序列说明（截短边界、突变、标签等） */
+  sequenceNotes?: string
+  /** 同源蛋白/参考蛋白信息 */
+  homologs?: string
+  /** 风险与关注点 */
+  keyConcerns?: string[]
+  /** 解析来源：llm = 大模型提取；regex = 规则兑底 */
+  source: 'llm' | 'regex'
+}
+
+// ─── 同靶点 UniProt+序列合并评估（构建信息）─────────────────────────────────
+
+/** 提供序列 vs UniProt 全长序列的比对结果 */
+export interface SequenceComparison {
+  /** 0-100 近似一致性 */
+  identity: number
+  /** 是否判定为同一靶点（identity ≥ 85 或完全子串） */
+  sameTarget: boolean
+  providedLength: number
+  fullLength: number
+  /** 估计对应全长 1-based 起始位（锚定失败为 null） */
+  start: number | null
+  /** 估计对应全长 1-based 结束位 */
+  end: number | null
+  method: 'exact-substring' | 'anchored' | 'kmer'
+}
+
+/** 作业汇总中的构建信息（合并评估时存在） */
+export interface ConstructInfo {
+  providedLength: number
+  fullLength: number
+  identity: number
+  sameTarget: boolean
+  start: number | null
+  end: number | null
 }
 
 // ─── 进度 ─────────────────────────────────────────────────────────────────────

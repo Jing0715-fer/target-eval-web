@@ -6,7 +6,7 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, LiteratureItem, PdbEntry, PdbeCoverageResult, Scores, UniprotInfo } from './types'
+import type { BlastHit, FormInsights, LiteratureItem, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
 import { llmChat } from './llm'
 
@@ -15,6 +15,10 @@ export interface ReportContext {
   sequence: string
   goal?: string
   goalHints: string[]
+  /** 评估表 LLM 智能解析要点（目标/科学问题/实验数据摘要等） */
+  insights?: FormInsights
+  /** 客户提供的伴随序列（合并评估：UniProt 为主 + 构建边界分析） */
+  providedSequence?: { sequence: string; comparison: SequenceComparison }
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
   coverage: PdbeCoverageResult | null
@@ -108,9 +112,30 @@ function buildDigest(ctx: ReportContext): string {
   }
 
   lines.push('')
-  lines.push('【客户目标】')
+  lines.push('【客户目标与科学问题】')
   lines.push(ctx.goal?.trim() || ctx.goalHints.join(' / ') || '（未提供明确目标 — 按通用结构解析可行性评估）')
   if (!ctx.goal && ctx.goalHints.length) lines.push(`（评估表中提取的需求线索：${ctx.goalHints.slice(0, 4).join(' / ')}）`)
+  const ins = ctx.insights
+  if (ins?.scientificQuestions?.length) {
+    lines.push('待解决的科学问题（评估表提取）：')
+    lines.push(ins.scientificQuestions.map((q, i) => `  ${i + 1}. ${q}`).join('\n'))
+  }
+  if (ins?.experimentalSummary) lines.push(`实验数据要点（评估表提取）：${ins.experimentalSummary}`)
+  if (ins?.sequenceNotes) lines.push(`构建/序列说明（评估表提取）：${ins.sequenceNotes}`)
+  if (ins?.homologs) lines.push(`同源/参考信息（评估表提取）：${ins.homologs}`)
+  if (ins?.keyConcerns?.length) lines.push(`风险关注点（评估表提取）：${ins.keyConcerns.join('；')}`)
+
+  if (ctx.providedSequence) {
+    const cmp = ctx.providedSequence.comparison
+    lines.push('')
+    lines.push('【客户提供序列（构建信息）】')
+    lines.push(`提供序列长度 ${cmp.providedLength} aa，UniProt 全长 ${cmp.fullLength} aa（占 ${Math.round((cmp.providedLength / cmp.fullLength) * 100)}%）`)
+    if (cmp.start != null && cmp.end != null) {
+      lines.push(`估计对应全长区间：${cmp.start}-${cmp.end} 位`)
+    }
+    lines.push(`与 UniProt 序列一致性：${cmp.identity}%（${cmp.sameTarget ? '同一靶点，已合并为单次评估' : '相似度低于同靶点阈值，可能为不同靶点/同源蛋白'}）`)
+    lines.push('（客户已提供具体构建序列：构建设计章节应优先评估该边界的合理性，而非另起炉灶给出完全不同的建议）')
+  }
 
   lines.push('')
   lines.push(`【已有 PDB 结构】共 ${pdbs.length} 个（X-ray ${xrayCount} / Cryo-EM ${cryoemCount} / NMR ${nmrCount}）${bestRes != null ? `，最佳分辨率 ${bestRes}Å` : ''}`)
@@ -184,6 +209,10 @@ async function callPart(name: string, instruction: string, digest: string, signa
 
 /** 第一段：执行摘要 + 客户目标可行性 + 生物学背景 */
 function partAInstruction(ctx: ReportContext): string {
+  const questions = ctx.insights?.scientificQuestions ?? []
+  const qLine = questions.length
+    ? `- **待解决科学问题**：逐条列出评估表提取到的科学问题（共 ${questions.length} 条），并逐条回应其从结构解析角度的可回答性与难度\n`
+    : ''
   return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 执行摘要
@@ -192,11 +221,11 @@ function partAInstruction(ctx: ReportContext): string {
 
 ## 客户目标与可行性结论
 - 先逐字重述客户目标（未提供则写"通用结构解析可行性评估"）
-- **可行性结论**：直接给出分级（高/中/低）并用一段话说明判断依据
+${qLine}- **可行性结论**：直接给出分级（高/中/低）并用一段话说明判断依据
 - **关键依据**：3-5 条列表，每条引用具体数据（PDB 数量/覆盖率/最佳分辨率/同源 identity/文献证据）
 - **主要风险**：2-4 条列表（构象柔性/覆盖空白/表达纯化难度/竞争风险等，基于数据判断）
 - **达成建议**：1-2 段，给出最可行的切入角度
-- 篇幅 500-800 字
+- 篇幅 500-800 字${questions.length ? '（含科学问题逐条回应）' : ''}
 
 ## 靶点生物学背景
 - ### 功能与机制（基于功能注释与文献，2-3 段）
@@ -231,6 +260,8 @@ function partBInstruction(): string {
 /** 第三段：实验数据评估 + 可行性矩阵 + 方案（强化模块） */
 function partCInstruction(ctx: ReportContext): string {
   const hasImages = ctx.images.length > 0
+  const expText = ctx.insights?.experimentalSummary
+  const cmp = ctx.providedSequence?.comparison
   return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 实验数据评估${hasImages ? '（客户评估表）' : ''}
@@ -240,7 +271,12 @@ ${hasImages
 - 给出**样品质量结论**：当前样品是否达到结构解析级别（X-ray 需 >95% 纯度+单分散；Cryo-EM 需高浓度单分散+合适粒径分布）
 - 若图注信息不足以精确判读，给出"需要客户补充的信息"清单
 - 篇幅 300-500 字`
-    : `- 客户未上传评估表实验数据，说明无法评估当前样品状态
+    : expText
+      ? `- 评估表未含胶图/SEC 图片，但已从评估表文本中提取到实验数据要点：${expText}
+- 基于这些文字信息评估当前样品状态与实验成熟度，明确指出信息缺口（如未提供纯度/得率/稳定性数据）
+- 给出**样品信息完备度结论**与结构解析前需补充的质控清单（SDS-PAGE、SEC、DLS、DSF 等）
+- 篇幅 250-400 字`
+      : `- 客户未上传评估表实验数据，说明无法评估当前样品状态
 - 列出结构解析前的标准样品质控清单（SDS-PAGE 纯度、SEC 单分散性、DLS、热稳定性 DSF 等）与各项的判定标准
 - 篇幅 200-300 字`}
 
@@ -251,7 +287,10 @@ ${hasImages
 - 篇幅 500-800 字
 
 ## 实验方案建议
-- ### 构建设计：基于结构域特征与覆盖空白，建议截短边界（引用具体区间号）、标签位置、是否需要点突变（如无序区删除/糖基化位点突变/稳定化突变）
+- ### 构建设计：${cmp
+      ? `客户已提供构建序列（${cmp.providedLength} aa${cmp.start != null && cmp.end != null ? `，估计对应全长 ${cmp.start}-${cmp.end} 位` : ''}，与全长一致性 ${cmp.identity}%）— 先评估该构建边界的合理性（与已有结构覆盖区间/结构域边界的匹配度），再给出微调建议（标签位置、端部微调、是否需稳定化突变）
+- 禁止无视客户已有构建而另给一套完全不同的边界；若现有构建存在明显缺陷（如包含无序区/缺失关键结构域/跨膜区未处理），需明确指出并给出具体调整区间`
+      : '基于结构域特征与覆盖空白，建议截短边界（引用具体区间号）、标签位置、是否需要点突变（如无序区删除/糖基化位点突变/稳定化突变）'}
 - ### 表达与纯化策略：推荐表达系统（基于物种与结构域类型）、纯化流程要点（含去垢剂选择若为膜蛋白）
 - ### 时间规划：Markdown 表格（阶段/预计时间/关键里程碑/风险点），总计给出一个现实的时间范围
 - 篇幅 400-600 字

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { LoaderCircle } from 'lucide-react'
 import { AppHeader } from '@/components/eval/app-header'
@@ -11,7 +11,9 @@ import { ProgressPanel } from '@/components/eval/progress-panel'
 import { ErrorPanel } from '@/components/eval/error-panel'
 import { ResultView } from '@/components/eval/result-view'
 import { HistoryDialog, RecentEvaluations } from '@/components/eval/history'
+import { LlmConfigPanel } from '@/components/eval/llm-config-panel'
 import { useEvaluationFlow } from '@/components/eval/use-evaluation-flow'
+import { fetchLlmConfig } from '@/components/eval/api'
 
 const viewMotion = {
   initial: { opacity: 0, y: 14 },
@@ -29,6 +31,28 @@ export default function Home() {
   const flow = useEvaluationFlow()
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyKey, setHistoryKey] = useState(0)
+  const [llmConfigOpen, setLlmConfigOpen] = useState(false)
+  const [engine, setEngine] = useState<{ summary: string; isBuiltin: boolean }>({
+    summary: 'Z.ai GLM-4.6（内置）',
+    isBuiltin: true,
+  })
+
+  // 首次加载读取 LLM 引擎状态（失败静默保持内置）
+  useEffect(() => {
+    let alive = true
+    fetchLlmConfig()
+      .then(d => {
+        if (alive) setEngine({ summary: d.engineSummary, isBuiltin: !d.active })
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const handleEngineChange = useCallback((summary: string, isBuiltin: boolean) => {
+    setEngine({ summary, isBuiltin })
+  }, [])
 
   /** 根据阶段计算 stepper 步数：0 输入 / 1 数据收集 / 2 分析生成 / 3-4 报告 */
   const step =
@@ -58,6 +82,8 @@ export default function Home() {
         onOpenHistory={() => setHistoryOpen(true)}
         onHome={handleNewEvaluation}
         canGoHome={flow.phase !== 'idle' && !flow.loadingHistoryJob}
+        onOpenLlmConfig={() => setLlmConfigOpen(true)}
+        engineIsBuiltin={engine.isBuiltin}
       />
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 sm:py-8">
@@ -122,7 +148,7 @@ export default function Home() {
         )}
       </main>
 
-      <AppFooter />
+      <AppFooter engineSummary={engine.summary} />
 
       <HistoryDialog
         open={historyOpen}
@@ -132,6 +158,12 @@ export default function Home() {
           setHistoryOpen(false)
           openHistoryJob(id)
         }}
+      />
+
+      <LlmConfigPanel
+        open={llmConfigOpen}
+        onOpenChange={setLlmConfigOpen}
+        onEngineChange={handleEngineChange}
       />
     </div>
   )
