@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { generateBatchReport, judgeTargetRelation } from './api'
-import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment } from './types'
+import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
 /** 主视图状态机：idle（输入）→ running（进度）→ done（结果）；error 单独处理 */
 export type Phase = 'idle' | 'running' | 'done' | 'error'
@@ -44,6 +44,8 @@ export interface BatchState {
   mergedError?: string
   /** 结果视图：merged = 合并报告（默认，关联时）；job = 各靶点数据 */
   view?: 'merged' | 'job'
+  /** 评估表序列归属（v1.10 — 批量条/合并报告展示「每条序列的去向」） */
+  sequenceAttribution?: SequenceAttribution[]
 }
 
 const POLL_INTERVAL_MS = 2000
@@ -104,6 +106,8 @@ export function useEvaluationFlow() {
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startedAtRef = useRef<number>(0)
   const failCountRef = useRef(0)
+  /** 上一次请求携带的 docx 原始序列（v1.10：关系判断归属 → 按靶点附构建序列） */
+  const docxSequencesRef = useRef<string[] | null>(null)
   const lastRequestsRef = useRef<EvaluateRequest[] | null>(null)
   const batchRef = useRef<BatchState | null>(null)
   const batchCancelRef = useRef(false)
@@ -228,6 +232,12 @@ export function useEvaluationFlow() {
         }
         try {
           const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
+          // 作业已从服务端消失（外部取消/删除/TTL 清理）→ 终止等待并按取消处理
+          // （否则 404 会被当作网络抖动无限重试，批量编排卡死）
+          if (res.status === 404 || res.status === 410) {
+            finish('canceled')
+            return
+          }
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
           const data = (await res.json()) as JobDetail
           fails = 0
@@ -268,13 +278,16 @@ export function useEvaluationFlow() {
     failCountRef.current = 0
     startTick()
 
-    // ── ① 靶点关系判断（失败降级为独立报告，不阻塞）──
+    // ── ① 靶点关系判断（含 v1.10 同源归并：系统序列比对 + 序列归属；失败降级为独立报告）──
     const uploadId = (requests[0]?.docxJobId ?? requests[0]?.uploadId ?? '').trim() || undefined
     const uniprots = requests.map(r => (r.uniprotFromDocx ?? r.uniprot ?? '').trim().toUpperCase()).filter(Boolean)
     let judgment: RelationJudgment | null = null
+    let attribution: SequenceAttribution[] | undefined
     if (uploadId && new Set(uniprots).size >= 2) {
       try {
-        judgment = await judgeTargetRelation({ uploadId, uniprots, goal: requests[0]?.goal })
+        const rel = await judgeTargetRelation({ uploadId, uniprots, goal: requests[0]?.goal })
+        judgment = rel.judgment
+        attribution = rel.sequenceAttribution
       } catch (e) {
         st.relationError = e instanceof Error ? e.message : '关系判断服务暂不可用'
       }
@@ -290,16 +303,34 @@ export function useEvaluationFlow() {
     }
     st.relationJudging = false
     st.relation = judgment
+    st.sequenceAttribution = attribution
     setBatch(snapshot())
 
     const related = judgment?.related === true
     const batchNote = !related && judgment ? buildBatchNote(judgment, requests.length) : undefined
+    // v1.10 按归属附构建序列：kind=construct 的序列 → 归属靶点的作业（服务端已验证
+    // 同一靶点 ≥85%，不会再走「疑似不同靶点」告警分支）；无归属时回退用户手选序列
+    const attachMap = new Map<string, string>()
+    const docxSeqs = docxSequencesRef.current
+    if (docxSeqs && attribution) {
+      for (const a of attribution) {
+        if (a.kind === 'construct' && a.uniprotId && a.index < docxSeqs.length && docxSeqs[a.index]) {
+          if (!attachMap.has(a.uniprotId)) attachMap.set(a.uniprotId, docxSeqs[a.index])
+        }
+      }
+    }
     // 关联 → deferred（数据收集后并入合并报告）；非关联 → 独立报告 + 批次说明
-    const reqs: EvaluateRequest[] = requests.map(r => ({
-      ...r,
-      batchNote,
-      options: { ...r.options, reportMode: related ? 'deferred' : 'single' },
-    }))
+    const reqs: EvaluateRequest[] = requests.map(r => {
+      const u = (r.uniprotFromDocx ?? r.uniprot ?? '').trim().toUpperCase()
+      const attributedSeq = u ? attachMap.get(u) : undefined
+      return {
+        ...r,
+        sequence: attributedSeq ?? r.sequence,
+        sequenceFromDocx: attributedSeq ?? r.sequenceFromDocx,
+        batchNote,
+        options: { ...r.options, reportMode: related ? 'deferred' : 'single' },
+      }
+    })
 
     // ── ② 2 并发滑动窗口执行（一个作业等 BLAST 时另一个先做数据检索）──
     let nextIndex = 0
@@ -398,11 +429,15 @@ export function useEvaluationFlow() {
     }
   }
 
-  /** 创建评估作业（单个 = 原有流程；多个 = v1.8 批量编排） */
-  const startEvaluation = async (requests: EvaluateRequest[]): Promise<StartResult> => {
+  /** 创建评估作业（单个 = 原有流程；多个 = v1.8 批量编排 + v1.10 同源归并） */
+  const startEvaluation = async (
+    requests: EvaluateRequest[],
+    opts?: { docxSequences?: string[] },
+  ): Promise<StartResult> => {
     const list = (requests ?? []).filter(Boolean)
     if (list.length === 0) return { ok: false, error: '未提供评估请求' }
     lastRequestsRef.current = list
+    docxSequencesRef.current = opts?.docxSequences ?? null
     setSubmitting(true)
     setSubmitError(null)
     setBatch(null)
@@ -472,13 +507,14 @@ export function useEvaluationFlow() {
     setSubmitError(null)
     setNetworkIssue(false)
     setBatch(null)
+    docxSequencesRef.current = null
   }, [clearTimers])
 
   /** 失败后重试（复用上一次请求参数） */
   const retry = useCallback(() => {
     const reqs = lastRequestsRef.current
     if (reqs && reqs.length) {
-      void startEvaluation(reqs)
+      void startEvaluation(reqs, { docxSequences: docxSequencesRef.current ?? undefined })
     } else {
       reset()
     }

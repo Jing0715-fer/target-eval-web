@@ -1,8 +1,9 @@
 /**
- * POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.8）
+ * POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.8；v1.10 增同源归并）
  * 输入 { uploadId, uniprots: string[] }（docx 多靶点）；
- * 拉取各 UniProt 简介后由 LLM 判断是否合并为一份报告。
- * 判断失败不阻塞：返回降级 judgment（related=false，error 说明）。
+ * 拉取各 UniProt 简介后：① 全长序列两两同源比对（确定性证据）② 评估表序列归属
+ * ③ LLM 综合判断是否合并为一份报告。序列一致性 ≥40% 的靶点对直接判定同源家族
+ * （LLM 不可否决 — 生物学上确定性事件）；判断失败不阻塞：降级 independent。
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
@@ -12,7 +13,8 @@ import { judgeTargetRelation, type RelationTargetBrief } from '@/lib/eval/relati
 import { getOwner } from '@/lib/eval/request-guard'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import { detectAntibody } from '@/lib/eval/antibody'
-import type { FormInsights, ParsedSequence, RelationJudgment } from '@/lib/eval/types'
+import { clusterHomologs, attributeSequences, HOMOLOG_MERGE_IDENTITY, type HomologTarget } from '@/lib/eval/homology'
+import type { FormInsights, ParsedSequence, RelationJudgment, SequenceAttribution } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -78,6 +80,29 @@ export async function POST(req: Request) {
     return brief
   }))
 
+  // v1.10 同源归并：全长序列两两比对（确定性证据）+ 评估表序列归属
+  // fetchUniprotInfo 有 LRU 缓存，此处二次拉取命中缓存（拿到完整 sequence）
+  const homologTargets: HomologTarget[] = []
+  for (const id of uniprots.slice(0, 6)) {
+    try {
+      const info = await fetchUniprotInfo(id)
+      if (info?.sequence && info.sequence.length >= 40) {
+        homologTargets.push({ uniprotId: info.uniprotId, sequence: info.sequence })
+      }
+    } catch { /* 单靶点失败仅降级该靶点 */ }
+  }
+  const { pairs: homologPairs } = clusterHomologs(homologTargets)
+  const hasDeterministicFamily = homologPairs.some(p => p.identity >= HOMOLOG_MERGE_IDENTITY)
+
+  let sequenceAttribution: SequenceAttribution[] = []
+  if (sequences.length && homologTargets.length) {
+    // 完整传入（含过短/空序列）— attributeSequences 内部容错，保持与 parsed.sequences 的下标对应
+    sequenceAttribution = attributeSequences(
+      sequences.map(s => ({ header: s.header, seq: s.seq, length: s.length })),
+      homologTargets,
+    )
+  }
+
   // 评估表中的序列（含抗体角色）作为关系判断的背景证据（非独立靶点，不传原始序列）
   const sequenceEvidence: Array<{ header?: string; length: number; role: 'antibody' | 'antigen' }> = []
   for (const s of sequences.slice(0, 4)) {
@@ -95,7 +120,22 @@ export async function POST(req: Request) {
     sequences: sequenceEvidence,
     goal: body.goal,
     insights: insights ?? { goals: goalHints, scientificQuestions: [], source: 'regex' },
+    homologEvidence: homologPairs.length ? homologPairs : undefined,
   })
 
-  return NextResponse.json({ ok: true, judgment })
+  // 确定性覆盖：序列一致性 ≥40% 的靶点对为同源家族（LLM 判为非关联时覆盖；
+  // LLM 判为 complex/fusion 等物理关联时保留 LLM 类型，仅补充同源证据）
+  if (hasDeterministicFamily) {
+    judgment.homologPairs = homologPairs
+    if (!judgment.related) {
+      const topPair = homologPairs.filter(p => p.identity >= HOMOLOG_MERGE_IDENTITY).sort((x, y) => y.identity - x.identity)[0]
+      judgment.related = true
+      judgment.relationType = 'homologous'
+      judgment.confidence = 'high'
+      judgment.rationale = `系统全长序列比对确认同源家族（${topPair.a} 与 ${topPair.b} 一致性 ${topPair.identity}%）${judgment.rationale ? `；${judgment.rationale}` : ''}`
+      judgment.strategy = judgment.strategy || '同源家族合并评估：任一成员的已有结构与构建经验可直接指导其他成员'
+    }
+  }
+
+  return NextResponse.json({ ok: true, judgment, sequenceAttribution })
 }

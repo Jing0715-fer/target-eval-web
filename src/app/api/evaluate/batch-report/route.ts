@@ -15,7 +15,9 @@ import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml } from '@/lib/eval/report-merged'
 import { getEngineSummary } from '@/lib/eval/llm-provider'
-import type { FormInsights, ParsedImage, RelationJudgment } from '@/lib/eval/types'
+import { fetchUniprotInfo } from '@/lib/eval/uniprot'
+import { attributeSequences } from '@/lib/eval/homology'
+import type { FormInsights, ParsedImage, ParsedSequence, RelationJudgment, SequenceAttribution } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -26,6 +28,30 @@ interface BatchReportBody {
   uploadId?: string
   relation?: RelationJudgment
   goal?: string
+}
+
+/** 服务端重算评估表序列归属（不信任前端透传；fetchUniprotInfo LRU 缓存，二次拉取快） */
+async function recomputeAttribution(
+  uploadDir: string,
+  targets: Array<{ uniprotId?: string }>,
+): Promise<SequenceAttribution[]> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(uploadDir, 'parsed.json'), 'utf-8')) as { sequences?: ParsedSequence[] }
+    const sequences = (parsed.sequences ?? []).map(s => ({ header: s.header, seq: s.seq, length: s.length }))
+    if (!sequences.length) return []
+    const withSeq: Array<{ uniprotId: string; sequence: string }> = []
+    for (const t of targets) {
+      if (!t.uniprotId) continue
+      try {
+        const info = await fetchUniprotInfo(t.uniprotId)
+        if (info?.sequence && info.sequence.length >= 40) withSeq.push({ uniprotId: info.uniprotId, sequence: info.sequence })
+      } catch { /* 单靶点失败仅降级 */ }
+    }
+    if (!withSeq.length) return []
+    return attributeSequences(sequences, withSeq)
+  } catch {
+    return []
+  }
 }
 
 function isRelationJudgment(v: unknown): v is RelationJudgment {
@@ -65,11 +91,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '完成的评估作业不足 2 个，无法生成合并报告' }, { status: 400 })
   }
 
-  // 上传共享数据（insights + 图片）
+  // 上传共享数据（insights + 图片 + 序列归属）
   const uploadId = body.uploadId?.trim() || undefined
   let insights: FormInsights | null = null
   let images: ParsedImage[] = []
   let assetDir = ''
+  let sequenceAttribution: SequenceAttribution[] = []
   if (uploadId && isUploadId(uploadId) && (await uploadOwnedBy(uploadId, owner))) {
     const uploadDir = path.join(process.cwd(), 'db', 'reports', uploadId)
     assetDir = path.join(uploadDir, 'assets')
@@ -81,10 +108,12 @@ export async function POST(req: Request) {
       const data = JSON.parse(await fs.readFile(path.join(uploadDir, 'insights.json'), 'utf-8')) as FormInsights
       if (Array.isArray(data.goals)) insights = data
     } catch { /* insights 可选 */ }
+    // v1.10：序列归属服务端重算（评估表序列的去向在合并报告中显性呈现）
+    sequenceAttribution = await recomputeAttribution(uploadDir, targets)
   }
 
   // LLM 生成合并报告（三段式）
-  const generated = await generateMergedReport({ targets, relation, goal: body.goal, insights, images })
+  const generated = await generateMergedReport({ targets, relation, goal: body.goal, insights, images, sequenceAttribution })
 
   // 落库 + HTML 落盘
   const record = await db.batchReport.create({
@@ -92,6 +121,7 @@ export async function POST(req: Request) {
       jobIds: JSON.stringify(jobIds),
       uploadId: uploadId ?? null,
       relation: JSON.stringify(relation),
+      sequenceAttribution: sequenceAttribution.length ? JSON.stringify(sequenceAttribution) : null,
       markdown: generated.fullMarkdown?.trim() || null,
       ownerKey: owner.key,
       ownerMask: owner.mask,
@@ -111,6 +141,7 @@ export async function POST(req: Request) {
       assetDir,
       batchReportId: record.id,
       engineSummary,
+      sequenceAttribution,
     })
     const dir = path.join(process.cwd(), 'db', 'reports', record.id)
     await fs.mkdir(dir, { recursive: true })
@@ -128,6 +159,7 @@ export async function POST(req: Request) {
       id: record.id,
       jobIds,
       relation,
+      sequenceAttribution,
       markdown: generated.fullMarkdown,
       llmOk: generated.ok,
       errors: generated.errors,
@@ -164,8 +196,10 @@ export async function GET(req: Request) {
 
   let jobIds: string[] = []
   let relation: unknown = null
+  let sequenceAttribution: SequenceAttribution[] | null = null
   try { jobIds = JSON.parse(record.jobIds) } catch { /* ignore */ }
   try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
+  try { sequenceAttribution = record.sequenceAttribution ? JSON.parse(record.sequenceAttribution) : null } catch { /* ignore */ }
 
   return NextResponse.json({
     ok: true,
@@ -173,6 +207,7 @@ export async function GET(req: Request) {
       id: record.id,
       jobIds,
       relation,
+      sequenceAttribution,
       markdown: record.markdown,
       uploadId: record.uploadId,
       createdAt: record.createdAt,

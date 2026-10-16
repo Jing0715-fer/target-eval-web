@@ -207,12 +207,13 @@ export interface JobSummary {
   batchNote?: string
 }
 
-// ─── 靶点关系判断（v1.8 批量评估）────────────────────────────────
+// ─── 靶点关系判断（v1.8 批量评估；v1.10 增 homologous）────────────
 
 export type TargetRelationType =
   | 'complex'          // 复合物亚基：共表达/共纯化解析复合物结构
   | 'antibody-antigen' // 抗体-抗原对：Fab/scFv 与靶抗原复合物
   | 'fusion'           // 融合构建：同一构建中串联多个结构域
+  | 'homologous'       // 同源蛋白家族（v1.10）：直系/旁系同源或同一蛋白变体 — 家族级合并评估
   | 'pathway'          // 同通路/同疾病关联：生物学功能相关但非物理复合
   | 'independent'      // 相互独立的项目
   | 'other'            // 其他关联（LLM 文本说明）
@@ -229,6 +230,35 @@ export interface RelationJudgment {
   strategy: string
   /** 判断失败时前端降级为「未判断」 */
   error?: string
+  /** 家族序列一致性证据（v1.10 系统比对，供合并报告矩阵/展示；LLM 判断不依赖但引用） */
+  homologPairs?: HomologPair[]
+}
+
+export interface HomologPair {
+  a: string
+  b: string
+  /** 一致性估计（0-100；不同源对为 0） */
+  identity: number
+  method: string
+}
+
+/** 评估表序列 → 靶点归属（v1.10 同源归并：序列不再静默丢弃，全部显性呈现） */
+export interface SequenceAttribution {
+  /** parsed.sequences 中的下标（稳定标识） */
+  index: number
+  header: string
+  length: number
+  /** 归属判定 */
+  kind: 'construct' | 'homolog' | 'antibody' | 'unmatched'
+  /** 最佳匹配靶点（kind ≠ antibody/unmatched 时存在） */
+  uniprotId?: string
+  /** 与最佳匹配靶点的一致性（0-100） */
+  identity?: number
+  /** 对应全长区间（构建序列且锚定成功时存在，1-based） */
+  start?: number | null
+  end?: number | null
+  /** 展示用说明 */
+  note: string
 }
 
 /** 关系类型 → 中文描述（前后端共用） */
@@ -237,6 +267,7 @@ export function describeRelationType(t: TargetRelationType): string {
     case 'complex': return '复合物亚基（物理相互作用）'
     case 'antibody-antigen': return '抗体-抗原配对'
     case 'fusion': return '融合构建（多结构域串联）'
+    case 'homologous': return '同源蛋白家族（直系/旁系同源）'
     case 'pathway': return '同通路/功能相关'
     case 'independent': return '相互独立'
     case 'other': return '其他关联'

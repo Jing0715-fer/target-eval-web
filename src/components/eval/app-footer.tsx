@@ -12,7 +12,7 @@ export function AppFooter({ engineSummary }: { engineSummary?: string }) {
           <span className="mx-1.5" aria-hidden>·</span>
           Protein Structure Feasibility Evaluation
           <span className="mx-1.5" aria-hidden>·</span>
-          v1.9
+          v1.10
         </div>
         <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
           数据源：UniProt · RCSB PDB · PDBe · PubMed · NCBI BLAST — LLM 生成的评估分析仅供参考

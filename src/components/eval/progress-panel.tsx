@@ -105,7 +105,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
   const relationJudging = batch?.relationJudging === true
   const merging = batch?.merging === true
   const message = relationJudging
-    ? '正在分析批次内靶点的关联关系（LLM 判断：复合物 / 抗体-抗原 / 融合构建 / 独立项目）…'
+    ? '正在分析批次内靶点的关联关系（系统序列比对 + LLM 判断：同源家族 / 复合物 / 抗体-抗原 / 融合构建 / 独立项目）…'
     : merging
       ? '靶点数据已就绪，正在生成合并评估报告（含关系分析章节）…'
       : isQueued

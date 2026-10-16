@@ -9,7 +9,7 @@
  */
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
-import type { FormInsights, RelationJudgment, TargetRelationType } from './types'
+import type { FormInsights, HomologPair, RelationJudgment, TargetRelationType } from './types'
 
 /** 判断输入中的单个靶点简介 */
 export interface RelationTargetBrief {
@@ -37,6 +37,8 @@ export interface RelationJudgeInput {
   goal?: string
   /** 评估表 LLM 解析要点 */
   insights?: FormInsights | null
+  /** 系统序列一致性比对证据（v1.10 — 靶点两两一致性，确定性数字） */
+  homologEvidence?: HomologPair[]
 }
 
 const SYSTEM = `你是资深结构生物学项目负责人（CRO 评估视角）。客户提交的同一份评估表中包含多个待评估靶点，你需要判断这些靶点之间是否存在需要合并分析的关联关系。
@@ -46,15 +48,17 @@ const SYSTEM = `你是资深结构生物学项目负责人（CRO 评估视角）
   1. complex — 复合物亚基：这些蛋白构成已知物理复合物，结构解析需共表达/共纯化/组装后一起分析
   2. antibody-antigen — 抗体-抗原配对：批次中同时存在抗体序列与其靶抗原，目标是用抗体辅助抗原结晶（Fab 复合物）或 Cryo-EM 配对
   3. fusion — 融合构建：多个结构域/蛋白在同一多肽构建中串联（如靶蛋白-Fc 融合、双特异性抗体的两臂）
-  4. other（related）— 客户目标文本明确要求把多个靶点作为一个项目合并分析
+  4. homologous — 同源蛋白家族：直系同源（不同物种的同一基因，如人/小鼠的同一蛋白）、近缘旁系同源（同一基因家族的近缘成员，如受体激酶家族中同一亚家族的成员）、或同一蛋白的变体/突变体/剪接异构体。任一家族成员的已有结构可直接指导其他成员的构建边界设计与结晶条件借鉴（折叠与核心结构域高度保守），应作为同一项目合并为家族级评估报告
+  5. other（related）— 客户目标文本明确要求把多个靶点作为一个项目合并分析
 - related=false 的情形：
   1. independent — 相互独立的项目：各靶点分别表达纯化、分别解析结构，互不依赖
   2. pathway — 同通路/同疾病功能相关但物理上独立解析：生物学上有关联，结构解析层面仍是独立项目
-- 仅凭「都是激酶」「都在同一通路」不构成 related=true — 需要物理复合/配对/融合或客户明确要求合并
+- 「同源家族」与「仅同一通路」的界限：EGFR 与 HER2（同亚家族受体激酶，序列一致性 40%+）是 homologous；但两个毫不相关的激酶（如 CDK 与 EGFR，仅同属激酶超家族、一致性 <25%）只是 pathway/independent — 判读时优先参考系统提供的「序列一致性比对」确定性证据（≥40% 为家族级同源）与蛋白名/基因名的家族关系
+- 仅凭「都是激酶」「都在同一通路」这类泛泛关联不构成 related=true — 需要物理复合/配对/融合/同源家族或客户明确要求合并
 - 判断存疑时倾向 related=false（分别报告更稳妥，且报告中会注明功能关联）
 
 输出严格 JSON（不要 markdown 代码块包裹）：
-{"related": true|false, "relationType": "complex"|"antibody-antigen"|"fusion"|"pathway"|"independent"|"other", "confidence": "high"|"medium"|"low", "rationale": "判断依据（引用靶点名/序列头/客户目标中的具体证据，≤300 字）", "strategy": "对结构解析策略的影响：related 时给出复合物共表达/组装策略要点，无关时说明各靶点独立推进的注意点（≤200 字）"}`
+{"related": true|false, "relationType": "complex"|"antibody-antigen"|"fusion"|"homologous"|"pathway"|"independent"|"other", "confidence": "high"|"medium"|"low", "rationale": "判断依据（引用靶点名/序列头/客户目标/序列一致性数字中的具体证据，≤300 字）", "strategy": "对结构解析策略的影响：related 时给出合并分析策略要点（同源家族：优先解析哪个成员/家族证据互用/构建边界借鉴），无关时说明各靶点独立推进的注意点（≤200 字）"}`
 
 function extractJson(text: string): Record<string, unknown> | null {
   const cleaned = text.replace(/```json/gi, '```').replace(/```/g, '').trim()
@@ -68,7 +72,7 @@ function extractJson(text: string): Record<string, unknown> | null {
   }
 }
 
-const VALID_TYPES: TargetRelationType[] = ['complex', 'antibody-antigen', 'fusion', 'pathway', 'independent', 'other']
+const VALID_TYPES: TargetRelationType[] = ['complex', 'antibody-antigen', 'fusion', 'homologous', 'pathway', 'independent', 'other']
 
 function sanitizeType(v: unknown): TargetRelationType {
   return typeof v === 'string' && (VALID_TYPES as string[]).includes(v) ? (v as TargetRelationType) : 'other'
@@ -127,6 +131,11 @@ export async function judgeTargetRelation(input: RelationJudgeInput, signal?: Ab
   const ctxLines: string[] = []
   ctxLines.push('【待评估靶点列表（关系判断的主体 — 判断它们之间是否需要合并分析）】')
   ctxLines.push(targetLines.join('\n'))
+  if (input.homologEvidence?.length) {
+    ctxLines.push('')
+    ctxLines.push('【系统序列一致性比对（确定性证据 — 全长序列两两比对，≥40% 判定为家族级同源）】')
+    ctxLines.push(input.homologEvidence.map(p => `${p.a} ↔ ${p.b}: ${p.identity}%${p.identity >= 40 ? '（家族级同源）' : p.identity >= 30 ? '（弱同源信号）' : ''}`).join('\n'))
+  }
   if (input.sequences?.length) {
     ctxLines.push('')
     ctxLines.push('【评估表中的序列（背景证据，非独立评估靶点 — 仅用于理解项目上下文）】')
@@ -161,14 +170,16 @@ export async function judgeTargetRelation(input: RelationJudgeInput, signal?: Ab
   let relationType = sanitizeType(obj.relationType)
   // 一致性校验：related=true 时类型不应是 independent/pathway，反之亦然
   if (related && (relationType === 'independent' || relationType === 'pathway')) relationType = 'other'
-  if (!related && ['complex', 'antibody-antigen', 'fusion'].includes(relationType)) {
+  if (!related && ['complex', 'antibody-antigen', 'fusion', 'homologous'].includes(relationType)) {
     // LLM 判了关联类型但 related=false → 信任 related=false，类型归为独立/通路二选一
     relationType = 'independent'
   }
+  // homologous 语义上必然 related（同源家族应合并评估）
+  const finalRelated = related || relationType === 'homologous'
   const confidence = obj.confidence === 'high' || obj.confidence === 'medium' ? obj.confidence : 'low'
   const rationale = sanitizeText(obj.rationale, 300)
   const strategy = sanitizeText(obj.strategy, 200)
   if (!rationale) return fallbackJudgment('LLM 返回缺少判断依据')
 
-  return { related, relationType, confidence, rationale, strategy }
+  return { related: finalRelated, relationType, confidence, rationale, strategy, homologPairs: input.homologEvidence }
 }

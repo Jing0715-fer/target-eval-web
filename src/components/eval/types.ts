@@ -91,7 +91,28 @@ export interface UploadResponse {
 
 // ─── 靶点关系判断（v1.8 批量评估）───────────────────────────
 
-export type TargetRelationType = 'complex' | 'antibody-antigen' | 'fusion' | 'pathway' | 'independent' | 'other'
+export type TargetRelationType = 'complex' | 'antibody-antigen' | 'fusion' | 'homologous' | 'pathway' | 'independent' | 'other'
+
+/** 家族序列一致性证据（v1.10 服务端比对，随 judgment 返回） */
+export interface HomologPair {
+  a: string
+  b: string
+  identity: number
+  method: string
+}
+
+/** 评估表序列归属（v1.10） */
+export interface SequenceAttribution {
+  index: number
+  header: string
+  length: number
+  kind: 'construct' | 'homolog' | 'antibody' | 'unmatched'
+  uniprotId?: string
+  identity?: number
+  start?: number | null
+  end?: number | null
+  note: string
+}
 
 export interface RelationJudgment {
   /** 是否建议合并为一份报告 */
@@ -104,6 +125,8 @@ export interface RelationJudgment {
   strategy: string
   /** 判断失败时的降级说明 */
   error?: string
+  /** 家族序列一致性证据（v1.10） */
+  homologPairs?: HomologPair[]
 }
 
 /** 关系类型 → 中文描述 + 图标语义（前端展示用） */
@@ -112,6 +135,7 @@ export function describeRelationType(t: TargetRelationType): string {
     case 'complex': return '复合物亚基（物理相互作用）'
     case 'antibody-antigen': return '抗体-抗原配对'
     case 'fusion': return '融合构建（多结构域串联）'
+    case 'homologous': return '同源蛋白家族（直系/旁系同源）'
     case 'pathway': return '同通路/功能相关'
     case 'independent': return '相互独立'
     case 'other': return '其他关联'
@@ -123,6 +147,8 @@ export interface BatchReportInfo {
   id: string
   jobIds: string[]
   relation: RelationJudgment
+  /** 评估表序列归属（v1.10，历史报告可能缺失） */
+  sequenceAttribution?: SequenceAttribution[] | null
   markdown: string
   llmOk?: boolean
   errors?: string[]

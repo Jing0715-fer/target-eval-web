@@ -12,7 +12,7 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown } from './report-html'
-import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type LiteratureItem, type MethodStats, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores } from './types'
+import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution } from './types'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
 
@@ -122,6 +122,8 @@ export interface MergedReportInput {
   goal?: string
   insights?: FormInsights | null
   images: ParsedImage[]
+  /** 评估表序列归属（v1.10：构建序列随靶点评估、同源/未匹配序列显性呈现） */
+  sequenceAttribution?: SequenceAttribution[]
 }
 
 export interface GeneratedMergedReport {
@@ -140,6 +142,22 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
   digestLines.push(`关系判定: ${relName}（置信度 ${relation.confidence}）`)
   digestLines.push(`判定依据: ${relation.rationale}`)
   digestLines.push(`策略要点: ${relation.strategy}`)
+  const pairs = relation.homologPairs?.filter(p => p.identity > 0) ?? []
+  if (relation.relationType === 'homologous' || pairs.length) {
+    digestLines.push('')
+    digestLines.push('【家族序列一致性（系统全长序列两两比对 — 确定性证据，≥40% 判为家族级同源）】')
+    digestLines.push(pairs.length
+      ? pairs.map(p => `${p.a} ↔ ${p.b}: ${p.identity}%${p.identity >= 40 ? '（家族级同源）' : p.identity >= 30 ? '（弱同源信号）' : '（非同源）'}`).join('\n')
+      : '（未获得可比对的序列数据）')
+  }
+  if (input.sequenceAttribution?.length) {
+    digestLines.push('')
+    digestLines.push('【评估表序列归属（系统比对 — 每条序列的去向，无遗漏）】')
+    digestLines.push(input.sequenceAttribution.map((a, i) => {
+      const tag = a.kind === 'construct' ? '客户构建' : a.kind === 'homolog' ? '同源家族成员' : a.kind === 'antibody' ? '抗体序列' : '未匹配'
+      return `${i + 1}. ${a.length} aa${a.header ? `（${a.header.slice(0, 50)}）` : ''} → ${tag}${a.uniprotId ? ` ${a.uniprotId}` : ''}${a.identity != null ? `，一致性 ${a.identity}%` : ''}${a.kind === 'construct' && a.start != null && a.end != null ? `，对应区间 ${a.start}-${a.end}` : ''}`
+    }).join('\n'))
+  }
   digestLines.push('')
   digestLines.push('【客户目标】')
   digestLines.push(input.goal?.trim() || input.insights?.goals?.slice(0, 3).map(elideSequenceRuns).join('；') || '（未提供明确目标 — 按通用结构解析可行性评估）')
@@ -174,14 +192,14 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
   const partA = await callPart('A', `撰写合并报告的以下两章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 执行摘要
-- 3-4 段：第一段给出批次总体结论（这些靶点作为整体项目的结构解析可行性、推荐技术路线）；第二段逐个靶点一句话概括其结构研究现状（引用具体数字）；第三段概括客户目标的达成路径与整体风险；第四段一句话给出下一步建议
+- 3-4 段：第一段给出批次总体结论（这些靶点作为整体项目的结构解析可行性、推荐技术路线${relation.relationType === 'homologous' ? '；同源家族批次需说明家族级结论（任一成员的结构证据对整个家族的指导意义）' : ''}）；第二段逐个靶点一句话概括其结构研究现状（引用具体数字）；第三段概括客户目标的达成路径与整体风险；第四段一句话给出下一步建议
 - 篇幅 400-600 字
 
 ## 靶点关系分析
 本报告的核心章节 — 客户需要理解这些靶点为什么合并评估：
-- ### 关系判定与证据：明确说明判定为「${relName}」的依据（引用数据上下文中的具体证据：蛋白名/功能注释/客户目标/序列信息）
-- ### 生物学意义：这种关系的生物学背景（复合物的组装方式/抗体-抗原结合模式/融合构建的设计意图等，基于注释与文献，禁止编造）
-- ### 对结构解析策略的影响：${relation.relationType === 'complex' ? '复合物亚基的共表达/共纯化策略、化学计量比、组装验证' : relation.relationType === 'antibody-antigen' ? '抗体（Fab/scFv）与抗原的复合物组装、抗体辅助结晶或 Cryo-EM 配对策略' : relation.relationType === 'fusion' ? '融合构建的边界设计、linker 选择、各结构域的折叠独立性' : '关联项目协同推进的要点'}
+- ### 关系判定与证据：明确说明判定为「${relName}」的依据${pairs.length ? '（引用系统序列一致性比对的具体数字 + 蛋白名/基因/物种证据）' : '（引用数据上下文中的具体证据：蛋白名/功能注释/客户目标/序列信息）'}
+- ### 生物学意义：${relation.relationType === 'homologous' ? '同源家族的生物学背景：直系/旁系同源关系的判定依据（一致性水平/物种分布/基因名）、家族保守区域（催化残基/结构域）与变异区域的分布、物种差异对结构与功能的影响（基于注释，禁止编造）' : '这种关系的生物学背景（复合物的组装方式/抗体-抗原结合模式/融合构建的设计意图等，基于注释与文献，禁止编造）'}
+- ### 对结构解析策略的影响：${relation.relationType === 'complex' ? '复合物亚基的共表达/共纯化策略、化学计量比、组装验证' : relation.relationType === 'antibody-antigen' ? '抗体（Fab/scFv）与抗原的复合物组装、抗体辅助结晶或 Cryo-EM 配对策略' : relation.relationType === 'fusion' ? '融合构建的边界设计、linker 选择、各结构域的折叠独立性' : relation.relationType === 'homologous' ? '家族证据互用原则：任一成员已有结构可直接指导其他成员的构建边界设计与结晶条件借鉴；建议优先解析的家族成员（结构数据最丰富/表达最成熟者先行）；家族保守区与可变区的构建边界策略；如有序列归属中的同源序列，说明其与已选靶点的家族关系' : '关联项目协同推进的要点'}
 - 篇幅 500-800 字`)
 
   const partB = await callPart('B', `撰写报告的以下章节（以 ## 开头，顺序输出，不要输出其他章节）：
@@ -190,16 +208,16 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 对批次中每个靶点输出一个小节（### 靶点名），每节包含：
 - 一句话结论（该靶点结构解析可行性如何、推荐方法）
 - 已有结构研究概况（引用 PDB 数量/方法分布/最佳分辨率/覆盖率/高频配体）
-- 主要风险与注意点（构象柔性/覆盖空白/构建边界问题，基于数据判断）
+- ${relation.relationType === 'homologous' ? '家族内定位（与其他成员的一致性水平、在家族中的结构研究成熟度、可从哪些成员借鉴构建经验）' : '主要风险与注意点（构象柔性/覆盖空白/构建边界问题，基于数据判断）'}
 - 篇幅每靶点 300-450 字
 
-要求：各靶点篇幅均衡；数据引用与数据摘要一致；BLAST 跳过/失败的靶点如实说明，不要虚构同源结构`)
+要求：各靶点篇幅均衡；数据引用与数据摘要一致；BLAST 跳过/失败的靶点如实说明，不要虚构同源结构${input.sequenceAttribution?.some(a => a.kind === 'construct') ? '；已归属为客户构建的序列（见序列归属）在对应靶点小节中说明构建边界与全长区间的对应关系' : ''}`)
 
   const partC = await callPart('C', `撰写报告的以下两章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 整合可行性与实验策略
 - ### 跨靶点对比矩阵：用 Markdown 表格对比各靶点（行：靶点/PDB 数量/最佳分辨率/覆盖率/总体评分/推荐方法/主要风险）
-- ### 整合实验方案：${relation.relationType === 'complex' ? '复合物共表达与组装策略（共表达比例/纯化顺序/组装验证 SEC-MALS）、备选方案（分开表达后体外组装）' : relation.relationType === 'antibody-antigen' ? '抗体-抗原复合物制备（Fab 酶切/亲和纯化/复合物组装与纯化）、抗体辅助结晶 vs Cryo-EM 的选择' : relation.relationType === 'fusion' ? '融合构建表达纯化要点与各结构域独立对照实验的必要性' : '各靶点独立推进的资源配置与优先级排序建议'}
+- ### 整合实验方案：${relation.relationType === 'complex' ? '复合物共表达与组装策略（共表达比例/纯化顺序/组装验证 SEC-MALS）、备选方案（分开表达后体外组装）' : relation.relationType === 'antibody-antigen' ? '抗体-抗原复合物制备（Fab 酶切/亲和纯化/复合物组装与纯化）、抗体辅助结晶 vs Cryo-EM 的选择' : relation.relationType === 'fusion' ? '融合构建表达纯化要点与各结构域独立对照实验的必要性' : relation.relationType === 'homologous' ? '家族实验策略：优先表达/解析哪个家族成员（结构数据最丰富、覆盖最完整者先行作模板）、其余成员的构建边界借鉴方案（保守核心 + 可变区处理）、物种选择建议（表达系统兼容性与序列一致性的权衡）、若需全部解析则给优先级排序' : '各靶点独立推进的资源配置与优先级排序建议'}
 - ### 时间规划：Markdown 表格（阶段/预计时间/关键里程碑/风险点）
 - 篇幅 500-800 字
 
@@ -230,6 +248,8 @@ export interface MergedHtmlInput {
   assetDir: string
   batchReportId: string
   engineSummary: string
+  /** 评估表序列归属（v1.10） */
+  sequenceAttribution?: SequenceAttribution[]
 }
 
 /** 图片内嵌（预算：≤6 张、总 ≤4MB，gel/sec 优先） */
@@ -255,6 +275,53 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const relName = describeRelationType(relation.relationType)
   const dateStr = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
   const embedded = await embedImages(input.images, input.assetDir)
+
+  // v1.10 同源证据：一致性矩阵（下三角）与序列归属表（确定性数据，模板直出）
+  const pairMap = new Map<string, number>()
+  for (const p of relation.homologPairs ?? []) pairMap.set(`${p.a}|${p.b}`, p.identity)
+  const getPair = (a: string, b: string) => pairMap.get(`${a}|${b}`) ?? pairMap.get(`${b}|${a}`)
+  const isHomologousBatch = relation.relationType === 'homologous'
+  const matrixHtml = (isHomologousBatch || relation.homologPairs?.some(p => p.identity > 0)) && targets.length >= 2 ? `
+  <section class="sec" id="homolog">
+    <h2>${isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性'}<span class="sec-en">Pairwise Identity</span></h2>
+    <p class="note">系统对全部靶点全长序列两两比对（种子-对角链算法）得到的确定性一致性估计；≥40% 判为家族级同源，任一成员的已有结构可直接指导其他成员的构建设计。</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th></th>${targets.map(t => `<th>${esc(t.uniprotId ?? t.label)}</th>`).join('')}</tr></thead>
+      <tbody>${targets.map((row, i) => `<tr><th style="background:#f5f5f4;color:#1c1917">${esc(row.uniprotId ?? row.label)}</th>${targets.map((col, j) => {
+        if (i === j) return '<td class="num">—</td>'
+        if (j < i) {
+          const v = getPair(row.uniprotId ?? row.label, col.uniprotId ?? col.label)
+          return `<td class="num">${v != null ? v + '%' : '—'}</td>`
+        }
+        return '<td class="num" style="color:#d6d3d1">·</td>'
+      }).join('')}</tr>`).join('')}</tbody>
+    </table></div>
+  </section>` : ''
+
+  const attrKindText: Record<SequenceAttribution['kind'], string> = {
+    construct: '客户构建（已并入评估）',
+    homolog: '同源家族成员',
+    antibody: '抗体序列（背景证据）',
+    unmatched: '未匹配',
+  }
+  const attrRows = (input.sequenceAttribution ?? []).map((a, i) => `
+      <tr>
+        <td class="num">${i + 1}</td>
+        <td class="t-title">${esc(a.header ? a.header.slice(0, 60) : '（未命名序列）')}</td>
+        <td class="num">${a.length}</td>
+        <td>${a.uniprotId ? `<a href="https://www.uniprot.org/uniprotkb/${a.uniprotId}" target="_blank" rel="noopener">${a.uniprotId}</a>` : '—'}</td>
+        <td class="num">${a.identity != null ? a.identity + '%' : '—'}</td>
+        <td>${esc(attrKindText[a.kind])}${a.kind === 'construct' && a.start != null && a.end != null ? `（全长 ${a.start}-${a.end}）` : ''}</td>
+      </tr>`).join('')
+  const attributionHtml = input.sequenceAttribution?.length ? `
+  <section class="sec" id="attribution">
+    <h2>评估表序列归属<span class="sec-en">Sequence Attribution</span></h2>
+    <p class="note">评估表中每条序列经系统比对后的去向：同一靶点（一致性 ≥85%）的序列已作为客户构建并入对应靶点的评估（构建边界分析）；同源（35–85%）标注为家族成员；抗体序列作为背景证据；其余为未匹配。</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>#</th><th>序列</th><th>长度(aa)</th><th>最佳匹配</th><th>一致性</th><th>归属</th></tr></thead>
+      <tbody>${attrRows}</tbody>
+    </table></div>
+  </section>` : ''
 
   const targetMeta = targets.map(t => `
     <div class="tgt-card">
@@ -363,6 +430,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .fig-tag { display:inline-block; font-size:10.5px; padding:1px 8px; border-radius:3px; margin-right:8px; font-family:ui-monospace,Menlo,monospace; }
   .fig-gel { background:#fef2f2; color:#b91c1c; } .fig-sec { background:#eff6ff; color:#1d4ed8; } .fig-other { background:#f5f5f4; color:var(--sub); } .fig-ai { background:#f0fdfa; color:#0f766e; border:1px solid #99f6e4; }
   .warn-box { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:4px; padding:12px 16px; font-size:12.5px; margin:14px 0; }
+  .note { font-size:12.5px; color:#57534e; background:#f7f6f3; border-left:3px solid #a8a29e; padding:8px 14px; margin:10px 0; border-radius:0 4px 4px 0; }
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:ui-monospace,Menlo,monospace; }
   @media print { body { background:#fff; } .page { padding:24px 8px; } .pdb-fold { page-break-inside:avoid; } }
   @media (max-width:640px) { .page { padding:28px 18px; } .rpt-title { font-size:20px; } }
@@ -398,6 +466,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     <ol>
       <li><a href="#llm">合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
       <li><a href="#matrix">跨靶点对比矩阵</a></li>
+      ${matrixHtml ? '<li><a href="#homolog">' + (isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性') + '</a></li>' : ''}
+      ${attributionHtml ? '<li><a href="#attribution">评估表序列归属</a></li>' : ''}
       <li><a href="#pdbs">各靶点 PDB 结构</a></li>
       ${embedded.length ? '<li><a href="#assets">客户实验数据</a></li>' : ''}
     </ol>
@@ -417,6 +487,9 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <tbody>${matrixRows}</tbody>
     </table></div>
   </section>
+
+  ${matrixHtml}
+  ${attributionHtml}
 
   <section class="sec" id="pdbs">
     <h2>三、各靶点 PDB 结构<span class="sec-en">Structures by Target</span></h2>

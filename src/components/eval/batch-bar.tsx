@@ -32,6 +32,7 @@ export interface BatchBarProps {
  * v1.8：关系判定横幅（关联 → 合并报告按钮；独立 → 说明banner）+ 并发窗口双靶点进行中。
  * v1.9：切换区醒目化（用户反馈「UI 不太明显、点击看不出切换」）—
  *  「切换靶点」标签行 + 当前查看徽标（ID·蛋白名）+ 更大 chips（激活态 Eye/查看中标记）。
+ * v1.10：同源家族横幅（青色系 + 一致性徽标）+ 序列归属摘要（构建已并入 N 靶点）。
  */
 export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJobLabel }: BatchBarProps) {
   if (batch.items.length <= 1 && !batch.mergedReport) return null
@@ -69,11 +70,11 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
         </span>
       </div>
 
-      {/* 关系判定横幅（v1.8） */}
+      {/* 关系判定横幅（v1.8；v1.10 同源家族青色系） */}
       {batch.relationJudging && (
         <div className="flex items-center gap-2 rounded-md border border-stone-200 bg-stone-50/70 px-3 py-2 text-xs text-stone-600 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-300">
           <LoaderCircle className="size-3.5 shrink-0 animate-spin text-emerald-700 dark:text-emerald-500" aria-hidden />
-          正在分析 {batch.total} 个靶点之间的关联关系（复合物 / 抗体-抗原 / 融合构建 / 独立项目）…
+          正在分析 {batch.total} 个靶点之间的关联关系（同源家族 / 复合物 / 抗体-抗原 / 融合构建 / 独立项目）…
         </div>
       )}
       {!batch.relationJudging && batch.merging && (
@@ -86,13 +87,25 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
         <div
           className={cn(
             'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-xs leading-relaxed',
-            rel.related
-              ? 'border-violet-200 bg-violet-50/70 text-violet-800 dark:border-violet-900/70 dark:bg-violet-950/30 dark:text-violet-300'
-              : 'border-stone-200 bg-stone-50/70 text-stone-600 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-300'
+            rel.relationType === 'homologous'
+              ? 'border-teal-200 bg-teal-50/70 text-teal-800 dark:border-teal-900/70 dark:bg-teal-950/30 dark:text-teal-300'
+              : rel.related
+                ? 'border-violet-200 bg-violet-50/70 text-violet-800 dark:border-violet-900/70 dark:bg-violet-950/30 dark:text-violet-300'
+                : 'border-stone-200 bg-stone-50/70 text-stone-600 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-300'
           )}
         >
-          <Link2 className={cn('size-3.5 shrink-0', rel.related ? 'text-violet-600 dark:text-violet-400' : 'text-stone-400')} aria-hidden />
-          {rel.related ? (
+          <Link2 className={cn('size-3.5 shrink-0', rel.relationType === 'homologous' ? 'text-teal-600 dark:text-teal-400' : rel.related ? 'text-violet-600 dark:text-violet-400' : 'text-stone-400')} aria-hidden />
+          {rel.relationType === 'homologous' ? (
+            <>
+              <span className="font-medium">同源蛋白家族 · {batch.total} 个靶点</span>
+              <span className="text-stone-500 dark:text-stone-400">已合并为一份家族级评估报告（结构证据互用）</span>
+              {(rel.homologPairs ?? []).filter(p => p.identity >= 40).slice(0, 3).map(p => (
+                <span key={`${p.a}-${p.b}`} className="rounded-sm border border-teal-300 bg-white/60 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300" title={`${p.a} 与 ${p.b} 全长序列比对一致性 ${p.identity}%`}>
+                  {p.a}↔{p.b} {p.identity}%
+                </span>
+              ))}
+            </>
+          ) : rel.related ? (
             <>
               <span className="font-medium">关联靶点 · {describeRelationType(rel.relationType)}</span>
               <span className="text-stone-500 dark:text-stone-400">已合并生成一份报告（含关系性分析）</span>
@@ -125,6 +138,21 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
           合并报告生成失败（{batch.mergedError}）— 各靶点数据仍可正常查看，可重新发起评估重试
         </div>
       )}
+
+      {/* v1.10 序列归属摘要（构建序列已按靶点并入评估） */}
+      {!batch.relationJudging && (batch.sequenceAttribution ?? []).some(a => a.kind === 'construct') && (() => {
+        const attr = batch.sequenceAttribution ?? []
+        const constructs = attr.filter(a => a.kind === 'construct')
+        const homologs = attr.filter(a => a.kind === 'homolog')
+        return (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-teal-200/70 bg-teal-50/40 px-3 py-1.5 text-[11px] text-teal-800 dark:border-teal-900/60 dark:bg-teal-950/20 dark:text-teal-300">
+            <span className="eval-eyebrow text-teal-700 dark:text-teal-400">序列归属</span>
+            <span>{constructs.length} 条构建序列已并入对应靶点评估</span>
+            {homologs.length > 0 && <span className="text-stone-500 dark:text-stone-400">· {homologs.length} 条同源序列在合并报告中标注</span>}
+            <span className="text-stone-400 dark:text-stone-500">详见合并报告「评估表序列归属」</span>
+          </div>
+        )
+      })()}
 
       {/* 靶点切换区（醒目化：用户反馈“UI 不太明显，容易被忽略”） */}
       <div className="flex flex-col gap-2">

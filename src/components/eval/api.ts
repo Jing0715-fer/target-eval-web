@@ -11,6 +11,7 @@ import type {
   LlmModelsResponse,
   LlmTestResponse,
   RelationJudgment,
+  SequenceAttribution,
   UploadResponse,
 } from './types'
 
@@ -183,22 +184,32 @@ export async function fetchDocxInsights(uploadId: string, force = false): Promis
 
 // ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────
 
-/** POST /api/evaluate/relation — 批量评估前的靶点关系 LLM 判断 */
+/** POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.10：附带序列归属） */
+export interface RelationJudgeResponse {
+  judgment: RelationJudgment
+  sequenceAttribution?: SequenceAttribution[]
+}
+
 export async function judgeTargetRelation(input: {
   uploadId: string
   uniprots: string[]
   goal?: string
-}): Promise<RelationJudgment> {
+}): Promise<RelationJudgeResponse> {
   const res = await fetch('/api/evaluate/relation', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   })
-  const data = (await res.json().catch(() => null)) as { ok?: boolean; judgment?: RelationJudgment; error?: string } | null
+  const data = (await res.json().catch(() => null)) as {
+    ok?: boolean
+    judgment?: RelationJudgment
+    sequenceAttribution?: SequenceAttribution[]
+    error?: string
+  } | null
   if (!res.ok || !data?.ok || !data.judgment) {
     throw new Error(data?.error ?? `关系判断失败（HTTP ${res.status}）`)
   }
-  return data.judgment
+  return { judgment: data.judgment, sequenceAttribution: data.sequenceAttribution }
 }
 
 /** POST /api/evaluate/batch-report — 关联靶点全部完成后生成合并评估报告 */

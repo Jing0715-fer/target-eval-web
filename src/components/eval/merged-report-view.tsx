@@ -26,7 +26,7 @@ export interface MergedReportViewProps {
   onNewEvaluation: () => void
 }
 
-/** 关系类型 → 视觉色调（关联=紫罗兰系；独立批次的合并报告不会走到此视图） */
+/** 关系类型 → 视觉色调（关联=紫罗兰系；同源家族=青色系；独立批次的合并报告不会走到此视图） */
 function relationTone(type: BatchReportInfo['relation']['relationType']): { chip: string; icon: string; border: string } {
   switch (type) {
     case 'antibody-antigen':
@@ -40,6 +40,12 @@ function relationTone(type: BatchReportInfo['relation']['relationType']): { chip
         chip: 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300',
         icon: 'text-emerald-600 dark:text-emerald-400',
         border: 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-800/60 dark:bg-emerald-950/20',
+      }
+    case 'homologous':
+      return {
+        chip: 'border-teal-300 bg-teal-100 text-teal-800 dark:border-teal-800 dark:bg-teal-950/60 dark:text-teal-300',
+        icon: 'text-teal-600 dark:text-teal-400',
+        border: 'border-teal-200 bg-teal-50/60 dark:border-teal-900/60 dark:bg-teal-950/20',
       }
     default:
       return {
@@ -59,6 +65,8 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const tone = relationTone(rel.relationType)
   const md = report.markdown?.trim() || ''
   const llmOk = report.llmOk !== false && md.length > 0
+  const homologPairs = (rel.homologPairs ?? []).filter(p => p.identity > 0)
+  const attribution = report.sequenceAttribution ?? []
 
   const downloadReport = () => {
     window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&download=1`, '_blank')
@@ -120,6 +128,26 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
               <span><span className="eval-eyebrow mr-1.5 text-emerald-700 dark:text-emerald-500">策略要点</span>{rel.strategy}</span>
             </p>
           )}
+          {/* v1.10 同源证据：系统比对一致性徽标行 */}
+          {homologPairs.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-stone-500 dark:text-stone-400">
+              <span className="eval-eyebrow text-stone-400">序列一致性（系统比对）</span>
+              {homologPairs.map(p => (
+                <span
+                  key={`${p.a}-${p.b}`}
+                  className={cn(
+                    'rounded-sm border px-1.5 py-0.5',
+                    p.identity >= 40
+                      ? 'border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300'
+                      : 'border-stone-200 bg-stone-50 text-stone-500 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400',
+                  )}
+                  title={`${p.a} 与 ${p.b} 全长序列比对一致性 ${p.identity}%（${p.identity >= 40 ? '家族级同源' : p.identity >= 30 ? '弱同源信号' : '非同源'}）`}
+                >
+                  {p.a}↔{p.b} {p.identity}%
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* 参与靶点 chips */}
@@ -171,6 +199,66 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </Button>
         </div>
       </motion.section>
+
+      {/* 2.5 评估表序列归属（v1.10 — 每条序列的去向，不再静默丢弃） */}
+      {attribution.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.18, ease: 'easeOut' }}
+          className="flex flex-col gap-2.5"
+          aria-labelledby="sec-attribution"
+        >
+          <div id="sec-attribution" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+            Sequence Attribution · 评估表序列归属（系统比对）
+          </div>
+          <div className="overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60">
+                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">#</th>
+                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">序列</th>
+                    <th className="px-3 py-2 text-right font-medium text-stone-500 dark:text-stone-400">长度</th>
+                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">最佳匹配</th>
+                    <th className="px-3 py-2 text-right font-medium text-stone-500 dark:text-stone-400">一致性</th>
+                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">归属</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {attribution.map((a, i) => {
+                    const kindMeta = {
+                      construct: { text: '客户构建 · 已并入评估', cls: 'border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300' },
+                      homolog: { text: '同源家族成员', cls: 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300' },
+                      antibody: { text: '抗体 · 背景证据', cls: 'border-violet-300 bg-violet-50 text-violet-700 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300' },
+                      unmatched: { text: '未匹配', cls: 'border-stone-300 bg-stone-50 text-stone-500 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400' },
+                    }[a.kind]
+                    return (
+                      <tr key={a.index} className="border-b border-stone-100 last:border-0 dark:border-stone-800/60" title={a.note}>
+                        <td className="px-3 py-2 font-mono text-stone-400">{i + 1}</td>
+                        <td className="max-w-56 truncate px-3 py-2 text-stone-600 dark:text-stone-300" title={a.header}>
+                          {a.header || '（未命名序列）'}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-stone-600 dark:text-stone-300">{a.length} aa</td>
+                        <td className="px-3 py-2 font-mono text-stone-600 dark:text-stone-300">{a.uniprotId ?? '—'}</td>
+                        <td className="px-3 py-2 text-right font-mono text-stone-600 dark:text-stone-300">{a.identity != null ? `${a.identity}%` : '—'}</td>
+                        <td className="px-3 py-2">
+                          <span className={cn('inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[11px] font-medium', kindMeta.cls)}>
+                            {kindMeta.text}
+                            {a.kind === 'construct' && a.start != null && a.end != null && (
+                              <span className="ml-1 font-mono opacity-75">{a.start}-{a.end}</span>
+                            )}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </motion.section>
+      )}
 
       {/* 3. 合并分析全文 */}
       <motion.section

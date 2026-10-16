@@ -43,7 +43,8 @@ const MAX_BATCH_UNIPROT = 5
 export interface InputPanelProps {
   submitting: boolean
   submitError: string | null
-  onStart: (requests: EvaluateRequest[]) => Promise<StartResult>
+  /** v1.10：docxSequences = 评估表原始序列（关系判断归属后按靶点附构建序列） */
+  onStart: (requests: EvaluateRequest[], opts?: { docxSequences?: string[] }) => Promise<StartResult>
   onClearSubmitError: () => void
 }
 
@@ -209,7 +210,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           ? (upload.parsed.sequences[selectedSequenceIndex]?.seq ?? undefined)
           : undefined
       // 多 UniProt 靶点 → 每个靶点一份独立作业（串行执行，全部不落下）；
-      // 仅选序列时 → 单作业。伴随序列随每个作业提交，由后端同靶点校验决定是否合并
+      // 仅选序列时 → 单作业。伴随序列随每个作业提交，由后端同靶点校验决定是否合并；
+      // v1.10：评估表全部序列一并上送 — 关系判断归属后（同源家族/构建归属）按靶点附构建序列
       const targets = selectedUniprots.length > 0 ? selectedUniprots : [null]
       requests = targets.map(u => ({
         mode: 'docx' as const,
@@ -222,6 +224,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         goal: trimmedGoal,
         options,
       }))
+      const docxSequences = upload.parsed.sequences.map(s => s.seq ?? '')
+      await onStart(requests, { docxSequences })
+      return
     }
     await onStart(requests)
   }

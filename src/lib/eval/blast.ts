@@ -198,7 +198,9 @@ export async function collectBlastPdbWithRescue(
 
   while (true) {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
-    await sleep(attempts === 0 ? Math.max(3000, rtoe * 1000) : 6000, signal)
+    // 首 poll 等待 RTOE（但上限 30s — NCBI 队列拥堵时会返回极端 RTOE 如 24830s，
+    // 直译会睡 ~7 小时；RTOE 只是提示值，多等不会更快，30s 后进入常规 6s 轮询）
+    await sleep(attempts === 0 ? Math.min(Math.max(3000, rtoe * 1000), 30_000) : 6000, signal)
     attempts++
     const elapsed = Math.round((Date.now() - startedAt) / 1000)
     let pollRes: Response
