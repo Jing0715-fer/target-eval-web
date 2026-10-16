@@ -149,16 +149,23 @@ export interface BlastStatusInfo {
   status: BlastStatusCode
   /** 附注（失败原因 / 跳过依据） */
   note?: string
+  /** 同源数据来源（v1.9+）：ncbi = BLASTp 常规路径；rcsb = NCBI 拥堵/失败时 RCSB 序列检索兜底 */
+  provider?: 'ncbi' | 'rcsb'
 }
 
 /** BLAST 状态 → 中文描述（结果页与报告共用） */
 export function describeBlastStatus(info: BlastStatusInfo | undefined | null): string {
   if (!info) return '本作业未记录 BLAST 执行状态（可能为历史版本作业）'
+  const viaRcsb = info.provider === 'rcsb'
   switch (info.status) {
     case 'ok':
-      return `已完成同源检索${info.note ? `（${info.note}）` : ''}`
+      return viaRcsb
+        ? `已完成同源检索（RCSB 序列检索兜底 — NCBI 队列拥堵${info.note ? `，${info.note}` : ''}）`
+        : `已完成同源检索${info.note ? `（${info.note}）` : ''}`
     case 'no-hits':
-      return '已执行同源检索，未检索到显著同源结构（E ≤ 1e-5）'
+      return viaRcsb
+        ? '已执行 RCSB 序列检索（NCBI 拥堵兜底），未检索到显著同源结构'
+        : '已执行同源检索，未检索到显著同源结构（E ≤ 1e-5）'
     case 'skipped-covered':
       return '结构覆盖充分（直接结构 ≥5 个且覆盖率 ≥50%），无需同源检索'
     case 'skipped-disabled':
@@ -292,7 +299,7 @@ export interface FormInsights {
   homologs?: string
   /** 风险与关注点 */
   keyConcerns?: string[]
-  /** 解析来源：llm = 大模型提取；regex = 规则兑底 */
+  /** 解析来源：llm = 大模型提取；regex = 规则兜底 */
   source: 'llm' | 'regex'
 }
 

@@ -16,7 +16,8 @@ import { db } from '@/lib/db'
 import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges } from './pdbe'
-import { submitBlastPdb, collectBlastPdb, enrichBlastHits } from './blast'
+import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits } from './blast'
+import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
 import { generateReportSections, type ReportContext } from './report'
@@ -222,7 +223,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       if (signal.aborted) throw e
       const msg = e instanceof Error ? e.message : String(e)
       blastStatus = { status: 'failed', note: `提交失败：${msg.slice(0, 100)}` }
-      log(`BLAST 提交失败：${msg}（稍后阶段将标记为不可用）`, 'warn')
+      log(`BLAST 提交失败：${msg}（稍后阶段将尝试 RCSB 序列检索兜底）`, 'warn')
     }
   }
 
@@ -316,7 +317,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   }
   report('pubmed', `文献检索完成（${literature.length} 篇）`, 1)
 
-  // ─── 阶段 6：BLAST 结果收集（仍在运行不判超时失败）────────────────────────
+  // ─── 阶段 6：BLAST 结果收集（仍在运行不判超时失败；NCBI 拥堵/失败 → RCSB 兜底）──
   const coveragePct = coverage?.coveragePercent ?? 0
   const coverageSufficient = uniprotInfo && directPdbs.length >= 5 && coveragePct >= 50
   if (blastStatus.status === 'skipped-disabled') {
@@ -331,26 +332,36 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   } else if (blastSubmitted) {
     report('blast', `收集 BLAST 结果（RID=${blastSubmitted.rid}，等待期间已完成结构/文献检索）…`, 0.2)
     try {
-      const rawHits = await collectBlastPdb(
+      const outcome = await collectBlastPdbWithRescue(
         blastSubmitted.rid,
         blastSubmitted.rtoe,
+        sequence,
         msg => report('blast', msg, 0.5),
         signal,
       )
+      const rawHits = outcome.hits
+      const viaRescue = outcome.provider === 'rcsb'
       const directSet = new Set(directPdbs.map(p => p.pdbId))
       const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
       blastHits = await enrichBlastHits(filtered, directSet)
       blastStatus = {
         status: blastHits.length > 0 ? 'ok' : 'no-hits',
         note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
+        provider: outcome.provider,
       }
-      log(`BLAST 完成：${rawHits.length} 个命中，去重/排除直接命中后 ${blastHits.length} 个`)
+      log(
+        viaRescue
+          ? `同源检索经 RCSB 序列检索兜底完成（${outcome.rescueNote}）：${rawHits.length} 个命中，去重/排除直接命中后 ${blastHits.length} 个 — 已提交的 NCBI 任务弃用`
+          : `BLAST 完成：${rawHits.length} 个命中，去重/排除直接命中后 ${blastHits.length} 个`,
+      )
       // 序列模式且尚未识别 UniProt：从最佳命中回填
       if (!uniprotInfo && blastHits.length > 0) {
         const best = rawHits[0]
-        const acc = uniprotFromBlastDesc(best.description)
+        const acc = viaRescue
+          ? await fetchUniprotForEntryEntity(best.pdbId)
+          : uniprotFromBlastDesc(best.description)
         if (acc && best.identity >= 85) {
-          log(`从 BLAST 命中识别 UniProt ${acc}（identity ${best.identity}%），回填元数据…`)
+          log(`从同源命中识别 UniProt ${acc}（identity ${best.identity}%），回填元数据…`)
           const info = await fetchUniprotInfo(acc)
           if (info) {
             uniprotInfo = info
@@ -366,6 +377,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
               blastStatus = {
                 status: blastHits.length > 0 ? 'ok' : 'no-hits',
                 note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
+                provider: outcome.provider,
               }
             }
             report('pdbe', '补算 PDBe 覆盖率…', 0.5)
@@ -378,7 +390,13 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
           }
         }
       }
-      report('blast', `BLAST 完成（${blastHits.length} 个同源结构）`, 1)
+      report(
+        'blast',
+        viaRescue
+          ? `同源检索完成（RCSB 兜底，${blastHits.length} 个同源结构）`
+          : `BLAST 完成（${blastHits.length} 个同源结构）`,
+        1,
+      )
     } catch (e) {
       if (signal.aborted) throw e
       const msg = e instanceof Error ? e.message : String(e)
@@ -386,10 +404,34 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       log(`BLAST 失败：${msg}（继续后续阶段）`, 'warn')
       report('blast', 'BLAST 不可用（已跳过）', 1)
     }
+  } else if (blastStatus.status === 'failed' && sequence.length >= 30) {
+    // 提交阶段失败（网络/NCBI 拒收）→ 直接 RCSB 序列检索兜底（v1.9）
+    const submitErr = blastStatus.note ?? '提交失败'
+    report('blast', `NCBI 提交失败（${submitErr.slice(0, 60)}）— 尝试 RCSB 序列检索获得同源结构…`, 0.4)
+    try {
+      const rawHits = await searchRcsbHomologs(sequence, { signal })
+      const directSet = new Set(directPdbs.map(p => p.pdbId))
+      const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
+      blastHits = await enrichBlastHits(filtered, directSet)
+      blastStatus = {
+        status: blastHits.length > 0 ? 'ok' : 'no-hits',
+        note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
+        provider: 'rcsb',
+      }
+      log(`RCSB 序列检索兜底完成：${rawHits.length} 个命中，去重/排除直接命中后 ${blastHits.length} 个（NCBI 提交失败：${submitErr}）`)
+      report('blast', `同源检索完成（RCSB 兜底，${blastHits.length} 个同源结构）`, 1)
+    } catch (e2) {
+      if (signal.aborted) throw e2
+      const msg2 = e2 instanceof Error ? e2.message : String(e2)
+      blastStatus = { status: 'failed', note: `NCBI 提交失败：${submitErr.slice(0, 60)}；RCSB 兜底亦失败：${msg2.slice(0, 60)}` }
+      log(`RCSB 兜底亦失败：${msg2}（继续后续阶段）`, 'warn')
+      report('blast', '同源检索不可用（已跳过）', 1)
+    }
   } else {
-    // 提交阶段已失败（blastStatus 为 failed）
-    report('blast', 'BLAST 不可用（提交失败，已跳过）', 1)
-    log(`BLAST 阶段跳过：${blastStatus.note ?? '提交失败'}`)
+    // 序列过短（<30 aa）未提交等剩余情形
+    if (blastStatus.status === 'ok') blastStatus = { status: 'skipped-covered', note: '序列过短（<30 aa），未提交同源检索' }
+    report('blast', '未运行同源检索', 1)
+    log(`BLAST 阶段跳过：${blastStatus.note ?? '未提交'}`)
   }
 
   // ─── 阶段 7：评分 ────────────────────────────────────────────────────────

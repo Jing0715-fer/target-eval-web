@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpenText,
+  Crosshair,
   Database,
   Download,
   ExternalLink,
@@ -18,6 +19,7 @@ import {
   Printer,
   RotateCcw,
   SearchX,
+  ShieldCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -173,8 +175,8 @@ export const mdComponents: React.ComponentProps<typeof ReactMarkdown>['component
 }
 
 /** BLAST 空态说明框（0 命中/跳过/失败原因 — 不再凭空消失） */
-function BlastStatusBox({ status, note }: { status?: BlastStatusCode; note?: string }) {
-  const info = status ? describeBlastStatus({ status, note }) : describeBlastStatus(null)
+function BlastStatusBox({ status, note, provider }: { status?: BlastStatusCode; note?: string; provider?: 'ncbi' | 'rcsb' }) {
+  const info = status ? describeBlastStatus({ status, note, provider }) : describeBlastStatus(null)
   const tone =
     status === 'failed'
       ? 'border-amber-200 bg-amber-50/60 dark:border-amber-900/60 dark:bg-amber-950/20'
@@ -282,12 +284,15 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
     'skipped-antibody': '抗体序列，已跳过',
     failed: '检索失败，可重试',
   }
-  const blastSub = (blastInfo ? blastSubMap[blastInfo.status] : undefined) ?? 'NCBI BLAST'
+  const blastViaRcsb = blastInfo?.provider === 'rcsb'
+  const blastSub = blastViaRcsb
+    ? 'RCSB 序列检索（NCBI 拥堵兜底）'
+    : (blastInfo ? blastSubMap[blastInfo.status] : undefined) ?? 'NCBI BLAST'
 
   return (
     <div className="flex flex-col gap-8">
       {/* 0. 返回导航条 */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <Button
           variant="outline"
           onClick={onNewEvaluation}
@@ -296,6 +301,11 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <ArrowLeft className="size-3.5" />
           新建评估
         </Button>
+        {/* 当前靶点徽标：批量切换/同蛋白家族场景下让「正在看哪个靶点」一目了然 */}
+        <span className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 font-mono text-[11px] font-semibold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400">
+          <Crosshair className="size-3 shrink-0" aria-hidden />
+          当前靶点 {u.uniprotId}
+        </span>
         <span className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
           作业 {job.id.slice(0, 8)} · 耗时 {formatDuration(Math.round((summary.durationMs ?? 0) / 1000))}
         </span>
@@ -571,12 +581,24 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           no={blastNo}
           title="BLAST 同源结构"
           en="Homologs"
-          count={blastHits.length > 0 ? `${blastHits.length} 条命中` : blastInfo ? '未运行' : '—'}
+          count={
+            blastHits.length > 0
+              ? `${blastHits.length} 条命中${blastViaRcsb ? ' · RCSB 兜底' : ''}`
+              : blastInfo
+                ? '未运行'
+                : '—'
+          }
         />
+        {blastViaRcsb && blastHits.length > 0 && (
+          <div className="flex items-start gap-2.5 rounded-md border border-emerald-200 bg-emerald-50/60 px-3.5 py-2.5 text-xs leading-relaxed text-emerald-800 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-300">
+            <ShieldCheck className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            {describeBlastStatus(blastInfo)} — NCBI BLAST 队列拥堵/故障时自动改用 RCSB 序列检索（mmseqs2）获得等效同源结构，命中含一致性/E 值/覆盖度，可信度与 BLAST 同源结构相当。
+          </div>
+        )}
         {blastHits.length > 0 ? (
           <BlastTable hits={blastHits} />
         ) : (
-          <BlastStatusBox status={blastInfo?.status} note={blastInfo?.note} />
+          <BlastStatusBox status={blastInfo?.status} note={blastInfo?.note} provider={blastInfo?.provider} />
         )}
       </motion.section>
 

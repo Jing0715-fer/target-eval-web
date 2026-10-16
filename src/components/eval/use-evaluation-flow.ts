@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { toast } from '@/hooks/use-toast'
 import { generateBatchReport, judgeTargetRelation } from './api'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment } from './types'
 
@@ -483,7 +484,10 @@ export function useEvaluationFlow() {
     }
   }, [reset, startEvaluation])
 
-  /** 按 id 拉取作业详情并应用快照（批量完成后切换展示用） */
+  /** 按 id 拉取作业详情并应用快照（批量完成后切换展示用）。
+   * v1.9：切换失败改为非破坏性 —— 保留当前结果视图 + toast 提示
+   * （旧实现直接退回输入态，用户会误以为“点击没有真正切换”）；成功后滚回页面顶部，
+   * 让刊头/靶点徽标的变化立即可见（同蛋白家族场景下避免看不出切换） */
   const loadJobById = async (id: string, opts?: { switchView?: boolean }) => {
     try {
       const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
@@ -496,9 +500,13 @@ export function useEvaluationFlow() {
         // 批量已完成：切换到该靶点的数据视图
         setBatch(prev => (prev && prev.items.length > 1 ? { ...prev, view: 'job' } : prev))
       }
+      if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
     } catch {
-      setSubmitError('无法加载评估结果，请稍后在历史评估中查看')
-      setPhase('idle')
+      toast({
+        title: '切换靶点失败',
+        description: '无法加载该靶点的评估结果（网络波动或服务暂不可用），当前结果未受影响，请稍后重试',
+        variant: 'destructive',
+      })
     }
   }
 

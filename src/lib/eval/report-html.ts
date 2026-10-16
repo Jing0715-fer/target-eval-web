@@ -537,7 +537,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div><b>结构覆盖率</b> ${ctx.coverage ? ctx.coverage.coveragePercent + '%' : '—'}</div>
       <div><b>PDB 结构</b> ${pdbCountHtml}（X-ray ${methodStats.xrayCount} / Cryo-EM ${methodStats.cryoemCount} / NMR ${methodStats.nmrCount}）</div>
       <div><b>最佳分辨率</b> ${methodStats.bestResolution != null ? methodStats.bestResolution.toFixed(2) + ' Å' : '—'}</div>
-      <div><b>BLAST 同源</b> ${ctx.blastHits.length} 个${ctx.blastStatus && ctx.blastStatus.status !== 'ok' ? `（${esc(describeBlastStatus(ctx.blastStatus).split('—')[0].trim())}）` : ''}</div>
+      <div><b>BLAST 同源</b> ${ctx.blastHits.length} 个${ctx.blastStatus && ctx.blastStatus.status !== 'ok' ? `（${esc(describeBlastStatus(ctx.blastStatus).split('—')[0].trim())}）` : ctx.blastStatus?.provider === 'rcsb' ? '（RCSB 序列检索兜底）' : ''}</div>
       <div><b>文献证据</b> ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构条目直接关联）` : ''}</div>
       ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
       ${ctx.batchNote ? `<div><b>批次关系</b> <span style="color:#92400e">${esc(ctx.batchNote.slice(0, 90))}${ctx.batchNote.length > 90 ? '…' : ''}</span></div>` : ''}
@@ -546,7 +546,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     </div>
     <div class="rpt-badges">
       <span class="badge">综合评分 ${ctx.scores.overall.score}/10 · ${esc(ctx.scores.overall.rating)}</span>
-      <span class="badge">数据源：UniProt · RCSB · PDBe${blastRan ? ' · BLAST' : ''}${ctx.literature.length ? ' · PubMed' : ''}</span>
+      <span class="badge">数据源：UniProt · RCSB · PDBe${blastRan ? (ctx.blastStatus?.provider === 'rcsb' ? ' · RCSB 序列检索' : ' · BLAST') : ''}${ctx.literature.length ? ' · PubMed' : ''}</span>
       ${input.llmOk ? '<span class="badge">LLM 分析：已完成</span>' : '<span class="badge amber">LLM 分析：失败（见数据区块）</span>'}
     </div>
   </header>
@@ -587,7 +587,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   ${showBlastSec ? `
   <section class="sec" id="blast">
     <h2>${cnNums[blastNo - 1]}、BLAST 同源结构<span class="sec-en">Homologs · ${ctx.blastHits.length}</span></h2>
-    ${ctx.blastHits.length ? `<div class="tbl-wrap"><table class="tbl-data tbl-blast">
+    ${ctx.blastHits.length ? `${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px">
@@ -607,7 +607,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   ${imagesHtml}
 
   <footer class="rpt-foot">
-    <div>SOURCES — UniProt REST · RCSB PDB · PDBe (EBI)${blastRan ? ' · NCBI BLAST (pdbaa)' : ''} · PubMed eutils${ctx.images.length ? ' · 客户评估表' : ''}</div>
+    <div>SOURCES — UniProt REST · RCSB PDB · PDBe (EBI)${blastRan ? (ctx.blastStatus?.provider === 'rcsb' ? ' · RCSB 序列检索 (mmseqs2)' : ' · NCBI BLAST (pdbaa)') : ''} · PubMed eutils${ctx.images.length ? ' · 客户评估表' : ''}</div>
     <div>本报告由 TargetEval 系统自动生成：数据区块为数据库实时检索结果；「评估分析」章节由大语言模型基于上述数据生成，可能存在解读偏差，关键决策请以原始数据库与文献为准。</div>
     <div>JOB ${esc(input.jobId)} · GENERATED ${(input.durationMs / 1000).toFixed(1)}s · ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC</div>
   </footer>

@@ -142,6 +142,11 @@ export default function Home() {
                       currentJobId={flow.job.id}
                       onSelect={(id) => void flow.loadJobById(id, { switchView: true })}
                       onShowMerged={flow.showMergedReport}
+                      currentJobLabel={
+                        flow.job.summary?.uniprot
+                          ? `${flow.job.summary.uniprot.uniprotId} · ${flow.job.summary.uniprot.proteinName || flow.job.summary.uniprot.entryName}`
+                          : flow.job.uniprotId ?? null
+                      }
                     />
                   </div>
                 )}

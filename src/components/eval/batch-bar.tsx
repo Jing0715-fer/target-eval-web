@@ -2,10 +2,12 @@
 
 import {
   CheckCircle2,
+  Eye,
   FileStack,
   Layers,
   Link2,
   LoaderCircle,
+  MousePointerClick,
   ShieldAlert,
   XCircle,
 } from 'lucide-react'
@@ -20,14 +22,18 @@ export interface BatchBarProps {
   onSelect: (jobId: string) => void
   /** 切换到合并报告视图（关联批次） */
   onShowMerged?: () => void
+  /** 当前展示靶点的可读标识（如 "P00533 · Epidermal growth factor receptor"） */
+  currentJobLabel?: string | null
 }
 
 /**
  * 批量评估切换栏（docx 多 UniProt 评估）：
  * 进度态显示「批量 i/N + 当前靶点」；完成态显示各靶点状态 chips，点击切换结果。
  * v1.8：关系判定横幅（关联 → 合并报告按钮；独立 → 说明banner）+ 并发窗口双靶点进行中。
+ * v1.9：切换区醒目化（用户反馈「UI 不太明显、点击看不出切换」）—
+ *  「切换靶点」标签行 + 当前查看徽标（ID·蛋白名）+ 更大 chips（激活态 Eye/查看中标记）。
  */
-export function BatchBar({ batch, currentJobId, onSelect, onShowMerged }: BatchBarProps) {
+export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJobLabel }: BatchBarProps) {
   if (batch.items.length <= 1 && !batch.mergedReport) return null
   const doneCount = batch.items.filter(x => x.status === 'done').length
   const failCount = batch.items.filter(x => x.status === 'error' || x.status === 'canceled').length
@@ -120,7 +126,24 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged }: BatchB
         </div>
       )}
 
-      <div className="flex flex-wrap gap-1.5">
+      {/* 靶点切换区（醒目化：用户反馈“UI 不太明显，容易被忽略”） */}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          <MousePointerClick className="size-3.5 shrink-0 text-emerald-800 dark:text-emerald-500" aria-hidden />
+          <span className="text-xs font-semibold text-stone-800 dark:text-stone-100">切换靶点</span>
+          <span className="text-[11px] text-stone-400 dark:text-stone-500">共 {batch.total} 个 · 点击编号查看对应评估结果</span>
+          {/* 当前查看标识：同蛋白家族（如多个 GP 变体）场景下避免“看不出切换了” */}
+          {!running && !mergedActive && currentJobLabel && (
+            <span
+              className="ml-auto inline-flex min-h-6 max-w-full items-center gap-1.5 truncate rounded-md border border-emerald-200 bg-emerald-50 px-2 font-mono text-[11px] font-semibold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400"
+              title={currentJobLabel}
+            >
+              <Eye className="size-3 shrink-0" aria-hidden />
+              <span className="truncate">当前查看：{currentJobLabel}</span>
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-1.5">
         {/* 合并报告切换（关联批次，生成后显示） */}
         {batch.mergedReport && onShowMerged && (
           <button
@@ -128,13 +151,13 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged }: BatchB
             onClick={onShowMerged}
             title="查看本批次的合并评估报告（含靶点关系分析）"
             className={cn(
-              'flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-violet-500/40',
+              'flex min-h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-violet-500/40',
               mergedActive
                 ? 'border-violet-700 bg-violet-800 text-white'
                 : 'border-violet-200 bg-violet-50 text-violet-700 hover:border-violet-400 hover:text-violet-800 dark:border-violet-900 dark:bg-violet-950/40 dark:text-violet-300 dark:hover:border-violet-700',
             )}
           >
-            <FileStack className="size-3 shrink-0" aria-hidden />
+            <FileStack className="size-3.5 shrink-0" aria-hidden />
             合并报告
           </button>
         )}
@@ -152,25 +175,32 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged }: BatchB
                   ? `评估失败${item.error ? `：${item.error}` : ''}`
                   : item.status === 'running'
                     ? `${item.label} 评估中…`
-                    : `查看 ${item.label} 的评估结果`
+                    : active
+                      ? `正在查看 ${item.label} 的评估结果`
+                      : `点击切换查看 ${item.label} 的评估结果`
               }
               className={cn(
-                'flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 font-mono text-[11px] transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 disabled:cursor-default',
+                'flex min-h-9 items-center gap-1.5 rounded-md border px-3 font-mono text-xs transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 disabled:cursor-default',
                 active
-                  ? 'border-emerald-700 bg-emerald-800 font-semibold text-white'
+                  ? 'border-emerald-800 bg-emerald-800 font-bold text-white shadow-sm ring-2 ring-emerald-800/25 dark:border-emerald-600 dark:bg-emerald-700 dark:ring-emerald-400/25'
                   : clickable
-                    ? 'border-stone-200 bg-white text-stone-600 hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:border-emerald-600 dark:hover:text-emerald-400'
+                    ? 'border-stone-300 bg-white font-semibold text-stone-700 hover:border-emerald-500 hover:bg-emerald-50 hover:text-emerald-800 dark:border-stone-600 dark:bg-stone-900 dark:text-stone-200 dark:hover:border-emerald-600 dark:hover:bg-emerald-950/40 dark:hover:text-emerald-400'
                     : 'border-stone-200 bg-stone-50 text-stone-400 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-500'
               )}
             >
               {item.status === 'done' ? (
-                <CheckCircle2 className="size-3 shrink-0 text-emerald-600 dark:text-emerald-500" aria-hidden />
+                active ? (
+                  <Eye className="size-3.5 shrink-0" aria-hidden />
+                ) : (
+                  <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-500" aria-hidden />
+                )
               ) : item.status === 'running' ? (
-                <LoaderCircle className="size-3 shrink-0 animate-spin text-emerald-600 dark:text-emerald-500" aria-hidden />
+                <LoaderCircle className="size-3.5 shrink-0 animate-spin text-emerald-600 dark:text-emerald-500" aria-hidden />
               ) : (
-                <XCircle className="size-3 shrink-0 text-red-400" aria-hidden />
+                <XCircle className="size-3.5 shrink-0 text-red-400" aria-hidden />
               )}
               {item.label}
+              {active && <span className="rounded bg-white/20 px-1 text-[10px] font-sans font-semibold">查看中</span>}
             </button>
           )
         })}
@@ -179,11 +209,12 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged }: BatchB
           Array.from({ length: batch.total - batch.items.length }, (_, i) => (
             <span
               key={`pending-${i}`}
-              className="flex min-h-8 items-center rounded-md border border-dashed border-stone-200 px-2.5 font-mono text-[11px] text-stone-300 dark:border-stone-800 dark:text-stone-600"
+              className="flex min-h-9 items-center rounded-md border border-dashed border-stone-200 px-3 font-mono text-xs text-stone-300 dark:border-stone-800 dark:text-stone-600"
             >
               待排队
             </span>
           ))}
+        </div>
       </div>
     </div>
   )
