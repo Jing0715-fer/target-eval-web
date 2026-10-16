@@ -21,6 +21,8 @@ export interface EvaluateOptions {
   skipBlast: boolean
   forceBlast: boolean
   maxPdb: number
+  /** 报告模式：single = 独立报告（默认）；deferred = 数据并入合并报告（关联靶点批量） */
+  reportMode?: 'single' | 'deferred'
 }
 
 export interface EvaluateRequest {
@@ -39,6 +41,8 @@ export interface EvaluateRequest {
   sequenceFromDocx?: string
   /** 客户目标/科学问题（可选） */
   goal?: string
+  /** 批次关系说明（非关联批量：注入报告说明独立/复合物定位） */
+  batchNote?: string
   options: EvaluateOptions
 }
 
@@ -83,6 +87,46 @@ export interface UploadResponse {
   uploadId: string
   parsed: DocxParsed
   error?: string
+}
+
+// ─── 靶点关系判断（v1.8 批量评估）───────────────────────────
+
+export type TargetRelationType = 'complex' | 'antibody-antigen' | 'fusion' | 'pathway' | 'independent' | 'other'
+
+export interface RelationJudgment {
+  /** 是否建议合并为一份报告 */
+  related: boolean
+  relationType: TargetRelationType
+  confidence: 'high' | 'medium' | 'low'
+  /** 判断依据（≤300 字） */
+  rationale: string
+  /** 对结构解析策略的建议 */
+  strategy: string
+  /** 判断失败时的降级说明 */
+  error?: string
+}
+
+/** 关系类型 → 中文描述 + 图标语义（前端展示用） */
+export function describeRelationType(t: TargetRelationType): string {
+  switch (t) {
+    case 'complex': return '复合物亚基（物理相互作用）'
+    case 'antibody-antigen': return '抗体-抗原配对'
+    case 'fusion': return '融合构建（多结构域串联）'
+    case 'pathway': return '同通路/功能相关'
+    case 'independent': return '相互独立'
+    case 'other': return '其他关联'
+  }
+}
+
+/** 合并评估报告（关联靶点批量生成） */
+export interface BatchReportInfo {
+  id: string
+  jobIds: string[]
+  relation: RelationJudgment
+  markdown: string
+  llmOk?: boolean
+  errors?: string[]
+  createdAt?: string
 }
 
 // ─── 评估表 LLM 智能解析 ──────────────────────────────────────
@@ -227,6 +271,10 @@ export interface JobSummary {
   blast?: BlastStatusInfo
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
+  /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */
+  reportDeferred?: boolean
+  /** 批次关系说明（v1.8+ 非关联批量） */
+  batchNote?: string
 }
 
 export interface PdbEntry {

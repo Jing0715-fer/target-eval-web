@@ -1,11 +1,21 @@
 /**
  * NCBI BLAST (URL API) — blastp vs pdbaa，同源 PDB 检索。
- * 内存策略：HITLIST_SIZE 50；轮询墙钟上限 5 分钟；每轮响应即解析即释放。
+ * 内存策略：HITLIST_SIZE 50；每轮响应即解析即释放。
+ *
+ * v1.8 调度策略（用户反馈「BLAST 轮询 5 分钟后超时」）：
+ *  - 提交与收集拆分：submitBlastPdb 尽早触发（pipeline 在等待期做其他数据检索），
+ *    collectBlastPdb 在需要命中数据时才回收结果
+ *  - 「仍在运行不判失败」：NCBI 侧 Status=RUNNING 期间持续轮询，
+ *    不再因 5 分钟墙钟而超时报错；仅 FAILED / UNKNOWN / 网络长期不可达才失败
+ *  - 僵尸保险：绝对上限 30 分钟（NCBI 队列极端异常时自愈，日志明确标注）
  */
 import type { BlastHit } from './types'
 
 const BLAST_URL = 'https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi'
-const MAX_POLL_WALL_MS = 5 * 60_000
+/** RUNNING 状态下的绝对僵尸保险上限（仅极端异常时触发，不是常规超时） */
+const MAX_POLL_WALL_MS = 30 * 60_000
+/** 连续网络失败次数上限（~3 分钟完全不可达才判失败；单次抖动继续重试） */
+const MAX_CONSECUTIVE_NET_FAILS = 30
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -59,23 +69,20 @@ function parseBlastXml(xml: string): BlastHit[] {
   return [...seen.values()].sort((a, b) => b.identity - a.identity)
 }
 
-export interface BlastRunResult {
-  hits: BlastHit[]
+export interface BlastSubmitResult {
   rid: string
-  durationMs: number
-  skipped: boolean
-  skipReason?: string
+  rtoe: number
 }
 
 /**
- * 运行 BLASTp（pdbaa 数据库）。轮询直到完成 / 失败 / 超墙钟 / 中止。
- * onProgress 每轮轮询回调一次。
+ * 提交 BLASTp 任务（含 2 次退避重试），立即返回 RID。
+ * 提交后 NCBI 侧即开始排队/计算 —— 调用方可在收集结果前先做其他工作。
  */
-export async function runBlastPdb(
+export async function submitBlastPdb(
   sequence: string,
   onProgress?: (msg: string) => void,
   signal?: AbortSignal,
-): Promise<BlastHit[]> {
+): Promise<BlastSubmitResult> {
   if (!sequence || sequence.length < 30) throw new Error('序列过短（<30 aa），无法 BLAST')
 
   onProgress?.('提交 BLASTp 任务到 NCBI (pdbaa)…')
@@ -97,10 +104,7 @@ export async function runBlastPdb(
       if (!res.ok) throw new Error(`BLAST 提交失败 HTTP ${res.status}`)
       submitText = await res.text()
     } catch (e) {
-      if (signal?.aborted || (e instanceof Error && e.name === 'TimeoutError')) {
-        // 超时也重试（AbortSignal.timeout 的 TimeoutError）；用户主动取消则直接抛出
-        if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
-      }
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
       lastSubmitErr = e
       if (attempt < 2) {
         onProgress?.(`BLAST 提交失败（第 ${attempt + 1} 次），${2 + attempt * 3}s 后重试…`)
@@ -114,23 +118,42 @@ export async function runBlastPdb(
   const rid = submitText.match(/RID\s*=\s*(\S+)/)?.[1]
   const rtoe = parseInt(submitText.match(/RTOE\s*=\s*(\d+)/)?.[1] ?? '15', 10)
   if (!rid) throw new Error('BLAST 未返回 RID')
-
   onProgress?.(`BLAST 已提交 (RID=${rid}，预计 ${rtoe}s)`)
+  return { rid, rtoe }
+}
 
+/**
+ * 收集 BLAST 结果。核心策略：**NCBI 仍在运行（RUNNING）期间永不因等待时长而失败**，
+ * 持续轮询直至结果就绪；只有以下情况才报错：
+ *  - NCBI 侧 FAILED / RID 过期 UNKNOWN
+ *  - 连续 ~3 分钟网络完全不可达
+ *  - 绝对僵尸保险 30 分钟（NCBI 队列极端异常）
+ *  - 调用方 AbortSignal 取消
+ */
+export async function collectBlastPdb(
+  rid: string,
+  rtoe: number,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+): Promise<BlastHit[]> {
   const startedAt = Date.now()
   let attempts = 0
+  let netFails = 0
   while (true) {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
-    if (Date.now() - startedAt > MAX_POLL_WALL_MS) {
-      throw new Error(`BLAST 轮询超过 ${Math.round(MAX_POLL_WALL_MS / 60000)} 分钟上限`)
-    }
     await sleep(attempts === 0 ? Math.max(3000, rtoe * 1000) : 6000, signal)
     attempts++
     const elapsed = Math.round((Date.now() - startedAt) / 1000)
     let pollRes: Response
     try {
       pollRes = await fetch(`${BLAST_URL}?CMD=Get&FORMAT_TYPE=XML&RID=${rid}`, { signal: AbortSignal.timeout(30_000) })
-    } catch {
+      netFails = 0
+    } catch (e) {
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      netFails++
+      if (netFails >= MAX_CONSECUTIVE_NET_FAILS) {
+        throw new Error(`BLAST 轮询网络不可达（连续 ${netFails} 次失败，已等 ${Math.round(elapsed / 60)} 分钟）`)
+      }
       onProgress?.(`网络抖动，继续轮询（已等 ${elapsed}s）`)
       continue
     }
@@ -140,13 +163,38 @@ export async function runBlastPdb(
     }
     const xml = await pollRes.text()
     if (xml.includes('<BlastOutput>') || xml.includes('<BlastOutput_iterations>')) {
-      onProgress?.(`BLAST 完成（${Math.round((Date.now() - startedAt) / 1000)}s），解析结果…`)
+      onProgress?.(`BLAST 完成（等待 ${Math.round((Date.now() - startedAt) / 1000)}s），解析结果…`)
       return parseBlastXml(xml)
     }
     if (xml.includes('Status=FAILED')) throw new Error('BLAST 任务在 NCBI 侧失败')
     if (xml.includes('Status=UNKNOWN')) throw new Error(`BLAST RID ${rid} 已过期`)
-    onProgress?.(`等待 NCBI 队列（第 ${attempts} 次，已 ${elapsed}s）`)
+    // Status=RUNNING（或等待中）：只要 NCBI 显示仍在运行就不判失败
+    if (Date.now() - startedAt > MAX_POLL_WALL_MS) {
+      throw new Error(`NCBI 队列异常：BLAST 已提交 ${Math.round(MAX_POLL_WALL_MS / 60000)} 分钟仍无结果（RID=${rid}）`)
+    }
+    onProgress?.(`NCBI 仍在计算（第 ${attempts} 次，已 ${elapsed}s — 运行中不判超时）`)
   }
+}
+
+export interface BlastRunResult {
+  hits: BlastHit[]
+  rid: string
+  durationMs: number
+  skipped: boolean
+  skipReason?: string
+}
+
+/**
+ * 运行 BLASTp（pdbaa 数据库）：提交 + 阻塞收集（兼容封装）。
+ * 新代码建议使用 submitBlastPdb + collectBlastPdb 组合以重叠其他工作。
+ */
+export async function runBlastPdb(
+  sequence: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+): Promise<BlastHit[]> {
+  const { rid, rtoe } = await submitBlastPdb(sequence, onProgress, signal)
+  return collectBlastPdb(rid, rtoe, onProgress, signal)
 }
 
 /** 用 RCSB 批量接口补齐 BLAST 命中的方法/分辨率（每批 20 条）。 */

@@ -13,6 +13,7 @@ import {
   ExternalLink,
   Eye,
   FileCheck2,
+  Layers,
   Loader2,
   Printer,
   RotateCcw,
@@ -127,8 +128,8 @@ function SectionHeader({
 
 /* ---------------- LLM 报告 markdown 渲染 ---------------- */
 
-/** 与站点编辑风一致的 markdown 样式映射（react-markdown + remark-gfm 表格支持） */
-const mdComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
+/** 与站点编辑风一致的 markdown 样式映射（react-markdown + remark-gfm 表格支持；merged-report-view 复用） */
+export const mdComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
   h2: ({ children }) => (
     <h2 className="mt-8 mb-3 border-b border-stone-200 pb-2 font-display text-base font-bold text-stone-900 first:mt-0 dark:border-stone-800 dark:text-stone-50">
       {children}
@@ -255,6 +256,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const blastInfo = summary.blast ?? null
   const reportMd = job.reportMarkdown?.trim() || null
   const reportLlmFailed = summary.reportLlmOk === false
+  const reportDeferred = summary.reportDeferred === true
 
   const downloadReport = () => {
     window.open(`/api/jobs/${job.id}/report?download=1`, '_blank')
@@ -426,44 +428,50 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         transition={{ duration: 0.35, delay: 0.18, ease: 'easeOut' }}
         className={cn(
           'flex flex-col gap-4 rounded-lg border px-5 py-4 sm:flex-row sm:items-center',
-          reportLlmFailed
-            ? 'border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/20'
-            : 'border-emerald-700/25 bg-emerald-50/60 dark:border-emerald-700/30 dark:bg-emerald-950/20'
+          reportDeferred
+            ? 'border-violet-300 bg-violet-50/60 dark:border-violet-800 dark:bg-violet-950/20'
+            : reportLlmFailed
+              ? 'border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/20'
+              : 'border-emerald-700/25 bg-emerald-50/60 dark:border-emerald-700/30 dark:bg-emerald-950/20'
         )}
       >
         <div className="flex items-center gap-3">
           <div className={cn(
             'flex size-9 shrink-0 items-center justify-center rounded-md text-white',
-            reportLlmFailed ? 'bg-amber-600 dark:bg-amber-700' : 'bg-emerald-800 dark:bg-emerald-700'
+            reportDeferred ? 'bg-violet-700 dark:bg-violet-800' : reportLlmFailed ? 'bg-amber-600 dark:bg-amber-700' : 'bg-emerald-800 dark:bg-emerald-700'
           )}>
-            {reportLlmFailed ? <AlertTriangle className="size-4.5" /> : <FileCheck2 className="size-4.5" />}
+            {reportDeferred ? <Layers className="size-4.5" /> : reportLlmFailed ? <AlertTriangle className="size-4.5" /> : <FileCheck2 className="size-4.5" />}
           </div>
           <div>
             <div className="text-sm font-semibold text-stone-900 dark:text-stone-100">
-              {reportLlmFailed ? '报告生成（LLM 部分失败）' : '评估报告已生成'}
+              {reportDeferred ? '分析已并入合并评估报告' : reportLlmFailed ? '报告生成（LLM 部分失败）' : '评估报告已生成'}
             </div>
             <div className="font-mono text-[11px] text-stone-500 dark:text-stone-400">
-              HTML · {formatDuration(Math.round((summary.durationMs ?? 0) / 1000))} · 可独立下载分享
+              {reportDeferred
+                ? `关联靶点批次 · 数据收集 ${formatDuration(Math.round((summary.durationMs ?? 0) / 1000))} · 合并报告见上方切换栏`
+                : `HTML · ${formatDuration(Math.round((summary.durationMs ?? 0) / 1000))} · 可独立下载分享`}
             </div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 sm:ml-auto">
-          <Button
-            onClick={openPreview}
-            className="h-10 gap-2 rounded-md bg-emerald-800 px-4 font-medium text-white hover:bg-emerald-700 dark:bg-emerald-700 dark:hover:bg-emerald-600"
-          >
-            <Eye className="size-4" />
-            在线预览报告
-          </Button>
-          <Button
-            variant="outline"
-            onClick={downloadReport}
-            className="h-10 gap-2 rounded-md border-stone-300 bg-white px-4 dark:border-stone-700 dark:bg-stone-900"
-          >
-            <Download className="size-4" />
-            下载 HTML
-          </Button>
-        </div>
+        {!reportDeferred && (
+          <div className="flex flex-wrap gap-2 sm:ml-auto">
+            <Button
+              onClick={openPreview}
+              className="h-10 gap-2 rounded-md bg-emerald-800 px-4 font-medium text-white hover:bg-emerald-700 dark:bg-emerald-700 dark:hover:bg-emerald-600"
+            >
+              <Eye className="size-4" />
+              在线预览报告
+            </Button>
+            <Button
+              variant="outline"
+              onClick={downloadReport}
+              className="h-10 gap-2 rounded-md border-stone-300 bg-white px-4 dark:border-stone-700 dark:bg-stone-900"
+            >
+              <Download className="size-4" />
+              下载 HTML
+            </Button>
+          </div>
+        )}
       </motion.section>
 
       {/* 5. AI 评估报告（LLM 分析全文内联展示） */}
@@ -488,7 +496,20 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             LLM 报告生成失败或部分失败，以下可能仅包含成功生成的章节；结构化数据区块（评分 / PDB / 文献）不受影响，可重新评估以重试报告生成。
           </div>
         )}
-        {reportMd ? (
+        {reportDeferred ? (
+          <Card className="rounded-lg border-violet-200 bg-white shadow-none dark:border-violet-900 dark:bg-stone-900">
+            <CardContent className="flex flex-col items-center gap-2.5 px-6 py-8 text-center">
+              <Layers className="size-5 text-violet-500 dark:text-violet-400" aria-hidden />
+              <p className="text-sm text-stone-600 dark:text-stone-300">
+                本靶点与批次内其他靶点经分析判定为<span className="font-semibold text-violet-700 dark:text-violet-400">关联靶点</span>，
+                分析章节（执行摘要 / 靶点关系分析 / 各靶点综述 / 整合策略）已合并至本批次的合并评估报告
+              </p>
+              <p className="text-xs text-stone-400 dark:text-stone-500">
+                下方数据区块（评分 / PDB / BLAST / 文献）为该靶点的独立数据；合并报告可经上方切换栏查看
+              </p>
+            </CardContent>
+          </Card>
+        ) : reportMd ? (
           <Card className="rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
             <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
               <div className="mb-4 flex items-center gap-2 text-stone-400 dark:text-stone-500">

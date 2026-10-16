@@ -1,6 +1,14 @@
 /**
  * 评估主管线 — 阶段化数据收集 + 评分 + LLM 报告生成 + 持久化。
  * 全流程受 AbortSignal 控制；进度按 STAGE_RANGES 区间映射。
+ *
+ * v1.8 编排（用户反馈「BLAST 轮询 5 分钟超时 + 等待期间空转」）：
+ *  - BLAST 提交前置：阶段 2 确定 BLAST 序列后立即提交（不阻塞），
+ *    RCSB / PDBe / PubMed 在 NCBI 计算期间并行推进
+ *  - BLAST 收集后置：文献检索完成后再收集结果 — 「仍在运行不判超时失败」，
+ *    仅 NCBI FAILED / RID 过期 / 网络长期不可达才失败
+ *  - deferred 报告模式：关联靶点批量评估时跳过单靶点 LLM 报告，
+ *    数据并入批次合并报告（见 report-merged.ts）
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
@@ -8,7 +16,7 @@ import { db } from '@/lib/db'
 import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges } from './pdbe'
-import { runBlastPdb, enrichBlastHits } from './blast'
+import { submitBlastPdb, collectBlastPdb, enrichBlastHits } from './blast'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
 import { generateReportSections, type ReportContext } from './report'
@@ -25,6 +33,8 @@ export interface PipelineInput {
   sequence?: string
   uploadId?: string
   goal?: string
+  /** 批次关系说明（非关联批量时注入报告，LLM 在执行摘要中说明独立/复合物定位） */
+  batchNote?: string
   options: EvaluationOptions
 }
 
@@ -173,7 +183,6 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       sequence = info.sequence
     }
     log(`UniProt 元数据完成：${info.entryName}（${info.proteinName}，${info.sequenceLength} aa，${info.organism}）`)
-    report('uniprot', 'UniProt 元数据完成', 1)
   } else {
     // 纯序列输入：快速尝试精确肽段识别（失败则等 BLAST 兜底）
     report('uniprot', '尝试识别序列对应的 UniProt 条目…', 0.5)
@@ -187,7 +196,34 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     } else {
       log('序列未能直接匹配 UniProt，将由 BLAST 兜底识别', 'warn')
     }
-    report('uniprot', uniprotInfo ? 'UniProt 识别完成' : '无直接 UniProt 匹配（BLAST 兜底）', 1)
+  }
+
+  // ─── 阶段 2.5：BLAST 提前提交（非阻塞 — 等待期先做其他数据检索）───────────
+  let blastHits: BlastHit[] = []
+  let blastStatus: BlastStatusInfo = { status: 'ok' }
+  let blastSubmitted: { rid: string; rtoe: number } | null = null
+  const abVerdict = detectAntibody(sequence)
+  const blastDisabledByOption = Boolean(input.options.skipBlast)
+  const blastDisabledByAntibody = abVerdict.isAntibody && !input.options.forceBlast
+
+  if (blastDisabledByOption) {
+    blastStatus = { status: 'skipped-disabled' }
+    log('跳过 BLAST：已在高级选项中关闭')
+  } else if (blastDisabledByAntibody) {
+    // 抗体序列：BLAST pdbaa 会命中海量抗体恒定区结构，对靶点可行性评估无增量价值
+    blastStatus = { status: 'skipped-antibody', note: abVerdict.evidence.slice(0, 2).join('；') }
+    log(`跳过 BLAST：检测到抗体序列（${abVerdict.evidence.join('；')}）— 抗体结构库命中众多但参考价值低`)
+  } else if (sequence.length >= 30) {
+    try {
+      report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
+      blastSubmitted = await submitBlastPdb(sequence, msg => log(msg), signal)
+      log(`BLAST 提前提交完成（RID=${blastSubmitted.rid}，预计 ${blastSubmitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
+    } catch (e) {
+      if (signal.aborted) throw e
+      const msg = e instanceof Error ? e.message : String(e)
+      blastStatus = { status: 'failed', note: `提交失败：${msg.slice(0, 100)}` }
+      log(`BLAST 提交失败：${msg}（稍后阶段将标记为不可用）`, 'warn')
+    }
   }
 
   // ─── 阶段 3：RCSB PDB 检索 ────────────────────────────────────────────────
@@ -235,31 +271,72 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     report('pdbe', '跳过（无 UniProt）', 1)
   }
 
-  // ─── 阶段 5：BLAST ────────────────────────────────────────────────────────
-  let blastHits: BlastHit[] = []
-  let blastStatus: BlastStatusInfo = { status: 'ok' }
-  const coveragePct = coverage?.coveragePercent ?? 0
-  const abVerdict = detectAntibody(sequence)
-  const coverageSufficient = uniprotInfo && directPdbs.length >= 5 && coveragePct >= 50
-  if (input.options.skipBlast) {
-    blastStatus = { status: 'skipped-disabled' }
-    report('blast', '已按选项跳过 BLAST', 1)
-    log('跳过 BLAST：已在高级选项中关闭')
-  } else if (abVerdict.isAntibody && !input.options.forceBlast) {
-    // 抗体序列：BLAST pdbaa 会命中海量抗体恒定区结构，对靶点可行性评估无增量价值
-    blastStatus = { status: 'skipped-antibody', note: abVerdict.evidence.slice(0, 2).join('；') }
-    report('blast', '抗体序列 — 已跳过 BLAST 同源检索', 1)
-    log(`跳过 BLAST：检测到抗体序列（${abVerdict.evidence.join('；')}）— 抗体结构库命中众多但参考价值低`)
-  } else if (coverageSufficient && !input.options.forceBlast) {
-    blastStatus = { status: 'skipped-covered' }
-    report('blast', '结构覆盖充分，跳过 BLAST', 1)
-    log(`跳过 BLAST：直接结构 ${directPdbs.length} 个且覆盖率 ${coveragePct}%，结构证据已充分`)
-  } else {
-    report('blast', '提交 BLASTp（NCBI pdbaa）…', 0.05)
+  // ─── 阶段 5：PubMed 文献（先于 BLAST 收集 — 利用 NCBI 计算等待期）─────────
+  let literature: LiteratureItem[] = []
+  report('pubmed', '检索 PubMed 结构生物学文献…', 0.3)
+  try {
+    const geneNames = uniprotInfo?.geneNames ?? []
+    const proteinName = uniprotInfo?.proteinName ?? ''
+    const organism = uniprotInfo?.organism ?? ''
+    const query = buildLiteratureQuery(geneNames, proteinName, organism)
+    if (query) {
+      literature = await searchPubmed(query, 15)
+      log(`PubMed 检索完成：${literature.length} 篇相关文献`)
+    } else {
+      log('无法构造文献检索式（缺基因/蛋白名）', 'warn')
+    }
+  } catch (e) {
+    log(`PubMed 检索失败：${e instanceof Error ? e.message : e}`, 'warn')
+  }
+
+  // PDB 主引文（结构解析论文）并入文献列表，建立 PDB ↔ 文献关联
+  const structPmids: string[] = []
+  const seenPmid = new Set<string>(literature.map(l => String(l.pmid)))
+  for (const p of directPdbs) {
+    const pid = (p.pubmedId ?? '').trim()
+    if (pid && !seenPmid.has(pid)) {
+      seenPmid.add(pid)
+      structPmids.push(pid)
+    }
+    if (structPmids.length >= 20) break
+  }
+  if (structPmids.length > 0) {
+    report('pubmed', `拉取 ${structPmids.length} 篇 PDB 主引文文献详情…`, 0.7)
     try {
-      const rawHits = await runBlastPdb(sequence, msg => {
-        report('blast', msg, 0.3)
-      }, signal)
+      const structLits = (await fetchPubmedByPmids(structPmids))
+        .map(l => ({ ...l, fromPdb: true as const }))
+        .filter(l => !literature.some(x => String(x.pmid) === String(l.pmid)))
+      // 结构解析文献置前（与结构条目直接关联），按年份降序
+      structLits.sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
+      literature = [...structLits, ...literature]
+      log(`PDB 主引文并入：${structLits.length} 篇结构解析文献（与结构条目直接关联）`)
+    } catch (e) {
+      log(`PDB 主引文拉取失败：${e instanceof Error ? e.message : e}`, 'warn')
+    }
+  }
+  report('pubmed', `文献检索完成（${literature.length} 篇）`, 1)
+
+  // ─── 阶段 6：BLAST 结果收集（仍在运行不判超时失败）────────────────────────
+  const coveragePct = coverage?.coveragePercent ?? 0
+  const coverageSufficient = uniprotInfo && directPdbs.length >= 5 && coveragePct >= 50
+  if (blastStatus.status === 'skipped-disabled') {
+    report('blast', '已按选项跳过 BLAST', 1)
+  } else if (blastStatus.status === 'skipped-antibody') {
+    report('blast', '抗体序列 — 已跳过 BLAST 同源检索', 1)
+  } else if (coverageSufficient && !input.options.forceBlast) {
+    // 结构证据已充分：不再收集已提交的 BLAST 结果（避免低价值噪声）
+    blastStatus = { status: 'skipped-covered' }
+    report('blast', '结构覆盖充分，无需同源检索结果', 1)
+    log(`跳过 BLAST 收集：直接结构 ${directPdbs.length} 个且覆盖率 ${coveragePct}%，结构证据已充分（已提交的 NCBI 任务弃用）`)
+  } else if (blastSubmitted) {
+    report('blast', `收集 BLAST 结果（RID=${blastSubmitted.rid}，等待期间已完成结构/文献检索）…`, 0.2)
+    try {
+      const rawHits = await collectBlastPdb(
+        blastSubmitted.rid,
+        blastSubmitted.rtoe,
+        msg => report('blast', msg, 0.5),
+        signal,
+      )
       const directSet = new Set(directPdbs.map(p => p.pdbId))
       const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
       blastHits = await enrichBlastHits(filtered, directSet)
@@ -309,52 +386,11 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       log(`BLAST 失败：${msg}（继续后续阶段）`, 'warn')
       report('blast', 'BLAST 不可用（已跳过）', 1)
     }
+  } else {
+    // 提交阶段已失败（blastStatus 为 failed）
+    report('blast', 'BLAST 不可用（提交失败，已跳过）', 1)
+    log(`BLAST 阶段跳过：${blastStatus.note ?? '提交失败'}`)
   }
-
-  // ─── 阶段 6：PubMed 文献 ──────────────────────────────────────────────────
-  let literature: LiteratureItem[] = []
-  report('pubmed', '检索 PubMed 结构生物学文献…', 0.3)
-  try {
-    const geneNames = uniprotInfo?.geneNames ?? []
-    const proteinName = uniprotInfo?.proteinName ?? ''
-    const organism = uniprotInfo?.organism ?? ''
-    const query = buildLiteratureQuery(geneNames, proteinName, organism)
-    if (query) {
-      literature = await searchPubmed(query, 15)
-      log(`PubMed 检索完成：${literature.length} 篇相关文献`)
-    } else {
-      log('无法构造文献检索式（缺基因/蛋白名）', 'warn')
-    }
-  } catch (e) {
-    log(`PubMed 检索失败：${e instanceof Error ? e.message : e}`, 'warn')
-  }
-
-  // PDB 主引文（结构解析论文）并入文献列表，建立 PDB ↔ 文献关联
-  const structPmids: string[] = []
-  const seenPmid = new Set<string>(literature.map(l => String(l.pmid)))
-  for (const p of directPdbs) {
-    const pid = (p.pubmedId ?? '').trim()
-    if (pid && !seenPmid.has(pid)) {
-      seenPmid.add(pid)
-      structPmids.push(pid)
-    }
-    if (structPmids.length >= 20) break
-  }
-  if (structPmids.length > 0) {
-    report('pubmed', `拉取 ${structPmids.length} 篇 PDB 主引文文献详情…`, 0.7)
-    try {
-      const structLits = (await fetchPubmedByPmids(structPmids))
-        .map(l => ({ ...l, fromPdb: true as const }))
-        .filter(l => !literature.some(x => String(x.pmid) === String(l.pmid)))
-      // 结构解析文献置前（与结构条目直接关联），按年份降序
-      structLits.sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
-      literature = [...structLits, ...literature]
-      log(`PDB 主引文并入：${structLits.length} 篇结构解析文献（与结构条目直接关联）`)
-    } catch (e) {
-      log(`PDB 主引文拉取失败：${e instanceof Error ? e.message : e}`, 'warn')
-    }
-  }
-  report('pubmed', `文献检索完成（${literature.length} 篇）`, 1)
 
   // ─── 阶段 7：评分 ────────────────────────────────────────────────────────
   report('score', '计算可行性评分…', 0.5)
@@ -369,62 +405,95 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   report('score', '评分完成', 1)
 
   // ─── 阶段 8：LLM 报告 ────────────────────────────────────────────────────
-  report('report', '整理数据上下文…', 0.05)
   // 图片元数据已在阶段 1 从 parsed.json 读取；这里仅定位资产目录
   if (input.uploadId) {
     assetDir = path.join(process.cwd(), 'db', 'reports', input.uploadId, 'assets')
   }
 
-  const reportCtx: ReportContext = {
-    uniprot: uniprotInfo,
-    sequence,
-    goal: goal || undefined,
-    goalHints,
-    insights: insights ?? undefined,
-    providedSequence: providedSequence && comparison
-      ? { sequence: providedSequence, comparison }
-      : undefined,
-    directPdbs,
-    blastHits,
-    blastStatus,
-    coverage,
-    coverageText,
-    gapText,
-    literature,
-    images,
-    scores,
+  const deferReport = input.options.reportMode === 'deferred'
+  let generated: { fullMarkdown: string; ok: boolean; errors: string[] } = { fullMarkdown: '', ok: false, errors: [] }
+
+  if (deferReport) {
+    // 关联靶点批量：跳过单靶点报告 — 全部靶点完成后由合并报告统一生成
+    report('report', '报告并入合并评估报告（本靶点数据已就绪）…', 1)
+    log('跳过单靶点 LLM 报告：本批次判定为关联靶点，将合并生成一份含关系分析的报告')
+  } else {
+    report('report', '整理数据上下文…', 0.05)
+    const reportCtx: ReportContext = {
+      uniprot: uniprotInfo,
+      sequence,
+      goal: goal || undefined,
+      goalHints,
+      insights: insights ?? undefined,
+      batchNote: input.batchNote,
+      providedSequence: providedSequence && comparison
+        ? { sequence: providedSequence, comparison }
+        : undefined,
+      directPdbs,
+      blastHits,
+      blastStatus,
+      coverage,
+      coverageText,
+      gapText,
+      literature,
+      images,
+      scores,
+    }
+
+    report('report', 'LLM 生成评估分析（第 1/3 段：摘要与背景）…', 0.15)
+    const gen = await generateReportSections(reportCtx, signal)
+    generated = gen
+    for (let i = 0; i < gen.parts.length; i++) {
+      const p = gen.parts[i]
+      report('report', `LLM 第 ${['1', '2', '3'][i]}/3 段（${['摘要与背景', '结构研究全景', '可行性与策略'][i]}）${p.llmOk ? '完成' : '失败'}${p.llmOk ? `（${p.markdown.length} 字）` : `：${p.error}`}`, (i + 1) / 3)
+      log(`LLM 报告段 ${p.key} ${p.llmOk ? `完成（${p.markdown.length} 字）` : `失败：${p.error}`}`, p.llmOk ? 'info' : 'warn')
+    }
   }
 
-  report('report', 'LLM 生成评估分析（第 1/3 段：摘要与背景）…', 0.15)
-  const generated = await generateReportSections(reportCtx, signal)
-  for (let i = 0; i < generated.parts.length; i++) {
-    const p = generated.parts[i]
-    report('report', `LLM 第 ${['1', '2', '3'][i]}/3 段（${['摘要与背景', '结构研究全景', '可行性与策略'][i]}）${p.llmOk ? '完成' : '失败'}${p.llmOk ? `（${p.markdown.length} 字）` : `：${p.error}`}`, (i + 1) / 3)
-    log(`LLM 报告段 ${p.key} ${p.llmOk ? `完成（${p.markdown.length} 字）` : `失败：${p.error}`}`, p.llmOk ? 'info' : 'warn')
+  // HTML 渲染 + 落盘（deferred 模式不生成单靶点 HTML）
+  let reportPath: string | null = null
+  if (!deferReport) {
+    report('report', '组装 HTML 报告…', 0.95)
+    const engineSummary = await getEngineSummary()
+    const html = await renderReportHtml({
+      ctx: {
+        uniprot: uniprotInfo,
+        sequence,
+        goal: goal || undefined,
+        goalHints,
+        insights: insights ?? undefined,
+        batchNote: input.batchNote,
+        providedSequence: providedSequence && comparison
+          ? { sequence: providedSequence, comparison }
+          : undefined,
+        directPdbs,
+        blastHits,
+        blastStatus,
+        coverage,
+        coverageText,
+        gapText,
+        literature,
+        images,
+        scores,
+      },
+      methodStats: scores.methodStats,
+      llmMarkdown: generated.fullMarkdown,
+      llmOk: generated.ok,
+      llmErrors: generated.errors,
+      jobId: input.jobId,
+      durationMs: Date.now() - t0,
+      totalPdbFound,
+      engineSummary,
+      resolveImagePath: (meta) => {
+        const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
+        return path.join(assetDir, `${meta.id}.${ext}`)
+      },
+    })
+    const reportDir = path.join(process.cwd(), 'db', 'reports', input.jobId)
+    await fs.mkdir(reportDir, { recursive: true })
+    reportPath = path.join(reportDir, 'report.html')
+    await fs.writeFile(reportPath, html, 'utf-8')
   }
-
-  // HTML 渲染 + 落盘
-  report('report', '组装 HTML 报告…', 0.95)
-  const engineSummary = await getEngineSummary()
-  const html = await renderReportHtml({
-    ctx: reportCtx,
-    methodStats: scores.methodStats,
-    llmMarkdown: generated.fullMarkdown,
-    llmOk: generated.ok,
-    llmErrors: generated.errors,
-    jobId: input.jobId,
-    durationMs: Date.now() - t0,
-    totalPdbFound,
-    engineSummary,
-    resolveImagePath: (meta) => {
-      const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
-      return path.join(assetDir, `${meta.id}.${ext}`)
-    },
-  })
-  const reportDir = path.join(process.cwd(), 'db', 'reports', input.jobId)
-  await fs.mkdir(reportDir, { recursive: true })
-  const reportPath = path.join(reportDir, 'report.html')
-  await fs.writeFile(reportPath, html, 'utf-8')
 
   // ─── 持久化 ──────────────────────────────────────────────────────────────
   const durationMs = Date.now() - t0
@@ -449,7 +518,9 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     imageCount: images.length,
     durationMs,
     blast: blastStatus,
-    reportLlmOk: generated.ok,
+    reportLlmOk: deferReport ? undefined : generated.ok,
+    reportDeferred: deferReport || undefined,
+    batchNote: input.batchNote,
     construct: comparison
       ? {
           providedLength: comparison.providedLength,
@@ -473,7 +544,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       blastHits: JSON.stringify(blastHits),
       literature: JSON.stringify(literature),
       reportPath,
-      reportMarkdown: generated.fullMarkdown?.trim() ? generated.fullMarkdown : null,
+      reportMarkdown: !deferReport && generated.fullMarkdown?.trim() ? generated.fullMarkdown : null,
       error: null,
       updatedAt: new Date(),
     },
@@ -492,5 +563,5 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     }
   }
 
-  log(`评估完成：总耗时 ${(durationMs / 1000).toFixed(1)}s，报告已生成`)
+  log(`评估完成：总耗时 ${(durationMs / 1000).toFixed(1)}s${deferReport ? '（报告已并入合并评估报告）' : '，报告已生成'}`)
 }

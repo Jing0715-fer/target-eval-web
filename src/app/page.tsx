@@ -10,6 +10,7 @@ import { InputPanel } from '@/components/eval/input-panel'
 import { ProgressPanel } from '@/components/eval/progress-panel'
 import { ErrorPanel } from '@/components/eval/error-panel'
 import { ResultView } from '@/components/eval/result-view'
+import { MergedReportView } from '@/components/eval/merged-report-view'
 import { BatchBar } from '@/components/eval/batch-bar'
 import { HistoryDialog, RecentEvaluations } from '@/components/eval/history'
 import { LlmConfigPanel } from '@/components/eval/llm-config-panel'
@@ -139,11 +140,20 @@ export default function Home() {
                     <BatchBar
                       batch={flow.batch}
                       currentJobId={flow.job.id}
-                      onSelect={(id) => void flow.loadJob(id)}
+                      onSelect={(id) => void flow.loadJobById(id, { switchView: true })}
+                      onShowMerged={flow.showMergedReport}
                     />
                   </div>
                 )}
-                <ResultView job={flow.job} onNewEvaluation={handleNewEvaluation} />
+                {flow.batch?.mergedReport && flow.batch.view === 'merged' ? (
+                  <MergedReportView
+                    report={flow.batch.mergedReport}
+                    targetLabels={flow.batch.items.map(x => x.label)}
+                    onNewEvaluation={handleNewEvaluation}
+                  />
+                ) : (
+                  <ResultView job={flow.job} onNewEvaluation={handleNewEvaluation} />
+                )}
               </motion.div>
             )}
           </AnimatePresence>

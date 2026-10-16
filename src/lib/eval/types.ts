@@ -11,6 +11,8 @@ export interface EvaluationOptions {
   skipBlast: boolean
   forceBlast: boolean
   maxPdb: number
+  /** 报告生成模式：single = 各靶点独立报告（默认）；deferred = 跳过单靶点报告，数据并入合并报告（关联靶点批量评估用） */
+  reportMode?: 'single' | 'deferred'
 }
 
 // ─── UniProt ──────────────────────────────────────────────────────────────────
@@ -192,9 +194,49 @@ export interface JobSummary {
   blast?: BlastStatusInfo
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
+  /** 报告已延迟：本靶点不生成独立报告，数据并入合并评估报告（v1.8+ 关联靶点批量） */
+  reportDeferred?: boolean
+  /** 批次关系说明（v1.8+ 非关联批量时 LLM 在报告中说明独立/复合物定位） */
+  batchNote?: string
 }
 
-// ─── docx 解析 ────────────────────────────────────────────────────────────────
+// ─── 靶点关系判断（v1.8 批量评估）────────────────────────────────
+
+export type TargetRelationType =
+  | 'complex'          // 复合物亚基：共表达/共纯化解析复合物结构
+  | 'antibody-antigen' // 抗体-抗原对：Fab/scFv 与靶抗原复合物
+  | 'fusion'           // 融合构建：同一构建中串联多个结构域
+  | 'pathway'          // 同通路/同疾病关联：生物学功能相关但非物理复合
+  | 'independent'      // 相互独立的项目
+  | 'other'            // 其他关联（LLM 文本说明）
+
+export interface RelationJudgment {
+  /** 是否建议合并为一份报告 */
+  related: boolean
+  relationType: TargetRelationType
+  /** 判断置信度 */
+  confidence: 'high' | 'medium' | 'low'
+  /** 判断依据（≤300 字，给用户看） */
+  rationale: string
+  /** 对结构解析策略的建议（复合物共表达/复合物组装等，≤200 字） */
+  strategy: string
+  /** 判断失败时前端降级为「未判断」 */
+  error?: string
+}
+
+/** 关系类型 → 中文描述（前后端共用） */
+export function describeRelationType(t: TargetRelationType): string {
+  switch (t) {
+    case 'complex': return '复合物亚基（物理相互作用）'
+    case 'antibody-antigen': return '抗体-抗原配对'
+    case 'fusion': return '融合构建（多结构域串联）'
+    case 'pathway': return '同通路/功能相关'
+    case 'independent': return '相互独立'
+    case 'other': return '其他关联'
+  }
+}
+
+// ─── docx 解析 ────────────────────────────────────────────────────────────────────
 
 export interface ParsedSequence {
   header: string
@@ -302,22 +344,22 @@ export const STAGE_DEFS: Array<{ key: string; label: string }> = [
   { key: 'uniprot', label: 'UniProt 元数据' },
   { key: 'rcsb', label: 'PDB 结构检索' },
   { key: 'pdbe', label: 'PDBe 覆盖率' },
-  { key: 'blast', label: 'BLAST 同源检索' },
   { key: 'pubmed', label: '文献检索' },
+  { key: 'blast', label: 'BLAST 同源检索' },
   { key: 'score', label: '评分计算' },
   { key: 'report', label: 'LLM 报告生成' },
 ]
 
-/** 各阶段的进度区间（起点/终点百分比） */
+/** 各阶段的进度区间（起点/终点百分比）— 与 pipeline 实际执行顺序一致（v1.8 起 BLAST 收集晚于文献检索） */
 export const STAGE_RANGES: Record<string, [number, number]> = {
   input: [0, 5],
   uniprot: [5, 15],
-  rcsb: [15, 45],
-  pdbe: [45, 55],
-  blast: [55, 70],
-  pubmed: [70, 80],
-  score: [80, 85],
-  report: [85, 100],
+  rcsb: [15, 40],
+  pdbe: [40, 50],
+  pubmed: [50, 60],
+  blast: [60, 75],
+  score: [75, 80],
+  report: [80, 100],
 }
 
 /**

@@ -14,7 +14,7 @@ import type { ReportContext } from './report'
 
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
 
-function esc(s: string): string {
+export function esc(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -30,7 +30,7 @@ function inlineMd(s: string): string {
     .replace(/PMID\s*(\d{6,9})/g, 'PMID <a href="https://pubmed.ncbi.nlm.nih.gov/$1/" target="_blank" rel="noopener">$1</a>')
 }
 
-function renderMarkdown(md: string, headingOffset = 0): string {
+export function renderMarkdown(md: string, headingOffset = 0): string {
   const lines = md.replace(/\r\n/g, '\n').split('\n')
   const out: string[] = []
   let inList = false
@@ -540,6 +540,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div><b>BLAST 同源</b> ${ctx.blastHits.length} 个${ctx.blastStatus && ctx.blastStatus.status !== 'ok' ? `（${esc(describeBlastStatus(ctx.blastStatus).split('—')[0].trim())}）` : ''}</div>
       <div><b>文献证据</b> ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构条目直接关联）` : ''}</div>
       ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
+      ${ctx.batchNote ? `<div><b>批次关系</b> <span style="color:#92400e">${esc(ctx.batchNote.slice(0, 90))}${ctx.batchNote.length > 90 ? '…' : ''}</span></div>` : ''}
       <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
       <div><b>报告日期</b> ${dateStr}</div>
     </div>

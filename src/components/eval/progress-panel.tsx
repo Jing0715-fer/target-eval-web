@@ -94,7 +94,7 @@ export interface ProgressPanelProps {
   batch?: BatchState | null
 }
 
-/** 进度视图（running）：总体进度 + 阶段列表 + 实时日志 + 计时/取消 */
+/** 进度视图（running）：总体进度 + 阶段列表 + 实时日志 + 计时/取消（含 v1.8 关系判断/合并报告生成阶段） */
 export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCancel, batch }: ProgressPanelProps) {
   const progress = job?.progress ?? null
   const stages =
@@ -102,11 +102,17 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
   const percent = Math.min(100, Math.max(0, progress?.percent ?? 0))
   const isQueued = job?.status === 'pending'
   const queuePos = job?.queuePosition ?? 0
-  const message = isQueued
-    ? queuePos > 0
-      ? `排队等待中（前方还有 ${queuePos} 个作业）`
-      : '下一个执行，正在分配资源…'
-    : progress?.message?.trim() || '正在启动评估…'
+  const relationJudging = batch?.relationJudging === true
+  const merging = batch?.merging === true
+  const message = relationJudging
+    ? '正在分析批次内靶点的关联关系（LLM 判断：复合物 / 抗体-抗原 / 融合构建 / 独立项目）…'
+    : merging
+      ? '靶点数据已就绪，正在生成合并评估报告（含关系分析章节）…'
+      : isQueued
+        ? queuePos > 0
+          ? `排队等待中（前方还有 ${queuePos} 个作业）`
+          : '下一个执行，正在分配资源…'
+        : progress?.message?.trim() || '正在启动评估…'
 
   return (
     <div className="flex flex-col gap-6">
@@ -139,6 +145,23 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
           </p>
         )}
       </header>
+
+      {/* v1.8 阶段横幅：关系判断 / 合并报告生成（优先展示） */}
+      {(relationJudging || merging) && (
+        <div className="flex items-start gap-3 rounded-lg border border-violet-200 bg-violet-50/70 px-4 py-3.5 dark:border-violet-900/70 dark:bg-violet-950/30">
+          <LoaderCircle className="mt-0.5 size-4 shrink-0 animate-spin text-violet-600 dark:text-violet-400" aria-hidden />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-violet-800 dark:text-violet-300">
+              {relationJudging ? '正在分析靶点关系' : '正在生成合并评估报告'}
+            </p>
+            <p className="mt-0.5 text-xs leading-relaxed text-violet-700/80 dark:text-violet-400/80">
+              {relationJudging
+                ? `批次内 ${batch?.total ?? 0} 个靶点正由 LLM 判断关联关系 — 关联（复合物亚基 / 抗体-抗原配对 / 融合构建）则合并为一份含关系分析的报告；相互独立则分别生成报告并注明批次定位。通常需要 10–30 秒。`
+                : '各靶点数据已全部收集完成，LLM 正在撰写合并分析（执行摘要 / 靶点关系分析 / 各靶点综述 / 整合策略）。通常需要 1–3 分钟。'}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* 总体进度 */}
       <Card className="gap-0 rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">

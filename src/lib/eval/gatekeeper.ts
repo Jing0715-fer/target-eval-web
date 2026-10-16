@@ -211,7 +211,8 @@ async function acquireParseSlot(waitLimit: number | null): Promise<() => void> {
 // ─── 终态作业 TTL 清理 ─────────────────────────────────────────────────────────
 
 /**
- * 惰性清理：删除超过 TTL 的终态作业（DB 行 + db/reports/{jobId} 目录）。
+ * 惰性清理：删除超过 TTL 的终态作业（DB 行 + db/reports/{jobId} 目录）
+ * 与过期的合并报告（BatchReport 行 + db/reports/{batchId} 目录，v1.8+）。
  * 每小时最多执行一次（globalThis 时间戳闸门）；单次最多删 80 条防长尾。
  * fire-and-forget：调用方不 await、失败静默。
  */
@@ -232,6 +233,18 @@ export function scheduleJobTtlCleanup(): void {
           await fs.rm(path.join(process.cwd(), 'db', 'reports', j.id), { recursive: true, force: true })
         } catch { /* 磁盘清理失败不阻塞 */ }
         await db.evaluationJob.delete({ where: { id: j.id } }).catch(() => undefined)
+      }
+      // 过期合并报告（目录 + 行；参与作业删除后合并报告亦随 TTL 回收）
+      const staleReports = await db.batchReport.findMany({
+        where: { createdAt: { lt: cutoff } },
+        select: { id: true },
+        take: 40,
+      })
+      for (const r of staleReports) {
+        try {
+          await fs.rm(path.join(process.cwd(), 'db', 'reports', r.id), { recursive: true, force: true })
+        } catch { /* 磁盘清理失败不阻塞 */ }
+        await db.batchReport.delete({ where: { id: r.id } }).catch(() => undefined)
       }
     } catch { /* DB 不可用时忽略 */ }
   })()

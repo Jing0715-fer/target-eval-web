@@ -1,6 +1,9 @@
 /**
  * 作业管理器 — 4GB 内存沙箱防 OOM 设计：
- *  - 评估作业全局串行执行（promise chain 队列），任意时刻最多 1 个在跑
+ *  - 评估作业小并发池执行（默认 2，EVAL_JOB_CONCURRENCY 可调）：
+ *    评估管线为 I/O 密集（外部 API 检索 + LLM 调用 + BLAST 轮询 sleep），
+ *    BLAST 等待期不占内存 — 双并发可让「靶点 A 等 BLAST 期间靶点 B 先做数据检索」，
+ *    而内存峰值（docx 解析 mammoth/sharp/VLM）由 gatekeeper 独立信号量约束
  *  - 内存注册表 LRU ≤ 20：终态作业超限即逐出（历史从 DB 重建）
  *  - 运行中作业持有 AbortController，支持取消
  *  - 进度/日志回调写入内存（日志环缓冲 60 条），终态持久化到 SQLite
@@ -19,14 +22,20 @@ export interface JobSnapshot {
 }
 
 const MAX_MEMORY_JOBS = 20
+/** 评估作业并发数（默认 2：一个作业等 BLAST 时另一个跑数据检索） */
+function jobConcurrency(): number {
+  const n = Number(process.env.EVAL_JOB_CONCURRENCY)
+  return Number.isFinite(n) && n >= 1 ? Math.min(4, Math.floor(n)) : 2
+}
 
 const g = globalThis as unknown as {
   __evalJobs?: Map<string, JobSnapshot>
-  __evalQueue?: Promise<void>
+  __evalQueueState?: { active: number; pending: Array<() => Promise<void>> }
 }
 
 const jobs: Map<string, JobSnapshot> = (g.__evalJobs ??= new Map())
-let queue: Promise<void> = (g.__evalQueue ??= Promise.resolve())
+/** 并发池调度状态（HMR / 多次导入间共享同一实例） */
+const pool: { active: number; pending: Array<() => Promise<void>> } = (g.__evalQueueState ??= { active: 0, pending: [] })
 
 function nowTime(): string {
   return new Date().toTimeString().slice(0, 8)
@@ -75,9 +84,29 @@ export function setJobRunning(id: string): void {
   }
 }
 
-/** 串行执行：任意时刻最多一个作业在跑 */
+/**
+ * 小并发池执行（默认同时 2 个）：
+ * BLAST 轮询是纯等待（sleep + 单请求），第二个作业利用该空隙做数据检索，
+ * 批量评估总时长显著缩短且内存峰值不变。
+ */
 export function enqueueJob(task: () => Promise<void>): void {
-  queue = queue.then(task).catch(() => { /* 作业自身处理错误 */ })
+  pool.pending.push(task)
+  schedulePool()
+}
+
+function schedulePool(): void {
+  const max = jobConcurrency()
+  while (pool.active < max && pool.pending.length > 0) {
+    const task = pool.pending.shift()
+    if (!task) break
+    pool.active++
+    void task()
+      .catch(() => { /* 作业自身处理错误 */ })
+      .finally(() => {
+        pool.active--
+        schedulePool()
+      })
+  }
 }
 
 // ─── 进度与日志 ───────────────────────────────────────────────────────────────

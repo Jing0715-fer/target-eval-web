@@ -25,6 +25,8 @@ interface EvaluateBody {
   uniprotFromDocx?: string
   sequenceFromDocx?: string
   goal?: string
+  /** 批次关系说明（非关联批量：注入报告说明独立/复合物定位，≤500 字） */
+  batchNote?: string
   options?: Partial<EvaluationOptions>
 }
 
@@ -81,7 +83,9 @@ export async function POST(req: Request) {
     skipBlast: body.options?.skipBlast ?? false,
     forceBlast: body.options?.forceBlast ?? false,
     maxPdb: Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
+    reportMode: body.options?.reportMode === 'deferred' ? 'deferred' : 'single',
   }
+  const batchNote = body.batchNote?.trim().slice(0, 500) || undefined
 
   // 创建 DB 记录（pending）— 记录归属（哈希键 + 掩码）
   const job = await db.evaluationJob.create({
@@ -121,6 +125,7 @@ export async function POST(req: Request) {
           sequence,
           uploadId,
           goal: body.goal,
+          batchNote,
           options,
         },
         { signal: snap.abort.signal, report, log },

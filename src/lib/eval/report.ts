@@ -19,6 +19,8 @@ export interface ReportContext {
   goalHints: string[]
   /** 评估表 LLM 智能解析要点（目标/科学问题/实验数据摘要等） */
   insights?: FormInsights
+  /** 批次关系说明（v1.8+ 非关联批量：LLM 在执行摘要中说明独立/复合物项目定位） */
+  batchNote?: string
   /** 客户提供的伴随序列（合并评估：UniProt 为主 + 构建边界分析） */
   providedSequence?: { sequence: string; comparison: SequenceComparison }
   directPdbs: PdbEntry[]
@@ -119,6 +121,11 @@ function buildDigest(ctx: ReportContext): string {
   lines.push('【客户目标与科学问题】')
   lines.push(ctx.goal?.trim() || ctx.goalHints.join(' / ') || '（未提供明确目标 — 按通用结构解析可行性评估）')
   if (!ctx.goal && ctx.goalHints.length) lines.push(`（评估表中提取的需求线索：${ctx.goalHints.slice(0, 4).map(elideSequenceRuns).join(' / ')}）`)
+  if (ctx.batchNote) {
+    lines.push('')
+    lines.push(`【批次靶点关系】${ctx.batchNote}`)
+    lines.push('（本报告属于同批次多靶点评估：请在执行摘要末尾用 1-2 句自然说明本项目的定位 — 独立项目还是与批次内其他靶点构成复合物/配对关系，以及对结构解析策略的影响）')
+  }
   const ins = ctx.insights
   if (ins?.scientificQuestions?.length) {
     lines.push('待解决的科学问题（评估表提取）：')
@@ -227,7 +234,7 @@ function partAInstruction(ctx: ReportContext): string {
   return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 执行摘要
-- 3-4 段：第一段直接给出总体结论（该靶点结构解析可行性如何、推荐什么方法）；第二段概括已有结构研究情况（引用具体数字）；第三段概括客户目标的达成路径与主要风险；第四段一句话给出明确的下一步建议
+- 3-4 段：第一段直接给出总体结论（该靶点结构解析可行性如何、推荐什么方法）；第二段概括已有结构研究情况（引用具体数字）；第三段概括客户目标的达成路径与主要风险；第四段一句话给出明确的下一步建议${ctx.batchNote ? '，并用 1-2 句说明本项目在同批次多靶点中的定位（独立项目/复合物相关）' : ''}
 - 篇幅 400-600 字
 
 ## 客户目标与可行性结论

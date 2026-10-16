@@ -62,3 +62,21 @@ model LlmConfig {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
+
+// 多靶点合并评估报告（v1.8：关联靶点批量评估后合并生成）
+model BatchReport {
+  id        String   @id @default(cuid())
+  jobIds    String // JSON: string[]（参与的评估作业）
+  uploadId  String? // 来源上传（评估表）
+  relation  String // JSON: RelationJudgment（关系判定）
+  markdown  String? // 合并报告 LLM markdown（网页内联展示）
+  htmlPath  String? // 磁盘 HTML 报告路径
+  engine    String? // 生成引擎摘要
+  ownerKey  String? // 创建者归属键（与 EvaluationJob 一致）
+  ownerMask String? // 创建者来源 IP 掩码
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([ownerKey, createdAt])
+}

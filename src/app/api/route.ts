@@ -24,7 +24,7 @@ export async function GET() {
   const parse = parseLoad()
   return NextResponse.json({
     message: 'TargetEval API',
-    version: '1.7.0',
+    version: '1.8.0',
     queue: { pending, running },
     parse,
     time: new Date().toISOString(),

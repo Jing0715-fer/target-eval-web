@@ -3,12 +3,14 @@
  * 所有函数对失败抛出 Error，由调用方决定降级方式。
  */
 import type {
+  BatchReportInfo,
   DocxParsed,
   InsightsResponse,
   JobListItem,
   LlmConfigResponse,
   LlmModelsResponse,
   LlmTestResponse,
+  RelationJudgment,
   UploadResponse,
 } from './types'
 
@@ -177,6 +179,55 @@ export async function fetchDocxInsights(uploadId: string, force = false): Promis
     throw new Error(data?.error ?? `智能解析失败（HTTP ${res.status}）`)
   }
   return data
+}
+
+// ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────
+
+/** POST /api/evaluate/relation — 批量评估前的靶点关系 LLM 判断 */
+export async function judgeTargetRelation(input: {
+  uploadId: string
+  uniprots: string[]
+  goal?: string
+}): Promise<RelationJudgment> {
+  const res = await fetch('/api/evaluate/relation', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; judgment?: RelationJudgment; error?: string } | null
+  if (!res.ok || !data?.ok || !data.judgment) {
+    throw new Error(data?.error ?? `关系判断失败（HTTP ${res.status}）`)
+  }
+  return data.judgment
+}
+
+/** POST /api/evaluate/batch-report — 关联靶点全部完成后生成合并评估报告 */
+export async function generateBatchReport(input: {
+  jobIds: string[]
+  uploadId?: string
+  relation: RelationJudgment
+  goal?: string
+}): Promise<BatchReportInfo> {
+  const res = await fetch('/api/evaluate/batch-report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; batchReport?: BatchReportInfo; error?: string } | null
+  if (!res.ok || !data?.ok || !data.batchReport) {
+    throw new Error(data?.error ?? `合并报告生成失败（HTTP ${res.status}）`)
+  }
+  return data.batchReport
+}
+
+/** GET /api/evaluate/batch-report?id= — 查询合并报告（历史/刷新恢复） */
+export async function fetchBatchReport(id: string): Promise<BatchReportInfo> {
+  const res = await fetch(`/api/evaluate/batch-report?id=${encodeURIComponent(id)}`, { cache: 'no-store' })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; batchReport?: BatchReportInfo; error?: string } | null
+  if (!res.ok || !data?.ok || !data.batchReport) {
+    throw new Error(data?.error ?? `合并报告读取失败（HTTP ${res.status}）`)
+  }
+  return data.batchReport
 }
 
 // ─── LLM 引擎配置 ──────────────────────────────────────────────
