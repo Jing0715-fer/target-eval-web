@@ -43,6 +43,8 @@ export interface EvaluateRequest {
   goal?: string
   /** 批次关系说明（非关联批量：注入报告说明独立/复合物定位） */
   batchNote?: string
+  /** ≥90% 高一致同源组委托（v1.11）：组内首个提交 BLAST 的作业为代表，其余共享结果 */
+  homologBlast?: BlastGroup
   options: EvaluateOptions
 }
 
@@ -101,6 +103,13 @@ export interface HomologPair {
   method: string
 }
 
+/** ≥90% 高一致同源组（v1.11 BLAST 委托）：组内仅家族代表执行一次检索，其余共享结果 */
+export interface BlastGroup {
+  groupKey: string
+  members: string[]
+  minIdentity: number
+}
+
 /** 评估表序列归属（v1.10） */
 export interface SequenceAttribution {
   index: number
@@ -127,6 +136,8 @@ export interface RelationJudgment {
   error?: string
   /** 家族序列一致性证据（v1.10） */
   homologPairs?: HomologPair[]
+  /** ≥90% 高一致组（v1.11）：组内仅家族代表执行一次 BLAST，其余成员委托共享结果 */
+  blastGroups?: BlastGroup[]
 }
 
 /** 关系类型 → 中文描述 + 图标语义（前端展示用） */
@@ -142,6 +153,23 @@ export function describeRelationType(t: TargetRelationType): string {
   }
 }
 
+/** 合并报告各靶点结构化数据（v1.11 — PDB/同源结构/文献列表带 UniProt 归属） */
+export interface MergedTargetLite {
+  jobId: string
+  uniprotId?: string
+  proteinName: string
+  geneNames: string[]
+  organism: string
+  sequenceLength: number
+  coveragePercent: number
+  directPdbCount: number
+  blastHitCount: number
+  blastStatus?: BlastStatusInfo
+  directPdbs: PdbEntry[]
+  blastHits: BlastHit[]
+  literature: LiteratureItem[]
+}
+
 /** 合并评估报告（关联靶点批量生成） */
 export interface BatchReportInfo {
   id: string
@@ -153,6 +181,8 @@ export interface BatchReportInfo {
   llmOk?: boolean
   errors?: string[]
   createdAt?: string
+  /** 各靶点结构化数据（v1.11；历史报告/作业被清理时为空） */
+  targets?: MergedTargetLite[]
 }
 
 // ─── 评估表 LLM 智能解析 ──────────────────────────────────────

@@ -182,13 +182,17 @@ function BlastStatusBox({ status, note, provider }: { status?: BlastStatusCode; 
       ? 'border-amber-200 bg-amber-50/60 dark:border-amber-900/60 dark:bg-amber-950/20'
       : status === 'skipped-antibody'
         ? 'border-violet-200 bg-violet-50/60 dark:border-violet-900/60 dark:bg-violet-950/20'
-        : 'border-stone-200 bg-stone-50/60 dark:border-stone-800 dark:bg-stone-900/40'
+        : status === 'skipped-homolog'
+          ? 'border-teal-200 bg-teal-50/60 dark:border-teal-900/60 dark:bg-teal-950/20'
+          : 'border-stone-200 bg-stone-50/60 dark:border-stone-800 dark:bg-stone-900/40'
   const iconTone =
     status === 'failed'
       ? 'text-amber-600 dark:text-amber-400'
       : status === 'skipped-antibody'
         ? 'text-violet-600 dark:text-violet-400'
-        : 'text-stone-400 dark:text-stone-500'
+        : status === 'skipped-homolog'
+          ? 'text-teal-600 dark:text-teal-400'
+          : 'text-stone-400 dark:text-stone-500'
   return (
     <div className={cn('flex items-start gap-3 rounded-lg border px-4 py-5', tone)}>
       <SearchX className={cn('mt-0.5 size-4.5 shrink-0', iconTone)} aria-hidden />
@@ -282,12 +286,16 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
     'skipped-covered': '覆盖充分，未运行',
     'skipped-disabled': '已在选项中关闭',
     'skipped-antibody': '抗体序列，已跳过',
+    'skipped-homolog': '同源家族共享检索',
     failed: '检索失败，可重试',
   }
   const blastViaRcsb = blastInfo?.provider === 'rcsb'
-  const blastSub = blastViaRcsb
-    ? 'RCSB 序列检索（NCBI 拥堵兜底）'
-    : (blastInfo ? blastSubMap[blastInfo.status] : undefined) ?? 'NCBI BLAST'
+  const blastShared = (blastInfo?.note ?? '').includes('共享自家族代表')
+  const blastSub = blastShared
+    ? '同源家族共享检索（≥90% 一致）'
+    : blastViaRcsb
+      ? 'RCSB 序列检索（NCBI 拥堵兜底）'
+      : (blastInfo ? blastSubMap[blastInfo.status] : undefined) ?? 'NCBI BLAST'
 
   return (
     <div className="flex flex-col gap-8">
@@ -583,7 +591,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           en="Homologs"
           count={
             blastHits.length > 0
-              ? `${blastHits.length} 条命中${blastViaRcsb ? ' · RCSB 兜底' : ''}`
+              ? `${blastHits.length} 条命中${blastShared ? ' · 家族共享' : blastViaRcsb ? ' · RCSB 兜底' : ''}`
               : blastInfo
                 ? '未运行'
                 : '—'

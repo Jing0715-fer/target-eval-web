@@ -13,7 +13,7 @@ import { judgeTargetRelation, type RelationTargetBrief } from '@/lib/eval/relati
 import { getOwner } from '@/lib/eval/request-guard'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import { detectAntibody } from '@/lib/eval/antibody'
-import { clusterHomologs, attributeSequences, HOMOLOG_MERGE_IDENTITY, type HomologTarget } from '@/lib/eval/homology'
+import { clusterHomologs, attributeSequences, groupHighIdentity, HOMOLOG_MERGE_IDENTITY, type HomologTarget } from '@/lib/eval/homology'
 import type { FormInsights, ParsedSequence, RelationJudgment, SequenceAttribution } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
@@ -136,6 +136,11 @@ export async function POST(req: Request) {
       judgment.strategy = judgment.strategy || '同源家族合并评估：任一成员的已有结构与构建经验可直接指导其他成员'
     }
   }
+
+  // v1.11 ≥90% 高一致组：组内仅家族代表执行一次 BLAST，其余成员委托共享结果
+  // （用户反馈：同源性超过 90% 时不需要每个都检索；groupKey 带上传标识防跨批次碰撞）
+  const blastGroups = groupHighIdentity(homologPairs, `hg${uploadId.replace(/[^\w]/g, '').slice(-10)}`)
+  if (blastGroups.length) judgment.blastGroups = blastGroups
 
   return NextResponse.json({ ok: true, judgment, sequenceAttribution })
 }

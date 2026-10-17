@@ -10,7 +10,7 @@ import { runPipeline } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
 import { checkJobQuota, quotaResponse, scheduleJobTtlCleanup, QuotaError } from '@/lib/eval/gatekeeper'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
-import type { EvaluationOptions, InputMode } from '@/lib/eval/types'
+import type { BlastGroup, EvaluationOptions, InputMode } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -27,6 +27,8 @@ interface EvaluateBody {
   goal?: string
   /** 批次关系说明（非关联批量：注入报告说明独立/复合物定位，≤500 字） */
   batchNote?: string
+  /** ≥90% 高一致同源组委托（v1.11）：组内首个到达 BLAST 阶段的作业为代表，其余共享结果不重复检索 */
+  homologBlast?: Partial<BlastGroup>
   options?: Partial<EvaluationOptions>
 }
 
@@ -87,6 +89,16 @@ export async function POST(req: Request) {
   }
   const batchNote = body.batchNote?.trim().slice(0, 500) || undefined
 
+  // v1.11 同源家族 BLAST 委托（宽松校验：字段形态不对则忽略，不影响常规评估）
+  const hb = body.homologBlast
+  const homologBlast = hb
+    && typeof hb.groupKey === 'string' && /^hg[\w-]{1,48}$/.test(hb.groupKey)
+    && Array.isArray(hb.members) && hb.members.length >= 2 && hb.members.length <= 6
+    && hb.members.every(m => typeof m === 'string' && /^[A-Z0-9-]{6,16}$/.test(m))
+    && typeof hb.minIdentity === 'number' && hb.minIdentity >= 40 && hb.minIdentity <= 100
+    ? { groupKey: hb.groupKey, members: hb.members, minIdentity: hb.minIdentity }
+    : undefined
+
   // 创建 DB 记录（pending）— 记录归属（哈希键 + 掩码）
   const job = await db.evaluationJob.create({
     data: {
@@ -126,6 +138,7 @@ export async function POST(req: Request) {
           uploadId,
           goal: body.goal,
           batchNote,
+          homologBlast,
           options,
         },
         { signal: snap.abort.signal, report, log },

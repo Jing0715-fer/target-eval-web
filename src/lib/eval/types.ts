@@ -143,6 +143,7 @@ export type BlastStatusCode =
   | 'skipped-covered'    // 结构覆盖充分自动跳过
   | 'skipped-disabled'   // 用户关闭 BLAST
   | 'skipped-antibody'   // 检测到抗体序列，自动跳过
+  | 'skipped-homolog'    // 同源家族（≥90% 一致性）委托家族代表检索，不重复执行（v1.11）
   | 'failed'             // 执行失败（网络/NCBI 侧）
 
 export interface BlastStatusInfo {
@@ -159,9 +160,13 @@ export function describeBlastStatus(info: BlastStatusInfo | undefined | null): s
   const viaRcsb = info.provider === 'rcsb'
   switch (info.status) {
     case 'ok':
-      return viaRcsb
-        ? `已完成同源检索（RCSB 序列检索兜底 — NCBI 队列拥堵${info.note ? `，${info.note}` : ''}）`
-        : `已完成同源检索${info.note ? `（${info.note}）` : ''}`
+      if (viaRcsb) {
+        if ((info.note ?? '').includes('共享自家族代表')) {
+          return `同源结构共享自家族代表（≥90% 序列一致性，未单独检索；代表的检索经 RCSB 序列检索兜底完成）${info.note ? ` — ${info.note}` : ''}`
+        }
+        return `已完成同源检索（RCSB 序列检索兜底 — NCBI 队列拥堵${info.note ? `，${info.note}` : ''}）`
+      }
+      return `已完成同源检索${info.note ? `（${info.note}）` : ''}`
     case 'no-hits':
       return viaRcsb
         ? '已执行 RCSB 序列检索（NCBI 拥堵兜底），未检索到显著同源结构'
@@ -171,7 +176,9 @@ export function describeBlastStatus(info: BlastStatusInfo | undefined | null): s
     case 'skipped-disabled':
       return '已在高级选项中关闭 BLAST 同源检索'
     case 'skipped-antibody':
-      return `检测到抗体序列，已跳过同源检索${info.note ? `（依据：${info.note}）` : ''} — 抗体结构库命中众多但参考价值低` 
+      return `检测到抗体序列，已跳过同源检索${info.note ? `（依据：${info.note}）` : ''} — 抗体结构库命中众多但参考价值低`
+    case 'skipped-homolog':
+      return `同源家族已委托代表检索，本靶点未单独执行${info.note ? `（${info.note}）` : ''} — ≥90% 序列一致性的家族成员共享同一次检索结果`
     case 'failed':
       return `同源检索失败${info.note ? `：${info.note}` : ''} — 可重新评估并勾选「强制 BLAST」重试`
   }
@@ -199,6 +206,10 @@ export interface JobSummary {
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+ 作业存在；历史作业缺省） */
   blast?: BlastStatusInfo
+  /** 覆盖区间描述（v1.11 起入库，供合并报告 digest 引用；历史作业缺省） */
+  coverageText?: string
+  /** 未覆盖区间描述（同上） */
+  gapText?: string
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
   /** 报告已延迟：本靶点不生成独立报告，数据并入合并评估报告（v1.8+ 关联靶点批量） */
@@ -232,6 +243,18 @@ export interface RelationJudgment {
   error?: string
   /** 家族序列一致性证据（v1.10 系统比对，供合并报告矩阵/展示；LLM 判断不依赖但引用） */
   homologPairs?: HomologPair[]
+  /** ≥90% 高一致组（v1.11）：组内仅家族代表执行一次 BLAST，其余成员委托共享结果 */
+  blastGroups?: BlastGroup[]
+}
+
+/** ≥90% 高一致同源组（v1.11 BLAST 委托）：按 ≥ 阈值的靶点对做连通分量，组内共享一次同源检索 */
+export interface BlastGroup {
+  /** 组标识（同批次内唯一，随请求流转） */
+  groupKey: string
+  /** 组内成员 UniProt ID */
+  members: string[]
+  /** 组内成员两两一致性的最小值（连通判据为相邻对 ≥90%） */
+  minIdentity: number
 }
 
 export interface HomologPair {

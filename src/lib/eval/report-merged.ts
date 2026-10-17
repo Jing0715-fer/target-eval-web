@@ -31,10 +31,51 @@ export interface MergedTargetData {
   blastHits: BlastHit[]
   blastStatus?: BlastStatusInfo
   coveragePercent: number
+  /** 覆盖区间描述（v1.11 起新作业入库；历史作业缺省） */
+  coverageText?: string
+  /** 未覆盖区间描述（同上） */
+  gapText?: string
+  literature: LiteratureItem[]
   literatureCount: number
   ligandCount: number
   construct?: ConstructInfo
   durationMs: number
+}
+
+/** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属） */
+export interface MergedTargetLite {
+  jobId: string
+  uniprotId?: string
+  proteinName: string
+  geneNames: string[]
+  organism: string
+  sequenceLength: number
+  coveragePercent: number
+  directPdbCount: number
+  blastHitCount: number
+  blastStatus?: BlastStatusInfo
+  directPdbs: PdbEntry[]
+  blastHits: BlastHit[]
+  literature: LiteratureItem[]
+}
+
+/** 轻量化：网页合并视图展示上限（PDB 30 / BLAST 40 / 文献 12） */
+export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
+  return {
+    jobId: t.jobId,
+    uniprotId: t.uniprotId,
+    proteinName: t.proteinName,
+    geneNames: t.geneNames,
+    organism: t.organism,
+    sequenceLength: t.sequenceLength,
+    coveragePercent: t.coveragePercent,
+    directPdbCount: t.directPdbs.length,
+    blastHitCount: t.blastHits.length,
+    blastStatus: t.blastStatus,
+    directPdbs: t.directPdbs.slice(0, 30),
+    blastHits: t.blastHits.slice(0, 40),
+    literature: t.literature.slice(0, 12),
+  }
 }
 
 /** 从 DB 加载一批已完成作业为合并报告数据（不校验归属，调用方负责） */
@@ -46,13 +87,15 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
     let summary: {
       uniprot?: { uniprotId: string; proteinName: string; geneNames: string[]; organism: string; sequenceLength: number }
       scores?: Scores; methodStats?: MethodStats; coverage?: number; ligandCount?: number; literatureCount?: number
-      blast?: BlastStatusInfo; construct?: ConstructInfo; durationMs?: number
+      blast?: BlastStatusInfo; construct?: ConstructInfo; durationMs?: number; coverageText?: string; gapText?: string
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
+    let literature: LiteratureItem[] = []
     try { summary = job.summary ? JSON.parse(job.summary) : null } catch { /* ignore */ }
     try { pdbs = job.pdbs ? JSON.parse(job.pdbs) : [] } catch { /* ignore */ }
     try { blastHits = job.blastHits ? JSON.parse(job.blastHits) : [] } catch { /* ignore */ }
+    try { literature = job.literature ? JSON.parse(job.literature) : [] } catch { /* ignore */ }
     if (!summary?.scores) continue
     targets.push({
       jobId: job.id,
@@ -68,7 +111,10 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       blastHits,
       blastStatus: summary.blast,
       coveragePercent: summary.coverage ?? 0,
-      literatureCount: summary.literatureCount ?? 0,
+      coverageText: summary.coverageText,
+      gapText: summary.gapText,
+      literature,
+      literatureCount: summary.literatureCount ?? literature.length,
       ligandCount: summary.ligandCount ?? 0,
       construct: summary.construct,
       durationMs: summary.durationMs ?? 0,
@@ -93,25 +139,54 @@ function targetDigest(t: MergedTargetData): string {
   if (t.geneNames.length) lines.push(`基因: ${t.geneNames.slice(0, 5).join(', ')} · 物种: ${t.organism || '—'} · 长度: ${t.sequenceLength} aa`)
   lines.push(`评分: X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10 · 总体 ${t.scores.overall.score}/10（${t.scores.overall.rating}）`)
   const ms = t.methodStats
-  lines.push(`PDB 结构: ${t.directPdbs.length} 个（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）${ms.bestResolution != null ? `，最佳 ${ms.bestResolution}Å` : ''} · 覆盖率 ${t.coveragePercent}% · 配体 ${t.ligandCount} 种 · 文献 ${t.literatureCount} 篇`)
+  lines.push(`PDB 结构: ${t.directPdbs.length} 个（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）${ms.bestResolution != null ? `，最佳 ${ms.bestResolution}Å` : ''} · 覆盖率 ${t.coveragePercent}%${t.coverageText ? `（已覆盖: ${t.coverageText.slice(0, 160)}）` : ''}${t.gapText ? ` · 未覆盖区间: ${t.gapText.slice(0, 160)}` : ''} · 配体 ${t.ligandCount} 种 · 文献 ${t.literatureCount} 篇`)
   if (t.construct) {
     lines.push(`客户构建: ${t.construct.providedLength} aa（与全长一致性 ${t.construct.identity}%${t.construct.start != null && t.construct.end != null ? `，估计区间 ${t.construct.start}-${t.construct.end}` : ''}）`)
   }
   if (t.directPdbs.length) {
-    lines.push('代表性结构（前 6）: ' + t.directPdbs.slice(0, 6).map(p =>
-      `${p.pdbId}(${p.resolution != null ? p.resolution + 'Å' : p.method.slice(0, 8)}, ${p.releaseDate.slice(0, 4)})`,
-    ).join('、'))
+    // 代表性结构表（方法/分辨率/主要配体/年份 — 与单靶点报告 digest 同等粒度）
+    lines.push('代表性结构（前 10）:')
+    lines.push('| PDB | 方法 | 分辨率 | 主要配体 | 年份 |')
+    lines.push('|-----|------|--------|----------|------|')
+    lines.push(t.directPdbs.slice(0, 10).map(p =>
+      `| ${p.pdbId} | ${p.isXray ? 'X-ray' : p.isCryoem ? 'Cryo-EM' : p.isNmr ? 'NMR' : p.method.slice(0, 10)} | ${p.resolution != null ? p.resolution + 'Å' : '-'} | ${p.ligands.length ? p.ligands.slice(0, 3).join(', ') : '-'} | ${p.releaseDate.slice(0, 4)} |`,
+    ).join('\n'))
+    lines.push('结构标题（前 6）:')
+    lines.push(t.directPdbs.slice(0, 6).map(p => `- ${p.pdbId}: ${p.title.slice(0, 80)}`).join('\n'))
+    // 高频配体词频（研究状态/成药性证据）
     const topLig = new Map<string, number>()
     for (const p of t.directPdbs) for (const l of p.ligands) {
       const k = l.split('(')[0].trim(); topLig.set(k, (topLig.get(k) ?? 0) + 1)
     }
-    const ligs = [...topLig.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, c]) => `${k}×${c}`).join('、')
+    const ligs = [...topLig.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, c]) => `${k}×${c}`).join('、')
     if (ligs) lines.push(`高频配体: ${ligs}`)
+    // 年份分布（研究热度时间线）
+    const yearHist = new Map<string, number>()
+    for (const p of t.directPdbs) {
+      const y = p.releaseDate.slice(0, 4)
+      if (/^\d{4}$/.test(y)) yearHist.set(y, (yearHist.get(y) ?? 0) + 1)
+    }
+    const timeline = [...yearHist.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([y, c]) => `${y}:${c}`).join('、')
+    if (timeline) lines.push(`结构释放年份分布: ${timeline}`)
+  } else {
+    lines.push('（该 UniProt 无直接关联 PDB 结构）')
   }
   if (t.blastHits.length) {
-    lines.push(`BLAST 同源（前 4）: ` + t.blastHits.slice(0, 4).map(h => `${h.pdbId} ${h.identity}%`).join('、'))
+    lines.push(`同源结构命中（前 6，排除直接命中后）:`)
+    lines.push('| PDB | 描述 | Identity |')
+    lines.push('|-----|------|----------|')
+    lines.push(t.blastHits.slice(0, 6).map(h => `| ${h.pdbId || '-'} | ${h.description.slice(0, 70)} | ${h.identity}% |`).join('\n'))
+    if (t.blastStatus?.note) lines.push(`（同源检索说明: ${t.blastStatus.note}）`)
   } else if (t.blastStatus) {
-    lines.push(`BLAST: ${describeBlastStatus(t.blastStatus)}`)
+    lines.push(`BLAST: ${describeBlastStatus(t.blastStatus)}（报告中如实说明，不要虚构同源结构）`)
+  }
+  if (t.literature.length) {
+    lines.push('代表性文献（前 6）:')
+    lines.push('| PMID | 标题 | 期刊·年份 |')
+    lines.push('|------|------|-----------|')
+    lines.push(t.literature.slice(0, 6).map(l =>
+      `| ${l.pmid} | ${l.title.slice(0, 80)}${l.fromPdb ? '（结构解析文献）' : ''} | ${l.journal} ${l.year} |`,
+    ).join('\n'))
   }
   return lines.join('\n')
 }
@@ -195,23 +270,31 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 - 3-4 段：第一段给出批次总体结论（这些靶点作为整体项目的结构解析可行性、推荐技术路线${relation.relationType === 'homologous' ? '；同源家族批次需说明家族级结论（任一成员的结构证据对整个家族的指导意义）' : ''}）；第二段逐个靶点一句话概括其结构研究现状（引用具体数字）；第三段概括客户目标的达成路径与整体风险；第四段一句话给出下一步建议
 - 篇幅 400-600 字
 
+### 可行性结论（${relation.relationType === 'homologous' ? '家族级' : '批次级'}）
+- **结论分级**：直接给出高/中/低分级，并用一段话说明判断依据（引用具体数字：结构总数/最佳分辨率/覆盖率/同源命中/文献）
+- **关键依据**：3-5 条列表，每条注明来源靶点（哪个 UniProt 的证据）
+- **主要风险**：2-4 条列表（构象柔性/覆盖空白/表达纯化难度/家族成员间差异等，基于数据判断）
+
 ## 靶点关系分析
 本报告的核心章节 — 客户需要理解这些靶点为什么合并评估：
-- ### 关系判定与证据：明确说明判定为「${relName}」的依据${pairs.length ? '（引用系统序列一致性比对的具体数字 + 蛋白名/基因/物种证据）' : '（引用数据上下文中的具体证据：蛋白名/功能注释/客户目标/序列信息）'}
+- ### 关系判定与证据：明确说明判定为「${relName}」的依据${pairs.length ? '（引用系统序列一致性比对的具体数字 + 蛋白名/基因/物种证据）' : '（引用数据上下文中的具体证据：蛋白名/功能注释/客户目标/序列信息）'}${relation.blastGroups?.length ? '；说明 ≥90% 高一致成员共享同源检索结果的策略（哪些靶点未单独检索而共享了代表的命中）' : ''}
 - ### 生物学意义：${relation.relationType === 'homologous' ? '同源家族的生物学背景：直系/旁系同源关系的判定依据（一致性水平/物种分布/基因名）、家族保守区域（催化残基/结构域）与变异区域的分布、物种差异对结构与功能的影响（基于注释，禁止编造）' : '这种关系的生物学背景（复合物的组装方式/抗体-抗原结合模式/融合构建的设计意图等，基于注释与文献，禁止编造）'}
 - ### 对结构解析策略的影响：${relation.relationType === 'complex' ? '复合物亚基的共表达/共纯化策略、化学计量比、组装验证' : relation.relationType === 'antibody-antigen' ? '抗体（Fab/scFv）与抗原的复合物组装、抗体辅助结晶或 Cryo-EM 配对策略' : relation.relationType === 'fusion' ? '融合构建的边界设计、linker 选择、各结构域的折叠独立性' : relation.relationType === 'homologous' ? '家族证据互用原则：任一成员已有结构可直接指导其他成员的构建边界设计与结晶条件借鉴；建议优先解析的家族成员（结构数据最丰富/表达最成熟者先行）；家族保守区与可变区的构建边界策略；如有序列归属中的同源序列，说明其与已选靶点的家族关系' : '关联项目协同推进的要点'}
-- 篇幅 500-800 字`)
+- 篇幅 600-900 字`)
 
   const partB = await callPart('B', `撰写报告的以下章节（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 各靶点结构可行性综述
-对批次中每个靶点输出一个小节（### 靶点名），每节包含：
-- 一句话结论（该靶点结构解析可行性如何、推荐方法）
-- 已有结构研究概况（引用 PDB 数量/方法分布/最佳分辨率/覆盖率/高频配体）
-- ${relation.relationType === 'homologous' ? '家族内定位（与其他成员的一致性水平、在家族中的结构研究成熟度、可从哪些成员借鉴构建经验）' : '主要风险与注意点（构象柔性/覆盖空白/构建边界问题，基于数据判断）'}
-- 篇幅每靶点 300-450 字
+对批次中每个靶点输出一个小节（### 靶点名），每节包含（详细程度不低于独立单靶点报告）：
+- **一句话结论**：该靶点结构解析可行性如何、推荐方法
+- **已有结构研究概况**：引用 PDB 数量/方法分布/最佳分辨率/覆盖率（含覆盖区间与空白区间）/高频配体/结构释放年份分布（研究热度变化）
+- **同源结构证据**：BLAST/序列检索命中概况（最高一致性/命中数）；命中为共享自家族代表时必须如实说明（未单独检索、共享来源），不得虚构
+- **文献证据**：引用 1-2 篇代表性文献（PMID + 一句话贡献，优先结构解析文献）
+- **${relation.relationType === 'homologous' ? '家族内定位' : '主要风险与注意点'}**：${relation.relationType === 'homologous' ? '与其他成员的一致性水平、在家族中的结构研究成熟度、可从哪些成员借鉴构建经验与结晶条件' : '构象柔性/覆盖空白/构建边界问题，基于数据判断'}
+- **风险与切入建议**：主要风险 1-2 条 + 最可行的切入点（构建边界/表达系统/方法选择）
+- 篇幅每靶点 500-700 字
 
-要求：各靶点篇幅均衡；数据引用与数据摘要一致；BLAST 跳过/失败的靶点如实说明，不要虚构同源结构${input.sequenceAttribution?.some(a => a.kind === 'construct') ? '；已归属为客户构建的序列（见序列归属）在对应靶点小节中说明构建边界与全长区间的对应关系' : ''}`)
+要求：各靶点篇幅均衡；数据引用与数据摘要一致（PDB ID/PMID/分辨率/一致性数字必须来自数据上下文，禁止编造）；BLAST 跳过/失败/共享的靶点如实说明${input.sequenceAttribution?.some(a => a.kind === 'construct') ? '；已归属为客户构建的序列（见序列归属）在对应靶点小节中说明构建边界与全长区间的对应关系' : ''}`)
 
   const partC = await callPart('C', `撰写报告的以下两章（以 ## 开头，顺序输出，不要输出其他章节）：
 
@@ -345,7 +428,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 
   const pdbBlocks = targets.map(t => {
     if (!t.directPdbs.length) return ''
-    const rows = t.directPdbs.slice(0, 8).map(p => `
+    const rows = t.directPdbs.slice(0, 12).map(p => `
       <tr>
         <td class="td-id"><a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a></td>
         <td><span class="mth mth-${p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'}">${p.isXray ? 'X-ray' : p.isCryoem ? 'Cryo-EM' : p.isNmr ? 'NMR' : esc(p.method.slice(0, 10))}</span></td>
@@ -355,7 +438,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       </tr>`).join('')
     return `
     <details class="pdb-fold" open>
-      <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.directPdbs.length} 个结构（前 8）</summary>
+      <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.directPdbs.length} 个结构（前 12）</summary>
       <div class="tbl-wrap"><table>
         <colgroup><col style="width:74px"><col style="width:70px"><col style="width:64px"><col><col style="width:56px"></colgroup>
         <thead><tr><th>PDB</th><th>方法</th><th>分辨率</th><th>标题</th><th>年份</th></tr></thead>
@@ -364,9 +447,54 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     </details>`
   }).filter(Boolean).join('')
 
+  // v1.11 同源结构（BLAST/序列检索命中 — 含共享自家族代表的标注，可溯源归属靶点）
+  const blastBlocks = targets.map(t => {
+    if (!t.blastHits.length) return ''
+    const shared = t.blastStatus?.status === 'ok' && /共享自家族代表/.test(t.blastStatus.note ?? '')
+    const rows = t.blastHits.slice(0, 10).map(h => `
+      <tr>
+        <td class="td-id"><a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId || '—'}</a></td>
+        <td class="t-title">${esc(h.description.slice(0, 84))}</td>
+        <td class="num">${h.identity}%</td>
+        <td class="num">${h.resolution != null ? h.resolution.toFixed(2) + 'Å' : '—'}</td>
+        <td class="t-title">${esc((h.method || '').slice(0, 16))}</td>
+      </tr>`).join('')
+    return `
+    <details class="pdb-fold">
+      <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.blastHits.length} 个同源结构（前 10）${shared ? ' · <span style="font-weight:400;font-size:12px">共享自家族代表，未单独检索</span>' : ''}</summary>
+      <div class="tbl-wrap"><table>
+        <colgroup><col style="width:74px"><col><col style="width:64px"><col style="width:70px"><col style="width:80px"></colgroup>
+        <thead><tr><th>PDB</th><th>描述</th><th>Identity</th><th>分辨率</th><th>方法</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+    </details>`
+  }).filter(Boolean).join('')
+
+  // v1.11 各靶点文献（PMID 可点击；结构解析文献标记；归属靶点清晰可辨）
+  const litTotal = targets.reduce((s, t) => s + t.literature.length, 0)
+  const litBlocks = targets.map(t => {
+    if (!t.literature.length) return ''
+    const rows = t.literature.slice(0, 10).map(l => `
+      <tr>
+        <td class="td-id">${l.pmid ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${l.pmid}/" target="_blank" rel="noopener">${esc(l.pmid)}</a>` : '—'}</td>
+        <td class="t-title">${esc(l.title.slice(0, 110))}${l.fromPdb ? ' <span class="mth" style="background:#ecfdf5;color:#047857">结构解析文献</span>' : ''}</td>
+        <td class="t-title">${esc(l.journal.slice(0, 30))}</td>
+        <td class="num">${esc(l.year || '—')}</td>
+      </tr>`).join('')
+    return `
+    <details class="pdb-fold">
+      <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.literature.length} 篇（前 10）</summary>
+      <div class="tbl-wrap"><table>
+        <colgroup><col style="width:76px"><col><col style="width:150px"><col style="width:52px"></colgroup>
+        <thead><tr><th>PMID</th><th>标题</th><th>期刊</th><th>年份</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+    </details>`
+  }).filter(Boolean).join('')
+
   const figHtml = embedded.length ? `
   <section class="sec" id="assets">
-    <h2>五、客户实验数据<span class="sec-en">Experimental Data</span></h2>
+    <h2>六、客户实验数据<span class="sec-en">Experimental Data</span></h2>
     ${embedded.map(({ meta, dataUri }) => `
     <figure class="fig">
       <img src="${dataUri}" alt="${esc(meta.caption)}" loading="lazy">
@@ -451,6 +579,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     <div class="tgt-grid">${targetMeta}</div>
     <div class="meta-line">
       靶点 ${targets.length} 个 · PDB 结构合计 ${targets.reduce((s, t) => s + t.directPdbs.length, 0)} 个 ·
+      同源结构合计 ${targets.reduce((s, t) => s + t.blastHits.length, 0)} 个 · 文献合计 ${litTotal} 篇 ·
       报告编号 ${esc(input.batchReportId.slice(0, 10))} · ${dateStr}
       ${input.goal ? `<br>客户目标：${esc(input.goal.slice(0, 160))}` : ''}
     </div>
@@ -469,6 +598,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       ${matrixHtml ? '<li><a href="#homolog">' + (isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性') + '</a></li>' : ''}
       ${attributionHtml ? '<li><a href="#attribution">评估表序列归属</a></li>' : ''}
       <li><a href="#pdbs">各靶点 PDB 结构</a></li>
+      ${blastBlocks ? '<li><a href="#blast-hits">同源结构（BLAST/序列检索）</a></li>' : ''}
+      ${litBlocks ? '<li><a href="#literature">各靶点文献</a></li>' : ''}
       ${embedded.length ? '<li><a href="#assets">客户实验数据</a></li>' : ''}
     </ol>
   </nav>
@@ -496,10 +627,24 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     ${pdbBlocks || '<p>本批次靶点暂无直接关联 PDB 结构。</p>'}
   </section>
 
+  ${blastBlocks ? `
+  <section class="sec" id="blast-hits">
+    <h2>四、同源结构（BLAST / 序列检索）<span class="sec-en">Homologous Structures</span></h2>
+    <p class="note">各靶点经 BLAST（NCBI pdbaa）或 RCSB 序列检索（NCBI 拥堵时兜底）获得的同源结构命中，已排除该靶点自身的直接结构。≥90% 序列一致性的家族成员共享家族代表的同一次检索结果（标注「共享自家族代表」）。</p>
+    ${blastBlocks}
+  </section>` : ''}
+
+  ${litBlocks ? `
+  <section class="sec" id="literature">
+    <h2>五、各靶点文献<span class="sec-en">Literature by Target</span></h2>
+    <p class="note">各靶点分别检索的 PubMed 文献（含 PDB 结构主引文，标记「结构解析文献」）— 按靶点分组，每条文献的归属 UniProt 见分组标题。同一文献可能同时关联多个靶点。</p>
+    ${litBlocks}
+  </section>` : ''}
+
   ${figHtml}
 
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v1.9）<br>
+    Generated by TargetEval · 多靶点合并评估（v1.11）<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
   </footer>

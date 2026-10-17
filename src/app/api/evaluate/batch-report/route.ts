@@ -13,7 +13,8 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
-import { generateMergedReport, loadMergedTargets, renderMergedReportHtml } from '@/lib/eval/report-merged'
+import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
+import { propagateFamilyBlast } from '@/lib/eval/blast-family'
 import { getEngineSummary } from '@/lib/eval/llm-provider'
 import { fetchUniprotInfo } from '@/lib/eval/uniprot'
 import { attributeSequences } from '@/lib/eval/homology'
@@ -91,6 +92,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '完成的评估作业不足 2 个，无法生成合并报告' }, { status: 400 })
   }
 
+  // v1.11 同源家族 BLAST 委托结果传播：≥90% 组内代表检索一次，其余成员在此补齐
+  // （先于 LLM 生成执行 — 即使 LLM 失败，传播结果也已持久化到各成员作业）
+  const propagation = await propagateFamilyBlast(targets, relation)
+  if (propagation.shared > 0 || propagation.rescued > 0) {
+    console.log(`[batch-report] 家族同源检索传播：共享 ${propagation.shared} 个成员 · 兜底 ${propagation.rescued} 个 — ${propagation.notes.join('；')}`)
+  }
+
   // 上传共享数据（insights + 图片 + 序列归属）
   const uploadId = body.uploadId?.trim() || undefined
   let insights: FormInsights | null = null
@@ -164,6 +172,8 @@ export async function POST(req: Request) {
       llmOk: generated.ok,
       errors: generated.errors,
       createdAt: record.createdAt,
+      /** 各靶点结构化数据（v1.11 — PDB/同源结构/文献列表带 UniProt 归属，网页合并视图展示） */
+      targets: targets.map(toMergedTargetLite),
     },
   })
 }
@@ -201,6 +211,11 @@ export async function GET(req: Request) {
   try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
   try { sequenceAttribution = record.sequenceAttribution ? JSON.parse(record.sequenceAttribution) : null } catch { /* ignore */ }
 
+  // v1.11：各靶点结构化数据（传播结果已在 POST 时持久化 — 此处直接读库；
+  // 作业被 TTL 清理后 targets 为空数组，前端降级为仅展示 markdown）
+  let targets: unknown[] = []
+  try { targets = (await loadMergedTargets(jobIds)).map(toMergedTargetLite) } catch { /* ignore */ }
+
   return NextResponse.json({
     ok: true,
     batchReport: {
@@ -211,6 +226,7 @@ export async function GET(req: Request) {
       markdown: record.markdown,
       uploadId: record.uploadId,
       createdAt: record.createdAt,
+      targets,
     },
   })
 }

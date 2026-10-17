@@ -99,6 +99,11 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
             <>
               <span className="font-medium">同源蛋白家族 · {batch.total} 个靶点</span>
               <span className="text-stone-500 dark:text-stone-400">已合并为一份家族级评估报告（结构证据互用）</span>
+              {(rel.blastGroups ?? []).length > 0 && (
+                <span className="rounded-sm border border-teal-300 bg-white/60 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300" title="≥90% 序列一致性的成员共享家族代表的同一次检索结果，不重复检索">
+                  ≥90% 成员共享同源检索
+                </span>
+              )}
               {(rel.homologPairs ?? []).filter(p => p.identity >= 40).slice(0, 3).map(p => (
                 <span key={`${p.a}-${p.b}`} className="rounded-sm border border-teal-300 bg-white/60 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300" title={`${p.a} 与 ${p.b} 全长序列比对一致性 ${p.identity}%`}>
                   {p.a}↔{p.b} {p.identity}%

@@ -19,7 +19,7 @@
  */
 import { compareSequences } from './seq-compare'
 import { detectAntibody } from './antibody'
-import type { HomologPair, SequenceAttribution } from './types'
+import type { BlastGroup, HomologPair, SequenceAttribution } from './types'
 
 const K = 4
 /** 单个 k-mer 在 A 中出现超过该次数视为重复，跳过（低复杂度区） */
@@ -186,6 +186,67 @@ export function clusterHomologs(
   // 只保留 ≥2 成员的组（家族）
   const clusters = [...groups.values()].filter(g => g.length >= 2)
   return { pairs, clusters }
+}
+
+// ─── ≥90% 高一致组（v1.11 BLAST 委托）───────────────────────────────────────
+
+/** 高一致组判据：两两一致性 ≥ 该值的靶点对视为「同一检索可共享」 */
+export const HIGH_IDENTITY_GROUP = 90
+
+/**
+ * 从两两比对结果中提取 ≥90% 高一致组（连通分量）：
+ * 组内成员序列高度一致（直系同源/同一蛋白不同物种），BLAST 同源结构几乎完全重合，
+ * 仅需家族代表执行一次检索，其余成员共享结果（用户 v1.11 反馈：≥90% 不必每个都搜）。
+ * minIdentity = 组内全部两两一致性的最小值（诚实下界；连通判据为相邻对 ≥ 阈值）。
+ */
+export function groupHighIdentity(
+  pairs: HomologPair[],
+  keyPrefix = 'hg',
+  threshold: number = HIGH_IDENTITY_GROUP,
+): BlastGroup[] {
+  const strong = pairs.filter(p => p.identity >= threshold)
+  if (!strong.length) return []
+  const parent = new Map<string, string>()
+  const find = (x: string): string => {
+    const p = parent.get(x)
+    if (p === undefined || p === x) return x
+    const r = find(p)
+    parent.set(x, r)
+    return r
+  }
+  const union = (x: string, y: string) => {
+    const rx = find(x)
+    const ry = find(y)
+    if (rx !== ry) parent.set(rx, ry)
+  }
+  for (const p of strong) {
+    if (!parent.has(p.a)) parent.set(p.a, p.a)
+    if (!parent.has(p.b)) parent.set(p.b, p.b)
+    union(p.a, p.b)
+  }
+  const groups = new Map<string, string[]>()
+  for (const id of parent.keys()) {
+    const r = find(id)
+    const arr = groups.get(r) ?? []
+    arr.push(id)
+    groups.set(r, arr)
+  }
+  const out: BlastGroup[] = []
+  let seq = 0
+  for (const members of groups.values()) {
+    if (members.length < 2) continue
+    const mset = new Set(members)
+    let min = 100
+    for (const p of pairs) {
+      if (mset.has(p.a) && mset.has(p.b) && p.identity > 0) min = Math.min(min, p.identity)
+    }
+    out.push({
+      groupKey: `${keyPrefix}_${seq++}`,
+      members: members.sort(),
+      minIdentity: min,
+    })
+  }
+  return out
 }
 
 // ─── 评估表序列归属（类型 SequenceAttribution / AttributionTarget 见 types.ts）──

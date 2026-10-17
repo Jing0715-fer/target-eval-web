@@ -25,7 +25,7 @@ import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
-import { isValidUniprotId, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
+import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
   jobId: string
@@ -36,6 +36,8 @@ export interface PipelineInput {
   goal?: string
   /** 批次关系说明（非关联批量时注入报告，LLM 在执行摘要中说明独立/复合物定位） */
   batchNote?: string
+  /** ≥90% 高一致同源组（v1.11）：组内首个提交 BLAST 的作业为代表，其余跳过并共享结果 */
+  homologBlast?: BlastGroup
   options: EvaluationOptions
 }
 
@@ -70,6 +72,37 @@ async function readUploadInsights(uploadId: string): Promise<FormInsights | null
 function uniprotFromBlastDesc(desc: string): string | null {
   const m = desc.match(/(?:sp|tr)\|([A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]|[OPQ][0-9][A-Z0-9]{3}[0-9])(?:[A-Z0-9]{3}[0-9])?\|/)
   return m ? m[1] : null
+}
+
+// ─── v1.11 同源家族 BLAST 委托（≥90% 高一致组共享一次检索）────────────────
+
+/** 组声明（首个到达 BLAST 提交阶段的作业 = 家族代表） */
+interface BlastFamilyClaim {
+  jobId: string
+  uniprotId: string
+  at: number
+}
+
+/** 声明有效期：过期后同组新批次可重新选代表（防止残留声明永久压制后续评估） */
+const CLAIM_TTL_MS = 30 * 60 * 1000
+
+const blastFamilyG = globalThis as unknown as {
+  __blastFamilyClaims?: Map<string, BlastFamilyClaim>
+}
+const blastFamilyClaims: Map<string, BlastFamilyClaim> = (blastFamilyG.__blastFamilyClaims ??= new Map())
+
+/** 尝试认领：组未被有效占用 → 本作业成为代表（返回 null）；已被占用 → 返回持有者 */
+function claimBlastFamily(groupKey: string, jobId: string, uniprotId: string): BlastFamilyClaim | null {
+  const existing = blastFamilyClaims.get(groupKey)
+  if (existing && existing.jobId !== jobId && Date.now() - existing.at < CLAIM_TTL_MS) return existing
+  blastFamilyClaims.set(groupKey, { jobId, uniprotId, at: Date.now() })
+  return null
+}
+
+/** 提交失败时释放声明（让组内后续作业有机会接管代表角色） */
+function releaseBlastFamily(groupKey: string, jobId: string): void {
+  const existing = blastFamilyClaims.get(groupKey)
+  if (existing && existing.jobId === jobId) blastFamilyClaims.delete(groupKey)
 }
 
 export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): Promise<void> {
@@ -206,6 +239,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   const abVerdict = detectAntibody(sequence)
   const blastDisabledByOption = Boolean(input.options.skipBlast)
   const blastDisabledByAntibody = abVerdict.isAntibody && !input.options.forceBlast
+  /** v1.11：本作业是否为 ≥90% 高一致组的家族代表（唯一提交 BLAST 者） */
+  let familyRep = false
 
   if (blastDisabledByOption) {
     blastStatus = { status: 'skipped-disabled' }
@@ -215,15 +250,35 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     blastStatus = { status: 'skipped-antibody', note: abVerdict.evidence.slice(0, 2).join('；') }
     log(`跳过 BLAST：检测到抗体序列（${abVerdict.evidence.join('；')}）— 抗体结构库命中众多但参考价值低`)
   } else if (sequence.length >= 30) {
-    try {
-      report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
-      blastSubmitted = await submitBlastPdb(sequence, msg => log(msg), signal)
-      log(`BLAST 提前提交完成（RID=${blastSubmitted.rid}，预计 ${blastSubmitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
-    } catch (e) {
-      if (signal.aborted) throw e
-      const msg = e instanceof Error ? e.message : String(e)
-      blastStatus = { status: 'failed', note: `提交失败：${msg.slice(0, 100)}` }
-      log(`BLAST 提交失败：${msg}（稍后阶段将尝试 RCSB 序列检索兜底）`, 'warn')
+    // v1.11 同源家族委托：组内首个到达此处的作业认领代表并提交；其余成员跳过检索，
+    // 合并报告时共享代表结果（用户反馈：≥90% 一致性不必每个都搜）
+    if (input.homologBlast && !input.options.forceBlast) {
+      const hb = input.homologBlast
+      const holder = claimBlastFamily(hb.groupKey, input.jobId, uniprotIdInput ?? input.jobId.slice(0, 8))
+      if (holder) {
+        blastStatus = {
+          status: 'skipped-homolog',
+          note: `家族代表 ${holder.uniprotId} 已提交同源检索（组内序列一致性 ≥${hb.minIdentity}%），结果将共享给本靶点`,
+        }
+        log(`跳过 BLAST：同源家族（一致性 ≥${hb.minIdentity}%）已委托代表 ${holder.uniprotId} 统一检索，结果合并时共享 — 不重复检索`)
+        report('uniprot', `同源家族 ≥${hb.minIdentity}%：由代表 ${holder.uniprotId} 统一检索，本靶点共享结果`, 1)
+      } else {
+        familyRep = true
+        log(`本靶点担任同源组（一致性 ≥${hb.minIdentity}%，${hb.members.length} 成员）的 BLAST 家族代表 — 结果将共享给其他成员`)
+      }
+    }
+    if (blastStatus.status !== 'skipped-homolog') {
+      try {
+        report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
+        blastSubmitted = await submitBlastPdb(sequence, msg => log(msg), signal)
+        log(`BLAST 提前提交完成（RID=${blastSubmitted.rid}，预计 ${blastSubmitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
+      } catch (e) {
+        if (signal.aborted) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        blastStatus = { status: 'failed', note: `提交失败：${msg.slice(0, 100)}` }
+        if (familyRep && input.homologBlast) releaseBlastFamily(input.homologBlast.groupKey, input.jobId)
+        log(`BLAST 提交失败：${msg}（稍后阶段将尝试 RCSB 序列检索兜底）`, 'warn')
+      }
     }
   }
 
@@ -324,8 +379,12 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     report('blast', '已按选项跳过 BLAST', 1)
   } else if (blastStatus.status === 'skipped-antibody') {
     report('blast', '抗体序列 — 已跳过 BLAST 同源检索', 1)
-  } else if (coverageSufficient && !input.options.forceBlast) {
-    // 结构证据已充分：不再收集已提交的 BLAST 结果（避免低价值噪声）
+  } else if (blastStatus.status === 'skipped-homolog') {
+    // v1.11：家族委托成员 — 本身不检索；代表的命中在合并报告阶段传播过来（排除自身直接结构后入库）
+    report('blast', '同源家族已委托代表检索（结果将在合并时共享给本靶点）', 1)
+  } else if (coverageSufficient && !input.options.forceBlast && !familyRep) {
+    // 结构证据已充分：不再收集已提交的 BLAST 结果（避免低价值噪声）。
+    // 例外（v1.11）：家族代表不弃用 — 组内 ≥90% 成员还等着共享这份检索结果
     blastStatus = { status: 'skipped-covered' }
     report('blast', '结构覆盖充分，无需同源检索结果', 1)
     log(`跳过 BLAST 收集：直接结构 ${directPdbs.length} 个且覆盖率 ${coveragePct}%，结构证据已充分（已提交的 NCBI 任务弃用）`)
@@ -346,7 +405,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       blastHits = await enrichBlastHits(filtered, directSet)
       blastStatus = {
         status: blastHits.length > 0 ? 'ok' : 'no-hits',
-        note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
+        note: blastHits.length > 0 ? `${blastHits.length} 个同源命中${familyRep ? `（家族代表检索：结果将共享给 ≥${input.homologBlast?.minIdentity ?? 90}% 一致性的同源成员）` : ''}` : undefined,
         provider: outcome.provider,
       }
       log(
@@ -401,7 +460,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       if (signal.aborted) throw e
       const msg = e instanceof Error ? e.message : String(e)
       blastStatus = { status: 'failed', note: msg.slice(0, 120) }
-      log(`BLAST 失败：${msg}（继续后续阶段）`, 'warn')
+      if (familyRep && input.homologBlast) releaseBlastFamily(input.homologBlast.groupKey, input.jobId)
+      log(`BLAST 失败：${msg}（继续后续阶段；家族成员将在合并时自行兜底检索）`, 'warn')
       report('blast', 'BLAST 不可用（已跳过）', 1)
     }
   } else if (blastStatus.status === 'failed' && sequence.length >= 30) {
@@ -423,8 +483,9 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     } catch (e2) {
       if (signal.aborted) throw e2
       const msg2 = e2 instanceof Error ? e2.message : String(e2)
+      if (familyRep && input.homologBlast) releaseBlastFamily(input.homologBlast.groupKey, input.jobId)
       blastStatus = { status: 'failed', note: `NCBI 提交失败：${submitErr.slice(0, 60)}；RCSB 兜底亦失败：${msg2.slice(0, 60)}` }
-      log(`RCSB 兜底亦失败：${msg2}（继续后续阶段）`, 'warn')
+      log(`RCSB 兜底亦失败：${msg2}（继续后续阶段；家族成员将在合并时自行兜底检索）`, 'warn')
       report('blast', '同源检索不可用（已跳过）', 1)
     }
   } else {
@@ -560,6 +621,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     imageCount: images.length,
     durationMs,
     blast: blastStatus,
+    coverageText: coverageText || undefined,
+    gapText: gapText || undefined,
     reportLlmOk: deferReport ? undefined : generated.ok,
     reportDeferred: deferReport || undefined,
     batchNote: input.batchNote,
@@ -593,14 +656,19 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   })
 
   // 图片资产登记（供 /api/assets 访问）
+  // v1.11 修复：同一上传的多靶点批次此前共用 meta.id 做 upsert — 后完成的作业把
+  // 资产行「抢」到自己名下（update jobId），导致客户实验数据只出现在最后一个
+  // UniProt 的结果页。现改为每个作业登记自己的行（复合 id，路径仍指向上传目录的
+  // 同一文件），全部靶点页面共享完整实验数据。
   if (images.length) {
     for (let i = 0; i < images.length; i++) {
       const meta = images[i]
       const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
+      const rowId = `${meta.id}__${input.jobId}`.slice(0, 64)
       await db.reportAsset.upsert({
-        where: { id: meta.id },
-        create: { id: meta.id, jobId: input.jobId, kind: meta.kind, caption: meta.caption, mime: meta.mime, size: meta.sizeKB * 1024, path: path.join(assetDir, `${meta.id}.${ext}`), order: i, vlm: meta.vlmKind ?? false },
-        update: { jobId: input.jobId, order: i, vlm: meta.vlmKind ?? false },
+        where: { id: rowId },
+        create: { id: rowId, jobId: input.jobId, kind: meta.kind, caption: meta.caption, mime: meta.mime, size: meta.sizeKB * 1024, path: path.join(assetDir, `${meta.id}.${ext}`), order: i, vlm: meta.vlmKind ?? false },
+        update: { order: i, vlm: meta.vlmKind ?? false },
       }).catch(() => undefined)
     }
   }

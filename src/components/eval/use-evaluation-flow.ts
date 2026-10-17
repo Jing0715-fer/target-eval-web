@@ -319,15 +319,20 @@ export function useEvaluationFlow() {
         }
       }
     }
+    // v1.11 ≥90% 高一致组：组内首个提交 BLAST 的作业成为家族代表统一检索，
+    // 其余成员跳过（结果在合并报告阶段共享）— 用户反馈「≥90% 不必每个都搜」
+    const blastGroups = judgment?.blastGroups ?? []
     // 关联 → deferred（数据收集后并入合并报告）；非关联 → 独立报告 + 批次说明
     const reqs: EvaluateRequest[] = requests.map(r => {
       const u = (r.uniprotFromDocx ?? r.uniprot ?? '').trim().toUpperCase()
       const attributedSeq = u ? attachMap.get(u) : undefined
+      const group = u ? blastGroups.find(g => g.members.includes(u)) : undefined
       return {
         ...r,
         sequence: attributedSeq ?? r.sequence,
         sequenceFromDocx: attributedSeq ?? r.sequenceFromDocx,
         batchNote,
+        homologBlast: group,
         options: { ...r.options, reportMode: related ? 'deferred' : 'single' },
       }
     })

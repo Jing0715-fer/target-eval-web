@@ -7,9 +7,11 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpenText,
+  Dna,
   Download,
   Layers,
   Link2,
+  SearchX,
   ShieldCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -17,7 +19,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { describeRelationType } from './types'
 import { mdComponents } from './result-view'
-import type { BatchReportInfo } from './types'
+import { BlastTable } from './blast-table'
+import { LiteratureList } from './literature-list'
+import { PdbTable } from './pdb-table'
+import type { BatchReportInfo, MergedTargetLite } from './types'
 
 export interface MergedReportViewProps {
   report: BatchReportInfo
@@ -56,9 +61,45 @@ function relationTone(type: BatchReportInfo['relation']['relationType']): { chip
   }
 }
 
+/** 靶点分组头（每个数据列表块的归属标识 — 用户要求「能看到属于哪个 UniProt ID」） */
+function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+      <span className="rounded-sm border border-teal-300 bg-teal-50 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-teal-800 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300">
+        {t.uniprotId ?? '—'}
+      </span>
+      <span className="text-sm font-semibold text-stone-800 dark:text-stone-100">{t.proteinName}</span>
+      <span className="truncate font-mono text-[11px] text-stone-400 dark:text-stone-500" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
+        {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'}
+      </span>
+      {right && <span className="ml-auto font-mono text-[11px] tabular-nums text-stone-400 dark:text-stone-500">{right}</span>}
+    </div>
+  )
+}
+
+/** 同源结构状态备注（共享自家族代表 / 跳过说明 — 不虚构数据） */
+function BlastNote({ t }: { t: MergedTargetLite }) {
+  const st = t.blastStatus
+  if (!st) return null
+  const shared = st.status === 'ok' && (st.note ?? '').includes('共享自家族代表')
+  if (st.status === 'ok' && !shared) return null
+  return (
+    <div className={cn(
+      'flex items-start gap-2 rounded-md border px-3 py-2 text-xs leading-relaxed',
+      shared
+        ? 'border-teal-200 bg-teal-50/70 text-teal-800 dark:border-teal-900/70 dark:bg-teal-950/30 dark:text-teal-300'
+        : 'border-stone-200 bg-stone-50/70 text-stone-500 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-400',
+    )}>
+      {shared ? <Dna className="mt-0.5 size-3.5 shrink-0" aria-hidden /> : <SearchX className="mt-0.5 size-3.5 shrink-0" aria-hidden />}
+      <span>{st.note ?? '未执行同源检索'}</span>
+    </div>
+  )
+}
+
 /**
  * 合并评估报告视图（v1.8 关联靶点批量）：
  * 返回栏 → 刊头（关系判定卡）→ 报告操作条（下载 HTML）→ LLM 合并分析全文
+ * v1.11：新增各靶点 PDB / 同源结构 / 文献三组数据列表（带 UniProt 归属分组头）
  */
 export function MergedReportView({ report, targetLabels, onNewEvaluation }: MergedReportViewProps) {
   const rel = report.relation
@@ -67,6 +108,10 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const llmOk = report.llmOk !== false && md.length > 0
   const homologPairs = (rel.homologPairs ?? []).filter(p => p.identity > 0)
   const attribution = report.sequenceAttribution ?? []
+  const targets = report.targets ?? []
+  const pdbTargets = targets.filter(t => t.directPdbs.length > 0)
+  const blastTargets = targets.filter(t => t.blastHits.length > 0 || t.blastStatus)
+  const litTargets = targets.filter(t => t.literature.length > 0)
 
   const downloadReport = () => {
     window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&download=1`, '_blank')
@@ -299,6 +344,83 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </CardContent>
         </Card>
       </motion.section>
+
+      {/* 4. 各靶点 PDB 结构（v1.11 — 带 UniProt 归属，与单靶点结果页同等粒度） */}
+      {pdbTargets.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.24, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+          aria-labelledby="sec-merged-pdb"
+        >
+          <div id="sec-merged-pdb" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+            Structures by Target · 各靶点 PDB 结构（{pdbTargets.reduce((s, t) => s + t.directPdbCount, 0)} 个）
+          </div>
+          <div className="flex flex-col gap-5">
+            {pdbTargets.map(t => (
+              <div key={t.jobId} className="flex flex-col gap-2">
+                <TargetGroupHeader t={t} right={`${t.directPdbCount} PDB · 覆盖率 ${t.coveragePercent}%`} />
+                <PdbTable pdbs={t.directPdbs} literature={t.literature} />
+              </div>
+            ))}
+          </div>
+        </motion.section>
+      )}
+
+      {/* 5. 同源结构（BLAST/序列检索 — 含共享自家族代表的标注） */}
+      {blastTargets.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.28, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+          aria-labelledby="sec-merged-blast"
+        >
+          <div id="sec-merged-blast" className="flex flex-wrap items-center gap-x-2">
+            <span className="eval-eyebrow text-stone-500 dark:text-stone-400">
+              Homologous Structures · 同源结构（BLAST / 序列检索）
+            </span>
+            {(rel.blastGroups ?? []).length > 0 && (
+              <span className="rounded-sm border border-teal-200 bg-teal-50 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 dark:border-teal-900 dark:bg-teal-950/40 dark:text-teal-300">
+                ≥90% 家族成员共享一次检索
+              </span>
+            )}
+          </div>
+          <div className="flex flex-col gap-5">
+            {blastTargets.map(t => (
+              <div key={t.jobId} className="flex flex-col gap-2">
+                <TargetGroupHeader t={t} right={t.blastHits.length > 0 ? `${t.blastHitCount} 个同源结构` : '无命中'} />
+                {t.blastHits.length > 0 && <BlastTable hits={t.blastHits} />}
+                <BlastNote t={t} />
+              </div>
+            ))}
+          </div>
+        </motion.section>
+      )}
+
+      {/* 6. 各靶点文献（v1.11 — 归属 UniProt，含结构解析文献标记） */}
+      {litTargets.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.32, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+          aria-labelledby="sec-merged-lit"
+        >
+          <div id="sec-merged-lit" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+            Literature by Target · 各靶点文献（{litTargets.reduce((s, t) => s + t.literature.length, 0)} 篇）
+          </div>
+          <div className="flex flex-col gap-5">
+            {litTargets.map(t => (
+              <div key={t.jobId} className="flex flex-col gap-2">
+                <TargetGroupHeader t={t} right={`${t.literature.length} 篇`} />
+                <LiteratureList items={t.literature} pdbs={t.directPdbs} />
+              </div>
+            ))}
+          </div>
+        </motion.section>
+      )}
     </div>
   )
 }
