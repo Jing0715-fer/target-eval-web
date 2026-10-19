@@ -86,80 +86,37 @@ export async function POST(req: Request) {
     if (!isOwnedBy(j, owner)) return notFound()
   }
 
-  // 加载数据完整的已完成作业
+  // 数据完整性校验（同步快速失败，读库开销小）
   const targets = await loadMergedTargets(jobIds)
   if (targets.length < 2) {
     return NextResponse.json({ ok: false, error: '完成的评估作业不足 2 个，无法生成合并报告' }, { status: 400 })
   }
 
-  // v1.11 同源家族 BLAST 委托结果传播：≥90% 组内代表检索一次，其余成员在此补齐
-  // （先于 LLM 生成执行 — 即使 LLM 失败，传播结果也已持久化到各成员作业）
-  const propagation = await propagateFamilyBlast(targets, relation)
-  if (propagation.shared > 0 || propagation.rescued > 0) {
-    console.log(`[batch-report] 家族同源检索传播：共享 ${propagation.shared} 个成员 · 兜底 ${propagation.rescued} 个 — ${propagation.notes.join('；')}`)
-  }
-
-  // 上传共享数据（insights + 图片 + 序列归属）
   const uploadId = body.uploadId?.trim() || undefined
-  let insights: FormInsights | null = null
-  let images: ParsedImage[] = []
-  let assetDir = ''
-  let sequenceAttribution: SequenceAttribution[] = []
-  if (uploadId && isUploadId(uploadId) && (await uploadOwnedBy(uploadId, owner))) {
-    const uploadDir = path.join(process.cwd(), 'db', 'reports', uploadId)
-    assetDir = path.join(uploadDir, 'assets')
-    try {
-      const parsed = JSON.parse(await fs.readFile(path.join(uploadDir, 'parsed.json'), 'utf-8')) as { images?: ParsedImage[] }
-      images = parsed.images ?? []
-    } catch { /* 图片缺失容错 */ }
-    try {
-      const data = JSON.parse(await fs.readFile(path.join(uploadDir, 'insights.json'), 'utf-8')) as FormInsights
-      if (Array.isArray(data.goals)) insights = data
-    } catch { /* insights 可选 */ }
-    // v1.10：序列归属服务端重算（评估表序列的去向在合并报告中显性呈现）
-    sequenceAttribution = await recomputeAttribution(uploadDir, targets)
+  if (uploadId && (!isUploadId(uploadId) || !(await uploadOwnedBy(uploadId, owner)))) {
+    return NextResponse.json({ ok: false, error: '无权使用该上传（仅上传者本人可用）' }, { status: 403 })
   }
-
-  // LLM 生成合并报告（三段式）
-  const generated = await generateMergedReport({ targets, relation, goal: body.goal, insights, images, sequenceAttribution })
-
-  // 落库 + HTML 落盘
+  // v1.12：异步生成 — LLM 三段式生成耗时分钟级，同步等待会触发网关超时（HTTP 502）。
+  // 立即落库 running 记录并返回，后台继续生成，前端轮询 GET 直到终态。
   const record = await db.batchReport.create({
     data: {
       jobIds: JSON.stringify(jobIds),
       uploadId: uploadId ?? null,
       relation: JSON.stringify(relation),
-      sequenceAttribution: sequenceAttribution.length ? JSON.stringify(sequenceAttribution) : null,
-      markdown: generated.fullMarkdown?.trim() || null,
       ownerKey: owner.key,
       ownerMask: owner.mask,
+      status: 'running',
     },
   })
-  let htmlPath: string | null = null
-  if (generated.fullMarkdown.trim()) {
-    const engineSummary = await getEngineSummary()
-    const html = await renderMergedReportHtml({
-      targets,
-      relation,
-      goal: body.goal,
-      markdown: generated.fullMarkdown,
-      llmOk: generated.ok,
-      llmErrors: generated.errors,
-      images,
-      assetDir,
-      batchReportId: record.id,
-      engineSummary,
-      sequenceAttribution,
-    })
-    const dir = path.join(process.cwd(), 'db', 'reports', record.id)
-    await fs.mkdir(dir, { recursive: true })
-    htmlPath = path.join(dir, 'report.html')
-    await fs.writeFile(htmlPath, html, 'utf-8')
-    await db.batchReport.update({
-      where: { id: record.id },
-      data: { htmlPath, engine: engineSummary },
-    })
-  }
+
+  // 后台生成（fire-and-forget；uploadId 归属已在上传流程验证，此处透传可信）
+  void runBatchReportGeneration({
+    batchReportId: record.id,
+    jobIds,
+    uploadId,
+    relation,
+    goal: body.goal,
+  })
 
   return NextResponse.json({
     ok: true,
@@ -167,15 +124,114 @@ export async function POST(req: Request) {
       id: record.id,
       jobIds,
       relation,
-      sequenceAttribution,
-      markdown: generated.fullMarkdown,
-      llmOk: generated.ok,
-      errors: generated.errors,
-      createdAt: record.createdAt,
-      /** 各靶点结构化数据（v1.11 — PDB/同源结构/文献列表带 UniProt 归属，网页合并视图展示） */
-      targets: targets.map(toMergedTargetLite),
+      status: 'running',
+      markdown: '',
+      sequenceAttribution: [],
+      createdAt: record.createdAt.toISOString(),
     },
   })
+}
+
+/** 后台生成合并报告：传播同源检索 → 聚合上传数据 → LLM 三段式 → markdown/HTML 落库 → 更新终态 */
+async function runBatchReportGeneration(ctx: {
+  batchReportId: string
+  jobIds: string[]
+  uploadId?: string
+  relation: RelationJudgment
+  goal?: string
+}): Promise<void> {
+  const { batchReportId, jobIds, uploadId, relation } = ctx
+  const startedAt = Date.now()
+  const fail = async (msg: string) => {
+    console.error(`[batch-report] 合并报告生成失败（${batchReportId}）：${msg}`)
+    await db.batchReport.update({
+      where: { id: batchReportId },
+      data: { status: 'error', error: msg.slice(0, 500), updatedAt: new Date() },
+    }).catch(() => undefined)
+  }
+  try {
+    // 重新加载（拿到各作业最新持久化数据）
+    const targets = await loadMergedTargets(jobIds)
+    if (targets.length < 2) return void (await fail('完成的评估作业不足 2 个'))
+
+    // v1.11 同源家族 BLAST 委托结果传播：≥90% 组内代表检索一次，其余成员在此补齐
+    // （先于 LLM 生成执行 — 即使 LLM 失败，传播结果也已持久化到各成员作业）
+    const propagation = await propagateFamilyBlast(targets, relation)
+    if (propagation.shared > 0 || propagation.rescued > 0) {
+      console.log(`[batch-report] 家族同源检索传播：共享 ${propagation.shared} 个成员 · 兜底 ${propagation.rescued} 个 — ${propagation.notes.join('；')}`)
+    }
+
+    // 上传共享数据（insights + 图片 + 序列归属）
+    let insights: FormInsights | null = null
+    let images: ParsedImage[] = []
+    let assetDir = ''
+    let sequenceAttribution: SequenceAttribution[] = []
+    if (uploadId && isUploadId(uploadId)) {
+      const uploadDir = path.join(process.cwd(), 'db', 'reports', uploadId)
+      assetDir = path.join(uploadDir, 'assets')
+      try {
+        const parsed = JSON.parse(await fs.readFile(path.join(uploadDir, 'parsed.json'), 'utf-8')) as { images?: ParsedImage[] }
+        images = parsed.images ?? []
+      } catch { /* 图片缺失容错 */ }
+      try {
+        const data = JSON.parse(await fs.readFile(path.join(uploadDir, 'insights.json'), 'utf-8')) as FormInsights
+        if (Array.isArray(data.goals)) insights = data
+      } catch { /* insights 可选 */ }
+      // v1.10：序列归属服务端重算（评估表序列的去向在合并报告中显性呈现）
+      sequenceAttribution = await recomputeAttribution(uploadDir, targets)
+    }
+
+    // LLM 生成合并报告（三段式）
+    const generated = await generateMergedReport({ targets, relation, goal: ctx.goal, insights, images, sequenceAttribution })
+
+    // markdown + 终态落库
+    const engineSummary = await getEngineSummary()
+    await db.batchReport.update({
+      where: { id: batchReportId },
+      data: {
+        markdown: generated.fullMarkdown?.trim() || null,
+        sequenceAttribution: sequenceAttribution.length ? JSON.stringify(sequenceAttribution) : null,
+        engine: engineSummary,
+        status: 'done',
+        error: generated.ok ? null : (generated.errors.join('；').slice(0, 500) || 'LLM 生成失败'),
+        updatedAt: new Date(),
+      },
+    })
+
+    // HTML 落盘（失败不影响终态 — markdown 已成功）
+    if (generated.fullMarkdown.trim()) {
+      try {
+        const html = await renderMergedReportHtml({
+          targets,
+          relation,
+          goal: ctx.goal,
+          markdown: generated.fullMarkdown,
+          llmOk: generated.ok,
+          llmErrors: generated.errors,
+          images,
+          assetDir,
+          batchReportId,
+          engineSummary,
+          sequenceAttribution,
+        })
+        const dir = path.join(process.cwd(), 'db', 'reports', batchReportId)
+        await fs.mkdir(dir, { recursive: true })
+        const htmlPath = path.join(dir, 'report.html')
+        await fs.writeFile(htmlPath, html, 'utf-8')
+        await db.batchReport.update({
+          where: { id: batchReportId },
+          data: { htmlPath, engine: engineSummary },
+        })
+      } catch (err) {
+        console.error(`[batch-report] HTML 渲染失败（${batchReportId}）：${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
+    console.log(`[batch-report] 合并报告生成完成（${batchReportId}）：${targets.length} 个靶点 · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s`)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await fail(msg)
+  }
 }
 
 export async function GET(req: Request) {
@@ -211,6 +267,34 @@ export async function GET(req: Request) {
   try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
   try { sequenceAttribution = record.sequenceAttribution ? JSON.parse(record.sequenceAttribution) : null } catch { /* ignore */ }
 
+  // v1.12：异步生成状态。
+  // 旧记录兼容：db:push 前 status 列被补填为 'running'，但当时同步生成已落 markdown —
+  // 有 markdown 的 running 记录视为已完成，避免前端误等。
+  const status: 'running' | 'done' | 'error' =
+    record.status === 'done' || record.status === 'error'
+      ? record.status
+      : record.markdown
+        ? 'done'
+        : 'running'
+
+  // 生成中 — 不做重数据加载（targets 在终态时返回），快速返回
+  if (status === 'running') {
+    return NextResponse.json({
+      ok: true,
+      batchReport: {
+        id: record.id,
+        jobIds,
+        relation,
+        sequenceAttribution,
+        markdown: '',
+        status: 'running',
+        uploadId: record.uploadId,
+        createdAt: record.createdAt,
+        targets: [],
+      },
+    })
+  }
+
   // v1.11：各靶点结构化数据（传播结果已在 POST 时持久化 — 此处直接读库；
   // 作业被 TTL 清理后 targets 为空数组，前端降级为仅展示 markdown）
   let targets: unknown[] = []
@@ -223,7 +307,11 @@ export async function GET(req: Request) {
       jobIds,
       relation,
       sequenceAttribution,
-      markdown: record.markdown,
+      markdown: record.markdown ?? '',
+      status,
+      error: record.error ?? null,
+      llmOk: !record.error,
+      errors: record.error ? [record.error] : [],
       uploadId: record.uploadId,
       createdAt: record.createdAt,
       targets,

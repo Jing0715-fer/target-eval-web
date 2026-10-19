@@ -73,6 +73,8 @@ model BatchReport {
   markdown  String? // 合并报告 LLM markdown（网页内联展示）
   htmlPath  String? // 磁盘 HTML 报告路径
   engine    String? // 生成引擎摘要
+  status    String   @default("running") // running / done / error（异步生成状态）
+  error     String? // 生成失败原因（status=error 时）
   ownerKey  String? // 创建者归属键（与 EvaluationJob 一致）
   ownerMask String? // 创建者来源 IP 掩码
   createdAt DateTime @default(now())

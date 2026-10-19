@@ -212,7 +212,9 @@ export async function judgeTargetRelation(input: {
   return { judgment: data.judgment, sequenceAttribution: data.sequenceAttribution }
 }
 
-/** POST /api/evaluate/batch-report — 关联靶点全部完成后生成合并评估报告 */
+/** POST /api/evaluate/batch-report — 关联靶点全部完成后生成合并评估报告
+ *  v1.12：后端异步生成（LLM 三段式分钟级），POST 立即返回 running，
+ *  此处轮询 GET 直到终态（done / error），期间 UI 保持"生成中"状态。 */
 export async function generateBatchReport(input: {
   jobIds: string[]
   uploadId?: string
@@ -228,7 +230,33 @@ export async function generateBatchReport(input: {
   if (!res.ok || !data?.ok || !data.batchReport) {
     throw new Error(data?.error ?? `合并报告生成失败（HTTP ${res.status}）`)
   }
-  return data.batchReport
+  const started = data.batchReport
+  if (started.status !== 'running') return started // 兼容即时完成的响应
+  return waitForBatchReport(started.id)
+}
+
+/** 轮询合并报告直到终态（done 返回完整数据；error 抛错；超时 15 分钟）
+ *  单次网络抖动不中断轮询（连续失败由超时兜底） */
+export async function waitForBatchReport(id: string): Promise<BatchReportInfo> {
+  const deadline = Date.now() + 15 * 60 * 1000
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 3000))
+    let r: BatchReportInfo
+    try {
+      r = await fetchBatchReport(id)
+    } catch {
+      continue // 瞬时网络错误 → 继续轮询（超时兜底）
+    }
+    if (r.status === 'error') {
+      throw new Error(r.error || '合并报告生成失败')
+    }
+    if (r.status === 'done') {
+      // LLM 全失败时 markdown 为空但 status=done — 返回降级结果（视图展示错误提示）
+      return r
+    }
+    // running → 继续轮询
+  }
+  throw new Error('合并报告生成超时（15 分钟）— 生成可能仍在后台进行，请稍后通过历史记录查看')
 }
 
 /** GET /api/evaluate/batch-report?id= — 查询合并报告（历史/刷新恢复） */

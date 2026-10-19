@@ -183,6 +183,10 @@ export interface BatchReportInfo {
   createdAt?: string
   /** 各靶点结构化数据（v1.11；历史报告/作业被清理时为空） */
   targets?: MergedTargetLite[]
+  /** 异步生成状态（v1.12：running = 后台生成中，前端轮询直到终态） */
+  status?: 'running' | 'done' | 'error'
+  /** 生成失败原因（status = error 时） */
+  error?: string | null
 }
 
 // ─── 评估表 LLM 智能解析 ──────────────────────────────────────
