@@ -1,9 +1,12 @@
 'use client'
 
 import { useTheme } from 'next-themes'
-import { ArrowLeft, History, Moon, SlidersHorizontal, Sun } from 'lucide-react'
+import { ArrowLeft, Github, History, Moon, SlidersHorizontal, Sun } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+
+/** 项目 GitHub 仓库地址 */
+const GITHUB_REPO_URL = 'https://github.com/Jing0715-fer/target-eval-web'
 
 function ThemeToggle() {
   const { resolvedTheme, setTheme } = useTheme()
@@ -95,6 +98,16 @@ export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, e
               />
             )}
           </Button>
+          <a
+            href={GITHUB_REPO_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="GitHub 仓库"
+            title="GitHub 仓库"
+            className="inline-flex size-9 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800/60 dark:hover:text-stone-100"
+          >
+            <Github className="size-4" />
+          </a>
           <ThemeToggle />
         </div>
       </div>
