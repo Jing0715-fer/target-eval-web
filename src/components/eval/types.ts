@@ -189,6 +189,16 @@ export interface BatchReportInfo {
   error?: string | null
 }
 
+/** 合并报告历史列表项（v1.13：批量评估历史记录） */
+export interface BatchReportListItem {
+  id: string
+  jobIds: string[]
+  title: string
+  status: 'running' | 'done' | 'error'
+  hasContent: boolean
+  createdAt: string
+}
+
 // ─── 评估表 LLM 智能解析 ──────────────────────────────────────
 
 /** LLM 从评估表内容中提取的结构化要点 */

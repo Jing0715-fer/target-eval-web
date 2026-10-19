@@ -11,7 +11,7 @@ import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
-import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
+import { getOwner, isOwnedBy, notFound, ownerListFilter } from '@/lib/eval/request-guard'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
 import { propagateFamilyBlast } from '@/lib/eval/blast-family'
@@ -238,11 +238,56 @@ export async function GET(req: Request) {
   const owner = getOwner(req)
   const url = new URL(req.url)
   const id = url.searchParams.get('id')?.trim()
-  if (!id) return NextResponse.json({ ok: false, error: '缺少 id 参数' }, { status: 400 })
+
+  // 无 id 参数 — 返回当前用户的合并报告列表（v1.13：批量评估历史记录）
+  if (!id) {
+    const rows = await db.batchReport.findMany({
+      where: ownerListFilter(owner),
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+      select: {
+        id: true, jobIds: true, status: true, error: true,
+        markdown: true, createdAt: true, updatedAt: true,
+      },
+    })
+    const items = rows.map(r => {
+      let jobIds: string[] = []
+      try { jobIds = JSON.parse(r.jobIds) } catch { /* ignore */ }
+      const md = r.markdown ?? ''
+      const titleMatch = md.match(/^#\s+(.+)$/m)
+      const title = titleMatch?.[1]?.trim() || `合并报告 ${r.id.slice(0, 8)}`
+      return {
+        id: r.id,
+        jobIds,
+        title,
+        status: r.status === 'done' || r.status === 'error' ? r.status : (r.markdown ? 'done' : 'running'),
+        hasContent: md.length > 0,
+        createdAt: r.createdAt.toISOString(),
+      }
+    })
+    return NextResponse.json({ ok: true, items })
+  }
 
   const record = await db.batchReport.findUnique({ where: { id } })
   if (!record) return notFound()
-  if (record.ownerKey && record.ownerKey !== owner.key) return notFound()
+  if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) return notFound()
+
+  // inline 预览模式 — 返回 HTML（允许 iframe 嵌入，用于报告预览 Dialog）
+  if (url.searchParams.get('inline') === '1') {
+    if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
+    try {
+      const html = await fs.readFile(record.htmlPath, 'utf-8')
+      return new Response(html, {
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Content-Security-Policy': 'frame-ancestors *;',
+        },
+      })
+    } catch {
+      return NextResponse.json({ ok: false, error: '报告文件已过期清理' }, { status: 404 })
+    }
+  }
 
   // 下载 HTML 文件
   if (url.searchParams.get('download') === '1') {

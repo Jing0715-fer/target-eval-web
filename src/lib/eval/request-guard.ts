@@ -2,14 +2,14 @@
  * 请求归属与访问控制 — 公网部署的数据隔离层。
  *
  * 设计要点：
+ *  - 归属键（ownerKey）优先读取浏览器 cookie（te_owner，由 middleware 派发），
+ *    每个浏览器会话拥有独立 ownerKey，实现可靠的"仅自己可见"隔离。
+ *  - 无 cookie 时（如 curl 等非浏览器客户端）回退到来源 IP 的 SHA-256（hex 前 24 位）。
  *  - 来源 IP 提取：X-Forwarded-For（首段）→ X-Real-IP → CF-Connecting-IP → 直连兜底
- *  - 归属键（ownerKey）：来源 IP 的 SHA-256（hex，前 24 位）。
- *    DB 不落明文 IP，仅落掩码字符串（如 203.0.113.*）用于排障展示；
+ *  - DB 不落明文 IP，仅落掩码字符串（如 203.0.113.*）用于排障展示；
  *    隔离判定全部基于 ownerKey 相等比较，哈希不可逆推原始 IP。
- *  - 无代理头直连（本地开发）时所有请求同属 'direct' 组 —— 公网部署务必置于
- *    反向代理之后并传递 X-Forwarded-For（README 部署章节）。
- *  - 兼容策略：ownerKey 为 null 的历史记录（升级前创建）仅能通过列表查看
- *    自己名下记录，详情页因 cuid 不可猜测仍可访问（见各路由）。
+ *  - 兼容策略：ownerKey 为 null 的历史记录仅能通过列表查看自己名下记录，
+ *    详情页因 cuid 不可猜测仍可访问（见各路由）。
  */
 import { createHash } from 'node:crypto'
 import { db } from '@/lib/db'
@@ -17,6 +17,9 @@ import type { EvaluationJob } from '@prisma/client'
 
 /** 直连（无代理头）时的归属组 */
 export const DIRECT_GROUP = 'direct'
+
+/** 浏览器会话 cookie 名（与 middleware.ts 保持一致） */
+export const OWNER_COOKIE_NAME = 'te_owner'
 
 /** 从请求头解析来源 IP（可信代理链：网关已重写 X-Forwarded-For 为真实远端） */
 export function getClientIp(req: Request): string {
@@ -67,19 +70,60 @@ export function maskIp(ip: string): string {
 
 export interface RequestOwner {
   ip: string
+  /** 生效归属键（cookie 优先，否则 IP-hash）— 用于创建记录 */
   key: string
+  /** IP-hash 归属键 — 用于列表查询兼容旧记录 */
+  ipKey: string
   mask: string
+  /** 归属键来源：cookie（浏览器）或 ip（非浏览器回退） */
+  source: 'cookie' | 'ip'
 }
 
-/** 从请求解析归属（IP + 哈希键 + 掩码） */
+/** 从 cookie 头解析指定 cookie 值 */
+function readCookie(req: Request, name: string): string | null {
+  const cookieHeader = req.headers.get('cookie')
+  if (!cookieHeader) return null
+  for (const part of cookieHeader.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq < 0) continue
+    const k = part.slice(0, eq).trim()
+    const v = part.slice(eq + 1).trim()
+    if (k === name && v.length >= 16) return v
+  }
+  return null
+}
+
+/**
+ * 从请求解析归属：优先读取 owner cookie，无 cookie 时回退到 IP-hash。
+ * cookie 由 proxy.ts 在首次访问时派发，确保每个浏览器会话独立隔离。
+ * ipKey 始终返回 IP-hash，供列表端点兼容查询旧记录。
+ */
 export function getOwner(req: Request): RequestOwner {
   const ip = getClientIp(req)
-  return { ip, key: ownerKeyOfIp(ip), mask: maskIp(ip) }
+  const mask = maskIp(ip)
+  const ipKey = ownerKeyOfIp(ip)
+
+  const cookieValue = readCookie(req, OWNER_COOKIE_NAME)
+  if (cookieValue) {
+    return { ip, key: cookieValue, ipKey, mask, source: 'cookie' }
+  }
+
+  // 回退：非浏览器客户端（curl 等），或首次访问 cookie 尚未派发
+  return { ip, key: ipKey, ipKey, mask, source: 'ip' }
 }
 
-/** 记录归属是否匹配（null 视为历史遗留：放行详情访问，列表仍按本人过滤） */
+/** 列表查询的 ownerKey 过滤条件：同时匹配 cookie key 和 IP-hash key（兼容旧记录） */
+export function ownerListFilter(owner: RequestOwner) {
+  if (owner.key === owner.ipKey) {
+    return { ownerKey: owner.key }
+  }
+  return { OR: [{ ownerKey: owner.key }, { ownerKey: owner.ipKey }] }
+}
+
+/** 记录归属是否匹配（null 视为历史遗留：放行详情访问；cookie/ipKey 任一匹配即放行） */
 export function isOwnedBy(job: Pick<EvaluationJob, 'ownerKey'>, owner: RequestOwner): boolean {
-  return !job.ownerKey || job.ownerKey === owner.key
+  if (!job.ownerKey) return true
+  return job.ownerKey === owner.key || job.ownerKey === owner.ipKey
 }
 
 /** 404 响应（不暴露资源存在性） */

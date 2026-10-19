@@ -78,6 +78,10 @@ export default function Home() {
     void flow.loadJob(id)
   }
 
+  const openBatchReport = (id: string) => {
+    void flow.loadBatchReport(id)
+  }
+
   return (
     <div className="flex min-h-screen flex-col bg-[#fafaf9] text-stone-900 dark:bg-stone-950 dark:text-stone-100">
       <AppHeader
@@ -169,6 +173,7 @@ export default function Home() {
           <RecentEvaluations
             refreshKey={historyKey}
             onOpenJob={openHistoryJob}
+            onOpenBatchReport={openBatchReport}
             onOpenHistory={() => setHistoryOpen(true)}
           />
         )}
@@ -183,6 +188,10 @@ export default function Home() {
         onOpenJob={(id) => {
           setHistoryOpen(false)
           openHistoryJob(id)
+        }}
+        onOpenBatchReport={(id) => {
+          setHistoryOpen(false)
+          openBatchReport(id)
         }}
       />
 

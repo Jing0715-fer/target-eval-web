@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -9,13 +10,18 @@ import {
   BookOpenText,
   Dna,
   Download,
+  ExternalLink,
+  Eye,
   Layers,
   Link2,
+  Loader2,
+  Printer,
   SearchX,
   ShieldCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { describeRelationType } from './types'
 import { mdComponents } from './result-view'
@@ -113,9 +119,29 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const blastTargets = targets.filter(t => t.blastHits.length > 0 || t.blastStatus)
   const litTargets = targets.filter(t => t.literature.length > 0)
 
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewLoaded, setPreviewLoaded] = useState(false)
+  const [previewSlow, setPreviewSlow] = useState(false)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  const openPreview = () => {
+    setPreviewLoaded(false)
+    setPreviewSlow(false)
+    setPreviewOpen(true)
+  }
+
+  // 预览加载超过 12s 提供降级提示
+  useEffect(() => {
+    if (!previewOpen || previewLoaded) return
+    const t = setTimeout(() => setPreviewSlow(true), 12_000)
+    return () => clearTimeout(t)
+  }, [previewOpen, previewLoaded])
+
   const downloadReport = () => {
     window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&download=1`, '_blank')
   }
+
+  const inlineUrl = `/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&inline=1`
 
   const confidenceText = rel.confidence === 'high' ? '高' : rel.confidence === 'medium' ? '中' : '低'
 
@@ -236,8 +262,18 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         </div>
         <div className="flex flex-wrap gap-2 sm:ml-auto">
           <Button
+            onClick={openPreview}
+            disabled={!llmOk}
+            className="h-10 gap-2 rounded-md bg-violet-700 px-4 font-medium text-white hover:bg-violet-600 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-violet-800 dark:hover:bg-violet-700"
+          >
+            <Eye className="size-4" />
+            在线预览报告
+          </Button>
+          <Button
             onClick={downloadReport}
-            className="h-10 gap-2 rounded-md bg-violet-700 px-4 font-medium text-white hover:bg-violet-600 dark:bg-violet-800 dark:hover:bg-violet-700"
+            disabled={!llmOk}
+            variant="outline"
+            className="h-10 gap-2 rounded-md border-violet-300 px-4 font-medium text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-800 dark:text-violet-300 dark:hover:bg-violet-950/40"
           >
             <Download className="size-4" />
             下载 HTML
@@ -421,6 +457,88 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </div>
         </motion.section>
       )}
+
+      {/* 报告在线预览（大窗口 iframe + 加载态 + 新窗口/打印） */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent
+          showCloseButton
+          className="flex h-[88vh] w-full max-w-6xl flex-col gap-0 overflow-hidden rounded-lg p-0 sm:max-w-6xl"
+        >
+          <DialogHeader className="flex-row items-center justify-between gap-4 border-b border-stone-200 px-5 py-3 pr-14 text-left dark:border-stone-800">
+            <div className="flex flex-col gap-0.5">
+              <DialogTitle className="flex items-center gap-2 font-display text-base">
+                合并评估报告 · {report.id.slice(0, 8)}
+              </DialogTitle>
+              <DialogDescription className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
+                完整 HTML 报告 · 可直接打印
+              </DialogDescription>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => iframeRef.current?.contentWindow?.print()}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-violet-400 hover:text-violet-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Printer className="size-3.5" />
+                打印
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open(inlineUrl, '_blank')}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-violet-400 hover:text-violet-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <ExternalLink className="size-3.5" />
+                新窗口
+              </Button>
+            </div>
+          </DialogHeader>
+          <div className="relative min-h-0 flex-1">
+            {!previewLoaded && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-white dark:bg-stone-950">
+                <Loader2 className="size-6 animate-spin text-violet-700 dark:text-violet-500" />
+                {previewSlow ? (
+                  <div className="flex max-w-xs flex-col items-center gap-3 px-4 text-center">
+                    <p className="text-xs text-stone-500 dark:text-stone-400">
+                      报告加载较慢（含内嵌图片时体积较大），也可选择其他方式查看：
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => window.open(inlineUrl, '_blank')}
+                        className="h-8 gap-1.5 rounded-md"
+                      >
+                        <ExternalLink className="size-3.5" />
+                        新窗口打开
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={downloadReport}
+                        className="h-8 gap-1.5 rounded-md"
+                      >
+                        <Download className="size-3.5" />
+                        下载
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="font-mono text-xs text-stone-400">报告加载中…</p>
+                )}
+              </div>
+            )}
+            <iframe
+              ref={iframeRef}
+              src={inlineUrl}
+              title="合并评估报告预览"
+              onLoad={() => setPreviewLoaded(true)}
+              className="h-full w-full bg-white dark:bg-stone-950"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

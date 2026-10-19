@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
-import { generateBatchReport, judgeTargetRelation } from './api'
+import { fetchBatchReport, generateBatchReport, judgeTargetRelation } from './api'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
 /** 主视图状态机：idle（输入）→ running（进度）→ done（结果）；error 单独处理 */
@@ -556,6 +556,61 @@ export function useEvaluationFlow() {
     setBatch(prev => (prev ? { ...prev, view: 'merged' } : prev))
   }, [])
 
+  /** 从历史记录加载合并报告（v1.13：批量评估历史）
+   *  拉取 BatchReport → 构造最小 batch 状态 → 切到 done + merged 视图 */
+  const loadBatchReport = useCallback(
+    async (id: string) => {
+      setLoadingHistoryJob(true)
+      setSubmitError(null)
+      try {
+        const report = await fetchBatchReport(id)
+        // 各靶点标签：优先取 targets 中的 uniprot/蛋白名；降级用 jobIds 序号
+        const labels = (report.targets ?? []).map(t => {
+          const id = t.uniprotId || t.jobId?.slice(0, 6) || '?'
+          return t.proteinName ? `${id} · ${t.proteinName}` : `靶点 ${id}`
+        })
+        while (labels.length < report.jobIds.length) {
+          labels.push(`靶点 ${report.jobIds[labels.length]?.slice(0, 6) ?? '?'}`)
+        }
+        const items = report.jobIds.map((jid, i) => ({
+          key: jid,
+          label: labels[i] ?? jid.slice(0, 8),
+          jobId: jid,
+          status: 'done' as const,
+        }))
+        setBatch({
+          total: items.length,
+          currentIndex: items.length - 1,
+          items,
+          done: true,
+          relation: report.relation,
+          mergedReport: report,
+          view: 'merged',
+          sequenceAttribution: report.sequenceAttribution ?? undefined,
+        })
+        // 同步加载第一个靶点的详情作为 flow.job（ResultView 切换栏需要）
+        if (report.jobIds.length > 0) {
+          try {
+            const res = await fetch(`/api/jobs/${report.jobIds[0]}`, { cache: 'no-store' })
+            if (res.ok) {
+              const data = (await res.json()) as JobDetail
+              jobIdRef.current = data.id
+              displayJobIdRef.current = data.id
+              applyJobSnapshot(data)
+            }
+          } catch { /* 靶点详情加载失败不阻断合并报告展示 */ }
+        }
+        setPhase('done')
+        if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
+      } catch {
+        setSubmitError('无法加载该合并报告，可能已被清理或服务暂不可用')
+      } finally {
+        setLoadingHistoryJob(false)
+      }
+    },
+    [applyJobSnapshot]
+  )
+
   /** 从历史记录加载作业：done → 结果视图；running/pending → 进度视图 */
   const loadJob = useCallback(
     async (id: string) => {
@@ -599,6 +654,7 @@ export function useEvaluationFlow() {
     retry,
     loadJob,
     loadJobById,
+    loadBatchReport,
     showMergedReport,
     clearSubmitError,
   }

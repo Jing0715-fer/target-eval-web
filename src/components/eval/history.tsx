@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowRight, CircleAlert, History, LoaderCircle, ShieldCheck, Trash2 } from 'lucide-react'
+import { ArrowRight, CircleAlert, History, Layers, LoaderCircle, ShieldCheck, Trash2 } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,10 +17,10 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
-import { deleteJobById, fetchJobList } from './api'
+import { deleteJobById, fetchBatchReportList, fetchJobList } from './api'
 import { StatusBadge } from './badges'
 import { formatDateTime, formatPercent } from './format'
-import type { JobListItem } from './types'
+import type { BatchReportListItem, JobListItem } from './types'
 
 /* ---------------- 共享行组件 ---------------- */
 
@@ -117,11 +117,52 @@ function PrivacyBadge({ className }: { className?: string }) {
         'inline-flex items-center gap-1 rounded-sm border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400',
         className,
       )}
-      title="评估记录按来源网络（IP）隔离，其他用户不可见"
+      title="评估记录按浏览器会话隔离，其他用户不可见"
     >
       <ShieldCheck className="size-3" aria-hidden />
       仅自己可见
     </span>
+  )
+}
+
+/* ---------------- 合并报告行组件 ---------------- */
+
+function BatchReportRow({
+  report,
+  onOpen,
+}: {
+  report: BatchReportListItem
+  onOpen: (id: string) => void
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(report.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpen(report.id)
+        }
+      }}
+      className="flex min-h-14 cursor-pointer items-center gap-3 rounded-md border border-stone-200 bg-white px-4 py-3 transition-colors outline-none hover:border-violet-300 hover:bg-stone-50 focus-visible:ring-[3px] focus-visible:ring-violet-500/40 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-violet-800 dark:hover:bg-stone-900/60"
+    >
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-violet-100 text-violet-700 dark:bg-violet-950/40 dark:text-violet-400">
+        <Layers className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium text-stone-800 dark:text-stone-200">
+          {report.title}
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-stone-500 dark:text-stone-500">
+          <span>{report.jobIds.length} 个靶点</span>
+          <span>{formatDateTime(report.createdAt)}</span>
+          {report.status === 'running' && <span className="text-amber-600">· 生成中</span>}
+          {report.status === 'error' && <span className="text-red-500">· 生成失败</span>}
+        </div>
+      </div>
+      <ArrowRight className="size-4 shrink-0 text-stone-400" />
+    </div>
   )
 }
 
@@ -132,13 +173,16 @@ export function HistoryDialog({
   onOpenChange,
   refreshKey,
   onOpenJob,
+  onOpenBatchReport,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   refreshKey: number
   onOpenJob: (id: string) => void
+  onOpenBatchReport: (id: string) => void
 }) {
   const [jobs, setJobs] = useState<JobListItem[] | null>(null)
+  const [batches, setBatches] = useState<BatchReportListItem[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -148,10 +192,15 @@ export function HistoryDialog({
     setLoading(true)
     setError(null)
     try {
-      const list = await fetchJobList()
-      setJobs(list)
+      const [jobList, batchList] = await Promise.all([
+        fetchJobList(),
+        fetchBatchReportList().catch(() => [] as BatchReportListItem[]),
+      ])
+      setJobs(jobList)
+      setBatches(batchList)
     } catch {
       setJobs([])
+      setBatches([])
       setError('无法获取评估记录（评估服务可能尚未就绪）')
     } finally {
       setLoading(false)
@@ -185,7 +234,7 @@ export function HistoryDialog({
             <PrivacyBadge className="ml-1" />
           </DialogTitle>
           <DialogDescription>
-            你最近的评估作业，点击记录加载结果或继续跟踪进度；记录按来源网络隔离，其他用户不可见
+            你最近的评估作业与合并报告，点击记录加载结果；记录按浏览器会话隔离，其他用户不可见
           </DialogDescription>
         </DialogHeader>
 
@@ -205,20 +254,47 @@ export function HistoryDialog({
                 重新加载
               </Button>
             </div>
-          ) : !jobs || jobs.length === 0 ? (
-            <EmptyHistoryState />
           ) : (
-            <div className="flex flex-col gap-2">
-              {jobs.map((j) => (
-                <JobRow
-                  key={j.id}
-                  job={j}
-                  onOpen={onOpenJob}
-                  onDelete={(id) => setConfirmDelete(jobs.find((x) => x.id === id) ?? null)}
-                  deleting={deletingId === j.id}
-                />
-              ))}
-            </div>
+            <>
+              {/* 合并报告（批量评估历史） */}
+              {batches && batches.length > 0 && (
+                <div className="mb-4">
+                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-violet-700 dark:text-violet-400">
+                    <Layers className="size-3.5" />
+                    合并报告（{batches.length}）
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    {batches.map((b) => (
+                      <BatchReportRow key={b.id} report={b} onOpen={onOpenBatchReport} />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* 单靶点评估 */}
+              {(!jobs || jobs.length === 0) && (!batches || batches.length === 0) ? (
+                <EmptyHistoryState />
+              ) : jobs && jobs.length > 0 ? (
+                <div>
+                  {batches && batches.length > 0 && (
+                    <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                      <History className="size-3.5" />
+                      单靶点评估（{jobs.length}）
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-2">
+                    {jobs.map((j) => (
+                      <JobRow
+                        key={j.id}
+                        job={j}
+                        onOpen={onOpenJob}
+                        onDelete={(id) => setConfirmDelete(jobs.find((x) => x.id === id) ?? null)}
+                        deleting={deletingId === j.id}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </>
           )}
         </div>
       </DialogContent>
@@ -252,26 +328,30 @@ export function HistoryDialog({
 export function RecentEvaluations({
   refreshKey,
   onOpenJob,
+  onOpenBatchReport,
   onOpenHistory,
 }: {
   refreshKey: number
   onOpenJob: (id: string) => void
+  onOpenBatchReport: (id: string) => void
   onOpenHistory: () => void
 }) {
   const [jobs, setJobs] = useState<JobListItem[] | null>(null)
+  const [batches, setBatches] = useState<BatchReportListItem[] | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<JobListItem | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    fetchJobList()
-      .then((list) => {
-        if (!cancelled) setJobs(list)
-      })
-      .catch(() => {
-        // API 未就绪时静默降级为空状态
-        if (!cancelled) setJobs([])
-      })
+    Promise.all([
+      fetchJobList().catch(() => [] as JobListItem[]),
+      fetchBatchReportList().catch(() => [] as BatchReportListItem[]),
+    ]).then(([jobList, batchList]) => {
+      if (!cancelled) {
+        setJobs(jobList)
+        setBatches(batchList)
+      }
+    })
     return () => {
       cancelled = true
     }
@@ -314,16 +394,19 @@ export function RecentEvaluations({
         </Button>
       </div>
 
-      {jobs === null ? (
+      {jobs === null || batches === null ? (
         <div className="flex flex-col gap-2">
           {[0, 1].map((i) => (
             <Skeleton key={i} className="h-14 w-full rounded-lg" />
           ))}
         </div>
-      ) : jobs.length === 0 ? (
+      ) : jobs.length === 0 && batches.length === 0 ? (
         <EmptyHistoryState compact />
       ) : (
         <div className="flex flex-col gap-2">
+          {batches.slice(0, 3).map((b) => (
+            <BatchReportRow key={b.id} report={b} onOpen={onOpenBatchReport} />
+          ))}
           {jobs.slice(0, 5).map((j) => (
             <JobRow
               key={j.id}
@@ -333,10 +416,10 @@ export function RecentEvaluations({
               deleting={deletingId === j.id}
             />
           ))}
-          {jobs.length > 5 && (
+          {(jobs.length > 5 || batches.length > 3) && (
             <div className="flex justify-center pt-1">
               <span className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
-                共 {jobs.length} 条记录
+                共 {batches.length} 份合并报告 · {jobs.length} 条单靶点记录
               </span>
             </div>
           )}

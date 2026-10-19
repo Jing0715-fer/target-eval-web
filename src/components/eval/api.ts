@@ -4,6 +4,7 @@
  */
 import type {
   BatchReportInfo,
+  BatchReportListItem,
   DocxParsed,
   InsightsResponse,
   JobListItem,
@@ -267,6 +268,16 @@ export async function fetchBatchReport(id: string): Promise<BatchReportInfo> {
     throw new Error(data?.error ?? `合并报告读取失败（HTTP ${res.status}）`)
   }
   return data.batchReport
+}
+
+/** GET /api/evaluate/batch-report（无 id）— 当前用户的合并报告列表（v1.13 批量评估历史） */
+export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
+  const res = await fetch('/api/evaluate/batch-report', { cache: 'no-store' })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; items?: BatchReportListItem[]; error?: string } | null
+  if (!res.ok || !data?.ok || !Array.isArray(data.items)) {
+    throw new Error(data?.error ?? `合并报告列表读取失败（HTTP ${res.status}）`)
+  }
+  return data.items
 }
 
 // ─── LLM 引擎配置 ──────────────────────────────────────────────

@@ -6,7 +6,7 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { reapOrphanJobs } from '@/lib/eval/job-manager'
-import { getOwner } from '@/lib/eval/request-guard'
+import { getOwner, ownerListFilter } from '@/lib/eval/request-guard'
 import { scheduleJobTtlCleanup } from '@/lib/eval/gatekeeper'
 import type { JobSummary, JobStatus } from '@/lib/eval/types'
 
@@ -18,7 +18,7 @@ export async function GET(req: Request) {
   await reapOrphanJobs()
   scheduleJobTtlCleanup()
   const rows = await db.evaluationJob.findMany({
-    where: { ownerKey: owner.key },
+    where: ownerListFilter(owner),
     orderBy: { createdAt: 'desc' },
     take: 20,
     select: { id: true, status: true, title: true, uniprotId: true, summary: true, createdAt: true },
