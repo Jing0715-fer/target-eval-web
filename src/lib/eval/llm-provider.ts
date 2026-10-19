@@ -123,8 +123,10 @@ export interface UnifiedLlmResult {
 }
 
 const CALL_TIMEOUT_MS = 180_000
-const MAX_RETRIES = 4
+const MAX_RETRIES = 6
 const BASE_DELAY_MS = 4_000
+/** 429 限流专用退避（秒）— 限流恢复需要更长等待 */
+const RATE_LIMIT_DELAYS_MS = [20_000, 40_000, 60_000, 90_000, 120_000]
 
 export interface ChatMessages {
   system: string
@@ -155,6 +157,7 @@ export async function unifiedLlmChat(
   const protocol: ProviderProtocol = cfg ? (meta?.protocol ?? 'openai') : 'zai'
 
   let lastErr = ''
+  let rateLimitIdx = 0
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     if (signal?.aborted) return { ok: false, text: '', error: 'aborted', durationMs: 0 }
     try {
@@ -164,9 +167,16 @@ export async function unifiedLlmChat(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       lastErr = msg
-      const transient = /\b429\b|too many requests|rate ?limit|overloaded|temporarily|status 5\d\d|timeout|超时|ECONNRESET|ETIMEDOUT|fetch failed|content[_\s-]?filter|content policy|safety|moderation/i.test(msg)
+      const isRateLimit = /\b429\b|too many requests|rate ?limit/i.test(msg)
+      const transient = isRateLimit || /\boverloaded|temporarily|status 5\d\d|timeout|超时|ECONNRESET|ETIMEDOUT|fetch failed|content[_\s-]?filter|content policy|safety|moderation/i.test(msg)
       if (!transient || attempt === MAX_RETRIES - 1) break
-      await new Promise(r => setTimeout(r, BASE_DELAY_MS * Math.pow(2, attempt)))
+      // 429 限流用专用长退避（20s/40s/60s/90s/120s），其他瞬态用指数退避（4s/8s/16s...）
+      const delay = isRateLimit
+        ? RATE_LIMIT_DELAYS_MS[Math.min(rateLimitIdx, RATE_LIMIT_DELAYS_MS.length - 1)]
+        : BASE_DELAY_MS * Math.pow(2, attempt)
+      rateLimitIdx++
+      console.log(`[llm] 第 ${attempt + 1} 次重试（${isRateLimit ? '限流' : '瞬态'}，等 ${Math.round(delay / 1000)}s）：${msg.slice(0, 120)}`)
+      await new Promise(r => setTimeout(r, delay))
     }
   }
   return { ok: false, text: '', error: lastErr || 'LLM 调用失败', durationMs: Date.now() - t0 }
