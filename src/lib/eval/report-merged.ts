@@ -340,6 +340,8 @@ export interface MergedHtmlInput {
   engineSummary: string
   /** 评估表序列归属（v1.10） */
   sequenceAttribution?: SequenceAttribution[]
+  /** v1.15：评估表 AI 解析要点（LLM 失败时作为兜底证据展示） */
+  insights?: FormInsights | null
 }
 
 /** 图片内嵌（预算：≤6 张、总 ≤4MB，gel/sec 优先） */
@@ -513,6 +515,20 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     </figure>`).join('')}
   </section>` : ''
 
+  // v1.15：评估表 AI 解析要点（LLM 失败时作为兜底证据；正常时作为可溯源原始要点）
+  const ins = input.insights
+  const insightsHtml = ins && (ins.goals?.length || ins.scientificQuestions?.length || ins.experimentalSummary || ins.sequenceNotes || ins.homologs || ins.keyConcerns?.length) ? `
+  <section class="sec" id="insights">
+    <h2>客户评估表要点<span class="sec-en">Form Insights</span></h2>
+    <p class="note">由 AI 从上传的评估表中结构化提取的关键要点 — 供比对 LLM 分析的复述是否忠于原始输入。</p>
+    ${ins.goals?.length ? `<h3>客户目标</h3><ul>${ins.goals.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
+    ${ins.scientificQuestions?.length ? `<h3>待解决科学问题</h3><ol>${ins.scientificQuestions.map(q => `<li>${esc(q)}</li>`).join('')}</ol>` : ''}
+    ${ins.experimentalSummary ? `<h3>实验数据要点</h3><blockquote>${esc(ins.experimentalSummary)}</blockquote>` : ''}
+    ${ins.sequenceNotes ? `<h3>构建 / 序列说明</h3><blockquote>${esc(ins.sequenceNotes)}</blockquote>` : ''}
+    ${ins.homologs ? `<h3>同源 / 参考信息</h3><blockquote>${esc(ins.homologs)}</blockquote>` : ''}
+    ${ins.keyConcerns?.length ? `<h3>风险关注点</h3><ul>${ins.keyConcerns.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
+  </section>` : ''
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -554,7 +570,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .sec code { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; background:#f5f5f4; padding:1px 5px; border-radius:3px; }
   .tbl-wrap { overflow-x:auto; margin:12px 0; }
   table { border-collapse:collapse; width:100%; font-size:12.5px; }
-  th { background:#f7f7f5; color:var(--sub); font-weight:500; padding:7px 10px; text-align:left; white-space:nowrap; font-size:10px; letter-spacing:1px; text-transform:uppercase; }
+  th { background:#f7f7f5; color:var(--sub); font-weight:600; padding:7px 10px; text-align:left; white-space:nowrap; font-size:10px; letter-spacing:1px; text-transform:uppercase; border-bottom:1.5px solid #d6d3d1; }
   td { padding:6px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
   tr:nth-child(even) td { background:#fafaf8; } tr:hover td { background:#f5f5f4; }
   .td-id { font-family:ui-monospace,Menlo,monospace; white-space:nowrap; }
@@ -609,6 +625,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     <b>Contents · 目录</b>
     <ol>
       <li><a href="#llm">合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
+      ${insightsHtml ? '<li><a href="#insights">客户评估表要点</a></li>' : ''}
       <li><a href="#matrix">跨靶点对比矩阵</a></li>
       ${matrixHtml ? '<li><a href="#homolog">' + (isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性') + '</a></li>' : ''}
       ${attributionHtml ? '<li><a href="#attribution">评估表序列归属</a></li>' : ''}
@@ -619,12 +636,14 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     </ol>
   </nav>
 
-  ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据。</div>`}
+  ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点。</div>`}
 
   <section class="sec" id="llm">
     <h2>一、合并评估分析<span class="sec-en">Merged Analysis</span></h2>
-    ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 请参考下方数据区块）', 1)}
+    ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 请参考下方数据区块与评估表要点）', 1)}
   </section>
+
+  ${insightsHtml}
 
   <section class="sec" id="matrix">
     <h2>二、跨靶点对比矩阵<span class="sec-en">Comparison Matrix</span></h2>

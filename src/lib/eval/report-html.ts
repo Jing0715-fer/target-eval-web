@@ -431,7 +431,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
 
   /* ── 表格 ── */
   .tbl-wrap { overflow-x:auto; margin:12px 0 6px; }
-  table { width:100%; border-collapse:collapse; font-size:12px; font-family:var(--mono); }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; font-family:var(--serif); }
   /* 数据表（PDB/BLAST）：固定列宽防长串挤压重叠；窄屏由 .tbl-wrap 横向滚动 */
   table.tbl-data { table-layout:fixed; min-width:760px; }
   table.tbl-blast { min-width:640px; }
@@ -440,11 +440,12 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   th, td { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:6px 8px; vertical-align:top; }
   thead th { border-top:none; border-bottom:1.5px solid #d6d3d1; }
   tbody tr:last-child td { border-bottom:none; }
-  tbody tr:nth-child(even) td { background:#fbfaf8; }
-  tbody tr:hover td { background:#f5f4ef; }
+  tbody tr:nth-child(even) td { background:#fafaf8; }
+  tbody tr:hover td { background:#f5f5f4; }
   td { overflow-wrap:anywhere; }
-  td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; font-family:var(--mono); }
   td.td-id a, .t-nowrap { white-space:nowrap; }
+  td.td-id { font-family:var(--mono); }
   .t-title, .t-desc { font-family:var(--serif); overflow-wrap:break-word; }
   .t-lig { font-size:11px; overflow-wrap:anywhere; }
   .t-journal { font-size:11px; }
@@ -555,6 +556,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     <b>Contents · 目录</b>
     <ol>
       <li><a href="#llm">评估分析（摘要 / 目标可行性 / 研究全景 / 实验策略）</a></li>
+      ${ctx.insights ? '<li><a href="#insights">客户评估表要点</a></li>' : ''}
       <li><a href="#scores">可行性评分</a></li>
       <li><a href="#pdbs">PDB 结构清单</a></li>
       ${showBlastSec ? '<li><a href="#blast">BLAST 同源结构</a></li>' : ''}
@@ -563,12 +565,29 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     </ol>
   </nav>
 
-  ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据，评估分析部分缺失，可稍后重试生成。</div>`}
+  ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点，可稍后重试生成。</div>`}
 
   <section class="sec" id="llm">
     <h2>一、评估分析<span class="sec-en">Analysis</span></h2>
-    ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 未能生成，请参考下方数据区块）', 1)}
+    ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 未能生成，请参考下方数据区块与评估表要点）', 1)}
   </section>
+
+  ${ctx.insights ? (() => {
+    const i = ctx.insights!
+    const has = i.goals?.length || i.scientificQuestions?.length || i.experimentalSummary || i.sequenceNotes || i.homologs || i.keyConcerns?.length
+    if (!has) return ''
+    return `
+  <section class="sec" id="insights">
+    <h2>客户评估表要点<span class="sec-en">Form Insights</span></h2>
+    <p class="note">由 AI 从上传的评估表中结构化提取的关键要点 — 供比对 LLM 分析的复述是否忠于原始输入。</p>
+    ${i.goals?.length ? `<h3>客户目标</h3><ul>${i.goals.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
+    ${i.scientificQuestions?.length ? `<h3>待解决科学问题</h3><ol>${i.scientificQuestions.map(q => `<li>${esc(q)}</li>`).join('')}</ol>` : ''}
+    ${i.experimentalSummary ? `<h3>实验数据要点</h3><blockquote>${esc(i.experimentalSummary)}</blockquote>` : ''}
+    ${i.sequenceNotes ? `<h3>构建 / 序列说明</h3><blockquote>${esc(i.sequenceNotes)}</blockquote>` : ''}
+    ${i.homologs ? `<h3>同源 / 参考信息</h3><blockquote>${esc(i.homologs)}</blockquote>` : ''}
+    ${i.keyConcerns?.length ? `<h3>风险关注点</h3><ul>${i.keyConcerns.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
+  </section>`
+  })() : ''}
 
   <section class="sec" id="scores">
     <h2>二、可行性评分<span class="sec-en">Scores</span></h2>

@@ -267,17 +267,15 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         <div className="flex flex-wrap gap-2 sm:ml-auto">
           <Button
             onClick={openPreview}
-            disabled={!llmOk}
-            className="h-10 gap-2 rounded-md bg-violet-700 px-4 font-medium text-white hover:bg-violet-600 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-violet-800 dark:hover:bg-violet-700"
+            className="h-10 gap-2 rounded-md bg-violet-700 px-4 font-medium text-white hover:bg-violet-600 dark:bg-violet-800 dark:hover:bg-violet-700"
           >
             <Eye className="size-4" />
             在线预览报告
           </Button>
           <Button
             onClick={downloadReport}
-            disabled={!llmOk}
             variant="outline"
-            className="h-10 gap-2 rounded-md border-violet-300 px-4 font-medium text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-800 dark:text-violet-300 dark:hover:bg-violet-950/40"
+            className="h-10 gap-2 rounded-md border-violet-300 px-4 font-medium text-violet-700 hover:bg-violet-50 dark:border-violet-800 dark:text-violet-300 dark:hover:bg-violet-950/40"
           >
             <Download className="size-4" />
             下载 HTML

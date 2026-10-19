@@ -199,8 +199,9 @@ async function runBatchReportGeneration(ctx: {
       },
     })
 
-    // HTML 落盘（失败不影响终态 — markdown 已成功）
-    if (generated.fullMarkdown.trim()) {
+    // HTML 始终落盘（LLM 全失败时也渲染结构化数据区块 + warn-box 警示，
+    // 用户仍可预览/下载报告 — 结构化数据不依赖 LLM）
+    {
       try {
         const html = await renderMergedReportHtml({
           targets,
@@ -215,6 +216,7 @@ async function runBatchReportGeneration(ctx: {
           batchReportId,
           engineSummary,
           sequenceAttribution,
+          insights,
         })
         const dir = path.join(process.cwd(), 'db', 'reports', batchReportId)
         await fs.mkdir(dir, { recursive: true })

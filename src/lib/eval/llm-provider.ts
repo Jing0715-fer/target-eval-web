@@ -122,8 +122,8 @@ export interface UnifiedLlmResult {
   durationMs: number
 }
 
-const CALL_TIMEOUT_MS = 120_000
-const MAX_RETRIES = 3
+const CALL_TIMEOUT_MS = 180_000
+const MAX_RETRIES = 4
 const BASE_DELAY_MS = 4_000
 
 export interface ChatMessages {
@@ -164,7 +164,7 @@ export async function unifiedLlmChat(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       lastErr = msg
-      const transient = /\b429\b|too many requests|rate ?limit|overloaded|temporarily|status 5\d\d|timeout|超时|ECONNRESET|ETIMEDOUT|fetch failed/i.test(msg)
+      const transient = /\b429\b|too many requests|rate ?limit|overloaded|temporarily|status 5\d\d|timeout|超时|ECONNRESET|ETIMEDOUT|fetch failed|content[_\s-]?filter|content policy|safety|moderation/i.test(msg)
       if (!transient || attempt === MAX_RETRIES - 1) break
       await new Promise(r => setTimeout(r, BASE_DELAY_MS * Math.pow(2, attempt)))
     }
