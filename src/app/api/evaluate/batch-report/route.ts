@@ -184,11 +184,12 @@ async function runBatchReportGeneration(ctx: {
     // LLM 生成合并报告（三段式）
     const generated = await generateMergedReport({ targets, relation, goal: ctx.goal, insights, images, sequenceAttribution })
 
-    // markdown + 终态落库
+    // markdown + title + 终态落库
     const engineSummary = await getEngineSummary()
     await db.batchReport.update({
       where: { id: batchReportId },
       data: {
+        title: generated.title || null,
         markdown: generated.fullMarkdown?.trim() || null,
         sequenceAttribution: sequenceAttribution.length ? JSON.stringify(sequenceAttribution) : null,
         engine: engineSummary,
@@ -206,6 +207,7 @@ async function runBatchReportGeneration(ctx: {
           relation,
           goal: ctx.goal,
           markdown: generated.fullMarkdown,
+          title: generated.title,
           llmOk: generated.ok,
           llmErrors: generated.errors,
           images,
@@ -247,15 +249,16 @@ export async function GET(req: Request) {
       take: 30,
       select: {
         id: true, jobIds: true, status: true, error: true,
-        markdown: true, createdAt: true, updatedAt: true,
+        title: true, markdown: true, createdAt: true, updatedAt: true,
       },
     })
     const items = rows.map(r => {
       let jobIds: string[] = []
       try { jobIds = JSON.parse(r.jobIds) } catch { /* ignore */ }
       const md = r.markdown ?? ''
+      // v1.14：title 优先取 DB title，fallback 从 markdown 提取，再 fallback 通用标题
       const titleMatch = md.match(/^#\s+(.+)$/m)
-      const title = titleMatch?.[1]?.trim() || `合并报告 ${r.id.slice(0, 8)}`
+      const title = r.title?.trim() || titleMatch?.[1]?.trim() || `合并报告 ${r.id.slice(0, 8)}`
       return {
         id: r.id,
         jobIds,
@@ -331,6 +334,7 @@ export async function GET(req: Request) {
         jobIds,
         relation,
         sequenceAttribution,
+        title: record.title ?? '',
         markdown: '',
         status: 'running',
         uploadId: record.uploadId,
@@ -352,6 +356,7 @@ export async function GET(req: Request) {
       jobIds,
       relation,
       sequenceAttribution,
+      title: record.title ?? '',
       markdown: record.markdown ?? '',
       status,
       error: record.error ?? null,

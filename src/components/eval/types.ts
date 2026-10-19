@@ -177,6 +177,8 @@ export interface BatchReportInfo {
   relation: RelationJudgment
   /** 评估表序列归属（v1.10，历史报告可能缺失） */
   sequenceAttribution?: SequenceAttribution[] | null
+  /** v1.14：LLM 生成的描述性标题 */
+  title?: string
   markdown: string
   llmOk?: boolean
   errors?: string[]

@@ -1,6 +1,8 @@
 /**
  * GET /api/jobs — 最近评估作业列表（≤20 条，仅本人可见）
- * 公网加固：按创建者归属键（IP 哈希）过滤，他人记录不可见；
+ * 公网加固：按创建者归属键（cookie/IP 哈希）过滤，他人记录不可见；
+ * v1.14：批量评估产生的子作业不单独展示（合并报告已作为一条记录展示），
+ *        通过反查当前用户所有 BatchReport.jobIds 排除；
  * 顺带触发终态作业 TTL 清理（防 DB / 磁盘无限膨胀）。
  */
 import { NextResponse } from 'next/server'
@@ -17,8 +19,22 @@ export async function GET(req: Request) {
   const owner = getOwner(req)
   await reapOrphanJobs()
   scheduleJobTtlCleanup()
-  const rows = await db.evaluationJob.findMany({
+
+  // v1.14：查出当前用户所有合并报告包含的 jobIds，这些子作业不单独展示
+  const batchReports = await db.batchReport.findMany({
     where: ownerListFilter(owner),
+    select: { jobIds: true },
+  })
+  const excludedJobIds = new Set<string>()
+  for (const br of batchReports) {
+    try {
+      const ids = JSON.parse(br.jobIds) as string[]
+      for (const jid of ids) excludedJobIds.add(jid)
+    } catch { /* ignore */ }
+  }
+
+  const rows = await db.evaluationJob.findMany({
+    where: { ...ownerListFilter(owner), id: { notIn: [...excludedJobIds] } },
     orderBy: { createdAt: 'desc' },
     take: 20,
     select: { id: true, status: true, title: true, uniprotId: true, summary: true, createdAt: true },

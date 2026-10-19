@@ -130,7 +130,7 @@ const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目
 - 结论先行：每章开头直接给结论，再展开论据
 - 严格基于给定的数据上下文，禁止编造不存在的 PDB ID、PMID、分辨率或文献
 - 数据里没有的信息，用"（本次数据未覆盖）"或"暂无可靠数据"明确说明
-- 输出为 Markdown 子集：## / ### 标题、**加粗**、- 列表、|表格|、> 引用，不使用图片链接和代码块
+- 输出为 Markdown 子集：# 标题（仅首行使用一次，作为整份报告的描述性标题）/ ## / ### 标题、**加粗**、- 列表、|表格|、> 引用，不使用图片链接和代码块
 - 数字引用必须与数据上下文一致`
 
 function targetDigest(t: MergedTargetData): string {
@@ -203,6 +203,8 @@ export interface MergedReportInput {
 
 export interface GeneratedMergedReport {
   fullMarkdown: string
+  /** v1.14：LLM 生成的描述性标题（从 partA 首行 # 提取） */
+  title: string
   ok: boolean
   errors: string[]
 }
@@ -264,7 +266,7 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
     return { key: name, markdown: r.ok ? r.text : '', llmOk: r.ok, error: r.error }
   }
 
-  const partA = await callPart('A', `撰写合并报告的以下两章（以 ## 开头，顺序输出，不要输出其他章节）：
+  const partA = await callPart('A', `撰写合并报告的标题与首两章。首行输出 # 开头的描述性报告标题（一行，≤30 字，不要副标题，不要包含"报告"二字、日期、编号），高度概括本批次靶点与关系类型，例如「EGFR 与 p53 抗体-抗原复合物合并评估」「MAPK 家族三成员合并结构可行性评估」「血红蛋白 α/β 异源二聚体复合物评估」。然后顺序输出以下两章（以 ## 开头，不要输出其他章节）：
 
 ## 执行摘要
 - 3-4 段：第一段给出批次总体结论（这些靶点作为整体项目的结构解析可行性、推荐技术路线${relation.relationType === 'homologous' ? '；同源家族批次需说明家族级结论（任一成员的结构证据对整个家族的指导意义）' : ''}）；第二段逐个靶点一句话概括其结构研究现状（引用具体数字）；第三段概括客户目标的达成路径与整体风险；第四段一句话给出下一步建议
@@ -282,7 +284,7 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 - ### 对结构解析策略的影响：${relation.relationType === 'complex' ? '复合物亚基的共表达/共纯化策略、化学计量比、组装验证' : relation.relationType === 'antibody-antigen' ? '抗体（Fab/scFv）与抗原的复合物组装、抗体辅助结晶或 Cryo-EM 配对策略' : relation.relationType === 'fusion' ? '融合构建的边界设计、linker 选择、各结构域的折叠独立性' : relation.relationType === 'homologous' ? '家族证据互用原则：任一成员已有结构可直接指导其他成员的构建边界设计与结晶条件借鉴；建议优先解析的家族成员（结构数据最丰富/表达最成熟者先行）；家族保守区与可变区的构建边界策略；如有序列归属中的同源序列，说明其与已选靶点的家族关系' : '关联项目协同推进的要点'}
 - 篇幅 600-900 字`)
 
-  const partB = await callPart('B', `撰写报告的以下章节（以 ## 开头，顺序输出，不要输出其他章节）：
+  const partB = await callPart('B', `撰写报告的以下章节（以 ## 开头，顺序输出，不要输出其他章节，不要再输出 # 标题）：
 
 ## 各靶点结构可行性综述
 对批次中每个靶点输出一个小节（### 靶点名），每节包含（详细程度不低于独立单靶点报告）：
@@ -296,7 +298,7 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 
 要求：各靶点篇幅均衡；数据引用与数据摘要一致（PDB ID/PMID/分辨率/一致性数字必须来自数据上下文，禁止编造）；BLAST 跳过/失败/共享的靶点如实说明${input.sequenceAttribution?.some(a => a.kind === 'construct') ? '；已归属为客户构建的序列（见序列归属）在对应靶点小节中说明构建边界与全长区间的对应关系' : ''}`)
 
-  const partC = await callPart('C', `撰写报告的以下两章（以 ## 开头，顺序输出，不要输出其他章节）：
+  const partC = await callPart('C', `撰写报告的以下两章（以 ## 开头，顺序输出，不要输出其他章节，不要再输出 # 标题）：
 
 ## 整合可行性与实验策略
 - ### 跨靶点对比矩阵：用 Markdown 表格对比各靶点（行：靶点/PDB 数量/最佳分辨率/覆盖率/总体评分/推荐方法/主要风险）
@@ -311,7 +313,10 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
   const parts = [partA, partB, partC]
   const fullMarkdown = parts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n')
   const errors = parts.filter(p => !p.llmOk).map(p => `段${p.key}: ${p.error}`)
-  return { fullMarkdown, ok: parts.some(p => p.llmOk), errors }
+  // v1.14：从 partA 首行提取 LLM 生成的描述性标题（# 开头）
+  const titleMatch = partA.markdown.match(/^#\s+(.+)$/m)
+  const title = titleMatch?.[1]?.trim() || ''
+  return { fullMarkdown, title, ok: parts.some(p => p.llmOk), errors }
 }
 
 // ─── 合并报告 HTML 渲染（期刊风，与单靶点报告同一设计语言）──────────────────
@@ -325,6 +330,8 @@ export interface MergedHtmlInput {
   relation: RelationJudgment
   goal?: string
   markdown: string
+  /** v1.14：LLM 生成的描述性标题（HTML <h1> 与 <title> 用） */
+  title?: string
   llmOk: boolean
   llmErrors: string[]
   images: ParsedImage[]
@@ -356,6 +363,10 @@ async function embedImages(images: ParsedImage[], assetDir: string): Promise<Arr
 export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<string> {
   const { targets, relation } = input
   const relName = describeRelationType(relation.relationType)
+  // v1.14：LLM 生成的描述性标题（fallback 通用标题）
+  const reportTitle = input.title?.trim() || '多靶点合并评估报告'
+  // 剥离 markdown 首行 # 标题（已用作 HTML <h1>，避免重复渲染）
+  const llmMarkdown = input.markdown ? input.markdown.replace(/^#\s+.+\r?\n?/, '') : ''
   const dateStr = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
   const embedded = await embedImages(input.images, input.assetDir)
 
@@ -507,15 +518,16 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>多靶点合并评估报告 · ${esc(targets.map(t => t.label).join(' + '))}</title>
+<title>${esc(reportTitle)} · ${esc(targets.map(t => t.label).join(' + '))}</title>
 <style>
   :root { --ink:#1c1917; --sub:#57534e; --faint:#a8a29e; --line:#e7e5e4; --accent:#047857; --accent-2:#059669; --paper:#fffdf9; }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:"Source Han Serif SC","Noto Serif SC","Songti SC",Georgia,serif; background:#f0efec; color:var(--ink); line-height:1.75; }
-  .page { max-width:860px; margin:0 auto; background:var(--paper); padding:56px 52px 48px; }
-  .rpt-head { border-bottom:2.5px solid var(--ink); padding-bottom:20px; margin-bottom:26px; }
+  body { font-family:"Source Han Serif SC","Noto Serif SC","Songti SC",Georgia,serif; background:#f0efec; color:var(--ink); font-size:14.5px; line-height:1.85; }
+  .page { max-width:920px; margin:0 auto; background:var(--paper); padding:56px 56px 48px; }
+  .rpt-head { border-bottom:1px solid var(--ink); position:relative; padding-bottom:22px; margin-bottom:26px; }
+  .rpt-head::after { content:''; position:absolute; left:0; bottom:3px; width:100%; border-bottom:3px solid var(--ink); }
   .rpt-eyebrow { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:2.5px; color:var(--accent); text-transform:uppercase; margin-bottom:10px; }
-  .rpt-title { font-size:26px; font-weight:700; line-height:1.35; margin-bottom:6px; }
+  .rpt-title { font-size:27px; font-weight:700; line-height:1.35; margin-bottom:6px; }
   .rpt-subtitle { font-size:14px; color:var(--sub); margin-bottom:16px; }
   .rel-box { background:#ecfdf5; border:1px solid #a7f3d0; border-left:4px solid var(--accent); border-radius:5px; padding:14px 18px; margin:14px 0 4px; font-size:13px; color:#064e3b; }
   .rel-box b { color:#064e3b; }
@@ -529,29 +541,32 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .badge.amber { border-color:#d97706; color:#b45309; }
   .toc { border:1px solid var(--line); border-radius:5px; padding:12px 20px; margin:20px 0; font-size:13px; }
   .toc b { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:1.5px; color:var(--sub); }
-  .toc ol { margin:6px 0 0 20px; } .toc a { color:var(--accent-2); text-decoration:none; }
-  .sec { margin:34px 0; } .sec h2 { font-size:18px; padding-bottom:8px; border-bottom:1px solid var(--ink); margin-bottom:14px; }
-  .sec-en { font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--faint); font-weight:400; letter-spacing:1.5px; margin-left:10px; }
-  .sec h3 { font-size:15px; margin:18px 0 8px; color:#064e3b; }
+  .toc ol { margin:6px 0 0 20px; columns:2; column-gap:36px; } .toc a { color:var(--accent-2); text-decoration:none; }
+  .sec { margin:34px 0; } .sec h2 { font-size:19px; padding-bottom:8px; border-bottom:1px solid var(--ink); margin-bottom:14px; display:flex; align-items:baseline; }
+  .sec-en { font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--faint); font-weight:400; letter-spacing:1.5px; margin-left:auto; }
+  .sec h3 { font-size:15.5px; margin:18px 0 8px; color:#064e3b; }
   .sec h4 { font-size:13.5px; margin:14px 0 6px; }
-  .sec p { font-size:14px; margin:8px 0; text-align:justify; }
-  .sec ul { margin:8px 0 8px 22px; font-size:14px; } .sec li { margin:4px 0; }
+  .sec p { font-size:14.5px; margin:8px 0; text-align:justify; }
+  .sec ul { margin:8px 0 8px 22px; font-size:14.5px; } .sec li { margin:4px 0; }
   .sec blockquote { border-left:3px solid var(--accent); background:#f0fdf4; padding:8px 14px; margin:10px 0; font-size:13px; color:var(--sub); }
   .sec strong { color:#064e3b; }
   .sec a { color:var(--accent-2); text-decoration:none; }
   .sec code { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; background:#f5f5f4; padding:1px 5px; border-radius:3px; }
   .tbl-wrap { overflow-x:auto; margin:12px 0; }
   table { border-collapse:collapse; width:100%; font-size:12.5px; }
-  th { background:#1c1917; color:#fff; font-weight:500; padding:7px 10px; text-align:left; white-space:nowrap; font-size:12px; }
+  th { background:#f7f7f5; color:var(--sub); font-weight:500; padding:7px 10px; text-align:left; white-space:nowrap; font-size:10px; letter-spacing:1px; text-transform:uppercase; }
   td { padding:6px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
-  tr:nth-child(even) td { background:#fafaf8; }
+  tr:nth-child(even) td { background:#fafaf8; } tr:hover td { background:#f5f5f4; }
   .td-id { font-family:ui-monospace,Menlo,monospace; white-space:nowrap; }
-  .num { font-family:ui-monospace,Menlo,monospace; white-space:nowrap; text-align:right; }
+  .num { font-family:ui-monospace,Menlo,monospace; white-space:nowrap; text-align:right; font-variant-numeric:tabular-nums; }
   .t-title { font-size:12px; color:var(--sub); }
   .mth { font-size:10.5px; padding:1px 7px; border-radius:3px; white-space:nowrap; }
   .mth-xray { background:#eff6ff; color:#1d4ed8; } .mth-cryoem { background:#fdf4ff; color:#a21caf; } .mth-nmr { background:#fff7ed; color:#c2410c; } .mth-other { background:#f5f5f4; color:var(--sub); }
-  .pdb-fold { border:1px solid var(--line); border-radius:5px; padding:10px 16px; margin:12px 0; }
-  .pdb-fold summary { font-size:13.5px; font-weight:600; cursor:pointer; color:#064e3b; }
+  .pdb-fold, .fold { border:1px solid var(--line); border-radius:5px; padding:10px 16px; margin:12px 0; }
+  .pdb-fold > summary, .fold > summary { font-size:13.5px; font-weight:600; cursor:pointer; color:#064e3b; list-style:none; }
+  .pdb-fold > summary::before, .fold > summary::before { content:'＋ '; color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-weight:400; }
+  .pdb-fold[open] > summary::before, .fold[open] > summary::before { content:'－ '; }
+  .pdb-fold > summary::-webkit-details-marker, .fold > summary::-webkit-details-marker { display:none; }
   .fig { margin:22px 0; text-align:center; }
   .fig img { max-width:100%; border:1px solid var(--line); border-radius:4px; background:#fff; }
   .fig figcaption { font-size:12px; color:var(--sub); margin-top:6px; text-align:left; }
@@ -560,8 +575,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .warn-box { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:4px; padding:12px 16px; font-size:12.5px; margin:14px 0; }
   .note { font-size:12.5px; color:#57534e; background:#f7f6f3; border-left:3px solid #a8a29e; padding:8px 14px; margin:10px 0; border-radius:0 4px 4px 0; }
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:ui-monospace,Menlo,monospace; }
-  @media print { body { background:#fff; } .page { padding:24px 8px; } .pdb-fold { page-break-inside:avoid; } }
-  @media (max-width:640px) { .page { padding:28px 18px; } .rpt-title { font-size:20px; } }
+  @media print { body { background:#fff; } .page { padding:24px 8px; } .pdb-fold, .fold { page-break-inside:avoid; } }
+  @media (max-width:640px) { .page { padding:28px 18px; } .rpt-title { font-size:20px; } .toc ol { columns:1; } }
 </style>
 </head>
 <body>
@@ -569,7 +584,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 
   <header class="rpt-head">
     <div class="rpt-eyebrow">TargetEval · Merged Structure Feasibility Report</div>
-    <h1 class="rpt-title">多靶点合并评估报告</h1>
+    <h1 class="rpt-title">${esc(reportTitle)}</h1>
     <div class="rpt-subtitle">${esc(targets.map(t => t.proteinName).join(' · '))}</div>
     <div class="rel-box">
       <b>靶点关系：${esc(relName)}</b>（置信度：${relation.confidence === 'high' ? '高' : relation.confidence === 'medium' ? '中' : '低'}）<br>
@@ -608,7 +623,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 
   <section class="sec" id="llm">
     <h2>一、合并评估分析<span class="sec-en">Merged Analysis</span></h2>
-    ${renderMarkdown(input.markdown || '（LLM 分析不可用 — 请参考下方数据区块）', 1)}
+    ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 请参考下方数据区块）', 1)}
   </section>
 
   <section class="sec" id="matrix">
@@ -644,11 +659,21 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   ${figHtml}
 
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v1.11）<br>
+    Generated by TargetEval · 多靶点合并评估（v1.14）<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
   </footer>
 </div>
+<script>
+// 打印时自动展开所有 <details> 折叠块，打印后恢复原状
+(function(){
+  var memo=[];
+  function expand(){ memo=[]; document.querySelectorAll('details').forEach(function(d){ if(!d.open){ memo.push(d); d.open=true; } }); }
+  function restore(){ memo.forEach(function(d){ d.open=false; }); memo=[]; }
+  window.addEventListener('beforeprint', expand);
+  window.addEventListener('afterprint', restore);
+})();
+</script>
 </body>
 </html>`
 }

@@ -118,6 +118,10 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const pdbTargets = targets.filter(t => t.directPdbs.length > 0)
   const blastTargets = targets.filter(t => t.blastHits.length > 0 || t.blastStatus)
   const litTargets = targets.filter(t => t.literature.length > 0)
+  // v1.14：LLM 生成的描述性标题（fallback 通用标题）
+  const reportTitle = report.title?.trim() || '多靶点合并可行性评估'
+  // 剥离 markdown 首行 # 标题（已用作刊头 h1，避免重复渲染）
+  const bodyMd = md ? md.replace(/^#\s+.+\r?\n?/, '') : md
 
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewLoaded, setPreviewLoaded] = useState(false)
@@ -173,7 +177,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           Merged Evaluation Report · 合并评估报告
         </p>
         <h1 className="font-display text-2xl leading-snug font-bold text-stone-900 sm:text-3xl dark:text-stone-50">
-          多靶点合并可行性评估
+          {reportTitle}
         </h1>
 
         {/* 关系判定卡 */}
@@ -370,7 +374,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
             </div>
             {md ? (
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                {md}
+                {bodyMd}
               </ReactMarkdown>
             ) : (
               <p className="py-6 text-center text-sm text-stone-500 dark:text-stone-400">

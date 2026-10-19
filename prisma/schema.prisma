@@ -70,6 +70,7 @@ model BatchReport {
   uploadId  String? // 来源上传（评估表）
   relation  String // JSON: RelationJudgment（关系判定，v1.10 起含 homologPairs 同源证据）
   sequenceAttribution String? // JSON: SequenceAttribution[]（评估表序列归属，v1.10）
+  title     String? // LLM 生成的描述性标题（v1.14，历史记录展示用）
   markdown  String? // 合并报告 LLM markdown（网页内联展示）
   htmlPath  String? // 磁盘 HTML 报告路径
   engine    String? // 生成引擎摘要
