@@ -14,7 +14,7 @@ export const dynamic = 'force-dynamic'
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const owner = getOwner(req)
-  const job = await db.evaluationJob.findUnique({ where: { id }, select: { reportPath: true, status: true, uniprotId: true, title: true, ownerKey: true } })
+  const job = await db.evaluationJob.findUnique({ where: { id }, select: { reportPath: true, status: true, uniprotId: true, title: true, ownerKey: true, ownerMask: true } })
   if (!job) return notFound()
   if (!isOwnedBy(job, owner)) return notFound()
   if (!job.reportPath || job.status !== 'done') {

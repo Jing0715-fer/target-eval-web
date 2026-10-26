@@ -27,8 +27,8 @@ export const MAX_UPLOADS_PER_DAY = num(process.env.EVAL_MAX_UPLOADS_PER_DAY, 20)
 export const PARSE_CONCURRENCY = num(process.env.EVAL_PARSE_CONCURRENCY, 2)
 /** 解析等待队列上限（并发满且排队 ≥ 此值 → 直接 429） */
 export const PARSE_WAIT_LIMIT = num(process.env.EVAL_PARSE_WAIT_LIMIT, 4)
-/** 终态作业保留天数 */
-export const JOB_TTL_DAYS = num(process.env.EVAL_JOB_TTL_DAYS, 7)
+/** 终态作业保留天数（v1.17：7 → 30，历史记录持久保存） */
+export const JOB_TTL_DAYS = num(process.env.EVAL_JOB_TTL_DAYS, 30)
 /** 清理最小间隔（ms） */
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 

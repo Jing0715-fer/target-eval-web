@@ -112,18 +112,26 @@ export function getOwner(req: Request): RequestOwner {
   return { ip, key: ipKey, ipKey, mask, source: 'ip' }
 }
 
-/** 列表查询的 ownerKey 过滤条件：同时匹配 cookie key 和 IP-hash key（兼容旧记录） */
+/**
+ * 列表查询的 ownerKey 过滤条件（v1.17「按 IP 智能显示」）：
+ *  同时匹配 ① 当前生效键（cookie / IP-hash）② IP-hash 键（旧记录兼容）
+ *  ③ 同来源 IP 掩码（ownerMask）—— cookie 丢失/换浏览器后回退 IP 身份，
+ *  同 IP（同网络入口）创建的记录依然可见，刷新/清缓存不丢历史。 */
 export function ownerListFilter(owner: RequestOwner) {
-  if (owner.key === owner.ipKey) {
-    return { ownerKey: owner.key }
-  }
-  return { OR: [{ ownerKey: owner.key }, { ownerKey: owner.ipKey }] }
+  const keys = [
+    { ownerKey: owner.key },
+    { ownerKey: owner.ipKey },
+    { ownerMask: owner.mask },
+  ]
+  return { OR: keys }
 }
 
-/** 记录归属是否匹配（null 视为历史遗留：放行详情访问；cookie/ipKey 任一匹配即放行） */
-export function isOwnedBy(job: Pick<EvaluationJob, 'ownerKey'>, owner: RequestOwner): boolean {
+/** 记录归属是否匹配（v1.17「按 IP 智能显示」）：
+ *  cookie 键 / IP-hash 键 / 同来源 IP 掩码任一命中即放行；
+ *  ownerKey 为 null 视为历史遗留放行。 */
+export function isOwnedBy(job: Pick<EvaluationJob, 'ownerKey' | 'ownerMask'>, owner: RequestOwner): boolean {
   if (!job.ownerKey) return true
-  return job.ownerKey === owner.key || job.ownerKey === owner.ipKey
+  return job.ownerKey === owner.key || job.ownerKey === owner.ipKey || job.ownerMask === owner.mask
 }
 
 /** 404 响应（不暴露资源存在性） */

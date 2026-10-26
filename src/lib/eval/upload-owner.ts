@@ -34,13 +34,13 @@ export async function writeOwnerFile(uploadId: string, owner: RequestOwner): Pro
   } catch { /* 磁盘失败不阻塞上传返回 */ }
 }
 
-/** 校验目录归属；无 owner.json 放行，key 不匹配返回 false */
+/** 校验目录归属；无 owner.json 放行；v1.17：键或 IP 掩码任一匹配即放行（按 IP 智能显示） */
 export async function uploadOwnedBy(uploadId: string, owner: RequestOwner): Promise<boolean> {
   try {
     const raw = await fs.readFile(path.join(uploadDir(uploadId), 'owner.json'), 'utf-8')
     const data = JSON.parse(raw) as Partial<OwnerFile>
     if (!data.key) return true
-    return data.key === owner.key
+    return data.key === owner.key || data.key === owner.ipKey || data.mask === owner.mask
   } catch {
     return true // 无标记（历史/竞争窗口）→ 放行
   }

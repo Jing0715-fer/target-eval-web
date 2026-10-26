@@ -2,14 +2,21 @@
  * 全局中间件 — 为每个浏览器会话派发稳定的 ownerCookie。
  *
  * 背景：沙箱内 Caddy 反代到 Next.js 时 X-Forwarded-For 被重写为 ::1，
- * 导致 IP-hash 隔离失效（所有公网用户共享同一 ownerKey）。
- * Cookie 隔离不依赖代理头，更可靠地实现"仅自己可见"。
+ * 导致纯 IP-hash 隔离失效（所有公网用户共享同一 ownerKey）。
+ * Cookie 隔离不依赖代理头，更可靠地实现"仅自己可见"；
+ * 无 cookie 时（curl / iframe 受限）回退 IP-hash（见 request-guard.ts）。
+ *
+ * v1.17 修复"刷新后历史记录丢失"：
+ *  - Z.ai 预览面板以跨站 iframe 嵌入应用，SameSite=Lax 的 cookie 在跨站
+ *    iframe 中不会被浏览器发送 → 每次刷新都被当作新访客。
+ *  - 现按请求协议自适应：https（公网预览）用 SameSite=None + Secure
+ *    （跨站 iframe 可发送），http（本地开发）保持 Lax。
  *
  * 策略：
- *  - 首次访问（无 te_owner cookie）：生成 32 位 hex，写入 httpOnly 长期 cookie
- *  - 同时注入到转发给路由的请求头，确保同一次请求的 API 也能读到
+ *  - 首次访问（无 te_owner cookie）：生成 32 位 hex，写入 httpOnly 长期 cookie（1 年）
+ *  - 仅在响应上设置 cookie（不注入请求头）— curl 等非浏览器客户端走
+ *    IP-hash 回退，同 IP 的旧记录依然可见（"按 IP 智能显示"）
  *  - 已有 cookie：直接放行
- *  - 静态资源 / 资产下载 / iframe 预览：不经过此中间件
  */
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -27,13 +34,19 @@ export function proxy(req: NextRequest) {
   const newOwner = (crypto.randomUUID().replace(/-/g, '') +
     crypto.randomUUID().replace(/-/g, '')).slice(0, 32)
 
-  // 仅在响应上设置 cookie（不注入请求头）— 保证 curl 等非浏览器客户端
-  // 走 IP-hash 回退，能看到旧记录；浏览器首次访问也走 IP-hash，
-  // 后续请求带 cookie 后切换到 cookie 隔离
+  // 判断协议：优先代理头（网关 https → 内部 http），其次请求 URL
+  const proto =
+    req.headers.get('x-forwarded-proto')?.split(',')[0]?.trim() ||
+    req.nextUrl.protocol.replace(':', '')
+  const isHttps = proto === 'https'
+
   const res = NextResponse.next()
   res.cookies.set(OWNER_COOKIE_NAME, newOwner, {
     httpOnly: true,
-    sameSite: 'lax',
+    // https（公网预览，含跨站 iframe）：SameSite=None + Secure 才能在 iframe 中发送；
+    // http（本地开发）：Lax
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: isHttps,
     maxAge: MAX_AGE,
     path: '/',
   })

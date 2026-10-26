@@ -275,7 +275,10 @@ export async function GET(req: Request) {
 
   const record = await db.batchReport.findUnique({ where: { id } })
   if (!record) return notFound()
-  if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) return notFound()
+  // v1.17「按 IP 智能显示」：cookie 键 / IP-hash 键 / 同来源 IP 掩码任一命中即放行
+  if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey && record.ownerMask !== owner.mask) {
+    return notFound()
+  }
 
   // inline 预览模式 — 返回 HTML（允许 iframe 嵌入，用于报告预览 Dialog）
   if (url.searchParams.get('inline') === '1') {
