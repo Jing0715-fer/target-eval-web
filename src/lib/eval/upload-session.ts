@@ -93,6 +93,19 @@ function validId(id: string): boolean {
   return /^u_[\w-]{4,64}$/.test(id)
 }
 
+/**
+ * 会话归属校验（与 request-guard.isOwnedBy 同口径的三层回退）：
+ *  - s.ownerKey 与 owner.key 完全相等（cookie 路径，最严格）
+ *  - s.ownerKey 与 owner.ipKey 相等（IP-hash 路径，无 cookie 时回退）
+ *  - s.ownerMask 与 owner.mask 相等（同来源 IP 段，cookie 丢失后兜底）
+ *
+ * 公网 Z.ai 预览面板的 cookie 不稳定（ALB 重写为 SameSite=lax，跨站 iframe
+ * 不回送），单纯 cookie 相等会误判；三层回退使「同会话发起的请求」均通过。
+ */
+function sessionOwnedBy(s: Pick<UploadSession, 'ownerKey' | 'ownerMask'>, owner: RequestOwner): boolean {
+  return s.ownerKey === owner.key || s.ownerKey === owner.ipKey || s.ownerMask === owner.mask
+}
+
 // ─── init ─────────────────────────────────────────────────────────────────────
 
 export interface InitResult {
@@ -159,7 +172,7 @@ export async function appendChunk(
   if (!validId(uploadId)) return { ok: false, status: 400, error: 'uploadId 无效' }
   const s = await readSession(uploadId)
   if (!s) return { ok: false, status: 404, error: '上传会话不存在或已过期，请重新上传' }
-  if (s.ownerKey !== owner.key) return { ok: false, status: 403, error: '无权访问该上传会话' }
+  if (!sessionOwnedBy(s, owner)) return { ok: false, status: 403, error: '无权访问该上传会话' }
   if (s.phase !== 'uploading') return { ok: false, status: 409, error: '该会话已完成上传，不能继续追加分块' }
   if (!Number.isFinite(offset) || offset < 0) return { ok: false, status: 400, error: 'offset 无效' }
   if (offset !== s.received) return { ok: false, status: 409, error: `offset 不连续（期望 ${s.received}，收到 ${offset}），请按顺序上传` }
@@ -191,7 +204,7 @@ export async function completeUploadSession(
   if (!validId(uploadId)) return { ok: false, status: 400, error: 'uploadId 无效' }
   const s = await readSession(uploadId)
   if (!s) return { ok: false, status: 404, error: '上传会话不存在或已过期，请重新上传' }
-  if (s.ownerKey !== owner.key) return { ok: false, status: 403, error: '无权访问该上传会话' }
+  if (!sessionOwnedBy(s, owner)) return { ok: false, status: 403, error: '无权访问该上传会话' }
   if (s.phase === 'done') return { ok: true }
   if (s.phase !== 'uploading' && s.phase !== 'queued' && s.phase !== 'parsing') {
     return { ok: false, status: 409, error: s.error ?? '会话状态异常，请重新上传' }
@@ -231,7 +244,7 @@ export async function getSessionStatus(owner: RequestOwner, uploadId: string): P
   // 会话仍在（未 done）：按 session.json 判断
   const s = await readSession(uploadId)
   if (s) {
-    if (s.ownerKey !== owner.key) return { ok: false, status: 403, error: '无权访问该上传会话' }
+    if (!sessionOwnedBy(s, owner)) return { ok: false, status: 403, error: '无权访问该上传会话' }
     return { ok: true, uploadId, phase: s.phase, error: s.error }
   }
   // 会话已删（完成或过期）：查 parsed.json —— 归属以 owner.json 为准（跨用户 404）

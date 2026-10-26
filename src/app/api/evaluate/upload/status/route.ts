@@ -4,6 +4,8 @@
  * 与旧直传响应同构的 parsed 载荷（前端复用同一渲染路径）。
  *
  * 归属：会话期校验 session.json 的 ownerKey；完成后校验 owner.json。
+ *
+ * v1.18：响应显式设置 Cache-Control: no-store（公网 ALB 会缓存 GET 响应）。
  */
 import { NextResponse } from 'next/server'
 import { getOwner } from '@/lib/eval/request-guard'
@@ -18,11 +20,11 @@ export async function GET(req: Request) {
   const url = new URL(req.url)
   const uploadId = (url.searchParams.get('uploadId') ?? '').trim()
   if (!uploadId) {
-    return NextResponse.json({ ok: false, error: '缺少 uploadId 参数' }, { status: 400 })
+    return NextResponse.json({ ok: false, error: '缺少 uploadId 参数' }, { status: 400, headers: { 'Cache-Control': 'no-store' } })
   }
   const r = await getSessionStatus(owner, uploadId)
   if (!r.ok) {
-    return NextResponse.json({ ok: false, error: r.error }, { status: r.status })
+    return NextResponse.json({ ok: false, error: r.error }, { status: r.status, headers: { 'Cache-Control': 'no-store' } })
   }
-  return NextResponse.json(r)
+  return NextResponse.json(r, { headers: { 'Cache-Control': 'no-store' } })
 }
