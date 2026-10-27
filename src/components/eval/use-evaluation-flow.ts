@@ -74,6 +74,61 @@ function buildBatchNote(judgment: RelationJudgment, total: number): string {
   return `本批次共评估 ${total} 个靶点，经分析为${typeText}${judgment.rationale ? `（${judgment.rationale.slice(0, 160)}）` : ''}，各靶点分别出具报告`
 }
 
+/** v1.19 自动下载记录（模块级：同一页面会话内每个报告只自动下载一次；切靶点/重渲染不重复） */
+const autoDownloadedKeys = new Set<string>()
+
+/**
+ * 作业 / 合并报告完成后自动把 HTML 报告下载到用户本机（v1.19）。
+ *
+ * 背景：公网部署（Z.ai space 等容器平台）空闲数小时后容器会被平台回收重建，
+ * SQLite（db/custom.db）与磁盘报告（db/reports/）均为运行时数据、不随仓库保留
+ * —— 在线评估结果因此「几小时就消失」（应用自身终态 TTL 为 30 天，丢失发生在
+ * 平台容器层，应用无法阻止）。
+ *
+ * 对策：作业完成的第一时间把 HTML 报告落到本机：
+ *  - fetch 先校验（报告未生成 / 已清理 → 404 静默跳过，不弹下载失败框）
+ *  - Blob + <a download> 触发（沿用服务端 Content-Disposition 文件名）
+ *  - 跨站 iframe（预览面板）可能拦截自动下载 → toast 引导手动按钮
+ *  - 历史记录查看不经过触发点，不会误弹；失败时允许后续重试
+ */
+function autoDownloadHtmlReport(url: string, key: string, label: string) {
+  if (autoDownloadedKeys.has(key)) return
+  autoDownloadedKeys.add(key)
+  void (async () => {
+    try {
+      const res = await fetch(url, { cache: 'no-store' })
+      if (!res.ok) {
+        // 报告未生成（关联批次的 deferred 单靶点无独立 HTML）或已被清理 → 跳过
+        autoDownloadedKeys.delete(key)
+        return
+      }
+      const blob = await res.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      // 文件名：优先服务端 Content-Disposition，回退默认名
+      let filename = 'TargetEval_Report.html'
+      const cd = res.headers.get('content-disposition') ?? ''
+      const m = /filename\*?=(?:UTF-8'')?"?([^";\n]+)/i.exec(cd)
+      if (m && m[1]) {
+        try { filename = decodeURIComponent(m[1].trim()) } catch { filename = m[1].trim() }
+      }
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download = filename
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000)
+      toast({
+        title: 'HTML 报告已自动下载',
+        description: `${label} — 已保存到本机下载目录（服务器端运行数据不长期保留，请及时查看）。若浏览器未弹出下载，请点击结果页的「下载 HTML」按钮。`,
+      })
+    } catch {
+      autoDownloadedKeys.delete(key) // 失败允许重试
+    }
+  })()
+}
+
 /**
  * 评估流程状态机：
  * - startEvaluation(requests)：单个请求 → POST + 2s 轮询（原有流程）；
@@ -163,6 +218,15 @@ export function useEvaluationFlow() {
       failCountRef.current = 0
       setNetworkIssue(false)
       applyJobSnapshot(data)
+      // v1.19：live 轮询到终态完成 → 自动下载 HTML 报告到本机
+      // （历史查看路径不经过 pollOnce，不会误触发；deferred 作业 404 静默跳过）
+      if (data.status === 'done') {
+        autoDownloadHtmlReport(
+          `/api/jobs/${id}/report?download=1`,
+          `job:${id}`,
+          data.uniprotId || '评估报告',
+        )
+      }
     } catch {
       // 单次失败静默重试；连续失败则提示
       failCountRef.current += 1
@@ -367,6 +431,15 @@ export function useEvaluationFlow() {
       const result = await waitForJobTerminal(created.jobId)
       item.status = result
       if (result === 'error') item.error = '评估失败（详见该作业日志）'
+      // v1.19：非关联批次 — 各靶点独立报告，完成即自动下载
+      // （关联批次为 deferred 模式，单靶点无独立 HTML，最终下载合并报告）
+      if (result === 'done' && !related) {
+        autoDownloadHtmlReport(
+          `/api/jobs/${created.jobId}/report?download=1`,
+          `job:${created.jobId}`,
+          label,
+        )
+      }
       setBatch(snapshot())
     }
 
@@ -414,6 +487,12 @@ export function useEvaluationFlow() {
         st.merging = false
         st.view = 'merged'
         setBatch(snapshot())
+        // v1.19：合并报告（关联批次的最终交付物）完成即自动下载到本机
+        autoDownloadHtmlReport(
+          `/api/evaluate/batch-report?id=${encodeURIComponent(merged.id)}&download=1`,
+          `batch:${merged.id}`,
+          '合并评估报告',
+        )
       } catch (e) {
         st.merging = false
         st.mergedError = e instanceof Error ? e.message : '合并报告生成失败'
