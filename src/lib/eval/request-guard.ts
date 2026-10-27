@@ -113,25 +113,29 @@ export function getOwner(req: Request): RequestOwner {
 }
 
 /**
- * 列表查询的 ownerKey 过滤条件（v1.17「按 IP 智能显示」）：
- *  同时匹配 ① 当前生效键（cookie / IP-hash）② IP-hash 键（旧记录兼容）
- *  ③ 同来源 IP 掩码（ownerMask）—— cookie 丢失/换浏览器后回退 IP 身份，
- *  同 IP（同网络入口）创建的记录依然可见，刷新/清缓存不丢历史。 */
+ * 列表查询的 ownerKey 过滤条件：
+ *  同时匹配 ① 当前生效键（cookie / IP-hash）② IP-hash 键（旧记录兼容）。
+ *  v1.21 修正：不再用 ownerMask 作为隔离条件——公网部署里 Caddy 重写
+ *  X-Forwarded-For 为 127.0.0.1，所有公网用户共享同一 ownerMask，把它
+ *  当作隔离条件会让任何人的 cookie 都能匹配任何人的记录（历史记录跨
+ *  用户泄漏）。ownerMask 仅用于排障展示。 */
 export function ownerListFilter(owner: RequestOwner) {
   const keys = [
     { ownerKey: owner.key },
     { ownerKey: owner.ipKey },
-    { ownerMask: owner.mask },
+    { ownerKey: null }, // 兼容升级前无 ownerKey 的历史记录
   ]
   return { OR: keys }
 }
 
-/** 记录归属是否匹配（v1.17「按 IP 智能显示」）：
- *  cookie 键 / IP-hash 键 / 同来源 IP 掩码任一命中即放行；
- *  ownerKey 为 null 视为历史遗留放行。 */
+/** 记录归属是否匹配：
+ *  cookie 键 / IP-hash 键任一命中即放行；
+ *  ownerKey 为 null 视为历史遗留放行。
+ *  v1.21：移除 ownerMask 分支——公网部署所有用户共享 mask（Caddy 重写
+ *  X-Forwarded-For 为 127.0.0.1），mask 隔离会让任意 cookie 都能匹配任意记录。 */
 export function isOwnedBy(job: Pick<EvaluationJob, 'ownerKey' | 'ownerMask'>, owner: RequestOwner): boolean {
   if (!job.ownerKey) return true
-  return job.ownerKey === owner.key || job.ownerKey === owner.ipKey || job.ownerMask === owner.mask
+  return job.ownerKey === owner.key || job.ownerKey === owner.ipKey
 }
 
 /** 404 响应（不暴露资源存在性） */

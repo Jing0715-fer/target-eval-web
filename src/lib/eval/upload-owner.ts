@@ -34,13 +34,15 @@ export async function writeOwnerFile(uploadId: string, owner: RequestOwner): Pro
   } catch { /* 磁盘失败不阻塞上传返回 */ }
 }
 
-/** 校验目录归属；无 owner.json 放行；v1.17：键或 IP 掩码任一匹配即放行（按 IP 智能显示） */
+/** 校验目录归属；无 owner.json 放行；键或 IP-hash 匹配即放行。
+ *  v1.21：移除 ownerMask 匹配分支——公网部署所有用户共享 mask（Caddy 重写
+ *  X-Forwarded-For 为 127.0.0.1），mask 隔离会让任意 cookie 都能匹配任意上传会话。 */
 export async function uploadOwnedBy(uploadId: string, owner: RequestOwner): Promise<boolean> {
   try {
     const raw = await fs.readFile(path.join(uploadDir(uploadId), 'owner.json'), 'utf-8')
     const data = JSON.parse(raw) as Partial<OwnerFile>
     if (!data.key) return true
-    return data.key === owner.key || data.key === owner.ipKey || data.mask === owner.mask
+    return data.key === owner.key || data.key === owner.ipKey
   } catch {
     return true // 无标记（历史/竞争窗口）→ 放行
   }
