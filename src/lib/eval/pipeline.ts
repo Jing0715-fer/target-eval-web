@@ -47,6 +47,16 @@ export interface PipelineCallbacks {
   log: (msg: string, level?: 'info' | 'warn' | 'error') => void
 }
 
+/** 把 UniProt 交叉引用的残基范围（Chains，UniProt 编号）回填到 PDB 结构列表 */
+function backfillChainRanges(pdbs: PdbEntry[], info: UniprotInfo | null | undefined): void {
+  const ranges = info?.pdbChainRanges
+  if (!ranges) return
+  for (const p of pdbs) {
+    const r = ranges[p.pdbId]
+    if (r) p.chainRanges = r
+  }
+}
+
 /** 上传解析结果持久化文件 */
 async function readUploadParsed(uploadId: string): Promise<{ goalHints: string[]; images?: ParsedImage[] } | null> {
   try {
@@ -298,6 +308,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
         signal,
       )
       directPdbs = result.entries
+      backfillChainRanges(directPdbs, uniprotInfo)
       const ligCount = directPdbs.filter(p => p.ligands.length > 0).length
       log(`PDB 详情完成：${directPdbs.length} 个结构（含配体 ${ligCount} 个）`)
     }
@@ -431,6 +442,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
             if (pdbIds.length) {
               const r = await fetchPdbEntries(pdbIds, maxPdb, (d, t) => report('rcsb', `补拉 PDB 详情 ${d}/${t}`, d / t), signal)
               directPdbs = r.entries
+              backfillChainRanges(directPdbs, info)
               const directSet2 = new Set(directPdbs.map(p => p.pdbId))
               blastHits = (await enrichBlastHits(filtered, directSet2)).filter(h => !directSet2.has(h.pdbId))
               blastStatus = {

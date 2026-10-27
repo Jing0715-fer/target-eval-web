@@ -110,6 +110,7 @@ export function PdbTable({ pdbs, ligandCount, literature }: PdbTableProps) {
               <TableHead className="eval-eyebrow h-9 pl-4 text-stone-500 dark:text-stone-400">PDB ID</TableHead>
               <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">方法</TableHead>
               <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">分辨率</TableHead>
+              <TableHead className="eval-eyebrow h-9 min-w-28 text-stone-500 dark:text-stone-400" title="该结构覆盖靶点 UniProt 序列的残基编号范围">范围</TableHead>
               <TableHead className="eval-eyebrow h-9 min-w-44 text-stone-500 dark:text-stone-400">标题</TableHead>
               <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">释放日期</TableHead>
               <TableHead className="eval-eyebrow h-9 min-w-28 text-stone-500 dark:text-stone-400">配体</TableHead>
@@ -120,7 +121,7 @@ export function PdbTable({ pdbs, ligandCount, literature }: PdbTableProps) {
           <TableBody>
             {visible.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="h-28 text-center text-sm text-stone-400">
+                <TableCell colSpan={9} className="h-28 text-center text-sm text-stone-400">
                   <span className="flex flex-col items-center gap-1.5">
                     <Inbox className="size-5" />
                     {pdbs.length === 0 ? (
@@ -165,6 +166,12 @@ export function PdbTable({ pdbs, ligandCount, literature }: PdbTableProps) {
                     </TableCell>
                     <TableCell className="font-mono text-xs tabular-nums text-stone-600 dark:text-stone-400">
                       {formatResolution(p.resolution)}
+                    </TableCell>
+                    <TableCell
+                      className="max-w-36 truncate font-mono text-xs tabular-nums text-stone-600 dark:text-stone-400"
+                      title={p.chainRanges ? `${p.chainRanges}（UniProt 残基编号范围）` : 'UniProt 交叉引用未提供范围（可能为旧记录或无对应链）'}
+                    >
+                      {p.chainRanges || '—'}
                     </TableCell>
                     <TableCell
                       className="max-w-56 truncate text-xs text-stone-600 dark:text-stone-400"

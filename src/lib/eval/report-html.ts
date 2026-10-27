@@ -122,6 +122,7 @@ function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, Liter
       <td class="td-id"><a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a></td>
       <td><span class="mth mth-${p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'}">${esc(methodLabel(p))}</span></td>
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
+      <td class="t-rng"${p.chainRanges ? ` title="${esc(p.chainRanges)}（UniProt 残基编号范围）"` : ''}>${esc(p.chainRanges || '—')}</td>
       <td class="t-title">${esc(p.title)}</td>
       <td class="num">${esc(p.releaseDate || '—')}</td>
       <td class="t-lig" title="${esc(p.ligands.slice(0, 5).join('; '))}">${ligShow ? esc(ligShow) : '—'}${p.ligands.length > 2 ? `<span class="lig-more"> 等${p.ligands.length}</span>` : ''}</td>
@@ -135,7 +136,7 @@ function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, Liter
 
 /** PDB 数据表 colgroup（固定列宽，杜绝长内容挤压/重叠；窄屏由 .tbl-wrap 横向滚动） */
 const PDB_COLGROUP = `<colgroup>
-  <col style="width:74px"><col style="width:62px"><col style="width:64px"><col>
+  <col style="width:74px"><col style="width:62px"><col style="width:64px"><col style="width:96px"><col>
   <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:72px">
 </colgroup>`
 
@@ -147,7 +148,7 @@ function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid:
   const headHtml = `
   <div class="tbl-wrap"><table class="tbl-data">
     ${PDB_COLGROUP}
-    <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
+    <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
     <tbody>${pdbRowsHtml(head, preview, litByPmid)}</tbody>
   </table></div>`
   if (rest.length === 0) return headHtml
@@ -156,7 +157,7 @@ function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid:
     <summary>展开其余 ${rest.length} 条结构（共 ${shown.length} 条，打印时自动展开）</summary>
     <div class="tbl-wrap"><table class="tbl-data">
       ${PDB_COLGROUP}
-      <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
+      <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
       <tbody>${pdbRowsHtml(rest, rest.length, litByPmid)}</tbody>
     </table></div>
   </details>`
@@ -433,7 +434,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .tbl-wrap { overflow-x:auto; margin:12px 0 6px; }
   table { width:100%; border-collapse:collapse; font-size:12.5px; font-family:var(--serif); }
   /* 数据表（PDB/BLAST）：固定列宽防长串挤压重叠；窄屏由 .tbl-wrap 横向滚动 */
-  table.tbl-data { table-layout:fixed; min-width:760px; }
+  table.tbl-data { table-layout:fixed; min-width:856px; }
   table.tbl-blast { min-width:640px; }
   th { background:#f7f7f5; text-align:left; font-size:10px; letter-spacing:1px; text-transform:uppercase; color:var(--sub); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   th.num { text-align:right; }
@@ -449,6 +450,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .t-title, .t-desc { font-family:var(--serif); overflow-wrap:break-word; }
   .t-lig { font-size:11px; overflow-wrap:anywhere; }
   .t-journal { font-size:11px; }
+  .t-rng { font-family:var(--mono); font-size:11px; color:var(--sub); overflow-wrap:anywhere; }
   .lig-more { color:var(--faint); white-space:nowrap; }
   table a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
   table a:hover { border-bottom-color:var(--accent-2); }

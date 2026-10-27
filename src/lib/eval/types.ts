@@ -39,6 +39,8 @@ export interface UniprotInfo {
   /** 关键特征：结构域/跨膜/信号肽/活性位点 */
   features: UniprotFeature[]
   keywords?: string[]
+  /** PDB 交叉引用的 UniProt 残基编号范围（pdbId → Chains 原值，如 "A=695-1022"） */
+  pdbChainRanges?: Record<string, string>
 }
 
 // ─── PDB（RCSB + PDBe 合并视角）───────────────────────────────────────────────
@@ -57,6 +59,8 @@ export interface PdbEntry {
   isXray: boolean
   isCryoem: boolean
   isNmr: boolean
+  /** 该结构覆盖的 UniProt 残基编号范围（来自 UniProt 交叉引用 Chains 属性，如 "A=695-1022"） */
+  chainRanges?: string
 }
 
 export interface PdbsResult {

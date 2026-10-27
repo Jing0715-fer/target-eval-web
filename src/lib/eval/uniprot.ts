@@ -26,6 +26,12 @@ interface UniprotRaw {
   features?: Array<{ type?: string; description?: string; location?: { start?: { value?: number }; end?: { value?: number } } }>
   keywords?: Array<{ name?: string }>
   entryType?: string
+  /** 交叉引用（含 PDB 的 Chains 残基范围，UniProt 编号） */
+  uniProtKBCrossReferences?: Array<{
+    database?: string
+    id?: string
+    properties?: Array<{ key?: string; value?: string }>
+  }>
 }
 
 /** 获取 UniProt 元数据（含序列与 features）。找不到返回 null。 */
@@ -90,6 +96,18 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
 
   const keywords = (raw.keywords ?? []).map(k => k.name ?? '').filter(Boolean).slice(0, 30)
 
+  // PDB 交叉引用 → UniProt 残基编号范围（Chains 属性，如 "A=695-1022"、"A/B=25-646"）。
+  // 供 PDB 结构表展示「该结构覆盖靶点序列的哪一段」。
+  const pdbChainRanges: Record<string, string> = {}
+  for (const x of raw.uniProtKBCrossReferences ?? []) {
+    if (x.database !== 'PDB') continue
+    const pdbId = (x.id ?? '').toUpperCase()
+    if (!/^[0-9A-Z]{4}$/.test(pdbId)) continue
+    const chains = (x.properties ?? []).find(p => p.key === 'Chains')?.value?.trim()
+    if (chains) pdbChainRanges[pdbId] = chains
+    if (Object.keys(pdbChainRanges).length >= 500) break // 防御上限
+  }
+
   return {
     uniprotId: raw.primaryAccession,
     entryName: raw.uniProtkbId ?? uniprotId,
@@ -102,6 +120,7 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
     subcellularLocations,
     features,
     keywords,
+    pdbChainRanges,
   }
 }
 

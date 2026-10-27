@@ -363,6 +363,8 @@ export interface PdbEntry {
   isXray: boolean
   isCryoem: boolean
   isNmr: boolean
+  /** 该结构覆盖的 UniProt 残基编号范围（如 "A=695-1022"；旧记录无此字段） */
+  chainRanges?: string
 }
 
 export interface BlastHit {
