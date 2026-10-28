@@ -13,7 +13,6 @@ import {
   Target,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
@@ -22,7 +21,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
-import { countResidues, isValidUniprotId } from './format'
+import { countResidues, parseMultiUniprotIds, parseMultiFasta, type FastaEntry } from './format'
 import { fetchDocxInsights, uploadEvaluateDocx, type UploadProgress } from './api'
 import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
 import type { EvaluateOptions, EvaluateRequest, FormInsights, InputMode, UploadResponse } from './types'
@@ -52,9 +51,12 @@ export interface InputPanelProps {
 export function InputPanel({ submitting, submitError, onStart, onClearSubmitError }: InputPanelProps) {
   const [mode, setMode] = useState<TabMode>('uniprot')
 
-  // UniProt 输入
+  // UniProt 输入（v1.22：支持多 ID，逗号/空格/换行分隔）
   const [uniprot, setUniprot] = useState('')
-  const uniprotValid = isValidUniprotId(uniprot)
+  const uniprotParsed = useMemo(() => parseMultiUniprotIds(uniprot), [uniprot])
+  const uniprotValid = uniprotParsed.valid.length >= 1 && uniprotParsed.invalid.length === 0
+  const uniprotMulti = uniprotParsed.valid.length > 1
+  const uniprotOverLimit = uniprotParsed.valid.length > MAX_BATCH_UNIPROT
 
   // UniProt Tab 的可选伴随序列（合并评估）
   const [companionOpen, setCompanionOpen] = useState(false)
@@ -62,9 +64,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const companionInfo = useMemo(() => countResidues(companionText), [companionText])
   const companionValid = companionInfo.count >= MIN_COMPANION_LENGTH
 
-  // 序列输入
+  // 序列输入（v1.22：支持多 FASTA，每个 `>` 标题段一条）
   const [sequenceText, setSequenceText] = useState('')
   const seqInfo = useMemo(() => countResidues(sequenceText), [sequenceText])
+  const seqEntries = useMemo(() => parseMultiFasta(sequenceText), [sequenceText])
+  const seqMulti = seqEntries.length > 1
+  const seqValidEntries = seqEntries.filter(e => e.length >= MIN_SEQUENCE_LENGTH)
+  const seqOverLimit = seqEntries.length > MAX_BATCH_UNIPROT
 
   // Word 评估表上传
   const [upload, setUpload] = useState<UploadResponse | null>(null)
@@ -168,9 +174,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
   const inputReady =
     mode === 'uniprot'
-      ? uniprotValid
+      ? uniprotValid && !uniprotOverLimit
       : mode === 'sequence'
-        ? seqInfo.count >= MIN_SEQUENCE_LENGTH
+        ? seqInfo.count >= MIN_SEQUENCE_LENGTH && !seqOverLimit
         : docxReady
 
   /** 切换 UniProt 靶点选中态（多选，上限 MAX_BATCH_UNIPROT） */
@@ -191,17 +197,28 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     const trimmedGoal = goal.trim() || undefined
     let requests: EvaluateRequest[]
     if (mode === 'uniprot') {
-      // 可选伴随序列：与同一靶点的 UniProt 合并为一次评估（构建边界分析）
-      const companion = companionText.trim() && companionValid ? companionText.trim() : undefined
-      requests = [{
-        mode: 'uniprot',
-        uniprot: uniprot.trim().toUpperCase(),
+      // v1.22：支持多 UniProt ID — 每个 ID 一份独立作业（批量编排 + 关系判断 + 共有结构）。
+      // 单 ID 时保留可选伴随序列（同靶点合并评估）；多 ID 时伴随序列不附加（语义不适用）。
+      const ids = uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT)
+      const companion = companionText.trim() && companionValid && ids.length === 1 ? companionText.trim() : undefined
+      requests = ids.map(id => ({
+        mode: 'uniprot' as const,
+        uniprot: id,
         sequence: companion,
         goal: trimmedGoal,
         options,
-      }]
+      }))
     } else if (mode === 'sequence') {
-      requests = [{ mode: 'sequence', sequence: sequenceText.trim(), goal: trimmedGoal, options }]
+      // v1.22：支持多 FASTA — 每条序列一份独立作业（批量编排 + 关系判断 + 共有结构）。
+      // 单条序列直接提交；多条按 `>` 标题段拆分，每条 ≥MIN_SEQUENCE_LENGTH 的独立评估。
+      const entries = seqEntries.slice(0, MAX_BATCH_UNIPROT)
+      if (entries.length === 0) return
+      requests = entries.map(e => ({
+        mode: 'sequence' as const,
+        sequence: e.seq,
+        goal: trimmedGoal,
+        options,
+      }))
     } else if (!upload) {
       return
     } else {
@@ -277,29 +294,38 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             <TabsContent value="uniprot" className="mt-0">
               <div className="flex flex-col gap-2.5">
                 <Label htmlFor="uniprot-input" className="eval-eyebrow text-stone-500 dark:text-stone-400">
-                  UniProt Accession
+                  UniProt Accession {uniprotMulti && (
+                    <span className="ml-1 rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                      {uniprotParsed.valid.length} 个靶点 · 批量评估
+                    </span>
+                  )}
                 </Label>
-                <Input
+                <Textarea
                   id="uniprot-input"
                   value={uniprot}
-                  onChange={(e) => {
-                    setUniprot(e.target.value)
-                  }}
-                  placeholder="如 P00533 (EGFR)、P04637 (p53)"
-                  className="h-11 rounded-md font-mono text-base uppercase placeholder:font-sans placeholder:normal-case md:text-sm"
+                  onChange={(e) => setUniprot(e.target.value)}
+                  placeholder={'支持多个 UniProt ID，用逗号、空格或换行分隔（最多 ' + MAX_BATCH_UNIPROT + ' 个），例如：\nP00533 (EGFR)\nP04637 (p53)\nQ9NZ08'}
+                  className="min-h-20 resize-y rounded-md font-mono text-sm uppercase placeholder:font-sans placeholder:normal-case"
                   spellCheck={false}
-                  autoComplete="off"
                 />
-                {uniprot.trim() !== '' && !uniprotValid && (
+                {uniprot.trim() !== '' && uniprotParsed.invalid.length > 0 && (
                   <p className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
                     <CircleAlert className="size-3.5" />
-                    格式不正确：UniProt accession 为 6 或 10 位（如 P00533、Q9NZ08）
+                    {uniprotParsed.invalid.length} 个格式不正确：{uniprotParsed.invalid.slice(0, 5).join('、')}{uniprotParsed.invalid.length > 5 ? '…' : ''}（UniProt accession 为 6 或 10 位，如 P00533、Q9NZ08）
+                  </p>
+                )}
+                {uniprotOverLimit && (
+                  <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                    <CircleAlert className="size-3.5" />
+                    超过上限 {MAX_BATCH_UNIPROT} 个，将只评估前 {MAX_BATCH_UNIPROT} 个：{uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT).join('、')}
                   </p>
                 )}
                 {uniprotValid && (
                   <p className="flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
                     <CircleCheckBig className="size-3.5" />
-                    格式正确，将自动获取该蛋白的元数据与结构信息
+                    {uniprotMulti
+                      ? `已识别 ${uniprotParsed.valid.length} 个靶点，将批量评估并分析关系性与共有结构`
+                      : '格式正确，将自动获取该蛋白的元数据与结构信息'}
                   </p>
                 )}
                 {uniprot.trim() === '' && (
@@ -315,6 +341,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                         {ex.id} · {ex.name}
                       </button>
                     ))}
+                    <button
+                      type="button"
+                      onClick={() => setUniprot(EXAMPLE_UNIPROTS.map(ex => ex.id).join(', '))}
+                      className="min-h-8 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 font-mono text-[11px] text-emerald-700 transition-colors hover:border-emerald-500 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-400"
+                    >
+                      多靶点示例（EGFR + p53）
+                    </button>
                   </div>
                 )}
 
@@ -371,17 +404,32 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             <TabsContent value="sequence" className="mt-0">
               <div className="flex flex-col gap-2.5">
                 <Label htmlFor="sequence-input" className="eval-eyebrow text-stone-500 dark:text-stone-400">
-                  氨基酸序列 · FASTA 或裸序列
+                  氨基酸序列 · FASTA 或裸序列 {seqMulti && (
+                    <span className="ml-1 rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                      {seqEntries.length} 条序列 · 批量评估
+                    </span>
+                  )}
                 </Label>
                 <Textarea
                   id="sequence-input"
                   value={sequenceText}
                   onChange={(e) => setSequenceText(e.target.value)}
-                  placeholder={'粘贴 FASTA 格式（以 > 开头的标题行）或直接粘贴氨基酸序列，例如：\n>EGFR kinase domain\nMVPKP…'}
+                  placeholder={'支持多条 FASTA 序列（每个 > 标题段一条，最多 ' + MAX_BATCH_UNIPROT + ' 条），例如：\n>EGFR kinase domain\nMVPKPVA...\n>p53 DNA-binding domain\nSSSVPSQ...'}
                   className="min-h-40 resize-y rounded-md font-mono text-xs leading-relaxed md:min-h-48"
                   spellCheck={false}
                 />
-                {seqInfo.count > 0 && (
+                {seqOverLimit && (
+                  <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                    <CircleAlert className="size-3.5" />
+                    超过上限 {MAX_BATCH_UNIPROT} 条，将只评估前 {MAX_BATCH_UNIPROT} 条序列
+                  </p>
+                )}
+                {seqMulti ? (
+                  <p className="flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
+                    <CircleCheckBig className="size-3.5" />
+                    已识别 {seqEntries.length} 条序列（{seqValidEntries.length} 条 ≥{MIN_SEQUENCE_LENGTH} aa），将批量评估并分析关系性与共有结构
+                  </p>
+                ) : seqInfo.count > 0 && (
                   <p
                     className={cn(
                       'flex items-center gap-1 text-xs',
@@ -573,7 +621,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             ? '正在创建评估作业…'
             : mode === 'docx' && selectedUniprots.length > 1
               ? `开始评估（${selectedUniprots.length} 个靶点）`
-              : '开始评估'}
+              : mode === 'uniprot' && uniprotMulti
+                ? `开始评估（${uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT).length} 个靶点）`
+                : mode === 'sequence' && seqMulti
+                  ? `开始评估（${seqEntries.slice(0, MAX_BATCH_UNIPROT).length} 条序列）`
+                  : '开始评估'}
         </Button>
         <p className="text-center font-mono text-[11px] text-stone-400 dark:text-stone-500">
           UNIPROT — RCSB — PDBE — PUBMED — BLAST — LLM ANALYSIS

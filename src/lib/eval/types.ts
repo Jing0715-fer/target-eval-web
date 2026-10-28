@@ -69,6 +69,39 @@ export interface PdbsResult {
   totalFound: number
 }
 
+// ─── 共有结构（多靶点交集）──────────────────────────────────────────────────────
+
+/** 共有结构对单个靶点的覆盖信息 */
+export interface SharedStructureCoverage {
+  uniprotId: string
+  proteinName: string
+  /** 该 PDB 覆盖此 UniProt 的链范围（如 "A=695-1022"；来自 UniProt 交叉引用 Chains） */
+  chainRanges?: string
+}
+
+/**
+ * 共有结构 — 同一 PDB 条目覆盖 ≥2 个输入 UniProt 的结构。
+ * 数据来源：各靶点 directPdbs（RCSB 按 UniProt accession exact_match 检索）的交集，
+ * 即该 PDB 的 polymer entity 同时引用了多个输入 UniProt（复合物/共结晶/融合构建等）。
+ */
+export interface SharedStructure {
+  pdbId: string
+  method: string
+  resolution: number | null
+  title: string
+  releaseDate: string
+  ligands: string[]
+  journal: string
+  pubmedId: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  /** 该 PDB 覆盖的靶点列表（含 UniProt ID、蛋白名、链范围）— 按输入顺序 */
+  coverage: SharedStructureCoverage[]
+  /** 覆盖的靶点数 */
+  targetCount: number
+}
+
 // ─── PDBe ─────────────────────────────────────────────────────────────────────
 
 export interface PdbeMapping {

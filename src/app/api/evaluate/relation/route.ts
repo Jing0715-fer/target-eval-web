@@ -1,7 +1,9 @@
 /**
- * POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.8；v1.10 增同源归并）
- * 输入 { uploadId, uniprots: string[] }（docx 多靶点）；
- * 拉取各 UniProt 简介后：① 全长序列两两同源比对（确定性证据）② 评估表序列归属
+ * POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.8；v1.10 增同源归并；v1.22 增无 uploadId 模式）
+ * 输入 { uploadId?, uniprots: string[], goal? }：
+ *  - 有 uploadId（docx 模式）：拉取评估表解析序列 + LLM 要点后判断
+ *  - 无 uploadId（v1.22 UniProt/序列多输入模式）：仅用 UniProt 元数据与全长序列判断
+ * 拉取各 UniProt 简介后：① 全长序列两两同源比对（确定性证据）② 评估表序列归属（仅 docx）
  * ③ LLM 综合判断是否合并为一份报告。序列一致性 ≥40% 的靶点对直接判定同源家族
  * （LLM 不可否决 — 生物学上确定性事件）；判断失败不阻塞：降级 independent。
  */
@@ -37,30 +39,33 @@ export async function POST(req: Request) {
 
   const uploadId = body.uploadId?.trim()
   const uniprots = (body.uniprots ?? []).map(u => u.trim().toUpperCase()).filter(Boolean)
-  if (!uploadId || !isUploadId(uploadId)) {
+  // v1.22：uploadId 可选（UniProt/序列多输入模式无 uploadId）
+  if (uploadId && !isUploadId(uploadId)) {
     return NextResponse.json({ ok: false, error: 'uploadId 无效' }, { status: 400 })
   }
   if (uniprots.length < 2) {
     return NextResponse.json({ ok: false, error: '关系判断至少需要 2 个靶点' }, { status: 400 })
   }
-  if (!(await uploadOwnedBy(uploadId, owner))) {
+  if (uploadId && !(await uploadOwnedBy(uploadId, owner))) {
     return NextResponse.json({ ok: false, error: '无权使用该上传（仅上传者本人可用）' }, { status: 403 })
   }
 
-  // 读取解析结果 + LLM 要点（缺失时容错）
-  const uploadDir = path.join(process.cwd(), 'db', 'reports', uploadId)
+  // 读取解析结果 + LLM 要点（仅 docx 模式有 uploadId；缺失时容错）
+  const uploadDir = uploadId ? path.join(process.cwd(), 'db', 'reports', uploadId) : ''
   let sequences: ParsedSequence[] = []
   let goalHints: string[] = []
   let insights: FormInsights | null = null
-  try {
-    const parsed = JSON.parse(await fs.readFile(path.join(uploadDir, 'parsed.json'), 'utf-8')) as { sequences?: ParsedSequence[]; goalHints?: string[] }
-    sequences = parsed.sequences ?? []
-    goalHints = parsed.goalHints ?? []
-  } catch { /* 解析数据缺失时仅按 UniProt 判断 */ }
-  try {
-    const data = JSON.parse(await fs.readFile(path.join(uploadDir, 'insights.json'), 'utf-8')) as FormInsights
-    if (Array.isArray(data.goals)) insights = data
-  } catch { /* insights 可选 */ }
+  if (uploadId) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(uploadDir, 'parsed.json'), 'utf-8')) as { sequences?: ParsedSequence[]; goalHints?: string[] }
+      sequences = parsed.sequences ?? []
+      goalHints = parsed.goalHints ?? []
+    } catch { /* 解析数据缺失时仅按 UniProt 判断 */ }
+    try {
+      const data = JSON.parse(await fs.readFile(path.join(uploadDir, 'insights.json'), 'utf-8')) as FormInsights
+      if (Array.isArray(data.goals)) insights = data
+    } catch { /* insights 可选 */ }
+  }
 
   // 各靶点拉取 UniProt 简介（并行 + 8s 超时容错 — 失败的靶点仅用 ID 判断）
   const briefs: RelationTargetBrief[] = await Promise.all(uniprots.slice(0, 6).map(async (id) => {
@@ -139,7 +144,8 @@ export async function POST(req: Request) {
 
   // v1.11 ≥90% 高一致组：组内仅家族代表执行一次 BLAST，其余成员委托共享结果
   // （用户反馈：同源性超过 90% 时不需要每个都检索；groupKey 带上传标识防跨批次碰撞）
-  const blastGroups = groupHighIdentity(homologPairs, `hg${uploadId.replace(/[^\w]/g, '').slice(-10)}`)
+  const groupKeySrc = (uploadId || uniprots.join('')).replace(/[^\w]/g, '').slice(-10)
+  const blastGroups = groupHighIdentity(homologPairs, `hg${groupKeySrc}`)
   if (blastGroups.length) judgment.blastGroups = blastGroups
 
   return NextResponse.json({ ok: true, judgment, sequenceAttribution })

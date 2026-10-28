@@ -18,7 +18,8 @@ import { propagateFamilyBlast } from '@/lib/eval/blast-family'
 import { getEngineSummary } from '@/lib/eval/llm-provider'
 import { fetchUniprotInfo } from '@/lib/eval/uniprot'
 import { attributeSequences } from '@/lib/eval/homology'
-import type { FormInsights, ParsedImage, ParsedSequence, RelationJudgment, SequenceAttribution } from '@/lib/eval/types'
+import { computeSharedStructures } from '@/lib/eval/shared-structures'
+import type { FormInsights, ParsedImage, ParsedSequence, RelationJudgment, SequenceAttribution, SharedStructure } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -184,6 +185,9 @@ async function runBatchReportGeneration(ctx: {
     // LLM 生成合并报告（三段式）
     const generated = await generateMergedReport({ targets, relation, goal: ctx.goal, insights, images, sequenceAttribution })
 
+    // v1.22 共有结构（同一 PDB 覆盖多个输入 UniProt 的交集）
+    const sharedStructures = computeSharedStructures(targets)
+
     // markdown + title + 终态落库
     const engineSummary = await getEngineSummary()
     await db.batchReport.update({
@@ -192,6 +196,7 @@ async function runBatchReportGeneration(ctx: {
         title: generated.title || null,
         markdown: generated.fullMarkdown?.trim() || null,
         sequenceAttribution: sequenceAttribution.length ? JSON.stringify(sequenceAttribution) : null,
+        sharedStructures: sharedStructures.length ? JSON.stringify(sharedStructures) : null,
         engine: engineSummary,
         status: 'done',
         error: generated.ok ? null : (generated.errors.join('；').slice(0, 500) || 'LLM 生成失败'),
@@ -216,6 +221,7 @@ async function runBatchReportGeneration(ctx: {
           batchReportId,
           engineSummary,
           sequenceAttribution,
+          sharedStructures,
           insights,
         })
         const dir = path.join(process.cwd(), 'db', 'reports', batchReportId)
@@ -316,9 +322,11 @@ export async function GET(req: Request) {
   let jobIds: string[] = []
   let relation: unknown = null
   let sequenceAttribution: SequenceAttribution[] | null = null
+  let sharedStructures: SharedStructure[] | null = null
   try { jobIds = JSON.parse(record.jobIds) } catch { /* ignore */ }
   try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
   try { sequenceAttribution = record.sequenceAttribution ? JSON.parse(record.sequenceAttribution) : null } catch { /* ignore */ }
+  try { sharedStructures = record.sharedStructures ? JSON.parse(record.sharedStructures) : null } catch { /* ignore */ }
 
   // v1.12：异步生成状态。
   // 旧记录兼容：db:push 前 status 列被补填为 'running'，但当时同步生成已落 markdown —
@@ -339,6 +347,7 @@ export async function GET(req: Request) {
         jobIds,
         relation,
         sequenceAttribution,
+        sharedStructures,
         title: record.title ?? '',
         markdown: '',
         status: 'running',
@@ -361,6 +370,7 @@ export async function GET(req: Request) {
       jobIds,
       relation,
       sequenceAttribution,
+      sharedStructures,
       title: record.title ?? '',
       markdown: record.markdown ?? '',
       status,

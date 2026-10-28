@@ -92,3 +92,59 @@ export function toLogLines(logs: string[] | null | undefined): string[] {
   if (!Array.isArray(logs)) return []
   return logs
 }
+
+/**
+ * 解析多 UniProt ID 输入（v1.22）：支持逗号、空格、换行、分号分隔。
+ * 返回去重保序的有效 ID 列表 + 无效 token（用于提示）。
+ */
+export function parseMultiUniprotIds(text: string): { valid: string[]; invalid: string[] } {
+  const tokens = text
+    .split(/[\s,;]+/)
+    .map((t) => t.trim().toUpperCase())
+    .filter(Boolean)
+  const valid: string[] = []
+  const invalid: string[] = []
+  const seen = new Set<string>()
+  for (const t of tokens) {
+    if (seen.has(t)) continue
+    seen.add(t)
+    if (isValidUniprotId(t)) valid.push(t)
+    else invalid.push(t)
+  }
+  return { valid, invalid }
+}
+
+/** 单条 FASTA 序列（解析多 FASTA 用） */
+export interface FastaEntry {
+  header: string
+  seq: string
+  length: number
+}
+
+/**
+ * 解析多 FASTA 序列（v1.22）：文本中含多个 `>` 标题段时拆成多条；
+ * 无 `>` 头的裸序列作为单条返回。
+ * 每条序列去除非法字符、转大写。
+ */
+export function parseMultiFasta(text: string): FastaEntry[] {
+  const lines = text.split('\n').map((l) => l.trimEnd())
+  const entries: FastaEntry[] = []
+  let cur: FastaEntry | null = null
+  for (const line of lines) {
+    if (line.startsWith('>')) {
+      if (cur && cur.seq) entries.push(cur)
+      cur = { header: line.slice(1).trim(), seq: '', length: 0 }
+    } else {
+      const cleaned = line.toUpperCase().replace(/[^A-Z*]/g, '')
+      if (cur && cleaned) {
+        cur.seq += cleaned
+        cur.length = cur.seq.length
+      } else if (!cur && cleaned) {
+        // 无 FASTA 头的裸序列
+        cur = { header: '', seq: cleaned, length: cleaned.length }
+      }
+    }
+  }
+  if (cur && cur.seq) entries.push(cur)
+  return entries
+}

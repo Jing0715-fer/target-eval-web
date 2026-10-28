@@ -177,6 +177,8 @@ export interface BatchReportInfo {
   relation: RelationJudgment
   /** 评估表序列归属（v1.10，历史报告可能缺失） */
   sequenceAttribution?: SequenceAttribution[] | null
+  /** 共有结构（v1.22：同一 PDB 覆盖多个输入 UniProt；历史报告可能缺失） */
+  sharedStructures?: SharedStructure[] | null
   /** v1.14：LLM 生成的描述性标题 */
   title?: string
   markdown: string
@@ -365,6 +367,33 @@ export interface PdbEntry {
   isNmr: boolean
   /** 该结构覆盖的 UniProt 残基编号范围（如 "A=695-1022"；旧记录无此字段） */
   chainRanges?: string
+}
+
+// ─── 共有结构（多靶点交集）──────────────────────────────────────────────────────
+
+/** 共有结构对单个靶点的覆盖信息 */
+export interface SharedStructureCoverage {
+  uniprotId: string
+  proteinName: string
+  /** 该 PDB 覆盖此 UniProt 的链范围（如 "A=695-1022"） */
+  chainRanges?: string
+}
+
+/** 共有结构 — 同一 PDB 条目覆盖 ≥2 个输入 UniProt 的结构（复合物/共结晶等） */
+export interface SharedStructure {
+  pdbId: string
+  method: string
+  resolution: number | null
+  title: string
+  releaseDate: string
+  ligands: string[]
+  journal: string
+  pubmedId: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  coverage: SharedStructureCoverage[]
+  targetCount: number
 }
 
 export interface BlastHit {

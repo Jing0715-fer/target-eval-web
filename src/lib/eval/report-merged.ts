@@ -12,7 +12,8 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown } from './report-html'
-import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution } from './types'
+import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution, type SharedStructure } from './types'
+import { computeSharedStructures } from './shared-structures'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
 
@@ -259,6 +260,18 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
   digestLines.push('')
   digestLines.push('【各靶点数据摘要】')
   digestLines.push(targets.map(targetDigest).join('\n\n'))
+
+  // 共有结构（v1.22）：同一 PDB 覆盖多个输入 UniProt —— 复合物/共结晶等物理关联证据
+  const sharedStructures = computeSharedStructures(targets)
+  if (sharedStructures.length > 0) {
+    digestLines.push('')
+    digestLines.push(`【共有结构（同一 PDB 覆盖多个输入 UniProt — 复合物/共结晶/融合构建，${sharedStructures.length} 个）】`)
+    digestLines.push(sharedStructures.slice(0, 30).map(s => {
+      const cov = s.coverage.map(c => `${c.uniprotId}${c.chainRanges ? `（${c.chainRanges}）` : ''}`).join('、')
+      return `- ${s.pdbId} [${s.method}${s.resolution != null ? ` ${s.resolution.toFixed(2)}Å` : ''}] 覆盖 ${s.targetCount} 个靶点：${cov} — ${s.title.slice(0, 80)}`
+    }).join('\n'))
+  }
+
   const digest = digestLines.join('\n')
 
   const callPart = async (name: string, instruction: string): Promise<{ key: string; markdown: string; llmOk: boolean; error?: string }> => {
@@ -347,6 +360,8 @@ export interface MergedHtmlInput {
   sequenceAttribution?: SequenceAttribution[]
   /** v1.15：评估表 AI 解析要点（LLM 失败时作为兜底证据展示） */
   insights?: FormInsights | null
+  /** v1.22：共有结构（同一 PDB 覆盖多个输入 UniProt）；未传时内部从 targets 计算 */
+  sharedStructures?: SharedStructure[]
 }
 
 /** 图片内嵌（预算：≤6 张、总 ≤4MB，gel/sec 优先） */
@@ -423,6 +438,42 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <tbody>${attrRows}</tbody>
     </table></div>
   </section>` : ''
+
+  // v1.22 共有结构（同一 PDB 覆盖多个输入 UniProt — 复合物/共结晶/融合构建）
+  const sharedStructures = input.sharedStructures ?? computeSharedStructures(targets)
+  const sharedStructuresHtml = sharedStructures.length > 0 ? (() => {
+    const SHARED_PDB_COLGROUP = `<colgroup>
+      <col style="width:74px"><col style="width:62px"><col style="width:64px"><col style="width:160px"><col><col style="width:86px"><col style="width:72px">
+    </colgroup>`
+    const rows = sharedStructures.slice(0, 60).map(s => {
+      const covChips = s.coverage.map(c =>
+        `<span class="cov-chip" title="${esc(c.proteinName)}">${esc(c.uniprotId)}${c.chainRanges ? `<span class="cov-rng">${esc(c.chainRanges)}</span>` : ''}</span>`,
+      ).join(' ')
+      const lit = s.pubmedId
+        ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${s.pubmedId}/" target="_blank" rel="noopener">${s.pubmedId}</a>`
+        : '—'
+      return `
+      <tr>
+        <td class="td-id"><a href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener">${s.pdbId}</a></td>
+        <td><span class="mth mth-${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}">${s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : esc(s.method.slice(0, 8))}</span></td>
+        <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
+        <td class="cov-cells">${covChips}</td>
+        <td class="t-title" title="${esc(s.title)}">${esc(s.title.slice(0, 70))}</td>
+        <td class="num">${esc(s.releaseDate.slice(0, 10))}</td>
+        <td class="td-id">${lit}</td>
+      </tr>`
+    }).join('')
+    return `
+  <section class="sec" id="shared-pdbs">
+    <h2>共有结构<span class="sec-en">Shared Structures</span></h2>
+    <p class="note">同一 PDB 条目同时覆盖多个输入 UniProt 的结构（复合物亚基共结晶 / 抗体-抗原复合物 / 融合构建等）。覆盖靶点列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号）。按覆盖靶点数降序、分辨率升序排列。</p>
+    <div class="tbl-wrap"><table class="tbl-data">
+      ${SHARED_PDB_COLGROUP}
+      <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>覆盖靶点</th><th>标题</th><th class="num">释放日期</th><th>文献</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </section>`
+  })() : ''
 
   const targetMeta = targets.map(t => `
     <div class="tgt-card">
@@ -583,6 +634,10 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .t-title { font-size:12px; color:var(--sub); }
   .mth { font-size:10.5px; padding:1px 7px; border-radius:3px; white-space:nowrap; }
   .mth-xray { background:#eff6ff; color:#1d4ed8; } .mth-cryoem { background:#fdf4ff; color:#a21caf; } .mth-nmr { background:#fff7ed; color:#c2410c; } .mth-other { background:#f5f5f4; color:var(--sub); }
+  /* v1.22 共有结构覆盖靶点列 */
+  .cov-cells { max-width:260px; }
+  .cov-chip { display:inline-block; font-family:var(--mono); font-size:10px; line-height:1.6; padding:1px 6px; margin:1px 2px 1px 0; border-radius:3px; background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; white-space:nowrap; }
+  .cov-rng { display:inline-block; margin-left:3px; padding:0 3px; border-radius:2px; background:#f0fdf4; color:#047857; font-size:9.5px; }
   .pdb-fold, .fold { border:1px solid var(--line); border-radius:5px; padding:10px 16px; margin:12px 0; }
   .pdb-fold > summary, .fold > summary { font-size:13.5px; font-weight:600; cursor:pointer; color:#064e3b; list-style:none; }
   .pdb-fold > summary::before, .fold > summary::before { content:'＋ '; color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-weight:400; }
@@ -634,6 +689,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <li><a href="#matrix">跨靶点对比矩阵</a></li>
       ${matrixHtml ? '<li><a href="#homolog">' + (isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性') + '</a></li>' : ''}
       ${attributionHtml ? '<li><a href="#attribution">评估表序列归属</a></li>' : ''}
+      ${sharedStructuresHtml ? '<li><a href="#shared-pdbs">共有结构</a></li>' : ''}
       <li><a href="#pdbs">各靶点 PDB 结构</a></li>
       ${blastBlocks ? '<li><a href="#blast-hits">同源结构（BLAST/序列检索）</a></li>' : ''}
       ${litBlocks ? '<li><a href="#literature">各靶点文献</a></li>' : ''}
@@ -660,6 +716,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 
   ${matrixHtml}
   ${attributionHtml}
+  ${sharedStructuresHtml}
 
   <section class="sec" id="pdbs">
     <h2>三、各靶点 PDB 结构<span class="sec-en">Structures by Target</span></h2>

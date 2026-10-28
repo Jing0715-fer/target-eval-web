@@ -28,6 +28,7 @@ import { mdComponents } from './result-view'
 import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { PdbTable } from './pdb-table'
+import { SharedPdbTable, SharedStructuresHeader } from './shared-pdb-table'
 import type { BatchReportInfo, MergedTargetLite } from './types'
 
 export interface MergedReportViewProps {
@@ -114,6 +115,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const llmOk = report.llmOk !== false && md.length > 0
   const homologPairs = (rel.homologPairs ?? []).filter(p => p.identity > 0)
   const attribution = report.sequenceAttribution ?? []
+  const sharedStructures = report.sharedStructures ?? []
   const targets = report.targets ?? []
   const pdbTargets = targets.filter(t => t.directPdbs.length > 0)
   const blastTargets = targets.filter(t => t.blastHits.length > 0 || t.blastStatus)
@@ -382,6 +384,25 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </CardContent>
         </Card>
       </motion.section>
+
+      {/* 3.5 共有结构（v1.22 — 同一 PDB 覆盖多个输入 UniProt） */}
+      {sharedStructures.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.22, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+          aria-labelledby="sec-merged-shared"
+        >
+          <SharedStructuresHeader count={sharedStructures.length} total={targets.length} />
+          <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+            同一 PDB 条目同时覆盖多个输入 UniProt 的结构（复合物亚基共结晶 / 抗体-抗原复合物 / 融合构建等）。
+            「覆盖靶点」列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号）。
+            按覆盖靶点数降序、分辨率升序排列。
+          </p>
+          <SharedPdbTable shared={sharedStructures} />
+        </motion.section>
+      )}
 
       {/* 4. 各靶点 PDB 结构（v1.11 — 带 UniProt 归属，与单靶点结果页同等粒度） */}
       {pdbTargets.length > 0 && (

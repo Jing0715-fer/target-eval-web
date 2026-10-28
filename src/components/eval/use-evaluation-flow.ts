@@ -74,6 +74,17 @@ function buildBatchNote(judgment: RelationJudgment, total: number): string {
   return `本批次共评估 ${total} 个靶点，经分析为${typeText}${judgment.rationale ? `（${judgment.rationale.slice(0, 160)}）` : ''}，各靶点分别出具报告`
 }
 
+/** 关系判断完全失败时的兜底独立判断（保证合并报告仍能生成） */
+function fallbackIndependentJudgment(): RelationJudgment {
+  return {
+    related: false,
+    relationType: 'independent',
+    confidence: 'low',
+    rationale: `关系判断未能完成，已按相互独立项目处理`,
+    strategy: '各靶点独立推进结构解析评估',
+  }
+}
+
 /** v1.19 自动下载记录（模块级：同一页面会话内每个报告只自动下载一次；切靶点/重渲染不重复） */
 const autoDownloadedKeys = new Set<string>()
 
@@ -343,11 +354,12 @@ export function useEvaluationFlow() {
     startTick()
 
     // ── ① 靶点关系判断（含 v1.10 同源归并：系统序列比对 + 序列归属；失败降级为独立报告）──
+    // v1.22：uploadId 可选 — UniProt/序列多输入模式无 uploadId 也能做关系判断
     const uploadId = (requests[0]?.docxJobId ?? requests[0]?.uploadId ?? '').trim() || undefined
     const uniprots = requests.map(r => (r.uniprotFromDocx ?? r.uniprot ?? '').trim().toUpperCase()).filter(Boolean)
     let judgment: RelationJudgment | null = null
     let attribution: SequenceAttribution[] | undefined
-    if (uploadId && new Set(uniprots).size >= 2) {
+    if (new Set(uniprots).size >= 2) {
       try {
         const rel = await judgeTargetRelation({ uploadId, uniprots, goal: requests[0]?.goal })
         judgment = rel.judgment
@@ -472,15 +484,17 @@ export function useEvaluationFlow() {
 
     const okItems = finished.filter(x => x.status === 'done' && x.jobId)
 
-    // ── ③ 关联批次：生成合并评估报告（含靶点关系分析章节）──
-    if (related && okItems.length >= 2 && uploadId) {
+    // ── ③ 生成合并评估报告（v1.22：无论关联与否都生成 — 含关系分析 + 共有结构 + 对比矩阵）。
+    // 关联批次：各靶点 deferred 模式（无独立报告），合并报告是唯一交付物。
+    // 非关联批次：各靶点 single 模式（有独立报告），合并报告额外提供关系性 + 共有结构分析。
+    if (okItems.length >= 2) {
       st.merging = true
       setBatch(snapshot())
       try {
         const merged = await generateBatchReport({
           jobIds: okItems.map(x => x.jobId as string),
           uploadId,
-          relation: judgment as RelationJudgment,
+          relation: (judgment ?? fallbackIndependentJudgment()) as RelationJudgment,
           goal: requests[0]?.goal,
         })
         st.mergedReport = merged
