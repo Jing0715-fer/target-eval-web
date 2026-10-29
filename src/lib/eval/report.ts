@@ -23,6 +23,8 @@ export interface ReportContext {
   batchNote?: string
   /** 客户提供的伴随序列（合并评估：UniProt 为主 + 构建边界分析） */
   providedSequence?: { sequence: string; comparison: SequenceComparison }
+  /** v1.23：用户指定的评估范围（UniProt 残基编号，1-based 闭区间）；报告题目与摘要中体现 */
+  range?: [number, number]
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
   /** BLAST 执行状态（跳过/失败原因 — 供报告说明） */
@@ -107,6 +109,7 @@ function buildDigest(ctx: ReportContext): string {
     lines.push(`基因: ${u.geneNames.join(', ') || '-'}`)
     lines.push(`物种: ${u.organism}`)
     lines.push(`序列长度: ${u.sequenceLength} aa`)
+    if (ctx.range) lines.push(`评估范围: 残基 ${ctx.range[0]}-${ctx.range[1]}（仅分析与该区间重叠的结构）`)
     if (u.functionText) lines.push(`功能注释: ${u.functionText.slice(0, 600)}`)
     if (u.subcellularLocations?.length) lines.push(`亚细胞定位: ${u.subcellularLocations.join('; ')}`)
     if (u.keywords?.length) lines.push(`关键词: ${u.keywords.join(', ')}`)

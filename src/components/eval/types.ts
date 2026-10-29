@@ -23,6 +23,8 @@ export interface EvaluateOptions {
   maxPdb: number
   /** 报告模式：single = 独立报告（默认）；deferred = 数据并入合并报告（关联靶点批量） */
   reportMode?: 'single' | 'deferred'
+  /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）；PDB/BLAST 命中过滤为与该区间重叠的结构 */
+  range?: [number, number]
 }
 
 export interface EvaluateRequest {
@@ -402,6 +404,9 @@ export interface BlastHit {
   identity: number
   evalue: number
   queryCoverage: number
+  /** v1.23：BLAST 命中在查询序列上的起止残基位置（1-based，闭区间）；旧记录可能缺失 */
+  queryFrom?: number
+  queryTo?: number
   method: string
   resolution: number | null
 }

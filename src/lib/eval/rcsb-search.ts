@@ -105,6 +105,8 @@ export async function searchRcsbHomologs(
         typeof ctx.query_beg === 'number' && typeof ctx.query_end === 'number' && ctx.query_end >= ctx.query_beg
           ? ctx.query_end - ctx.query_beg + 1
           : 0,
+      queryFrom: typeof ctx.query_beg === 'number' && ctx.query_beg > 0 ? ctx.query_beg : undefined,
+      queryTo: typeof ctx.query_end === 'number' && ctx.query_end > 0 ? ctx.query_end : undefined,
       method: '',
       resolution: null,
     }

@@ -8,11 +8,13 @@ import {
   Dna,
   FileText,
   LoaderCircle,
+  Ruler,
   Settings2,
   Sparkles,
   Target,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
@@ -63,6 +65,18 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [companionText, setCompanionText] = useState('')
   const companionInfo = useMemo(() => countResidues(companionText), [companionText])
   const companionValid = companionInfo.count >= MIN_COMPANION_LENGTH
+
+  // v1.23 评估范围限定（UniProt 残基编号，1-based 闭区间）— 仅 UniProt 单靶点无伴随序列时启用
+  const [rangeOpen, setRangeOpen] = useState(false)
+  const [rangeStart, setRangeStart] = useState('')
+  const [rangeEnd, setRangeEnd] = useState('')
+  const rangeStartN = parseInt(rangeStart, 10)
+  const rangeEndN = parseInt(rangeEnd, 10)
+  const rangeValid = Number.isFinite(rangeStartN) && Number.isFinite(rangeEndN)
+    && rangeStartN >= 1 && rangeEndN >= rangeStartN && rangeEndN <= 100000
+  // 多靶点或有伴随序列时不启用范围（语义不适用：多靶点各自范围不同；伴随序列已隐含构建边界）
+  const rangeEnabled = uniprotParsed.valid.length === 1 && !companionValid
+  const range = rangeEnabled && rangeValid ? [rangeStartN, rangeEndN] as [number, number] : undefined
 
   // 序列输入（v1.22：支持多 FASTA，每个 `>` 标题段一条）
   const [sequenceText, setSequenceText] = useState('')
@@ -199,14 +213,16 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     if (mode === 'uniprot') {
       // v1.22：支持多 UniProt ID — 每个 ID 一份独立作业（批量编排 + 关系判断 + 共有结构）。
       // 单 ID 时保留可选伴随序列（同靶点合并评估）；多 ID 时伴随序列不附加（语义不适用）。
+      // v1.23：单 ID 无伴随序列时支持评估范围限定（range）。
       const ids = uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT)
       const companion = companionText.trim() && companionValid && ids.length === 1 ? companionText.trim() : undefined
+      const reqRange = ids.length === 1 && !companion ? range : undefined
       requests = ids.map(id => ({
         mode: 'uniprot' as const,
         uniprot: id,
         sequence: companion,
         goal: trimmedGoal,
-        options,
+        options: { ...options, range: reqRange },
       }))
     } else if (mode === 'sequence') {
       // v1.22：支持多 FASTA — 每条序列一份独立作业（批量编排 + 关系判断 + 共有结构）。
@@ -392,6 +408,95 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                             {companionValid
                               ? '，将与 UniProt 合并为一次评估'
                               : `，少于 ${MIN_COMPANION_LENGTH} 个残基将被忽略`}
+                          </p>
+                        )}
+                      </div>
+                    </CollapsibleContent>
+                  </div>
+                </Collapsible>
+
+                {/* v1.23 评估范围限定（可选）— 仅单靶点无伴随序列时启用 */}
+                <Collapsible open={rangeOpen} onOpenChange={setRangeOpen} className="mt-2.5">
+                  <div className="rounded-md border border-stone-200 dark:border-stone-800">
+                    <CollapsibleTrigger
+                      className={cn(
+                        'flex min-h-11 w-full items-center gap-2 rounded-md px-3.5 py-2.5 text-xs font-medium outline-none transition-colors',
+                        rangeEnabled
+                          ? 'text-stone-600 hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60'
+                          : 'cursor-not-allowed text-stone-300 dark:text-stone-600',
+                      )}
+                    >
+                      <Ruler className={cn('size-4', rangeValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
+                      评估范围（可选）
+                      {rangeValid && (
+                        <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                          残基 {rangeStartN}-{rangeEndN}
+                        </span>
+                      )}
+                      <span className="ml-auto font-mono text-[10px] font-normal text-stone-400 dark:text-stone-500">
+                        {!rangeEnabled
+                          ? '多靶点/有伴随序列时不可用'
+                          : rangeValid
+                            ? '过滤 PDB/BLAST 命中为与该区间重叠的结构'
+                            : '限定分析与该区间重叠的结构'}
+                      </span>
+                      <ChevronDown
+                        className={cn(
+                          'size-4 shrink-0 text-stone-400 transition-transform duration-200',
+                          rangeOpen && 'rotate-180',
+                        )}
+                      />
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-1">
+                      <div className="flex flex-col gap-2 border-t border-stone-100 px-3.5 py-3.5 dark:border-stone-800">
+                        <div className="flex flex-wrap items-end gap-3">
+                          <div className="flex flex-col gap-1">
+                            <Label htmlFor="range-start" className="eval-eyebrow text-stone-500 dark:text-stone-400">起始残基</Label>
+                            <Input
+                              id="range-start"
+                              type="number"
+                              min={1}
+                              value={rangeStart}
+                              onChange={(e) => setRangeStart(e.target.value)}
+                              placeholder="如 695"
+                              className="h-9 w-28 rounded-md font-mono text-sm"
+                              disabled={!rangeEnabled}
+                            />
+                          </div>
+                          <span className="pb-2 text-stone-400">—</span>
+                          <div className="flex flex-col gap-1">
+                            <Label htmlFor="range-end" className="eval-eyebrow text-stone-500 dark:text-stone-400">结束残基</Label>
+                            <Input
+                              id="range-end"
+                              type="number"
+                              min={1}
+                              value={rangeEnd}
+                              onChange={(e) => setRangeEnd(e.target.value)}
+                              placeholder="如 1022"
+                              className="h-9 w-28 rounded-md font-mono text-sm"
+                              disabled={!rangeEnabled}
+                            />
+                          </div>
+                          {rangeValid && (
+                            <span className="pb-2 font-mono text-[11px] text-emerald-700 dark:text-emerald-400">
+                              覆盖 {rangeEndN - rangeStartN + 1} aa
+                            </span>
+                          )}
+                        </div>
+                        {!rangeEnabled && (
+                          <p className="text-xs text-stone-400 dark:text-stone-500">
+                            范围限定仅在单个 UniProt ID 且无伴随序列时可用（多靶点各自范围不同；伴随序列已隐含构建边界）。
+                          </p>
+                        )}
+                        {rangeEnabled && (rangeStart !== '' || rangeEnd !== '') && !rangeValid && (
+                          <p className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
+                            <CircleAlert className="size-3.5" />
+                            范围无效：需 1 ≤ 起始 ≤ 结束（如 EGFR 激酶域 695-1022）
+                          </p>
+                        )}
+                        {rangeValid && (
+                          <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+                            将过滤 PDB 列表与 BLAST 同源命中，仅保留链范围（UniProt 交叉引用）或查询区间与 {rangeStartN}-{rangeEndN} 重叠的结构；报告题目与摘要中也会体现该范围。无范围信息的结构默认保留。
                           </p>
                         )}
                       </div>

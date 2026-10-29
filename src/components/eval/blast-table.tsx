@@ -5,7 +5,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { MethodBadge } from './badges'
-import { formatEvalue, formatPercent, formatResolution } from './format'
+import { formatEvalue, formatResolution } from './format'
 import type { BlastHit } from './types'
 
 /** 折叠阈值：超过该数量时默认只显示前 N 条 */
@@ -27,7 +27,9 @@ export function BlastTable({ hits }: { hits: BlastHit[] }) {
               <TableHead className="eval-eyebrow h-9 min-w-44 text-stone-500 dark:text-stone-400">描述</TableHead>
               <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">Identity</TableHead>
               <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">E-value</TableHead>
-              <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">覆盖率</TableHead>
+              <TableHead className="eval-eyebrow h-9 min-w-28 text-stone-500 dark:text-stone-400" title="BLAST 命中在查询序列（=输入序列/UniProt 全长）上的起止残基位置（1-based 闭区间）">
+                覆盖范围
+              </TableHead>
               <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">方法</TableHead>
               <TableHead className="eval-eyebrow h-9 pr-4 text-stone-500 dark:text-stone-400">分辨率</TableHead>
             </TableRow>
@@ -61,7 +63,11 @@ export function BlastTable({ hits }: { hits: BlastHit[] }) {
                   {formatEvalue(h.evalue)}
                 </TableCell>
                 <TableCell className="font-mono text-xs tabular-nums text-stone-600 dark:text-stone-400">
-                  {formatPercent(h.queryCoverage)}
+                  {h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
+                    ? `${h.queryFrom}-${h.queryTo}`
+                    : h.queryCoverage != null && h.queryCoverage > 0
+                      ? `${h.queryCoverage} aa`
+                      : '—'}
                 </TableCell>
                 <TableCell>
                   <MethodBadge method={h.method} />

@@ -171,16 +171,21 @@ function methodLabel(p: PdbEntry): string {
 }
 
 function blastRowsHtml(hits: BlastHit[]): string {
-  return hits.map(h => `
+  return hits.map(h => {
+    const range = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
+      ? `${h.queryFrom}-${h.queryTo}`
+      : (h.queryCoverage != null && h.queryCoverage > 0 ? `${h.queryCoverage} aa` : '—')
+    return `
     <tr>
       <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
       <td class="t-desc">${esc(h.description)}</td>
       <td class="num">${h.identity.toFixed(1)}%</td>
       <td class="num">${esc(h.evalueRaw)}</td>
-      <td class="num">${esc(h.queryCoverage != null ? String(h.queryCoverage) : '—')}</td>
+      <td class="num">${esc(range)}</td>
       <td class="t-nowrap">${esc(h.method || '—')}</td>
       <td class="num">${h.resolution != null ? h.resolution.toFixed(2) : '—'}</td>
-    </tr>`).join('')
+    </tr>`
+  }).join('')
 }
 
 /** 文献条目（附关联 PDB chips） */
@@ -278,7 +283,9 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const { ctx, methodStats, llmMarkdown } = input
   const u = ctx.uniprot
   const dateStr = new Date().toISOString().slice(0, 10)
-  const proteinTitle = u ? `${u.proteinName}（${u.uniprotId}）` : '序列靶点评估'
+  // v1.23：题目体现评估范围（UniProt 残基编号区间）
+  const rangeSuffix = ctx.range ? ` · 残基 ${ctx.range[0]}-${ctx.range[1]}` : ''
+  const proteinTitle = u ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）` : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
   const geneStr = u?.geneNames.join(', ') || '—'
 
   // PMID ↔ PDB 双向关联
@@ -613,7 +620,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px">
       </colgroup>
-      <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖(aa)</th><th>方法</th><th class="num">分辨率 (Å)</th></tr></thead>
+      <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖范围</th><th>方法</th><th class="num">分辨率 (Å)</th></tr></thead>
       <tbody>${blastRowsHtml(ctx.blastHits)}</tbody>
     </table></div>`
     : `<p class="note">${esc(describeBlastStatus(ctx.blastStatus))}。同源结构证据在本报告中缺位，结论主要基于直接结构与文献证据；如需同源检索可重新评估并勾选「强制 BLAST」。</p>`}

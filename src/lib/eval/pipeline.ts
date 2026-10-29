@@ -25,6 +25,7 @@ import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
+import { filterPdbsByRange, filterBlastByRange } from './range-filter'
 import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
@@ -309,6 +310,11 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       )
       directPdbs = result.entries
       backfillChainRanges(directPdbs, uniprotInfo)
+      if (input.options.range) {
+        const before = directPdbs.length
+        directPdbs = filterPdbsByRange(directPdbs, input.options.range)
+        if (before !== directPdbs.length) log(`PDB 范围过滤：${before} → ${directPdbs.length}（限定 ${input.options.range[0]}-${input.options.range[1]}）`)
+      }
       const ligCount = directPdbs.filter(p => p.ligands.length > 0).length
       log(`PDB 详情完成：${directPdbs.length} 个结构（含配体 ${ligCount} 个）`)
     }
@@ -414,6 +420,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       const directSet = new Set(directPdbs.map(p => p.pdbId))
       const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
       blastHits = await enrichBlastHits(filtered, directSet)
+      if (input.options.range) blastHits = filterBlastByRange(blastHits, input.options.range)
       blastStatus = {
         status: blastHits.length > 0 ? 'ok' : 'no-hits',
         note: blastHits.length > 0 ? `${blastHits.length} 个同源命中${familyRep ? `（家族代表检索：结果将共享给 ≥${input.homologBlast?.minIdentity ?? 90}% 一致性的同源成员）` : ''}` : undefined,
@@ -443,8 +450,10 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
               const r = await fetchPdbEntries(pdbIds, maxPdb, (d, t) => report('rcsb', `补拉 PDB 详情 ${d}/${t}`, d / t), signal)
               directPdbs = r.entries
               backfillChainRanges(directPdbs, info)
+              if (input.options.range) directPdbs = filterPdbsByRange(directPdbs, input.options.range)
               const directSet2 = new Set(directPdbs.map(p => p.pdbId))
               blastHits = (await enrichBlastHits(filtered, directSet2)).filter(h => !directSet2.has(h.pdbId))
+              if (input.options.range) blastHits = filterBlastByRange(blastHits, input.options.range)
               blastStatus = {
                 status: blastHits.length > 0 ? 'ok' : 'no-hits',
                 note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
@@ -485,6 +494,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       const directSet = new Set(directPdbs.map(p => p.pdbId))
       const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
       blastHits = await enrichBlastHits(filtered, directSet)
+      if (input.options.range) blastHits = filterBlastByRange(blastHits, input.options.range)
       blastStatus = {
         status: blastHits.length > 0 ? 'ok' : 'no-hits',
         note: blastHits.length > 0 ? `${blastHits.length} 个同源命中` : undefined,
@@ -544,6 +554,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       providedSequence: providedSequence && comparison
         ? { sequence: providedSequence, comparison }
         : undefined,
+      range: input.options.range,
       directPdbs,
       blastHits,
       blastStatus,
@@ -581,6 +592,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
         providedSequence: providedSequence && comparison
           ? { sequence: providedSequence, comparison }
           : undefined,
+        range: input.options.range,
         directPdbs,
         blastHits,
         blastStatus,

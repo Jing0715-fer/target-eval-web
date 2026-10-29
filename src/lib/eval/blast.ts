@@ -61,6 +61,8 @@ function parseBlastXml(xml: string): BlastHit[] {
       evalue: parseFloat(evalueRaw) || 0,
       evalueRaw,
       queryCoverage,
+      queryFrom: queryFrom > 0 ? queryFrom : undefined,
+      queryTo: queryTo > 0 ? queryTo : undefined,
       method: '',
       resolution: null,
     })

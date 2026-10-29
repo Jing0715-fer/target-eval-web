@@ -13,6 +13,10 @@ export interface EvaluationOptions {
   maxPdb: number
   /** 报告生成模式：single = 各靶点独立报告（默认）；deferred = 跳过单靶点报告，数据并入合并报告（关联靶点批量评估用） */
   reportMode?: 'single' | 'deferred'
+  /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）。
+   *  设置后：PDB/BLAST 命中过滤为与该区间重叠的结构；报告题目显示范围。
+   *  仅 UniProt 单靶点模式（无伴随序列时）有效。 */
+  range?: [number, number]
 }
 
 // ─── UniProt ──────────────────────────────────────────────────────────────────
@@ -129,6 +133,11 @@ export interface BlastHit {
   identity: number
   evalue: number
   queryCoverage: number
+  /** v1.23：BLAST 命中在查询序列（=输入序列）上的起止残基位置（1-based，闭区间）。
+   *  UniProt 模式下即 UniProt 残基编号；查询序列为构建序列时为构建坐标。
+   *  旧记录可能缺失。 */
+  queryFrom?: number
+  queryTo?: number
   method: string
   resolution: number | null
   /** 原始 evalue 字符串（科学计数法） */

@@ -81,11 +81,22 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '配额检查失败，请稍后重试' }, { status: 500 })
   }
 
+  // v1.23 评估范围限定（UniProt 残基编号，1-based 闭区间）：仅 UniProt 单靶点无伴随序列时有效
+  const rawRange = body.options?.range
+  let range: [number, number] | undefined
+  if (Array.isArray(rawRange) && rawRange.length === 2) {
+    const s = Number(rawRange[0]), e = Number(rawRange[1])
+    if (Number.isFinite(s) && Number.isFinite(e) && s >= 1 && e >= s && e <= 100000) {
+      range = [Math.round(s), Math.round(e)]
+    }
+  }
+
   const options: EvaluationOptions = {
     skipBlast: body.options?.skipBlast ?? false,
     forceBlast: body.options?.forceBlast ?? false,
     maxPdb: Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
     reportMode: body.options?.reportMode === 'deferred' ? 'deferred' : 'single',
+    range,
   }
   const batchNote = body.batchNote?.trim().slice(0, 500) || undefined
 
