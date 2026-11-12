@@ -309,11 +309,24 @@ export interface ScoreItem {
   rating: string
 }
 
+/** v1.25：聚集形式对三方法的调整明细（评分卡展示；历史作业缺省） */
+export interface OligomerAdjustInfo {
+  label: string
+  stoichiometry: string
+  confidence: 'high' | 'medium' | 'low'
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
+}
+
 export interface Scores {
   xray: ScoreItem
   cryoem: ScoreItem
   nmr: ScoreItem
   overall: ScoreItem
+  /** v1.25：聚集形式调整明细 */
+  oligomerAdjust?: OligomerAdjustInfo
 }
 
 export interface MethodStats {
@@ -336,6 +349,8 @@ export interface OligomerEvidence {
 
 /** 蛋白聚集形式（寡聚态）分析结果（与后端 lib/eval/types.ts 契约一致） */
 export interface OligomerAnalysis {
+  /** v1.25：判定标签（如 "同源四聚体（homotetramer）"；历史作业缺省） */
+  label?: string
   summary: string
   category: OligomerCategory
   stoichiometry: string

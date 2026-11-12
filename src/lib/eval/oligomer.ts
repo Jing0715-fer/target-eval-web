@@ -370,6 +370,7 @@ export function analyzeOligomericState(input: OligomerInput): OligomerAnalysis {
   }
 
   return {
+    label: category === 'unknown' ? '未知' : stateLabel(decided!),
     summary,
     category,
     stoichiometry,

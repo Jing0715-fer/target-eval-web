@@ -152,9 +152,11 @@ function targetDigest(t: MergedTargetData): string {
   if (t.construct) {
     lines.push(`客户构建: ${t.construct.providedLength} aa（与全长一致性 ${t.construct.identity}%${t.construct.start != null && t.construct.end != null ? `，估计区间 ${t.construct.start}-${t.construct.end}` : ''}）`)
   }
-  // v1.24：聚集形式（寡聚态）— 各靶点小节的必写维度
+  // v1.24：聚集形式（寡聚态）— 各靶点小节的必写维度（v1.25：含评分调整值）
   if (t.oligomer) {
-    lines.push(`聚集形式: ${t.oligomer.summary}｜化学计量: ${t.oligomer.stoichiometry || '未知'}｜置信度: ${describeOligoConfidence(t.oligomer.confidence)}`)
+    lines.push(`聚集形式: ${t.oligomer.label || t.oligomer.summary}｜化学计量: ${t.oligomer.stoichiometry || '未知'}｜置信度: ${describeOligoConfidence(t.oligomer.confidence)}`)
+    const adj = t.scores.oligomerAdjust
+    if (adj) lines.push(`评分调整（已计入三方法分数）: X-ray ${adj.xray > 0 ? '+' : ''}${adj.xray} / Cryo-EM ${adj.cryoem > 0 ? '+' : ''}${adj.cryoem} / NMR ${adj.nmr > 0 ? '+' : ''}${adj.nmr} — ${adj.note}`)
     if (t.oligomer.evidence.length) {
       lines.push(`寡聚态证据: ${t.oligomer.evidence.map(e => `[${describeEvidenceSource(e.source)}] ${e.ref}`).join('；')}`)
     }
@@ -493,37 +495,40 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   </section>`
   })() : ''
 
-  // v1.24：聚集形式（寡聚态）分析 — 各靶点判定卡片 + 证据链（确定性数据模板直出）
+  // v1.25：聚集形式（寡聚态）— 不再单独成章：徽标融入刊头各靶点卡片，证据链以折叠形式挂在对比矩阵下方
   const oligoTargets = targets.filter(t => t.oligomer)
-  const oligomerHtml = oligoTargets.length ? `
-  <section class="sec" id="oligomer">
-    <h2>聚集形式分析<span class="sec-en">Oligomeric State</span></h2>
-    <p class="note">各靶点的蛋白聚集形式（寡聚态）由系统按证据优先级自动判定：已有结构（PDB 标题关键词 + 链化学计量）→ 同源结构 → UniProt interaction（SUBUNIT/INTERACTION 注释）→ 文献。寡聚态已纳入各靶点可行性评分与实验策略建议。</p>
-    ${oligoTargets.map(t => {
+  const oligoBadgeOf = (c: string) => c === 'monomer' ? '#047857' : c === 'hetero-complex' ? '#b45309' : c === 'homo-oligomer' ? '#065f46' : '#78716c'
+  const oligoCatOf = (c: string) => c === 'monomer' ? '单体' : c === 'homo-oligomer' ? '同源寡聚体' : c === 'hetero-complex' ? '异源复合物' : '未知'
+  const oligoFoldHtml = oligoTargets.length ? `
+    <details class="fold">
+      <summary>各靶点聚集形式判定与证据链（${oligoTargets.length} 个靶点 · 判定已计入各靶点评分，分析见合并评估分析章节）</summary>
+      ${oligoTargets.map(t => {
       const o = t.oligomer!
-      const badgeColor = o.category === 'monomer' ? '#047857' : o.category === 'hetero-complex' ? '#b45309' : o.category === 'homo-oligomer' ? '#065f46' : '#78716c'
-      const catZh = o.category === 'monomer' ? '单体' : o.category === 'homo-oligomer' ? '同源寡聚体' : o.category === 'hetero-complex' ? '异源复合物' : '未知'
       return `
-    <div class="oligo-card">
-      <div class="oligo-head">
-        <span class="tgt-inline">${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''}</span>
-        <span class="oligo-badge" style="background:${badgeColor}">${esc(catZh)}</span>
-        ${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}
-        <span class="oligo-conf">置信度：${esc(describeOligoConfidence(o.confidence))}</span>
-      </div>
-      <p class="oligo-summary">${esc(o.summary)}</p>
-      ${o.evidence.length ? `<div class="oligo-ev">${o.evidence.map(e => `<div class="oligo-ev-line"><span class="oligo-ev-src">${esc(describeEvidenceSource(e.source))}</span><span class="oligo-ev-ref">${esc(e.ref)}</span><span class="oligo-ev-text">${esc(e.text)}</span></div>`).join('')}</div>` : ''}
-      ${o.notes.length ? `<ul class="oligo-notes">${o.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
-    </div>`
-    }).join('')}
-  </section>` : ''
+      <div class="oligo-card">
+        <div class="oligo-head">
+          <span class="tgt-inline">${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''}</span>
+          <span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>
+          ${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}
+          <span class="oligo-conf">置信度：${esc(describeOligoConfidence(o.confidence))}</span>
+        </div>
+        <p class="oligo-summary">${esc(o.summary)}</p>
+        ${t.scores.oligomerAdjust ? `<p class="oligo-summary" style="font-size:12px">评分调整：X-ray ${t.scores.oligomerAdjust.xray > 0 ? '+' : ''}${t.scores.oligomerAdjust.xray} / Cryo-EM ${t.scores.oligomerAdjust.cryoem > 0 ? '+' : ''}${t.scores.oligomerAdjust.cryoem} / NMR ${t.scores.oligomerAdjust.nmr > 0 ? '+' : ''}${t.scores.oligomerAdjust.nmr} — ${esc(t.scores.oligomerAdjust.note)}</p>` : ''}
+        ${o.evidence.length ? `<div class="oligo-ev">${o.evidence.map(e => `<div class="oligo-ev-line"><span class="oligo-ev-src">${esc(describeEvidenceSource(e.source))}</span><span class="oligo-ev-ref">${esc(e.ref)}</span><span class="oligo-ev-text">${esc(e.text)}</span></div>`).join('')}</div>` : ''}
+      </div>`
+      }).join('')}
+    </details>` : ''
 
-  const targetMeta = targets.map(t => `
+  const targetMeta = targets.map(t => {
+    const o = t.oligomer
+    return `
     <div class="tgt-card">
       <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
-      <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}</div>
-    </div>`).join('')
+      ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
+      <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
+    </div>`
+  }).join('')
 
   const matrixRows = targets.map(t => `
     <tr>
@@ -684,13 +689,18 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .cov-cells { max-width:260px; }
   .cov-chip { display:inline-block; font-family:var(--mono); font-size:10px; line-height:1.6; padding:1px 6px; margin:1px 2px 1px 0; border-radius:3px; background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; white-space:nowrap; }
 
-  /* ── 聚集形式分析（v1.24） ── */
+  /* ── 聚集形式（v1.25：融入靶点卡片 + 矩阵下折叠）── */
   .oligo-card { border:1px solid var(--line); border-radius:5px; padding:14px 18px; background:#fff; margin:14px 0; }
   .oligo-head { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; }
   .tgt-inline { font-weight:700; font-size:13.5px; }
   .oligo-badge { color:#fff; font-size:11.5px; font-weight:700; padding:2px 11px; border-radius:3px; letter-spacing:1px; white-space:nowrap; }
   .oligo-stoich { font-family:var(--mono); font-size:11.5px; color:#1c1917; background:#f5f5f4; border:1px solid #e7e5e4; padding:1px 9px; border-radius:3px; white-space:nowrap; }
   .oligo-conf { font-size:11.5px; color:#57534e; margin-left:auto; white-space:nowrap; }
+  .tgt-oligo { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:5px; }
+  .tgt-oligo .oligo-badge { font-size:10px; padding:1px 8px; }
+  .tgt-oligo .oligo-stoich { font-size:10px; padding:0 7px; }
+  .tgt-oligo-conf { font-size:10.5px; color:var(--sub); }
+  .tgt-oligo-adj { margin-left:6px; font-size:10px; color:#047857; border:1px solid #a7f3d0; border-radius:99px; padding:0 7px; background:#ecfdf5; white-space:nowrap; }
   .oligo-summary { margin:6px 0 4px; font-size:13px; }
   .oligo-ev { margin:8px 0 0; border-top:1px dashed #e7e5e4; padding-top:8px; }
   .oligo-ev-line { display:flex; gap:10px; font-size:12px; padding:3px 0; align-items:baseline; }
@@ -752,7 +762,6 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       ${matrixHtml ? '<li><a href="#homolog">' + (isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性') + '</a></li>' : ''}
       ${attributionHtml ? '<li><a href="#attribution">评估表序列归属</a></li>' : ''}
       ${sharedStructuresHtml ? '<li><a href="#shared-pdbs">共有结构</a></li>' : ''}
-      ${oligomerHtml ? '<li><a href="#oligomer">聚集形式分析</a></li>' : ''}
       <li><a href="#pdbs">各靶点 PDB 结构</a></li>
       ${blastBlocks ? '<li><a href="#blast-hits">同源结构（BLAST/序列检索）</a></li>' : ''}
       ${litBlocks ? '<li><a href="#literature">各靶点文献</a></li>' : ''}
@@ -775,13 +784,12 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <thead><tr><th>UniProt</th><th>靶点</th><th>PDB</th><th>最佳分辨率</th><th>覆盖率</th><th>X-ray</th><th>Cryo-EM</th><th>NMR</th><th>总体</th></tr></thead>
       <tbody>${matrixRows}</tbody>
     </table></div>
+    ${oligoTargets.length ? `<p class="note">各靶点评分已包含蛋白聚集形式（寡聚态）调整（判定徽标见刊头靶点卡片，调整明细与证据链见下方折叠，分析已融入「一、合并评估分析」各靶点小节）。</p>${oligoFoldHtml}` : ''}
   </section>
 
   ${matrixHtml}
   ${attributionHtml}
   ${sharedStructuresHtml}
-
-  ${oligomerHtml}
 
   <section class="sec" id="pdbs">
     <h2>三、各靶点 PDB 结构<span class="sec-en">Structures by Target</span></h2>
@@ -805,7 +813,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   ${figHtml}
 
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v1.24）<br>
+    Generated by TargetEval · 多靶点合并评估（v1.25）<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
   </footer>

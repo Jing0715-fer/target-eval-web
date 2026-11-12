@@ -650,6 +650,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     coverage: coverage?.coveragePercent ?? 0,
     scores: {
       xray: scores.xray, cryoem: scores.cryoem, nmr: scores.nmr, overall: scores.overall,
+      /** v1.25：聚集形式调整明细（评分卡展示；无分析时缺省） */
+      oligomerAdjust: scores.oligomerAdjust,
     },
     methodStats: scores.methodStats,
     ligandCount: new Set(directPdbs.flatMap(p => p.ligands.map(l => l.split('(')[0].trim()))).size,

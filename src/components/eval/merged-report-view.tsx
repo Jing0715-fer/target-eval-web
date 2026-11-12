@@ -15,6 +15,7 @@ import {
   Layers,
   Link2,
   Loader2,
+  ChevronDown,
   Printer,
   SearchX,
   ShieldCheck,
@@ -406,68 +407,81 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         </motion.section>
       )}
 
-      {/* 3.5 聚集形式（寡聚态）分析（v1.24） */}
+      {/* 3.5 聚集形式（v1.25：融入为折叠块，不再单独成章 — 判定已计入各靶点评分，分析见合并分析全文） */}
       {oligoTargets.length > 0 && (
         <motion.section
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.35, delay: 0.22, ease: 'easeOut' }}
-          className="flex flex-col gap-3"
           aria-labelledby="sec-merged-oligomer"
         >
-          <div id="sec-merged-oligomer" className="eval-eyebrow text-stone-500 dark:text-stone-400">
-            Oligomeric State · 聚集形式分析（{oligoTargets.length} 个靶点）
-          </div>
-          <div className="flex flex-col gap-4">
-            {oligoTargets.map(t => {
-              const o = t.oligomer!
-              const catZh = o.category === 'monomer' ? '单体' : o.category === 'homo-oligomer' ? '同源寡聚体' : o.category === 'hetero-complex' ? '异源复合物' : '未知'
-              const confZh = o.confidence === 'high' ? '高' : o.confidence === 'medium' ? '中' : '低'
-              const badgeCls = o.category === 'monomer'
-                ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
-                : o.category === 'hetero-complex'
-                  ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
-                  : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
-              return (
-                <div key={t.jobId} className="flex flex-col gap-2.5 rounded-lg border border-stone-200 bg-white px-5 py-4 dark:border-stone-800 dark:bg-stone-900">
-                  <div className="flex flex-wrap items-center gap-2.5">
-                    <span className="text-sm font-semibold text-stone-900 dark:text-stone-50">
-                      {t.proteinName}
-                      {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-stone-400">{t.uniprotId}</span>}
+          <details className="group overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900">
+            <summary className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1.5 px-5 py-3.5 list-none [&::-webkit-details-marker]:hidden">
+              <ChevronDown className="size-3.5 shrink-0 text-stone-400 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+              <span id="sec-merged-oligomer" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+                Oligomeric State · 聚集形式判定（{oligoTargets.length} 个靶点 · 已计入各靶点评分）
+              </span>
+              <span className="ml-auto flex flex-wrap justify-end gap-1.5">
+                {oligoTargets.map(t => {
+                  const o = t.oligomer!
+                  const catZh = o.category === 'monomer' ? '单体' : o.category === 'homo-oligomer' ? '同源寡聚体' : o.category === 'hetero-complex' ? '异源复合物' : '未知'
+                  const badgeCls = o.category === 'monomer'
+                    ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                    : o.category === 'hetero-complex'
+                      ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+                      : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+                  return (
+                    <span key={`chip-${t.jobId}`} className={cn('inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold', badgeCls)}>
+                      {t.uniprotId ?? t.proteinName} {catZh}
                     </span>
-                    <span className={cn('inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-semibold', badgeCls)}>{catZh}</span>
-                    {o.stoichiometry && (
-                      <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 font-mono text-[10.5px] text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300">
-                        {o.stoichiometry}
+                  )
+                })}
+              </span>
+            </summary>
+            <div className="flex flex-col gap-4 border-t border-stone-200 px-5 py-4 dark:border-stone-800">
+              {oligoTargets.map(t => {
+                const o = t.oligomer!
+                const catZh = o.category === 'monomer' ? '单体' : o.category === 'homo-oligomer' ? '同源寡聚体' : o.category === 'hetero-complex' ? '异源复合物' : '未知'
+                const confZh = o.confidence === 'high' ? '高' : o.confidence === 'medium' ? '中' : '低'
+                const badgeCls = o.category === 'monomer'
+                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                  : o.category === 'hetero-complex'
+                    ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+                    : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+                return (
+                  <div key={t.jobId} className="flex flex-col gap-2.5 rounded-lg border border-stone-200 bg-white px-5 py-4 dark:border-stone-800 dark:bg-stone-900">
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <span className="text-sm font-semibold text-stone-900 dark:text-stone-50">
+                        {t.proteinName}
+                        {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-stone-400">{t.uniprotId}</span>}
                       </span>
+                      <span className={cn('inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-semibold', badgeCls)}>{catZh}</span>
+                      {o.stoichiometry && (
+                        <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 font-mono text-[10.5px] text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300">
+                          {o.stoichiometry}
+                        </span>
+                      )}
+                      <span className="ml-auto font-mono text-[10.5px] text-stone-400 dark:text-stone-500">置信度 {confZh}</span>
+                    </div>
+                    <p className="text-[13px] leading-6 text-stone-600 dark:text-stone-300">{o.summary}</p>
+                    {o.evidence.length > 0 && (
+                      <ul className="grid gap-1.5 sm:grid-cols-2">
+                        {o.evidence.map((e, i) => (
+                          <li key={`${t.jobId}-${e.ref}-${i}`} className="flex items-baseline gap-2 rounded-md border border-stone-100 bg-stone-50/60 px-2.5 py-1.5 text-[11px] leading-relaxed text-stone-600 dark:border-stone-800/60 dark:bg-stone-800/30 dark:text-stone-400">
+                            <span className="shrink-0 font-mono text-[10px] font-semibold text-emerald-700 dark:text-emerald-500">{e.ref}</span>
+                            <span className="min-w-0 flex-1">{e.text}</span>
+                          </li>
+                        ))}
+                      </ul>
                     )}
-                    <span className="ml-auto font-mono text-[10.5px] text-stone-400 dark:text-stone-500">置信度 {confZh}</span>
                   </div>
-                  <p className="text-[13px] leading-6 text-stone-600 dark:text-stone-300">{o.summary}</p>
-                  {o.evidence.length > 0 && (
-                    <ul className="grid gap-1.5 sm:grid-cols-2">
-                      {o.evidence.map((e, i) => (
-                        <li key={`${t.jobId}-${e.ref}-${i}`} className="flex items-baseline gap-2 rounded-md border border-stone-100 bg-stone-50/60 px-2.5 py-1.5 text-[11px] leading-relaxed text-stone-600 dark:border-stone-800/60 dark:bg-stone-800/30 dark:text-stone-400">
-                          <span className="shrink-0 font-mono text-[10px] font-semibold text-emerald-700 dark:text-emerald-500">{e.ref}</span>
-                          <span className="min-w-0 flex-1">{e.text}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {o.notes.length > 0 && (
-                    <ul className="ml-5 list-disc space-y-1 text-xs leading-relaxed text-stone-500 marker:text-stone-300 dark:text-stone-400 dark:marker:text-stone-600">
-                      {o.notes.map((n, i) => (
-                        <li key={i} className="pl-0.5">{n}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-          <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
-            聚集形式由系统按证据优先级判定（已有结构 → 同源结构 → UniProt interaction → 文献），已纳入各靶点评分与合并报告的实验策略建议。完整分析见下载的 HTML 报告。
-          </p>
+                )
+              })}
+              <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+                聚集形式由系统按证据优先级判定（已有结构 → 同源结构 → UniProt interaction → 文献）；判定与调整已计入各靶点评分，分析已融入上方合并分析全文，完整明细见下载的 HTML 报告。
+              </p>
+            </div>
+          </details>
         </motion.section>
       )}
 

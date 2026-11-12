@@ -175,6 +175,23 @@ export interface Scores {
   cryoem: ScoreItem
   nmr: ScoreItem
   overall: ScoreItem
+  /** v1.25：聚集形式（寡聚态）对三方法的调整明细（整数；无分析时缺省 — 历史作业） */
+  oligomerAdjust?: OligomerAdjustInfo
+}
+
+/** v1.25：聚集形式调整明细（score.ts computeOligomerAdjust 产出；评分卡展示） */
+export interface OligomerAdjustInfo {
+  /** 判定标签（如 "同源四聚体（homotetramer）"） */
+  label: string
+  /** 化学计量（如 "4 × 相同亚基"；unknown 为空串） */
+  stoichiometry: string
+  confidence: 'high' | 'medium' | 'low'
+  /** 三方法调整值（整数，直接叠加在舍入后的基础分上） */
+  xray: number
+  cryoem: number
+  nmr: number
+  /** 一句话调整依据（有效分子量/组装验证/方法适配） */
+  note: string
 }
 
 export interface MethodStats {
@@ -200,6 +217,8 @@ export interface OligomerEvidence {
 
 /** 蛋白聚集形式分析结果（oligomer.ts 产出，评分/报告/前端消费） */
 export interface OligomerAnalysis {
+  /** v1.25：判定标签（如 "同源四聚体（homotetramer）"；历史作业缺省 — 由 summary 回退） */
+  label?: string
   /** 判定汇总一句话（含判定依据） */
   summary: string
   category: OligomerCategory
