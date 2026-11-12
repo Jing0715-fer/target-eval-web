@@ -192,7 +192,8 @@ export interface RelationJudgeResponse {
 }
 
 export async function judgeTargetRelation(input: {
-  uploadId: string
+  /** v1.22：UniProt/序列多输入模式无 uploadId — 可选 */
+  uploadId?: string
   uniprots: string[]
   goal?: string
 }): Promise<RelationJudgeResponse> {

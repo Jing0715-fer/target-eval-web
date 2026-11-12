@@ -6,9 +6,10 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, BlastStatusInfo, FormInsights, LiteratureItem, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
+import type { BlastHit, BlastStatusInfo, FormInsights, LiteratureItem, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
 import { describeBlastStatus } from './types'
+import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 
@@ -35,6 +36,8 @@ export interface ReportContext {
   literature: LiteratureItem[]
   images: ParsedImage[]
   scores: Scores & { rationale: { xray: string; cryoem: string; nmr: string; overall: string } }
+  /** v1.24：聚集形式（寡聚态）分析（oligomer.ts 产出） */
+  oligomer?: OligomerAnalysis
 }
 
 const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目负责人视角），为蛋白靶点撰写专业的结构解析可行性评估报告。写作要求：
@@ -152,6 +155,24 @@ function buildDigest(ctx: ReportContext): string {
   }
 
   lines.push('')
+  lines.push('【蛋白聚集形式（寡聚态）分析 — 系统判定，报告必写】')
+  if (ctx.oligomer) {
+    lines.push(`判定: ${ctx.oligomer.summary}`)
+    lines.push(`化学计量: ${ctx.oligomer.stoichiometry || '未知'} · 置信度: ${describeOligoConfidence(ctx.oligomer.confidence)}`)
+    if (ctx.oligomer.evidence.length) {
+      lines.push('证据链（按优先级：已有结构 → 同源结构 → UniProt interaction → 文献）:')
+      lines.push(ctx.oligomer.evidence.map(e => `  - [${describeEvidenceSource(e.source)}] ${e.ref}: ${e.text}`).join('\n'))
+    }
+    if (ctx.oligomer.notes.length) {
+      lines.push('对结构解析策略的影响（系统要点，报告中需展开呼应）:')
+      lines.push(ctx.oligomer.notes.map(n => `  - ${n}`).join('\n'))
+    }
+    lines.push('（聚集形式是结构解析可行性的关键维度：请在下文「已有结构研究全景」的「构象状态与配体覆盖」小节与「实验方案建议」的构建设计/表达纯化策略中，明确呼应上述寡聚态判定与影响要点 — 组装界面保留/有效分子量变化/组装验证实验（SEC-MALS）/共表达 vs 体外组装选择等；证据不足处如实说明）')
+  } else {
+    lines.push('（本次未获得寡聚态分析数据 — 如实说明，不要虚构聚集形式）')
+  }
+
+  lines.push('')
   lines.push(`【已有 PDB 结构】共 ${pdbs.length} 个（X-ray ${xrayCount} / Cryo-EM ${cryoemCount} / NMR ${nmrCount}）${bestRes != null ? `，最佳分辨率 ${bestRes}Å` : ''}`)
   if (timeline) lines.push(`按释放年份分布: ${timeline}`)
   if (topLigands) lines.push(`高频配体: ${topLigands}`)
@@ -263,7 +284,7 @@ function partBInstruction(): string {
 这是本报告的核心章节，要求"尽量全面总结已有结构的研究情况"，按以下小节展开：
 - ### 研究历程概览：按年份分布描述该靶点结构研究的时间线（哪些年份集中发表、近年趋势说明了什么）
 - ### 方法学分布与代表性结构：X-ray/Cryo-EM/NMR 各自的数量与代表作（点名 PDB ID + 分辨率 + 配体状态 + 期刊），指出方法学上的研究成熟度
-- ### 构象状态与配体覆盖：已覆盖哪些配体结合态/突变体/复合物形式，哪些状态仍缺失（基于配体列表与结构标题推断，禁止编造）
+- ### 构象状态与配体覆盖：已覆盖哪些配体结合态/突变体/复合物形式，哪些状态仍缺失（基于配体列表与结构标题推断，禁止编造）；结合数据上下文中的「蛋白聚集形式（寡聚态）分析」，说明已有结构以何种装配形式（单体/同源寡聚/异源复合物）解析、与功能形式的对应关系
 - ### 结构覆盖与空白区：覆盖区间 vs 未覆盖区间（引用具体区间号），分析空白区可能的生物学意义（如无序区/跨膜区/末端结构域）与研究机会
 - 篇幅 700-1000 字
 
@@ -315,8 +336,8 @@ ${ctx.images.map(i => {
 - ### 构建设计：${cmp
       ? `客户已提供构建序列（${cmp.providedLength} aa${cmp.start != null && cmp.end != null ? `，估计对应全长 ${cmp.start}-${cmp.end} 位` : ''}，与全长一致性 ${cmp.identity}%）— 先评估该构建边界的合理性（与已有结构覆盖区间/结构域边界的匹配度），再给出微调建议（标签位置、端部微调、是否需稳定化突变）
 - 禁止无视客户已有构建而另给一套完全不同的边界；若现有构建存在明显缺陷（如包含无序区/缺失关键结构域/跨膜区未处理），需明确指出并给出具体调整区间`
-      : '基于结构域特征与覆盖空白，建议截短边界（引用具体区间号）、标签位置、是否需要点突变（如无序区删除/糖基化位点突变/稳定化突变）'}
-- ### 表达与纯化策略：推荐表达系统（基于物种与结构域类型）、纯化流程要点（含去垢剂选择若为膜蛋白）
+      : '基于结构域特征与覆盖空白，建议截短边界（引用具体区间号）、标签位置、是否需要点突变（如无序区删除/糖基化位点突变/稳定化突变）'}${ctx.oligomer ? '；聚集形式考量：若为同源寡聚体，截短边界必须保留寡聚化界面/组装结构域（引用证据中的多拷贝链结构）；若为异源复合物依赖，说明单独亚基构建与复合物构建的分阶段策略' : ''}
+- ### 表达与纯化策略：推荐表达系统（基于物种与结构域类型）、纯化流程要点（含去垢剂选择若为膜蛋白）${ctx.oligomer && ctx.oligomer.category !== 'monomer' ? '；组装验证：SEC-MALS/DLS 验证实际聚集状态与化学计量（引用寡聚态分析判定），同源寡聚体验证表观分子量为单体整数倍，异源复合物需确定亚基化学计量比' : ''}
 - ### 时间规划：Markdown 表格（阶段/预计时间/关键里程碑/风险点），总计给出一个现实的时间范围
 - 篇幅 400-600 字
 

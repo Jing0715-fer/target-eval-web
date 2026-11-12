@@ -273,6 +273,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const nextNo = () => String(++secNo).padStart(2, '0')
 
   const scoreNo = nextNo()
+  const oligoNo = summary.oligomer ? nextNo() : null
   const reportNo = nextNo()
   const assetsNo = assets.length > 0 ? nextNo() : null
   const pdbNo = nextNo()
@@ -296,6 +297,16 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
     : blastViaRcsb
       ? 'RCSB 序列检索（NCBI 拥堵兜底）'
       : (blastInfo ? blastSubMap[blastInfo.status] : undefined) ?? 'NCBI BLAST'
+
+  /** v1.24：聚集形式（寡聚态）分析 */
+  const oligo = summary.oligomer
+  const oligoCatZh = oligo?.category === 'monomer' ? '单体' : oligo?.category === 'homo-oligomer' ? '同源寡聚体' : oligo?.category === 'hetero-complex' ? '异源复合物' : '未知'
+  const oligoConfZh = oligo ? (oligo.confidence === 'high' ? '高' : oligo.confidence === 'medium' ? '中' : '低') : ''
+  const oligoBadgeCls = oligo?.category === 'monomer'
+    ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+    : oligo?.category === 'hetero-complex'
+      ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+      : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
 
   return (
     <div className="flex flex-col gap-8">
@@ -438,6 +449,67 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           </CardContent>
         </Card>
       </motion.section>
+
+      {/* 3.5 聚集形式（寡聚态）分析（v1.24） */}
+      {oligo && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.15, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+          aria-labelledby="sec-oligomer"
+        >
+          <div id="sec-oligomer">
+            <SectionHeader no={oligoNo!} title="蛋白聚集形式分析" en="Oligomeric State" count={`置信度 ${oligoConfZh}`} />
+          </div>
+          <Card className="gap-0 rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
+            <CardContent className="flex flex-col gap-4 px-5 py-5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className={cn('inline-flex min-h-7 items-center rounded-md border px-2.5 text-xs font-semibold', oligoBadgeCls)}>
+                  {oligoCatZh}
+                </span>
+                {oligo.stoichiometry && (
+                  <span className="rounded-md border border-stone-200 bg-stone-50 px-2.5 py-1 font-mono text-[11px] text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300">
+                    {oligo.stoichiometry}
+                  </span>
+                )}
+                <span className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
+                  判定依据：已有结构 → 同源结构 → UniProt interaction → 文献
+                </span>
+              </div>
+              <p className="text-sm leading-7 text-stone-700 dark:text-stone-300">{oligo.summary}</p>
+              {oligo.evidence.length > 0 && (
+                <div className="overflow-hidden rounded-lg border border-stone-200 dark:border-stone-800">
+                  <div className="eval-eyebrow border-b border-stone-200 bg-stone-50 px-3.5 py-2 text-[10px] tracking-widest text-stone-500 dark:border-stone-800 dark:bg-stone-900/80 dark:text-stone-400">
+                    证据链 · EVIDENCE
+                  </div>
+                  <ul className="divide-y divide-stone-100 dark:divide-stone-800/60">
+                    {oligo.evidence.map((e, i) => (
+                      <li key={`${e.ref}-${i}`} className="flex flex-col gap-1 px-3.5 py-2.5 sm:flex-row sm:items-baseline sm:gap-3">
+                        <span className="w-36 shrink-0 text-[11px] font-medium text-emerald-800 dark:text-emerald-500">
+                          {e.source === 'pdb-title' ? '已有结构 · 标题' : e.source === 'pdb-stoichiometry' ? '已有结构 · 链化学计量' : e.source === 'blast-title' ? '同源结构 · 标题（推断）' : e.source === 'uniprot-subunit' ? 'UniProt · 亚基注释' : e.source === 'uniprot-interaction' ? 'UniProt · 相互作用' : '文献标题'}
+                        </span>
+                        <span className="w-24 shrink-0 font-mono text-[11px] text-stone-500 dark:text-stone-400">{e.ref}</span>
+                        <span className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">{e.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {oligo.notes.length > 0 && (
+                <ul className="ml-5 list-disc space-y-1.5 text-sm leading-relaxed text-stone-600 marker:text-stone-400 dark:text-stone-300 dark:marker:text-stone-500">
+                  {oligo.notes.map((n, i) => (
+                    <li key={i} className="pl-1">{n}</li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+                聚集形式由系统按证据优先级自动判定，已纳入上方可行性评分与报告的构建设计/表达纯化策略建议。
+              </p>
+            </CardContent>
+          </Card>
+        </motion.section>
+      )}
 
       {/* 4. 报告操作条 */}
       <motion.section

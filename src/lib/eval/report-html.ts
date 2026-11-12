@@ -11,6 +11,7 @@ import * as path from 'node:path'
 import type { BlastHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats } from './types'
 import { describeBlastStatus } from './types'
 import type { ReportContext } from './report'
+import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
 
@@ -312,16 +313,50 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     : ''
 
   // 动态章节编号：一 llm / 二 scores / 三 pdbs / 后续按存在性编号
-  const cnNums = ['一', '二', '三', '四', '五', '六', '七']
+  const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八']
   let secNo = 3
   // v1.7+：BLAST 章节在 0 命中/跳过/失败时也渲染状态说明（不再凭空消失）
   const blastRan = ctx.blastStatus && (ctx.blastStatus.status === 'ok' || ctx.blastStatus.status === 'no-hits')
   const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus)
+  const oligoNo = ctx.oligomer ? ++secNo : 0
   const blastNo = showBlastSec ? ++secNo : 0
   const litNo = ctx.literature.length ? ++secNo : 0
   const assetsNo = embedded.length ? ++secNo : 0
 
   const scoreColor = (n: number) => (n >= 7 ? '#047857' : n >= 5 ? '#b45309' : '#b91c1c')
+
+  // v1.24：聚集形式（寡聚态）分析章节（确定性数据 — 判定/证据链/影响要点模板直出）
+  const oligo = ctx.oligomer
+  const oligoConfZh = oligo ? describeOligoConfidence(oligo.confidence) : ''
+  const oligoBadgeColor = oligo?.category === 'monomer' ? '#047857' : oligo?.category === 'hetero-complex' ? '#b45309' : oligo?.category === 'homo-oligomer' ? '#065f46' : '#78716c'
+  const oligoCategoryZh = oligo?.category === 'monomer' ? '单体' : oligo?.category === 'homo-oligomer' ? '同源寡聚体' : oligo?.category === 'hetero-complex' ? '异源复合物' : '未知'
+  const oligoHtml = oligo ? `
+  <section class="sec" id="oligomer">
+    <h2>${cnNums[oligoNo - 1]}、蛋白聚集形式分析<span class="sec-en">Oligomeric State</span></h2>
+    <div class="oligo-card">
+      <div class="oligo-head">
+        <span class="oligo-badge" style="background:${oligoBadgeColor}">${esc(oligoCategoryZh)}</span>
+        ${oligo.stoichiometry ? `<span class="oligo-stoich">${esc(oligo.stoichiometry)}</span>` : ''}
+        <span class="oligo-conf">置信度：${esc(oligoConfZh)}</span>
+      </div>
+      <p class="oligo-summary">${esc(oligo.summary)}</p>
+    </div>
+    ${oligo.evidence.length ? `
+    <h3>证据链（按优先级：已有结构 → 同源结构 → UniProt interaction → 文献）</h3>
+    <div class="tbl-wrap"><table class="tbl-data">
+      <thead><tr><th style="width:150px">来源</th><th style="width:110px">引用</th><th>证据</th></tr></thead>
+      <tbody>${oligo.evidence.map(e => `
+        <tr>
+          <td>${esc(describeEvidenceSource(e.source))}</td>
+          <td class="td-id">${/^[0-9A-Z]{4}$/.test(e.ref) ? `<a href="https://www.rcsb.org/structure/${e.ref}" target="_blank" rel="noopener">${e.ref}</a>` : /^PMID /.test(e.ref) ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${e.ref.slice(5)}/" target="_blank" rel="noopener">${e.ref}</a>` : esc(e.ref)}</td>
+          <td class="t-title">${esc(e.text)}</td>
+        </tr>`).join('')}</tbody>
+    </table></div>` : '<p class="note">未获得结构/注释/文献层面的寡聚化信号证据。</p>'}
+    ${oligo.notes.length ? `
+    <h3>对结构解析策略的影响</h3>
+    <ul>${oligo.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+    <p class="note">聚集形式由系统基于已有结构（标题关键词 + 链化学计量）→ UniProt interaction（SUBUNIT/INTERACTION 注释）→ 文献证据自动判定；寡聚态已纳入可行性评分（见评分依据），并作为构建设计/表达纯化策略的重要考量。</p>
+  </section>` : ''
 
   const scoreHtml = `
   <div class="score-card">
@@ -494,6 +529,14 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     .score-rating{ grid-column:1 / -1; grid-row:3; text-align:left; }
   }
   .score-rationale { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--sub); line-height:2; }
+
+  /* ── 聚集形式分析（v1.24） ── */
+  .oligo-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:16px 20px; margin:14px 0; }
+  .oligo-head { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:10px; }
+  .oligo-badge { color:#fff; font-size:12px; font-weight:700; padding:3px 12px; border-radius:3px; letter-spacing:1px; }
+  .oligo-stoich { font-family:var(--mono); font-size:12.5px; color:var(--ink); background:#f5f5f4; border:1px solid var(--line); padding:2px 10px; border-radius:3px; }
+  .oligo-conf { font-size:12px; color:var(--sub); margin-left:auto; }
+  .oligo-summary { margin:6px 0 0; font-size:13.5px; }
   .note { font-size:12px; color:var(--sub); margin-top:6px; }
 
   /* ── 文献 ── */
@@ -548,6 +591,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div><b>PDB 结构</b> ${pdbCountHtml}（X-ray ${methodStats.xrayCount} / Cryo-EM ${methodStats.cryoemCount} / NMR ${methodStats.nmrCount}）</div>
       <div><b>最佳分辨率</b> ${methodStats.bestResolution != null ? methodStats.bestResolution.toFixed(2) + ' Å' : '—'}</div>
       <div><b>BLAST 同源</b> ${ctx.blastHits.length} 个${ctx.blastStatus && ctx.blastStatus.status !== 'ok' ? `（${esc(describeBlastStatus(ctx.blastStatus).split('—')[0].trim())}）` : ctx.blastStatus?.provider === 'rcsb' ? '（RCSB 序列检索兜底）' : ''}</div>
+      ${ctx.oligomer ? `<div><b>聚集形式</b> ${esc(ctx.oligomer.summary.split('—')[0].trim())}（置信度${esc(oligoConfZh)}）</div>` : ''}
       <div><b>文献证据</b> ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构条目直接关联）` : ''}</div>
       ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
       ${ctx.batchNote ? `<div><b>批次关系</b> <span style="color:#92400e">${esc(ctx.batchNote.slice(0, 90))}${ctx.batchNote.length > 90 ? '…' : ''}</span></div>` : ''}
@@ -568,6 +612,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       ${ctx.insights ? '<li><a href="#insights">客户评估表要点</a></li>' : ''}
       <li><a href="#scores">可行性评分</a></li>
       <li><a href="#pdbs">PDB 结构清单</a></li>
+      ${ctx.oligomer ? '<li><a href="#oligomer">蛋白聚集形式分析</a></li>' : ''}
       ${showBlastSec ? '<li><a href="#blast">BLAST 同源结构</a></li>' : ''}
       ${ctx.literature.length ? '<li><a href="#literature">关键文献</a></li>' : ''}
       ${embedded.length ? '<li><a href="#assets">客户实验数据（评估表）</a></li>' : ''}
@@ -601,7 +646,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   <section class="sec" id="scores">
     <h2>二、可行性评分<span class="sec-en">Scores</span></h2>
     ${scoreHtml}
-    <p class="note">评分由系统规则计算（1-10）：基于序列长度、跨膜特征、已有结构先例（方法学+分辨率）、BLAST 同源 identity 加成。评分数值仅供参考，最终可行性需结合实验条件判断。</p>
+    <p class="note">评分由系统规则计算（1-10）：基于序列长度、跨膜特征、已有结构先例（方法学+分辨率）、BLAST 同源 identity 加成${ctx.oligomer ? '、蛋白聚集形式（寡聚态）调整' : ''}。评分数值仅供参考，最终可行性需结合实验条件判断。</p>
   </section>
 
   <section class="sec" id="pdbs">
@@ -611,6 +656,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : ''))
     : '<p>该靶点（或该 UniProt）暂无直接关联的 PDB 结构。同源结构请见 BLAST 章节。</p>'}
   </section>
+
+  ${oligoHtml}
 
   ${showBlastSec ? `
   <section class="sec" id="blast">

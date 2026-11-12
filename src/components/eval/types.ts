@@ -170,6 +170,8 @@ export interface MergedTargetLite {
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
   literature: LiteratureItem[]
+  /** v1.24：聚集形式（寡聚态）分析；历史作业缺省 */
+  oligomer?: OligomerAnalysis
 }
 
 /** 合并评估报告（关联靶点批量生成） */
@@ -321,6 +323,27 @@ export interface MethodStats {
   bestResolution: number | null
 }
 
+// ─── 聚集形式（寡聚态）分析（v1.24）────────────────────────────────────
+
+export type OligomerCategory = 'monomer' | 'homo-oligomer' | 'hetero-complex' | 'unknown'
+
+export interface OligomerEvidence {
+  source: 'pdb-title' | 'pdb-stoichiometry' | 'blast-title' | 'uniprot-subunit' | 'uniprot-interaction' | 'literature'
+  ref: string
+  text: string
+  state: { category: OligomerCategory; copies: number | null; term: string }
+}
+
+/** 蛋白聚集形式（寡聚态）分析结果（与后端 lib/eval/types.ts 契约一致） */
+export interface OligomerAnalysis {
+  summary: string
+  category: OligomerCategory
+  stoichiometry: string
+  confidence: 'high' | 'medium' | 'low'
+  evidence: OligomerEvidence[]
+  notes: string[]
+}
+
 /** 合并评估（UniProt+序列同靶点）时的构建信息 */
 export interface ConstructInfo {
   providedLength: number
@@ -345,6 +368,8 @@ export interface JobSummary {
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+） */
   blast?: BlastStatusInfo
+  /** 聚集形式（寡聚态）分析（v1.24+；历史作业缺省） */
+  oligomer?: OligomerAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */

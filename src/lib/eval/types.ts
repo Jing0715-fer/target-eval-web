@@ -40,6 +40,10 @@ export interface UniprotInfo {
   functionText?: string
   /** 亚细胞定位（行列表） */
   subcellularLocations?: string[]
+  /** 亚基结构注释（SUBUNIT comment，v1.24 聚集形式分析证据源） */
+  subunitText?: string
+  /** binary 相互作用（INTERACTION comments，v1.24；selfInteraction = 自相互作用→同源寡聚证据） */
+  interactions?: Array<{ accession: string; geneName?: string; selfInteraction: boolean }>
   /** 关键特征：结构域/跨膜/信号肽/活性位点 */
   features: UniprotFeature[]
   keywords?: string[]
@@ -180,6 +184,34 @@ export interface MethodStats {
   bestResolution: number | null
 }
 
+// ─── 聚集形式（寡聚态）分析（v1.24）──────────────────────────────────────
+
+export type OligomerCategory = 'monomer' | 'homo-oligomer' | 'hetero-complex' | 'unknown'
+
+export interface OligomerEvidence {
+  source: 'pdb-title' | 'pdb-stoichiometry' | 'blast-title' | 'uniprot-subunit' | 'uniprot-interaction' | 'literature'
+  /** 引用标识（PDB ID / PMID / "UniProt SUBUNIT"） */
+  ref: string
+  /** 证据原文（截断展示） */
+  text: string
+  /** 解析出的寡聚态：{ category, copies, term } */
+  state: { category: OligomerCategory; copies: number | null; term: string }
+}
+
+/** 蛋白聚集形式分析结果（oligomer.ts 产出，评分/报告/前端消费） */
+export interface OligomerAnalysis {
+  /** 判定汇总一句话（含判定依据） */
+  summary: string
+  category: OligomerCategory
+  /** 化学计量描述（如 "2 × 相同亚基"；unknown 为空串） */
+  stoichiometry: string
+  confidence: 'high' | 'medium' | 'low'
+  /** 证据链（≤8 条，按优先级排序） */
+  evidence: OligomerEvidence[]
+  /** 对结构解析策略的影响要点 */
+  notes: string[]
+}
+
 // ─── 作业汇总（前端 JobSummary）──────────────────────────────────────────────
 
 /** BLAST 执行状态（结果页空态说明 / 报告注记的数据源） */
@@ -256,6 +288,8 @@ export interface JobSummary {
   coverageText?: string
   /** 未覆盖区间描述（同上） */
   gapText?: string
+  /** 聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
+  oligomer?: OligomerAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
   /** 报告已延迟：本靶点不生成独立报告，数据并入合并评估报告（v1.8+ 关联靶点批量） */

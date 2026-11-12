@@ -20,13 +20,14 @@ import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits } from './bl
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
+import { analyzeOligomericState } from './oligomer'
 import { generateReportSections, type ReportContext } from './report'
 import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
-import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
+import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
   jobId: string
@@ -517,7 +518,15 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     log(`BLAST 阶段跳过：${blastStatus.note ?? '未提交'}`)
   }
 
-  // ─── 阶段 7：评分 ────────────────────────────────────────────────────────
+  // ─── 阶段 7：聚集形式（寡聚态）分析 + 评分 ──────────────────────────────
+  report('score', '分析蛋白聚集形式（寡聚态）…', 0.3)
+  const oligomer: OligomerAnalysis = analyzeOligomericState({
+    uniprot: uniprotInfo,
+    directPdbs,
+    blastHits,
+    literature,
+  })
+  log(`聚集形式分析：${oligomer.summary}（证据 ${oligomer.evidence.length} 条，置信度${oligomer.confidence === 'high' ? '高' : oligomer.confidence === 'medium' ? '中' : '低'}）`)
   report('score', '计算可行性评分…', 0.5)
   const scores = computeScores({
     sequenceLength: uniprotInfo?.sequenceLength ?? sequence.length,
@@ -525,6 +534,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     directPdbs,
     blastHits,
     coveragePercent: coverage?.coveragePercent ?? 0,
+    oligomer,
   })
   log(`评分完成：X-ray ${scores.xray.score}/10 · Cryo-EM ${scores.cryoem.score}/10 · NMR ${scores.nmr.score}/10 · 总体 ${scores.overall.score}/10`)
   report('score', '评分完成', 1)
@@ -564,6 +574,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       literature,
       images,
       scores,
+      oligomer,
     }
 
     report('report', 'LLM 生成评估分析（第 1/3 段：摘要与背景）…', 0.15)
@@ -602,6 +613,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
         literature,
         images,
         scores,
+        oligomer,
       },
       methodStats: scores.methodStats,
       llmMarkdown: generated.fullMarkdown,
@@ -647,6 +659,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     blast: blastStatus,
     coverageText: coverageText || undefined,
     gapText: gapText || undefined,
+    oligomer,
     reportLlmOk: deferReport ? undefined : generated.ok,
     reportDeferred: deferReport || undefined,
     batchNote: input.batchNote,

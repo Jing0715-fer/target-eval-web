@@ -21,6 +21,13 @@ interface UniprotRaw {
     commentType?: string
     texts?: Array<{ value?: string }>
     subcellularLocations?: Array<{ location?: { value?: string } }>
+    /** INTERACTION comment（binary 互作） */
+    interactions?: Array<{
+      id1?: string
+      id2?: string
+      gene2?: { geneName?: { value?: string } }
+      [k: string]: unknown
+    }>
     [k: string]: unknown
   }>
   features?: Array<{ type?: string; description?: string; location?: { start?: { value?: number }; end?: { value?: number } } }>
@@ -82,6 +89,8 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
 
   let functionText = ''
   let subcellularLocations: string[] = []
+  let subunitText = ''
+  const interactions: Array<{ accession: string; geneName?: string; selfInteraction: boolean }> = []
   for (const c of raw.comments ?? []) {
     if (c.commentType === 'FUNCTION' && !functionText) {
       functionText = (c.texts ?? []).map(t => t.value ?? '').join(' ').slice(0, 1500)
@@ -91,6 +100,24 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
         .map(l => l.location?.value ?? '')
         .filter(Boolean)
         .slice(0, 8)
+    }
+    // v1.24：SUBUNIT 亚基结构注释 — 聚集形式（寡聚态）分析的核心注释证据
+    if (c.commentType === 'SUBUNIT' && !subunitText) {
+      subunitText = (c.texts ?? []).map(t => t.value ?? '').join(' ').slice(0, 1200)
+    }
+    // v1.24：INTERACTION binary 互作 — 自相互作用（id1 === id2）为同源寡聚证据
+    if (c.commentType === 'INTERACTION') {
+      for (const it of c.interactions ?? []) {
+        const id1 = (it.id1 ?? '').trim()
+        const id2 = (it.id2 ?? '').trim()
+        if (!id1 || !id2) continue
+        const selfInteraction = id1 === id2 || (raw.primaryAccession === id1 && raw.primaryAccession === id2)
+        const geneName = it.gene2?.geneName?.value
+        // 同一伙伴去重；自相互作用优先保留；伙伴总数限 25（防超长蛋白撑爆存储）
+        if (!selfInteraction && interactions.some(x => x.accession === id2 && !x.selfInteraction)) continue
+        interactions.push({ accession: id2, geneName: geneName || undefined, selfInteraction })
+        if (interactions.length >= 25) break
+      }
     }
   }
 
@@ -118,6 +145,8 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
     sequence,
     functionText,
     subcellularLocations,
+    subunitText: subunitText || undefined,
+    interactions: interactions.length ? interactions : undefined,
     features,
     keywords,
     pdbChainRanges,
