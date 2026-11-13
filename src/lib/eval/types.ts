@@ -44,6 +44,8 @@ export interface UniprotInfo {
   subunitText?: string
   /** binary 相互作用（INTERACTION comments，v1.24；selfInteraction = 自相互作用→同源寡聚证据） */
   interactions?: Array<{ accession: string; geneName?: string; selfInteraction: boolean }>
+  /** v1.29：Complex Portal 复合物交叉引用（CPX-xxxx，complex viewer 数据源） */
+  complexPortalIds?: string[]
   /** 关键特征：结构域/跨膜/信号肽/活性位点 */
   features: UniprotFeature[]
   keywords?: string[]
@@ -179,6 +181,8 @@ export interface Scores {
   oligomerAdjust?: OligomerAdjustInfo
   /** v1.26：分子量增重策略（小分子量靶点）调整明细（整数；无分析/不适用时缺省） */
   mwAugmentAdjust?: MwAugmentAdjustInfo
+  /** v1.29：互作复合物证据调整明细（无直接结构时；无证据时缺省） */
+  interactionAdjust?: InteractionAdjustInfo
 }
 
 /** v1.25：聚集形式调整明细（score.ts computeOligomerAdjust 产出；评分卡展示） */
@@ -196,6 +200,95 @@ export interface OligomerAdjustInfo {
   note: string
 }
 
+// ─── 互作复合物证据（v1.29，无直接结构时）────────────────────────────
+
+/** 互作复合物（Complex Portal curated）中的一个组分 */
+export interface InteractionComponent {
+  /** UniProt accession（靶点自身或伙伴） */
+  accession: string
+  /** 基因名（如 SKP1） */
+  name: string
+  /** 蛋白名（如 S-phase kinase-associated protein 1） */
+  description: string
+  /** 化学计量原始文本（如 "minValue: 1, maxValue: 1"） */
+  stoichiometryText: string
+  /** 化学计量上限（解析失败为 null — MW 估算按 1 计） */
+  stochMax: number | null
+  /** 是否靶点自身 */
+  isTarget: boolean
+  /** 残基长度（UniProt；查询失败为 null） */
+  lengthAa?: number | null
+  /** 组分分子量估计（kDa；长度未知为 null） */
+  kda?: number | null
+  /** 该组分在 RCSB 的结构总数 */
+  pdbCount: number
+  /** 代表结构（按分辨率取优，≤3 个；无结构为空） */
+  representativePdbs: PdbEntry[]
+}
+
+/** Complex Portal curated 复合物（complex viewer 数据源 — 可靠装配证据） */
+export interface InteractionComplexInfo {
+  /** CPX 编号（如 CPX-7930） */
+  complexAc: string
+  /** 复合物名（如 "SCF E3 ubiquitin ligase complex, FBXO21 variant"） */
+  name: string
+  /** 系统名（如 "CUL1:FBXO21:RBX1:SKP1"） */
+  systematicName?: string
+  /** 装配描述（如 "Heterotetramer"） */
+  assembly: string | null
+  /** 全部组分（含靶点，isTarget 标记） */
+  components: InteractionComponent[]
+  /** 除靶点外有结构的组分数 */
+  componentsWithStructure: number
+  /** 组分（除靶点）结构总数 */
+  totalPdb: number
+  /** 复合物总分子量估算（kDa；长度缺失组分按 0 计，null 表示无法估算） */
+  assemblyKda: number | null
+}
+
+/** binary 互作伙伴的结构证据（IntAct，非 curated 复合物路径） */
+export interface InteractionBinaryInfo {
+  accession: string
+  geneName?: string
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+}
+
+/** v1.29 互作复合物证据分析（interaction.ts 产出；无直接结构时作为评估依据） */
+export interface InteractionAnalysis {
+  /** 结构证据场景（directPdbs = 0）才运行 */
+  applicable: boolean
+  /** 有可用证据：curated 复合物存在 或 任何伙伴/组分有结构 */
+  hasEvidence: boolean
+  /** UniProt SUBUNIT 注释摘要（如 "Directly interacts with SKP1 and CUL1"） */
+  subunitNote?: string
+  /** curated 复合物列表（按组分结构数降序，≤3 个） */
+  complexes: InteractionComplexInfo[]
+  /** 未被复合物覆盖的 binary 伙伴中 有结构者（≤4 个） */
+  binaryPartners: InteractionBinaryInfo[]
+  /** 一句话汇总（评分卡/报告展示） */
+  summary: string
+  /** 对结构解析策略的影响要点（LLM digest 与报告展开） */
+  notes: string[]
+}
+
+/** v1.29：互作复合物证据对三方法的调整明细（score.ts 产出；评分卡展示） */
+export interface InteractionAdjustInfo {
+  /** 最佳复合物（组分结构最多的） */
+  complexAc: string
+  complexName: string
+  /** 有结构组分数 */
+  componentsWithStructure: number
+  /** 复合物总分子量（无长度数据为 null） */
+  assemblyKda: number | null
+  /** 证据强度：curated（复合物+组分结构）> binary（仅伙伴结构） */
+  level: 'curated' | 'binary'
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
+}
+
 export interface MethodStats {
   xrayCount: number
   cryoemCount: number
@@ -203,7 +296,7 @@ export interface MethodStats {
   bestResolution: number | null
 }
 
-// ─── 聚集形式（寡聚态）分析（v1.24）──────────────────────────────────────
+// ─── 聚集形式（寡聚态）分析（v1.24）──────────────────────────────────
 
 export type OligomerCategory = 'monomer' | 'homo-oligomer' | 'hetero-complex' | 'unknown'
 
@@ -426,6 +519,8 @@ export interface JobSummary {
   gapText?: string
   /** 聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
+  /** v1.29：互作复合物证据分析（无直接结构时；有证据时报告/评分消费） */
+  interaction?: InteractionAnalysis
   /** 分子量增重策略分析（v1.26+ 作业存在；历史作业缺省；applicable=false 时也存档） */
   mwAugment?: MwAugmentAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */

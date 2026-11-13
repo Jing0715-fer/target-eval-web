@@ -6,7 +6,7 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, BlastStatusInfo, FormInsights, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
+import type { BlastHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
 import { describeBlastStatus } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
@@ -40,14 +40,17 @@ export interface ReportContext {
   oligomer?: OligomerAnalysis
   /** v1.26：分子量增重策略分析（mw-augment.ts 产出；小分子量靶点时 applicable=true） */
   mwAugment?: MwAugmentAnalysis
+  /** v1.29：互作复合物证据分析（interaction.ts 产出；无直接结构时有证据则 hasEvidence=true） */
+  interaction?: InteractionAnalysis
 }
 
 const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目负责人视角），为蛋白靶点撰写专业的结构解析可行性评估报告。写作要求：
 - 全文使用简体中文（专业术语可保留英文），正式书面语，不使用表情符号
-- 结论先行：每章开头直接给结论，再展开论据
+- 结论先行：每章开头直接给结论，再展开论据；每个 ## 章节的第一句话必须是加粗的核心结论句（**…**，一句话概括该章结论，便于速读）
+- 关键数据加粗突出（PDB 数量/分辨率/identity/覆盖率等核心数字），但每段加粗不超过 2 处，避免通篇加粗
 - 严格基于给定的数据上下文，禁止编造不存在的 PDB ID、PMID、分辨率或文献
 - 数据里没有的信息，用"（本次数据未覆盖）"或"暂无可靠数据"明确说明
-- 输出为 Markdown 子集：## / ### 标题、**加粗**、- 列表、|表格|、> 引用，不使用图片链接和代码块
+- 输出为 Markdown 子集：## / ### 标题、**加粗**、- 列表、|表格|、> 引用，不使用图片链接和代码块；## 章节标题保持简短（≤14 字）
 - 数字引用必须与数据上下文一致`
 
 // ─── 数据摘要构造（喂给 LLM 的紧凑上下文）──────────────────────────────────
@@ -218,8 +221,33 @@ function buildDigest(ctx: ReportContext): string {
     lines.push('（分子量是小靶点结构解析方法选择的第一约束：请将上述判定融入「结构解析可行性评估」章节 — 三方法对比矩阵中 Cryo-EM 的分子量适配行按装配分子量而非单体分子量评估；推荐技术路线与构建设计中给出增重路径优先级（生理装配 → 已有复合物 → 同源复合物（BLAST 推断，组装需验证）→ 互作伙伴 → 技术组分），并逐条回应冲突分析；执行摘要用一句话点明分子量结论。同源复合物为推断证据时，需按 identity 说明置信度（≥40% 界面通常保守 / 30-40% 边缘 / <30% 仅参考）并前置组装验证建议。禁止将本分析另列为独立章节）')
   }
 
+  // v1.29：互作复合物证据（无直接结构时）— 融入可行性评估，不单独成章
+  if (ctx.interaction?.applicable) {
+    const itx = ctx.interaction
+    lines.push('')
+    lines.push('【互作复合物证据（Complex Portal / IntAct）— 无直接结构时的评估依据，融入可行性评估，不单独成章】')
+    if (itx.hasEvidence) {
+      lines.push(`汇总: ${itx.summary}`)
+      if (itx.subunitNote) lines.push(`UniProt SUBUNIT 注释: ${itx.subunitNote}`)
+      for (const c of itx.complexes) {
+        lines.push(`curated 复合物 ${c.complexAc}（${c.name}${c.assembly ? ` · ${c.assembly}` : ''}${c.assemblyKda != null ? ` · 装配 ~${c.assemblyKda} kDa` : ''}）:`)
+        lines.push(c.components.map(x =>
+          `  · ${x.isTarget ? `【靶点】${x.name}` : x.name}（${x.accession}${x.kda != null ? `，~${x.kda} kDa` : ''}${x.stoichiometryText ? `，${x.stoichiometryText.replace(/minValue: |maxValue: /g, '').replace(/, /g, '–')}` : ''}）${x.isTarget ? '' : x.pdbCount > 0 ? ` — ${x.pdbCount} 个结构（代表：${x.representativePdbs.slice(0, 2).map(p => `${p.pdbId} ${p.resolution != null ? p.resolution + 'Å' : p.method.slice(0, 8)}`).join('、')}）` : ' — 无结构'}`,
+        ).join('\n'))
+      }
+      if (itx.binaryPartners.length) {
+        lines.push(`binary 互作伙伴（IntAct 实验证据，复合物之外）: ${itx.binaryPartners.map(b => `${b.geneName ?? b.accession}（${b.accession}，${b.pdbCount} 个结构）`).join('、')}`)
+      }
+      lines.push('系统要点（报告中需展开呼应）:')
+      lines.push(itx.notes.map(n => `  - ${n}`).join('\n'))
+      lines.push('（互作复合物是本靶点无直接/同源结构时的核心评估依据：Complex Portal 复合物为人工审核的装配证据，化学计量可靠 — 请融入「结构解析可行性评估」与「实验方案建议」：推荐技术路线中给出复合物组装路线（共表达/体外组装）与单体路线的优先级比对，组分结构用作构建边界参考与组装验证对照；并说明该路线与客户目的是否契合（若客户需要靶点单独结构，复合物路线为间接路径）。禁止将本分析另列为独立章节）')
+    } else {
+      lines.push('（互作通道已检索：无 curated 复合物、binary 伙伴无结构 — 如实说明，不要虚构互作证据）')
+    }
+  }
+
   lines.push('')
-  lines.push(`【已有 PDB 结构】共 ${pdbs.length} 个（X-ray ${xrayCount} / Cryo-EM ${cryoemCount} / NMR ${nmrCount}）${bestRes != null ? `，最佳分辨率 ${bestRes}Å` : ''}`)
+  lines.push(`【已有 PDB 结构】共 ${pdbs.length} 个（X-ray ${xrayCount} / Cryo-EM ${cryoemCount} / NMR ${nmrCount}）${bestRes != null ? `，最佳分辨率 ${bestRes}Å` : ''}${ctx.interaction?.applicable && pdbs.length === 0 && ctx.interaction.hasEvidence ? '（无直接结构 — 结构证据来自互作复合物组分，见上方互作证据块）' : ''}`)
   if (timeline) lines.push(`按释放年份分布: ${timeline}`)
   if (topLigands) lines.push(`高频配体: ${topLigands}`)
   if (pdbs.length) {
@@ -304,10 +332,13 @@ function partAInstruction(ctx: ReportContext): string {
   const mwLine = ctx.mwAugment?.applicable
     ? `，并一句话点明分子量结论（单体 ~${ctx.mwAugment.monomerKda} kDa${ctx.mwAugment.assemblyKda != null ? `，装配后 ~${ctx.mwAugment.assemblyKda} kDa${ctx.mwAugment.assemblyPath === 'homolog-complex' ? '（同源复合物推断）' : ''}` : '，无生物装配增重路径'} — 对方法选择的影响）`
     : ''
+  const itxLine = ctx.interaction?.applicable && ctx.interaction.hasEvidence
+    ? `；无直接/同源结构时点明互作复合物证据（${ctx.interaction.complexes[0] ? `${ctx.interaction.complexes[0].complexAc} curated 复合物${ctx.interaction.complexes[0].componentsWithStructure > 0 ? '，其他组分有结构' : ''}` : 'binary 互作伙伴有结构'} — 是本评估的结构证据基础）`
+    : ''
   return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 执行摘要
-- 3-4 段：第一段直接给出总体结论（该靶点结构解析可行性如何、推荐什么方法）${ctx.oligomer ? '，并点明聚集形式判定（' + (ctx.oligomer.label || ctx.oligomer.summary.split('—')[0].trim()) + '）及其对方法选择的影响' : ''}${mwLine}；第二段概括已有结构研究情况（引用具体数字）；第三段概括客户目标的达成路径与主要风险；第四段一句话给出明确的下一步建议${ctx.batchNote ? '，并用 1-2 句说明本项目在同批次多靶点中的定位（独立项目/复合物相关）' : ''}
+- 3-4 段：第一段直接给出总体结论（该靶点结构解析可行性如何、推荐什么方法）${ctx.oligomer ? '，并点明聚集形式判定（' + (ctx.oligomer.label || ctx.oligomer.summary.split('—')[0].trim()) + '）及其对方法选择的影响' : ''}${mwLine}${itxLine}；第二段概括已有结构研究情况（引用具体数字，无直接结构时说明结构证据的实际来源）；第三段概括客户目标的达成路径与主要风险；第四段一句话给出明确的下一步建议${ctx.batchNote ? '，并用 1-2 句说明本项目在同批次多靶点中的定位（独立项目/复合物相关）' : ''}
 - 篇幅 400-600 字
 
 ## 客户目标与可行性结论
@@ -326,7 +357,12 @@ ${qLine}- **可行性结论**：直接给出分级（高/中/低）并用一段�
 }
 
 /** 第二段：已有结构研究全景（强化模块） */
-function partBInstruction(): string {
+function partBInstruction(ctx: ReportContext): string {
+  const itxB = ctx.interaction?.applicable && ctx.interaction.hasEvidence
+    ? ctx.interaction.complexes.some(c => c.componentsWithStructure > 0)
+      ? `\n- 本靶点无直接结构，但互作复合物（Complex Portal curated）其他组分有结构：在本章「同源结构分析」中改以「复合物组分结构参考」展开 — 各组分（基因名/PDB/分辨率）对靶点构建设计（边界借鉴）与组装策略（化学计量、共表达组合）的参考价值；组分结构不能替代靶点自身结构，需明确区分`
+      : `\n- 本靶点无直接结构与同源结构，仅有互作证据（IntAct binary 伙伴/curated 复合物无组分结构）：如实说明结构证据缺位，基于 SUBUNIT 注释与互作伙伴讨论复合物组装可能性`
+    : ''
   return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 已有结构研究全景
@@ -340,7 +376,7 @@ function partBInstruction(): string {
 
 ## 同源结构分析
 - 基于 BLAST 命中（若有）：identity 梯度分析、跨物种/旁系同源情况、对目标蛋白结构解析的参考价值（可作为分子置换模型/ Cryo-EM 初始模型/域边界参考）
-- 若无 BLAST 数据，说明本次未运行或无命中，并给出基于直接结构的替代分析
+- 若无 BLAST 数据，说明本次未运行或无命中，并给出基于直接结构的替代分析${itxB}
 - 篇幅 300-500 字
 
 ## 关键文献证据综合
@@ -354,6 +390,9 @@ function partCInstruction(ctx: ReportContext): string {
   const hasImages = ctx.images.length > 0
   const expText = ctx.insights?.experimentalSummary
   const cmp = ctx.providedSequence?.comparison
+  const itxC = ctx.interaction?.applicable && ctx.interaction.hasEvidence
+    ? `\n- 互作复合物路线（无直接结构时的核心路径）：${ctx.interaction.complexes[0] ? `Complex Portal curated 复合物 ${ctx.interaction.complexes[0].complexAc}（${ctx.interaction.complexes[0].componentsWithStructure}/${ctx.interaction.complexes[0].components.length - 1} 个其他组分有结构${ctx.interaction.complexes[0].assemblyKda != null ? `，装配 ~${ctx.interaction.complexes[0].assemblyKda} kDa` : ''}）` : 'IntAct binary 互作伙伴有结构'} — 给出复合物组装路线（共表达组合/体外组装顺序/化学计量验证 SEC-MALS）与单体路线的优先级比对；组分结构用作构建边界参考；说明该路线与客户目的是否契合（需要靶点单独结构时复合物路线为间接路径）`
+    : ''
   return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
 
 ## 实验数据评估${hasImages ? '（客户评估表）' : ''}
@@ -379,7 +418,7 @@ ${ctx.images.map(i => {
 ## 结构解析可行性评估
 - ### 三方法对比矩阵：用 Markdown 表格对比 X-ray / Cryo-EM / NMR 在本靶点上的适配性，行维度至少包括：分子量适配、可结晶性/成象条件、已有成功先例、构象异质性处理、预计周期、综合评分（引用系统评分）${ctx.mwAugment?.applicable ? '\n- 分子量维度（小分子量靶点）：Cryo-EM 的「分子量适配」按装配有效分子量（~' + (ctx.mwAugment.assemblyKda ?? ctx.mwAugment.monomerKda) + ' kDa' + (ctx.mwAugment.assemblyPath === 'homolog-complex' ? '，同源复合物推断 — 需组装验证' : ctx.mwAugment.assemblyKda == null ? '，无生物装配路径 — 需技术增重' : '') + '）评估而非单体分子量；X-ray/NMR 行说明分子量对其影响的差异（增重对 NMR 无益、对 X-ray 非瓶颈）' : ''}
 - ### 评分依据解读：逐方法解释系统评分的含义（引用评分依据文本），哪些因素是加分项/减分项${ctx.mwAugment?.applicable ? '；Cryo-EM 评分中的「分子量维度」调整（' + (ctx.scores.mwAugmentAdjust ? ctx.scores.mwAugmentAdjust.note : '无') + '）需明确解读' : ''}
-- ### 推荐技术路线：明确给出第一推荐方法与理由、备选方法与触发条件（如 X-ray 失败多少轮后转 Cryo-EM）${ctx.mwAugment?.applicable ? '\n- 增重路径优先级：生理装配（寡聚/复合物，已有结构先例）→ 同源复合物（BLAST 推断，identity 按高低取舍，共表达/体外组装前需 pull-down/SPR 验证互作）→ 互作伙伴复合物（无结构先例，需共表达/体外组装与 SEC-MALS 验证）→ 技术组分（Fab/nanobody/MBP/ferritin 支架）；逐条回应「与客户目的的比对」中的契合/需注意/冲突条目（加入的蛋白是否改变研究对象/锁定构象/遮蔽界面）' : ''}
+- ### 推荐技术路线：明确给出第一推荐方法与理由、备选方法与触发条件（如 X-ray 失败多少轮后转 Cryo-EM）${ctx.mwAugment?.applicable ? '\n- 增重路径优先级：生理装配（寡聚/复合物，已有结构先例）→ 同源复合物（BLAST 推断，identity 按高低取舍，共表达/体外组装前需 pull-down/SPR 验证互作）→ 互作伙伴复合物（无结构先例，需共表达/体外组装与 SEC-MALS 验证）→ 技术组分（Fab/nanobody/MBP/ferritin 支架）；逐条回应「与客户目的的比对」中的契合/需注意/冲突条目（加入的蛋白是否改变研究对象/锁定构象/遮蔽界面）' : ''}${itxC}
 - 篇幅 500-800 字
 
 ## 实验方案建议
@@ -408,7 +447,7 @@ export async function generateReportSections(ctx: ReportContext, signal?: AbortS
   const parts: ReportPart[] = []
   const partA = await callPart('A', partAInstruction(ctx), digest, signal)
   parts.push(partA)
-  const partB = await callPart('B', partBInstruction(), digest, signal)
+  const partB = await callPart('B', partBInstruction(ctx), digest, signal)
   parts.push(partB)
   const partC = await callPart('C', partCInstruction(ctx), digest, signal)
   parts.push(partC)

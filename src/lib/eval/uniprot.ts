@@ -139,6 +139,9 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
   // PDB 交叉引用 → UniProt 残基编号范围（Chains 属性，如 "A=695-1022"、"A/B=25-646"）。
   // 供 PDB 结构表展示「该结构覆盖靶点序列的哪一段」。
   const pdbChainRanges: Record<string, string> = {}
+  // v1.29：ComplexPortal 交叉引用（CPX-xxxx，complex viewer 数据源）— 无直接结构时的
+  // 互作复合物证据入口（用户反馈：Complex viewer 复合物可靠，组分结构可作评估依据）
+  const complexPortalIds: string[] = []
   for (const x of raw.uniProtKBCrossReferences ?? []) {
     if (x.database !== 'PDB') continue
     const pdbId = (x.id ?? '').toUpperCase()
@@ -146,6 +149,12 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
     const chains = (x.properties ?? []).find(p => p.key === 'Chains')?.value?.trim()
     if (chains) pdbChainRanges[pdbId] = chains
     if (Object.keys(pdbChainRanges).length >= 500) break // 防御上限
+  }
+  for (const x of raw.uniProtKBCrossReferences ?? []) {
+    if (x.database !== 'ComplexPortal') continue
+    const cpx = (x.id ?? '').trim().toUpperCase()
+    if (/^CPX-\d+$/.test(cpx) && !complexPortalIds.includes(cpx)) complexPortalIds.push(cpx)
+    if (complexPortalIds.length >= 6) break
   }
 
   return {
@@ -160,6 +169,7 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
     subcellularLocations,
     subunitText: subunitText || undefined,
     interactions: interactions.length ? interactions : undefined,
+    complexPortalIds: complexPortalIds.length ? complexPortalIds : undefined,
     features,
     keywords,
     pdbChainRanges,

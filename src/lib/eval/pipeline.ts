@@ -16,11 +16,12 @@ import { db } from '@/lib/db'
 import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges } from './pdbe'
-import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits } from './blast'
+import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry } from './blast'
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
 import { analyzeOligomericState } from './oligomer'
+import { analyzeInteractionEvidence } from './interaction'
 import { analyzeMwAugmentation } from './mw-augment'
 import { generateReportSections, type ReportContext } from './report'
 import { renderReportHtml } from './report-html'
@@ -28,7 +29,7 @@ import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
-import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
+import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
   jobId: string
@@ -519,6 +520,80 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     log(`BLAST 阶段跳过：${blastStatus.note ?? '未提交'}`)
   }
 
+  // ─── 阶段 6.5：结构证据守门（v1.28，用户反馈「无结构且 BLAST 失败时不要贸然生成报告」）──
+  // 无直接结构 + 同源检索失败 = 结构证据缺位，此时生成的评分与建议缺乏依据、
+  // 可能误导决策 → 先给检索一次 last-resort 整周期重试机会；
+  // v1.29：重试仍失败不立即中止 — 互作复合物证据（阶段 6.6）可作为替代评估依据，
+  // 互作也无证据才中止（裁决后置到 6.6 之后）
+  let blastRetryFailed = false
+  if (
+    blastStatus.status === 'failed'   // 仅拦截真失败（no-hits 是有效科学结论；skipped-* 均为设计内跳过）
+    && directPdbs.length === 0
+    && blastHits.length === 0
+    && sequence.length >= 20
+  ) {
+    const failNote = blastStatus.note ?? '未知原因'
+    report('blast', `无直接结构且同源检索失败 — 启动最后一道整周期重试（避免生成缺乏结构证据的报告）…`, 0.5)
+    log(`结构证据守门：直接结构 0 个 + 同源检索失败（${failNote}）→ 启动 last-resort 整周期重试（RCSB 直连 + NCBI 完整周期，最多 2 轮）`, 'warn')
+    try {
+      const rescue = await runBlastWithRetry(
+        sequence,
+        msg => report('blast', msg, 0.7),
+        signal,
+      )
+      const directSet = new Set(directPdbs.map(p => p.pdbId))
+      const filtered = rescue.hits.filter(h => h.pdbId && !directSet.has(h.pdbId))
+      blastHits = await enrichBlastHits(filtered, directSet)
+      if (input.options.range) blastHits = filterBlastByRange(blastHits, input.options.range)
+      blastStatus = {
+        status: blastHits.length > 0 ? 'ok' : 'no-hits',
+        note: blastHits.length > 0
+          ? `${blastHits.length} 个同源命中（last-resort 重试：${rescue.note}）`
+          : `检索完成但无同源命中（last-resort 重试：${rescue.note}）— 全新靶点，结构证据以文献为准`,
+        provider: rescue.provider,
+      }
+      log(`last-resort 重试成功：${rescue.note}，去重后 ${blastHits.length} 个同源命中 — 结构证据已获取，继续生成报告`)
+      report('blast', `同源检索重试成功（${blastHits.length} 个同源结构）`, 1)
+    } catch (e) {
+      if (signal.aborted) throw e
+      const msg = e instanceof Error ? e.message : String(e)
+      blastRetryFailed = true
+      log(`last-resort 重试仍失败：${msg} — 将检查互作复合物证据（Complex Portal/IntAct）后再裁决是否中止`, 'warn')
+      report('blast', '同源检索重试失败 — 转向互作复合物证据检索…', 0.9)
+    }
+  }
+
+  // ─── 阶段 6.6：互作复合物证据（v1.29，无直接结构时）────────────────────
+  // 用户需求：搜不到结构时参考 UniProt Interaction（IntAct binary + Complex viewer
+  // 复合物）评估打分；curated 复合物其他组分有结构 → 检索列出作为评估依据
+  let interaction: InteractionAnalysis | null = null
+  if (uniprotInfo && directPdbs.length === 0) {
+    report('blast', '无直接结构 — 检索 UniProt 互作复合物证据（Complex Portal curated 复合物 + IntAct binary 伙伴）…', 0.92)
+    interaction = await analyzeInteractionEvidence({
+      uniprot: uniprotInfo,
+      signal,
+      onProgress: msg => log(msg),
+    })
+    if (interaction.hasEvidence) {
+      log(`互作复合物证据：${interaction.summary}${interaction.complexes.length ? `；组分结构已列出（复合物 ${interaction.complexes.length} 个）` : ''}`)
+    } else {
+      log('互作复合物证据：无可用证据（无 curated 复合物、binary 伙伴无结构）', 'warn')
+    }
+    report('blast', `互作证据检索完成${interaction.hasEvidence ? '（有可用证据）' : '（无可用证据）'}`, 1)
+  }
+
+  // ── 守门裁决（v1.29 后置）：BLAST 重试失败 且 互作也无证据 → 中止报告 ──
+  if (blastRetryFailed && (!interaction || !interaction.hasEvidence)) {
+    log('结构证据守门：同源检索重试失败且互作复合物无可用证据 — 中止报告生成（避免生成缺乏结构证据、可能误导决策的报告）', 'error')
+    throw new Error(
+      `结构证据不足，已中止报告生成：该靶点无直接关联 PDB 结构，同源结构检索通道（NCBI BLAST / RCSB 序列检索，含多轮自动重试）与互作复合物通道（Complex Portal / IntAct）均未获得可用证据。` +
+      `为避免生成缺乏结构证据、可能误导决策的评估报告，本次评估已中止 — 请稍后点击「重试评估」重新发起；若持续失败可尝试在高级选项中关闭 BLAST（报告将仅基于直接结构证据）。`,
+    )
+  }
+  if (blastRetryFailed && interaction?.hasEvidence) {
+    log(`结构证据守门：同源检索失败，但互作复合物证据可用 — 继续生成报告（评分纳入互作证据调整）`)
+  }
+
   // ─── 阶段 7：聚集形式（寡聚态）分析 + 评分 ──────────────────────────────
   report('score', '分析蛋白聚集形式（寡聚态）…', 0.3)
   const oligomer: OligomerAnalysis = analyzeOligomericState({
@@ -555,8 +630,9 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     coveragePercent: coverage?.coveragePercent ?? 0,
     oligomer,
     mwAugment,
+    interaction,
   })
-  log(`评分完成：X-ray ${scores.xray.score}/10 · Cryo-EM ${scores.cryoem.score}/10 · NMR ${scores.nmr.score}/10 · 总体 ${scores.overall.score}/10`)
+  log(`评分完成：X-ray ${scores.xray.score}/10 · Cryo-EM ${scores.cryoem.score}/10 · NMR ${scores.nmr.score}/10 · 总体 ${scores.overall.score}/10${scores.interactionAdjust ? `（含互作复合物调整：${scores.interactionAdjust.level === 'curated' ? scores.interactionAdjust.complexAc : 'binary 伙伴'}）` : ''}`)
   report('score', '评分完成', 1)
 
   // ─── 阶段 8：LLM 报告 ────────────────────────────────────────────────────
@@ -596,6 +672,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       scores,
       oligomer,
       mwAugment,
+      interaction: interaction ?? undefined,
     }
 
     report('report', 'LLM 生成评估分析（第 1/3 段：摘要与背景）…', 0.15)
@@ -636,6 +713,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
         scores,
         oligomer,
         mwAugment,
+        interaction: interaction ?? undefined,
       },
       methodStats: scores.methodStats,
       llmMarkdown: generated.fullMarkdown,
@@ -676,6 +754,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       oligomerAdjust: scores.oligomerAdjust,
       /** v1.26：分子量增重调整明细（评分卡展示；不适用时缺省） */
       mwAugmentAdjust: scores.mwAugmentAdjust,
+      /** v1.29：互作复合物证据调整明细（无直接结构且有证据时） */
+      interactionAdjust: scores.interactionAdjust,
     },
     methodStats: scores.methodStats,
     ligandCount: new Set(directPdbs.flatMap(p => p.ligands.map(l => l.split('(')[0].trim()))).size,
@@ -686,6 +766,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     coverageText: coverageText || undefined,
     gapText: gapText || undefined,
     oligomer,
+    /** v1.29：互作复合物证据分析（无直接结构时；无证据时 hasEvidence=false 亦存档） */
+    interaction: interaction ?? undefined,
     /** v1.26：分子量增重策略分析（小分子量靶点；applicable=false 时亦存档） */
     mwAugment,
     reportLlmOk: deferReport ? undefined : generated.ok,
