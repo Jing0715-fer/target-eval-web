@@ -264,6 +264,7 @@ export default function Home() {
                   <ErrorPanel
                     job={flow.job}
                     submitting={flow.submitting}
+                    submitError={flow.submitError}
                     onRetry={flow.retry}
                     onReset={flow.reset}
                   />

@@ -471,18 +471,55 @@ export interface GeneratedReport {
   fullMarkdown: string
   ok: boolean
   errors: string[]
+  /** v2.6：分段预算到点的部分结果（已完成的段已产出 markdown；调用方保存 parts 续跑） */
+  partial?: boolean
 }
 
-export async function generateReportSections(ctx: ReportContext, signal?: AbortSignal): Promise<GeneratedReport> {
+export interface GenerateSectionsOpts {
+  /** v2.6 分段预算（epoch ms）：到点不再开启新段，返回 partial（已完成的段保留） */
+  deadline?: number
+  /** v2.6 已完成的段（续跑 — 只生成缺失的段；失败段不含在「已完成」中，下一段自动重试） */
+  completedParts?: ReportPart[]
+  /** v2.6 单段 LLM 调用超时（分段模式收紧到段预算内 — 防慢引擎超出网关切断时长） */
+  partTimeoutMs?: number
+}
+
+export async function generateReportSections(
+  ctx: ReportContext,
+  signal?: AbortSignal,
+  opts: GenerateSectionsOpts = {},
+): Promise<GeneratedReport> {
   const digest = buildDigest(ctx)
-  const parts: ReportPart[] = []
-  const partA = await callPart('A', partAInstruction(ctx), digest, signal)
-  parts.push(partA)
-  const partB = await callPart('B', partBInstruction(ctx), digest, signal)
-  parts.push(partB)
-  const partC = await callPart('C', partCInstruction(ctx), digest, signal)
-  parts.push(partC)
+  // v2.6：只有成功段视为「已完成」；失败段（llmOk=false）不占用 have — 下一段自动重试
+  const have = new Set((opts.completedParts ?? []).filter(p => p.llmOk).map(p => p.key))
+  const parts: ReportPart[] = [...(opts.completedParts ?? []).filter(p => p.llmOk)]
+  const partSignal = (): AbortSignal | undefined => {
+    if (!opts.partTimeoutMs || opts.partTimeoutMs <= 0) return signal
+    return AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(opts.partTimeoutMs)])
+  }
+  /** 预算不足开启一段完整 LLM 调用（~30-90s）→ 不再开启，交还续跑 */
+  const budgetOk = () => opts.deadline == null || opts.deadline <= 0 || Date.now() < opts.deadline
+  // 段间依赖：A/B/C 相互独立（三段各自独立提示词），可任意续跑
+  if (!have.has('A') && budgetOk()) {
+    parts.push(await callPart('A', partAInstruction(ctx), digest, partSignal()))
+  } else if (!have.has('A')) {
+    return assemble(parts, true)
+  }
+  if (!have.has('B') && budgetOk()) {
+    parts.push(await callPart('B', partBInstruction(ctx), digest, partSignal()))
+  } else if (!have.has('B')) {
+    return assemble(parts, true)
+  }
+  if (!have.has('C') && budgetOk()) {
+    parts.push(await callPart('C', partCInstruction(ctx), digest, partSignal()))
+  } else if (!have.has('C')) {
+    return assemble(parts, true)
+  }
+  return assemble(parts, false)
+}
+
+function assemble(parts: ReportPart[], partial: boolean): GeneratedReport {
   const fullMarkdown = parts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n')
   const errors = parts.filter(p => !p.llmOk).map(p => `段${p.key}: ${p.error}`)
-  return { parts, fullMarkdown, ok: parts.some(p => p.llmOk), errors }
+  return { parts, fullMarkdown, ok: parts.some(p => p.llmOk), errors, ...(partial ? { partial: true } : {}) }
 }

@@ -70,10 +70,10 @@ async function main() {
   if (!(insights.ligands || []).some(l => /resmetirom/i.test(l)))
     throw new Error('FAIL: insights.ligands 未含 Resmetirom（规则兜底应提名）')
 
-  // ── 3. 同步流式评估 ──
-  log('── [3] 同步流式评估（O94952 + Resmetirom + evalTable 内联）──')
+  // ── 3. 同步流式评估（v2.6 分段续跑 — 跟随 checkpoint 段循环直至终态）──
+  log('── [3] 同步流式评估（O94952 + Resmetirom + evalTable 内联 · v2.6 分段续跑）──')
   const t0 = Date.now()
-  const body = {
+  const baseBody = {
     mode: 'docx',
     docxJobId: upJson.uploadId,
     uploadId: upJson.uploadId,
@@ -91,51 +91,64 @@ async function main() {
     },
     options: { skipBlast: true, maxPdb: 20 },
   }
-  const res = await jfetch('/api/evaluate/sync', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok || !res.body) {
-    const err = await res.json().catch(() => null)
-    throw new Error('sync 启动失败 HTTP ' + res.status + ': ' + JSON.stringify(err).slice(0, 200))
-  }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
   let events = 0
   let progressEvents = 0
   let final = null
   let streamErr = null
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    let nl
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim()
-      buf = buf.slice(nl + 1)
-      if (!line) continue
-      events++
-      try {
-        const ev = JSON.parse(line)
-        if (ev.type === 'job') {
-          progressEvents++
-          if (progressEvents <= 3 || progressEvents % 10 === 0) {
-            log(`  [进度 ${progressEvents}] stage=${ev.job.progress?.stage} ${ev.job.progress?.percent}% · ${String(ev.job.progress?.message || '').slice(0, 50)}`)
+  let segments = 0
+  let checkpoint = null
+  for (let round = 0; round < 100 && !final && !streamErr; round++) {
+    const res = await jfetch('/api/evaluate/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(checkpoint ? { ...baseBody, checkpoint } : baseBody),
+    })
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => null)
+      throw new Error('sync 启动失败 HTTP ' + res.status + ': ' + JSON.stringify(err).slice(0, 200))
+    }
+    segments++
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let nextCheckpoint = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let nl
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim()
+        buf = buf.slice(nl + 1)
+        if (!line) continue
+        events++
+        try {
+          const ev = JSON.parse(line)
+          if (ev.type === 'job') {
+            progressEvents++
+            if (progressEvents <= 3 || progressEvents % 10 === 0) {
+              log(`  [进度 ${progressEvents}] stage=${ev.job.progress?.stage} ${ev.job.progress?.percent}% · ${String(ev.job.progress?.message || '').slice(0, 50)}`)
+            }
+          } else if (ev.type === 'done') {
+            final = ev
+          } else if (ev.type === 'error') {
+            streamErr = ev.error
+            log('  [流错误]', ev.error)
+          } else if (ev.type === 'checkpoint' && ev.checkpoint) {
+            nextCheckpoint = ev.checkpoint
+            log(`  [段 ${segments}] 预算到点 — phase=${ev.checkpoint.state?.phase}，携快照续跑…`)
+          } else if (ev.type === 'ping') {
+            log('  [心跳]')
           }
-        } else if (ev.type === 'done') {
-          final = ev
-        } else if (ev.type === 'error') {
-          streamErr = ev.error
-          log('  [流错误]', ev.error)
-        } else if (ev.type === 'ping') {
-          log('  [心跳]')
-        }
-      } catch { /* 半行 */ }
+        } catch { /* 半行 */ }
+      }
+      if (final || streamErr || nextCheckpoint) break
     }
     if (final || streamErr) break
+    if (nextCheckpoint) { checkpoint = nextCheckpoint; continue }
+    throw new Error('流中断：无终态事件（events=' + events + '）')
   }
+  log('  分段总数:', segments, '（含 checkpoint 续跑）')
 
   // ── 4. 校验 ──
   log('── [4] 校验结果 ──')

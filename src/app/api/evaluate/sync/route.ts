@@ -19,7 +19,7 @@ import * as fs from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { db } from '@/lib/db'
 import { createJobSnapshot, getJobSnapshot, makeReporter, markStatus } from '@/lib/eval/job-manager'
-import { runPipeline, type InlineEvalTable, type PipelineResult } from '@/lib/eval/pipeline'
+import { runPipelineSegment, sanitizeCheckpoint, type InlineEvalTable, type PipelineCheckpoint, type PipelineResult } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
 import { runWithLlmOverride } from '@/lib/eval/llm-provider'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
@@ -50,6 +50,8 @@ interface SyncBody {
   options?: Partial<EvaluationOptions>
   /** v2.4：引擎配置覆写（无状态部署 DB 不保留，前端内联携带） */
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
+  /** v2.6：上一段交还的续跑快照（前端原样回传直至 done） */
+  checkpoint?: { version?: number; state?: unknown }
 }
 
 /** 流事件（NDJSON 行） */
@@ -58,6 +60,8 @@ type StreamEvent =
   | { type: 'ping' }
   | { type: 'done'; job: Record<string, unknown>; reportHtml: string | null }
   | { type: 'error'; error: string; job: Record<string, unknown> | null }
+  /** v2.6：本段预算到点 — 携带续跑快照，前端立即再发一段继续 */
+  | { type: 'checkpoint'; checkpoint: PipelineCheckpoint; job: Record<string, unknown> }
 
 export async function POST(req: Request) {
   const owner = getOwner(req)
@@ -297,8 +301,19 @@ const evalTable: InlineEvalTable | undefined = body.evalTable
         try {
           // 完成数据持有者（闭包赋值绕过 TS 控制流收窄）
           const holder: { r: PipelineResult | null } = { r: null }
+          // v2.6 分段预算：每段 ≤55s（网关 ~91s 切断长连接；预算留足余量容纳单次
+          // 慢调用超额）。到点管线交还 checkpoint → 本路由发 checkpoint 事件，
+          // 前端立即携快照再发一段继续（对前端表现为连续的进度流）。
+          const SEGMENT_MS = Number(process.env.EVAL_SYNC_SEGMENT_MS) > 10_000 ? Number(process.env.EVAL_SYNC_SEGMENT_MS) : 55_000
+          // v2.6：续跑快照消毒（客户端回传 — phase 枚举 + RID/PDB ID 形态 + 体积上限）
+          let checkpoint: PipelineCheckpoint | undefined
+          try {
+            if (body.checkpoint && JSON.stringify(body.checkpoint).length <= 8 * 1024 * 1024) {
+              checkpoint = sanitizeCheckpoint(body.checkpoint) ?? undefined
+            }
+          } catch { checkpoint = undefined } // 序列化异常按无效处理（从头跑）
           // v2.5：管线在引擎覆写的请求作用域内执行（AsyncLocalStorage 随 await 链传播）
-          await runWithLlmOverride(llmOverride, () => runPipeline(
+          const segmentOut = await runWithLlmOverride(llmOverride, () => runPipelineSegment(
             {
               jobId,
               mode,
@@ -313,11 +328,18 @@ const evalTable: InlineEvalTable | undefined = body.evalTable
             },
             {
               signal: snapshot.abort.signal,
+              deadline: Date.now() + SEGMENT_MS,
               // makeReporter：进度/日志写入内存快照（flush 循环统一推送）
               ...makeReporter(jobId),
               onComplete: r => { holder.r = r },
             },
+            checkpoint,
           ))
+          if (!segmentOut.done) {
+            // 本段预算到点 — 交还续跑快照（前端立即再发一段继续）
+            send({ type: 'checkpoint', checkpoint: segmentOut.checkpoint, job: buildProgressJob() })
+            return
+          }
           const result = holder.r
           markStatus(jobId, 'done')
           // 最终事件：完整 JobDetail（与 GET /api/jobs/[id] 同构）+ 内联 HTML 报告

@@ -11,11 +11,14 @@ export interface ErrorPanelProps {
   submitting: boolean
   onRetry: () => void
   onReset: () => void
+  /** v2.6：提交/流中断层的真实错误（job.error 为空时展示 — 同步流中断曾显示为“未知错误”） */
+  submitError?: string | null
 }
 
 /** 失败视图：错误信息 + 重试 / 返回按钮，保留日志便于排查 */
-export function ErrorPanel({ job, submitting, onRetry, onReset }: ErrorPanelProps) {
+export function ErrorPanel({ job, submitting, onRetry, onReset, submitError }: ErrorPanelProps) {
   const logs = job?.logs ?? []
+  const errorText = job?.error?.trim() || submitError?.trim() || ''
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-3">
@@ -29,7 +32,7 @@ export function ErrorPanel({ job, submitting, onRetry, onReset }: ErrorPanelProp
         <CircleAlert />
         <AlertTitle className="text-sm font-semibold">执行出错</AlertTitle>
         <AlertDescription className="text-red-700/90 dark:text-red-400/90">
-          <p className="leading-relaxed">{job?.error?.trim() || '作业执行过程中发生未知错误'}</p>
+          <p className="leading-relaxed">{errorText || '作业执行过程中发生未知错误'}</p>
           {job?.uniprotId && (
             <p className="mt-1 font-mono text-xs opacity-75">目标蛋白：{job.uniprotId}</p>
           )}

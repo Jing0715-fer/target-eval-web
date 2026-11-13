@@ -84,6 +84,8 @@ export interface PdbsResult {
   entries: PdbEntry[]
   /** 搜索总命中数（含未拉取详情的） */
   totalFound: number
+  /** v2.6：分段预算到点的部分结果（排序/配体回填延至完成段统一做） */
+  partial?: boolean
 }
 
 // ─── 共有结构（多靶点交集）──────────────────────────────────────────────────────

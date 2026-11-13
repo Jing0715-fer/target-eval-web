@@ -56,3 +56,10 @@ server.log
 /upload/
 /tool-results/
 /db/reports/u_*/
+
+# v2.6 运行时数据不入库（报告产物/DB/缓存随环境生成；客户评估表已在 /upload/ 规则下隔离）
+/db/reports/*/
+/db/custom.db
+/db/custom.db-journal
+/db/cache/alphafold/
+!/db/cache/3dmol.min.js

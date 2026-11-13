@@ -141,6 +141,29 @@ export interface BlastCollectOutcome {
   rescueNote?: string
 }
 
+/** v2.6 轮询续跑状态（跨段保存：RID 在 NCBI 侧存活，轮询本身是无状态 HTTP GET） */
+export interface BlastPollState {
+  rid: string
+  rtoe: number
+  /** 提交时刻（跨段保留，用于墙钟/软兜底计时） */
+  startedAt: number
+  waitingSince: number
+  searchingSince: number | null
+  attempts: number
+  netFails: number
+  rescueFails: number
+  rescueNextAt: number
+}
+
+export interface BlastCollectOpts {
+  /** 分段预算（epoch ms）：到点且仍在轮询 → 返回 stillRunning 而非拋错 */
+  deadline?: number
+  /** 上段保存的轮询状态（续跑） */
+  resume?: BlastPollState
+}
+
+/** 收集返回：终态 outcome 或「仍在运行（预算到点）」的续跑状态 */
+export type BlastCollectResult = BlastCollectOutcome | { stillRunning: true; pollState: BlastPollState }
 /** RCSB 兜底触发策略（collectBlastPdbWithRescue 用） */
 export interface BlastRescuePolicy {
   /** 持续 WAITING（排队未计算）触发兜底的时长，默认 90s */
@@ -173,23 +196,28 @@ export async function collectBlastPdbWithRescue(
   onProgress?: (msg: string) => void,
   signal?: AbortSignal,
   policy: BlastRescuePolicy = {},
-): Promise<BlastCollectOutcome> {
+  opts: BlastCollectOpts = {},
+): Promise<BlastCollectResult> {
   const waitingMs = policy.waitingMs ?? 90_000
   const searchingMs = policy.searchingMs ?? 240_000
   /** v1.28：last-resort 重试场景传入硬性墙钟；常规路径维持 30 分钟僵尸保险 */
   const wallMs = policy.maxWallMs ?? MAX_POLL_WALL_MS
-  const startedAt = Date.now()
-  let attempts = 0
-  let netFails = 0
+  const startedAt = opts.resume?.startedAt ?? Date.now()
+  let attempts = opts.resume?.attempts ?? 0
+  let netFails = opts.resume?.netFails ?? 0
   /** 状态连续时长跟踪（WAITING↔SEARCHING 转换时重置） */
-  let waitingSince = Date.now()
-  let searchingSince: number | null = null
+  let waitingSince = opts.resume?.waitingSince ?? Date.now()
+  let searchingSince = opts.resume?.searchingSince ?? null
   /** v1.28：RCSB 兜底多次重试 — 失败后按退避节奏重试，最多 MAX_RESCUE_ATTEMPTS 次 */
-  let rescueFails = 0
-  let rescueNextAt = 0
+  let rescueFails = opts.resume?.rescueFails ?? 0
+  let rescueNextAt = opts.resume?.rescueNextAt ?? 0
 
   const rescueExhausted = () => rescueFails >= MAX_RESCUE_ATTEMPTS
   const secSince = (t: number) => Math.round((Date.now() - t) / 1000)
+  /** v2.6：轮询状态快照（预算到点时随 stillRunning 返回，跨段续跑） */
+  const snapshot = (): BlastPollState => ({ rid, rtoe, startedAt, waitingSince, searchingSince, attempts, netFails, rescueFails, rescueNextAt })
+  /** v2.6：剩余预算不足一轮完整轮询（首等最多 30s / 常规 6s + GET）→ 不开启新轮询，交还续跑 */
+  const budgetLeft = () => (opts.deadline != null && opts.deadline > 0 ? opts.deadline - Date.now() : Infinity)
 
   /** 尝试 RCSB 兜底（v1.28：冷却节拍内直接跳过；连续失败达上限才判不可用）：
    *  成功返回结果；当前不可重试返回 null（调用方继续按 v1.8 语义等 NCBI） */
@@ -217,6 +245,10 @@ export async function collectBlastPdbWithRescue(
 
   while (true) {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+    // v2.6 分段预算：剩余不足一轮完整轮询周期 → 交还续跑（下一段带 pollState 继续）
+    if (budgetLeft() < (attempts === 0 ? 35_000 : 12_000)) {
+      return { stillRunning: true, pollState: snapshot() }
+    }
     // 首 poll 等待 RTOE（但上限 30s — NCBI 队列拥堵时会返回极端 RTOE 如 24830s，
     // 直译会睡 ~7 小时；RTOE 只是提示值，多等不会更快，30s 后进入常规 6s 轮询）
     await sleep(attempts === 0 ? Math.min(Math.max(3000, rtoe * 1000), 30_000) : 6000, signal)
@@ -302,6 +334,10 @@ export async function collectBlastPdbWithRescue(
         ? `NCBI 计算中（第 ${attempts} 次，已 ${elapsed}s — 运行中不判超时）`
         : `NCBI 排队中（第 ${attempts} 次，已 ${elapsed}s）`,
     )
+    // v2.6：每轮末检查 — 到点且仍在运行 → 交还续跑（下一段继续轮询同一 RID）
+    if (budgetLeft() <= 0) {
+      return { stillRunning: true, pollState: snapshot() }
+    }
   }
 }
 
@@ -317,7 +353,9 @@ export async function collectBlastPdb(
 ): Promise<BlastHit[]> {
   // 无序列可兜底（sequence=''）→ 软兜底与硬兜底均直接跳过，行为与 v1.8 完全一致
   const outcome = await collectBlastPdbWithRescue(rid, rtoe, '', onProgress, signal)
-  return outcome.hits
+  if ('hits' in outcome) return outcome.hits
+  // 无 deadline 时不会返回 stillRunning；防御性处理
+  throw new Error('BLAST 轮询被中断（未预期）')
 }
 
 export interface BlastRunResult {
@@ -338,7 +376,8 @@ export async function runBlastPdb(
 ): Promise<BlastHit[]> {
   const { rid, rtoe } = await submitBlastPdb(sequence, onProgress, signal)
   const outcome = await collectBlastPdbWithRescue(rid, rtoe, sequence, onProgress, signal)
-  return outcome.hits
+  if ('hits' in outcome) return outcome.hits
+  throw new Error('BLAST 轮询被中断（未预期）')
 }
 
 // ─── v1.28 last-resort 整周期重试 ─────────────────────────────────────────
@@ -405,11 +444,16 @@ export async function runBlastWithRetry(
     try {
       onProgress?.(`改走 NCBI BLASTp 完整周期（本轮限时 ${Math.round(attemptWallMs / 60000)} 分钟）…`)
       const { rid, rtoe } = await submitBlastPdb(sequence, onProgress, signal)
-      const outcome = await collectBlastPdbWithRescue(rid, rtoe, sequence, onProgress, signal, {
+      const outcomeRaw = await collectBlastPdbWithRescue(rid, rtoe, sequence, onProgress, signal, {
         waitingMs: 45_000,
         searchingMs: 90_000,
         maxWallMs: attemptWallMs,
       })
+      if ('stillRunning' in outcomeRaw) {
+        // v2.6：last-resort 路径无分段预算，不会走到这里；防御性兜底处理
+        throw new Error('BLAST 轮询被中断（未预期）')
+      }
+      const outcome = outcomeRaw
       onProgress?.(outcome.provider === 'rcsb'
         ? `本轮经 RCSB 兜底完成（${outcome.hits.length} 个命中）`
         : `NCBI BLASTp 完成（${outcome.hits.length} 个命中）`)

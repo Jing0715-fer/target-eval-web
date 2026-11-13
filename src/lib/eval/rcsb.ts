@@ -86,7 +86,7 @@ async function fetchEntryDetail(pdbId: string, signal?: AbortSignal): Promise<En
   const onAbort = () => controller.abort()
   signal?.addEventListener('abort', onAbort, { once: true })
   try {
-    const res = await fetch(`${DATA_URL}/${pdbId}`, {
+    const res = await fetch(`${DATA_URL}/${encodeURIComponent(pdbId)}`, {
       headers: { Accept: 'application/json' },
       signal: controller.signal,
     })
@@ -277,24 +277,42 @@ export async function fetchEntriesMetaBatch(pdbIds: string[], signal?: AbortSign
  * @param ids 全量 PDB ID
  * @param maxDetail 拉取详情的上限（默认 150）
  * @param onProgress (done, total)
+ * v2.6 分段续跑：deadline 到点 → 返回已完成的 entries（partial=true，排序与配体回填延至完成段）；
+ * 调用方保存 entries + completedIds，下一段经 priorEntries/completedIds 续跑。
  */
+export interface FetchPdbEntriesOpts {
+  signal?: AbortSignal
+  /** 分段预算（epoch ms）：到点返回 partial 结果 */
+  deadline?: number
+  /** 上段已完成的 PDB ID（跳过，不重复拉取） */
+  completedIds?: string[]
+  /** 上段已拉到的 entries（合并入返回值；配体回填在完成段统一做） */
+  priorEntries?: PdbEntry[]
+}
+
 export async function fetchPdbEntries(
   ids: string[],
   maxDetail: number,
   onProgress?: (done: number, total: number) => void,
   signal?: AbortSignal,
+  opts: FetchPdbEntriesOpts = {},
 ): Promise<PdbsResult> {
   const total = ids.length
   const detailIds = ids.slice(0, Math.max(1, maxDetail))
-  const entries: PdbEntry[] = []
+  const priorEntries = opts.priorEntries ?? []
+  const doneSet = new Set((opts.completedIds ?? []).map(x => x.toUpperCase()))
+  const entries: PdbEntry[] = [...priorEntries]
   const CONCURRENCY = 5
   let next = 0
   let done = 0
 
   async function worker() {
     while (next < detailIds.length && !signal?.aborted) {
+      // v2.6 分段预算：到点停止拉取（已完成的 entries 增量保存，下一段续跑）
+      if (opts.deadline != null && opts.deadline > 0 && Date.now() > opts.deadline) return
       const i = next++
       const pdbId = detailIds[i]
+      if (doneSet.has(pdbId.toUpperCase())) { done++; continue }
       const d = await fetchEntryDetail(pdbId, signal)
       done++
       if (d) {
@@ -333,6 +351,12 @@ export async function fetchPdbEntries(
 
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, detailIds.length) }, () => worker()))
   if (signal?.aborted) return { entries: [], totalFound: total }
+
+  // v2.6 分段预算：未拉完 → 增量返回（partial；排序与配体回填在完成段统一做）
+  const finishedAll = doneSet.size + done >= detailIds.length
+  if (!finishedAll) {
+    return { entries, totalFound: total, partial: true }
+  }
 
   // 排序：分辨率优先（null 靠后）
   entries.sort((a, b) => {

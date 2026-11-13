@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import {
+import { PillBottle,
   ChevronDown,
   CircleAlert,
   CircleCheckBig,
@@ -63,7 +63,8 @@ export interface InputPanelProps {
 interface LigandChip {
   id: number
   raw: string
-  source: 'text' | 'file'
+  /** v2.6：eval-table = 评估表 AI 识别后自动回填的芯片（可见可删） */
+  source: 'text' | 'file' | 'eval-table'
   fileName?: string
   parsed?: LigandFileParsed
 }
@@ -242,6 +243,20 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         setGoal(data.goals.slice(0, 3).join('；'))
         setGoalAutoFilled(true)
       }
+      // v2.6：评估表识别出的配体自动回填输入框芯片（用户可见/可删 — 此前仅静默随请求
+      // 提交，用户看不到“已识别”，反馈为“配体没有自动识别到输入框”）
+      if (data.ligands?.length) {
+        const normKey = (raw: string) => raw.toLowerCase().replace(/[\s-]/g, '')
+        setLigandChips(prev => {
+          const have = new Set(prev.map(c => normKey(c.raw)))
+          const auto = data.ligands!
+            .map(name => name.trim())
+            .filter(Boolean)
+            .filter(name => !have.has(normKey(name)))
+            .map(name => ({ id: ligandSeqRef.current++, raw: name, source: 'eval-table' as const }))
+          return auto.length ? [...prev, ...auto] : prev
+        })
+      }
     } catch (e) {
       setInsightsError(e instanceof Error ? e.message : '智能解析失败')
     } finally {
@@ -365,7 +380,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     // v2.4 配体输入组装：手动芯片 + 评估表 AI 提取的配体（合并去重，≤8 条）。
     // 评估表配体直接随请求发送 — 不再依赖服务器从磁盘 insights.json 回读
     // （无状态部署磁盘读不到；本地部署也有「insights 未完成即提交」的竞态）。
-    const manualLigands = ligandChips.map(c => ({ raw: c.raw, source: c.source as 'text' | 'file', fileName: c.fileName }))
+    const manualLigands = ligandChips.map(c => ({ raw: c.raw, source: c.source, fileName: c.fileName }))
     const tableLigands = (insights?.ligands ?? [])
       .map(name => name.trim())
       .filter(Boolean)
@@ -823,7 +838,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       >
                         {c.source === 'file'
                           ? <Paperclip className="size-3 shrink-0 text-primary" aria-hidden />
-                          : <span className="font-mono text-[11px] text-primary">T</span>}
+                          : c.source === 'eval-table'
+                            ? <PillBottle className="size-3 shrink-0 text-primary" aria-hidden />
+                            : <span className="font-mono text-[11px] text-primary">T</span>}
+                        {c.source === 'eval-table' && (
+                          <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-0.5 font-mono text-[9px] font-semibold text-primary" title="评估表 AI 识别的配体 — 已自动回填">表</span>
+                        )}
                         <span className="truncate font-mono text-[11px] text-foreground/90" title={c.raw}>
                           {c.raw.length > 34 ? c.raw.slice(0, 33) + '…' : c.raw}
                         </span>

@@ -26,7 +26,7 @@ async function main() {
     })
     const page = await ctx.newPage()
     await page.goto(BASE, { waitUntil: 'networkidle', timeout: 60_000 })
-    await page.waitForTimeout(600)
+    await page.waitForTimeout(2500)
     await page.screenshot({ path: `${OUT}/${vp.name}-home.png` })
     // 满页截图（看「下方是否空」）
     await page.screenshot({ path: `${OUT}/${vp.name}-home-full.png`, fullPage: true })

@@ -504,10 +504,14 @@ export interface SyncEvaluateResult {
 }
 
 /**
- * POST /api/evaluate/sync — 无状态部署的同步流式评估。
- * 读取 NDJSON 事件流：job 事件回调 onProgress；done/error 为终态。
+ * POST /api/evaluate/sync — 无状态部署的同步流式评估（v2.6 分段续跑）。
+ * 每段读取 NDJSON 事件流：job 进度事件回调 onProgress；checkpoint = 本段预算
+ * 到点（服务端交还续跑快照）→ 立即携快照再发一段继续，直至 done/error 终态。
  * abort 信号触发时中止请求（服务器同步中止管线）。
+ * 段上限防呆（MAX_SEGMENTS）：异常循环时最终以流中断错误终止。
  */
+const SYNC_MAX_SEGMENTS = 90 // ≈90 段 × ~55s ≈ 80 分钟总预算（超过视为异常）
+
 export async function evaluateSyncStream(
   body: SyncEvaluateBody,
   opts: {
@@ -515,64 +519,82 @@ export async function evaluateSyncStream(
     signal?: AbortSignal
   } = {},
 ): Promise<SyncEvaluateResult> {
-  // 引擎配置覆写（内存暂存的原始配置随请求内联携带）
-  const payload: SyncEvaluateBody = { ...body }
+  // 引擎配置覆写（内存暂存的原始配置随请求内联携带 — 每段都带）
   const llm = getLlmEngineOverride()
-  if (llm && !payload.llm) payload.llm = llm
+  let checkpoint: unknown | undefined
 
-  const res = await fetch('/api/evaluate/sync', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: opts.signal,
-  })
+  for (let segment = 0; ; segment++) {
+    const payload: SyncEvaluateBody = { ...body }
+    if (llm && !payload.llm) payload.llm = llm
+    if (checkpoint) (payload as { checkpoint?: unknown }).checkpoint = checkpoint
 
-  if (!res.ok || !res.body) {
-    const err = (await res.json().catch(() => null)) as { error?: string } | null
-    throw new Error(err?.error ?? `同步评估启动失败（HTTP ${res.status}）`)
-  }
+    const res = await fetch('/api/evaluate/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: opts.signal,
+    })
 
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let result: SyncEvaluateResult | null = null
-  let streamError: string | null = null
-
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    // 按行解析 NDJSON 事件
-    let nl = buffer.indexOf('\n')
-    while (nl >= 0) {
-      const line = buffer.slice(0, nl).trim()
-      buffer = buffer.slice(nl + 1)
-      if (line) {
-        try {
-          const ev = JSON.parse(line) as {
-            type: 'job' | 'ping' | 'done' | 'error'
-            job?: JobDetail
-            reportHtml?: string | null
-            error?: string
-          }
-          if (ev.type === 'job' && ev.job) {
-            opts.onProgress?.(ev.job)
-          } else if (ev.type === 'done' && ev.job) {
-            result = { job: ev.job, reportHtml: ev.reportHtml ?? null }
-          } else if (ev.type === 'error') {
-            streamError = ev.error ?? '评估失败'
-            if (ev.job) opts.onProgress?.(ev.job)
-          }
-          // ping 心跳：仅保活，无需处理
-        } catch { /* 半行/坏行丢弃，等下一块补齐 */ }
-      }
-      nl = buffer.indexOf('\n')
+    if (!res.ok || !res.body) {
+      const err = (await res.json().catch(() => null)) as { error?: string } | null
+      throw new Error(err?.error ?? `同步评估启动失败（HTTP ${res.status}）`)
     }
-    if (result || streamError) break
-  }
 
-  if (result) return result
-  if (streamError) throw new Error(streamError)
-  // 流中断且无终态（网关切断/超时）
-  throw new Error('评估流中断（网络或网关超时）。已完成的部分数据已丢失，请重试；若持续出现，请减少并发或稍后再试。')
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let result: SyncEvaluateResult | null = null
+    let streamError: string | null = null
+    let nextCheckpoint: unknown | null = null
+
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // 按行解析 NDJSON 事件
+      let nl = buffer.indexOf('\n')
+      while (nl >= 0) {
+        const line = buffer.slice(0, nl).trim()
+        buffer = buffer.slice(nl + 1)
+        if (line) {
+          try {
+            const ev = JSON.parse(line) as {
+              type: 'job' | 'ping' | 'done' | 'error' | 'checkpoint'
+              job?: JobDetail
+              reportHtml?: string | null
+              error?: string
+              checkpoint?: unknown
+            }
+            if (ev.type === 'job' && ev.job) {
+              opts.onProgress?.(ev.job)
+            } else if (ev.type === 'done' && ev.job) {
+              result = { job: ev.job, reportHtml: ev.reportHtml ?? null }
+            } else if (ev.type === 'error') {
+              streamError = ev.error ?? '评估失败'
+              if (ev.job) opts.onProgress?.(ev.job)
+            } else if (ev.type === 'checkpoint' && ev.checkpoint) {
+              // v2.6：本段到点 — 携快照进入下一段（对调用方完全透明）
+              nextCheckpoint = ev.checkpoint
+              if (ev.job) opts.onProgress?.(ev.job)
+            }
+            // ping 心跳：仅保活，无需处理
+          } catch { /* 半行/坏行丢弃，等下一块补齐 */ }
+        }
+        nl = buffer.indexOf('\n')
+      }
+      if (result || streamError || nextCheckpoint) break
+    }
+
+    if (result) return result
+    if (streamError) throw new Error(streamError)
+    if (nextCheckpoint) {
+      checkpoint = nextCheckpoint
+      if (segment + 1 >= SYNC_MAX_SEGMENTS) {
+        throw new Error('评估续跑段数超限（异常循环）— 请重试；若持续出现请稍后再试')
+      }
+      continue // 立即再发一段
+    }
+    // 流中断且无终态（网关切断/超时）
+    throw new Error('评估流中断（网络或网关超时）。已完成的部分数据已丢失，请重试；若持续出现，请减少并发或稍后再试。')
+  }
 }
