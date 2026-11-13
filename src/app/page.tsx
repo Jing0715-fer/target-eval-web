@@ -16,6 +16,7 @@ import { HistoryDialog, RecentEvaluations } from '@/components/eval/history'
 import { LlmConfigPanel } from '@/components/eval/llm-config-panel'
 import { useEvaluationFlow } from '@/components/eval/use-evaluation-flow'
 import { fetchLlmConfig } from '@/components/eval/api'
+import { cn } from '@/lib/utils'
 
 const viewMotion = {
   initial: { opacity: 0, y: 14 },
@@ -29,56 +30,151 @@ function isAnalysisStage(stage: string | null | undefined): boolean {
   return /score|rating|llm|report|generat|summary/i.test(stage ?? '')
 }
 
-/** 侧栏信息卡：评估流程（纵向编号轨）+ 数据源标签 */
-function PipelineCard() {
+/** 首屏主视觉（紧凑单行）：眉题 + 衬线标题 + 一句话导引 + 二级结构线稿 */
+function StudioHero() {
+  return (
+    <div className="flex shrink-0 flex-wrap items-end justify-between gap-x-8 gap-y-3">
+      <div className="min-w-0 max-w-3xl">
+        <div className="flex items-center gap-2.5">
+          <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">
+            Evaluation Studio
+          </span>
+          <span
+            aria-hidden
+            className="h-px w-10 bg-gradient-to-r from-emerald-700/50 to-transparent dark:from-emerald-500/50"
+          />
+          <span className="eval-eyebrow text-stone-400 dark:text-stone-500">
+            结构解析可行性
+          </span>
+        </div>
+        <h1 className="mt-2 font-display text-[24px] leading-[1.12] font-bold tracking-tight text-stone-900 dark:text-stone-50 sm:text-[26px]">
+          开始一次
+          <span className="bg-gradient-to-br from-emerald-800 via-emerald-700 to-teal-600 bg-clip-text text-transparent dark:from-emerald-400 dark:via-emerald-400 dark:to-teal-300">
+            靶点评估
+          </span>
+        </h1>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-stone-500 dark:text-stone-400">
+          输入靶点与配体，自动汇集结构、文献与同源数据，生成
+          <span className="font-medium text-stone-700 dark:text-stone-200">
+            {' '}X-ray · Cryo-EM · NMR{' '}
+          </span>
+          三方法可行性报告与实验策略建议。
+        </p>
+      </div>
+
+      {/* 蛋白二级结构线稿（α-螺旋 · β-折叠箭头 · 卷曲）：装饰性科学示意 */}
+      <svg
+        viewBox="0 0 168 48"
+        fill="none"
+        aria-hidden
+        className="hidden h-12 w-42 shrink-0 lg:block"
+      >
+        {/* α-螺旋波浪 */}
+        <path
+          d="M2 32 Q9 15 16 32 T30 32 T44 32"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          className="text-stone-300 dark:text-stone-700"
+        />
+        {/* 连接环 */}
+        <path
+          d="M44 32 C52 32 50 19 60 19"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          className="text-stone-300 dark:text-stone-700"
+        />
+        {/* β-折叠箭头（翡翠强调） */}
+        <path
+          d="M60 19 L79 12.5 L74.5 21.5 L93 15"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          className="text-emerald-600/90 dark:text-emerald-500/90"
+        />
+        {/* 无规卷曲 */}
+        <path
+          d="M93 15 C103 12 101 26 113 24 C123 22 121 34 133 32"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          className="text-stone-300 dark:text-stone-700"
+        />
+        {/* 原子标记 */}
+        <circle cx="79" cy="12.5" r="2.6" className="fill-emerald-600/90 dark:fill-emerald-500/90" />
+        <circle cx="133" cy="32" r="2.4" className="fill-stone-400/80 dark:fill-stone-600" />
+        <circle cx="16" cy="32" r="2" className="fill-stone-400/80 dark:fill-stone-600" />
+      </svg>
+    </div>
+  )
+}
+
+/** 右栏 · 评估管线导引（墨色面板）：提交后自动执行的四个阶段 + 数据源 */
+function WorkflowGuide() {
   const steps = [
-    { no: '01', label: '输入', desc: 'UniProt · 序列 · 评估表' },
-    { no: '02', label: '数据收集', desc: '结构 · 文献 · 同源检索' },
-    { no: '03', label: '分析生成', desc: '配体归一 · LLM 综合分析' },
-    { no: '04', label: '报告', desc: '三方法可行性 · 实验策略' },
+    { no: '01', title: '输入', desc: 'UniProt · 序列 · 评估表' },
+    { no: '02', title: '数据收集', desc: '结构 · 文献 · 同源检索' },
+    { no: '03', title: '分析生成', desc: '配体归一 · LLM 综合分析' },
+    { no: '04', title: '报告', desc: '三方法可行性 · 实验策略' },
   ]
   const sources = ['UniProt', 'RCSB PDB', 'PDBe', 'PubMed', 'NCBI BLAST', 'AlphaFold DB']
   return (
-    <section
-      aria-label="评估流程与数据源"
-      className="overflow-hidden rounded-xl border border-stone-200/90 bg-white shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-24px_rgba(28,25,23,0.18)] dark:border-stone-800 dark:bg-stone-900 dark:shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_32px_-24px_rgba(0,0,0,0.5)]"
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, delay: 0.08, ease: 'easeOut' }}
+      aria-label="评估工作流"
+      className="studio-ink relative shrink-0 overflow-hidden rounded-2xl text-stone-100 shadow-[0_2px_8px_rgba(28,25,23,0.18),0_24px_48px_-28px_rgba(28,25,23,0.5)] ring-1 ring-stone-900/10 dark:ring-black/50"
     >
-      <div className="flex items-center gap-2 border-b border-stone-100 px-3.5 py-2.5 dark:border-stone-800/70">
-        <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">Pipeline</span>
-        <h2 className="text-[13px] font-semibold text-stone-800 dark:text-stone-100">评估流程</h2>
-      </div>
-      <ol className="flex flex-col px-3.5 py-3">
+      {/* 顶部翡翠发丝线 */}
+      <div
+        aria-hidden
+        className="h-px bg-gradient-to-r from-emerald-400/80 via-emerald-400/25 to-transparent"
+      />
+      <header className="flex items-baseline gap-2 px-4 pt-3 pb-2">
+        <span className="eval-eyebrow text-emerald-400">Workflow</span>
+        <h2 className="text-[13px] font-semibold tracking-tight text-stone-50">评估管线</h2>
+        <span className="ml-auto font-mono text-[10px] text-stone-400">提交后自动执行</span>
+      </header>
+      <ol className="flex flex-col px-4 pb-3">
         {steps.map((s, i) => (
-          <li key={s.no} className="flex gap-2.5">
+          <li key={s.no} className="flex gap-3">
             <div className="flex flex-col items-center" aria-hidden>
-              <span className="flex size-5.5 shrink-0 items-center justify-center rounded-[5px] border border-emerald-200 bg-emerald-50 font-mono text-[9.5px] font-semibold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-400">
+              <span className="font-display text-[15px] leading-[1.15] font-bold text-emerald-400/90 tabular-nums">
                 {s.no}
               </span>
-              {i < steps.length - 1 && <span className="w-px flex-1 bg-stone-200 dark:bg-stone-800" />}
+              {i < steps.length - 1 && (
+                <span className="my-1.5 w-px flex-1 bg-emerald-500/25" />
+              )}
             </div>
-            <div className={i < steps.length - 1 ? 'min-w-0 flex-1 pb-3' : 'min-w-0 flex-1'}>
-              <div className="flex flex-wrap items-baseline gap-x-2">
-                <span className="text-[12.5px] font-medium text-stone-800 dark:text-stone-200">{s.label}</span>
-                <span className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">{s.desc}</span>
-              </div>
+            <div
+              className={cn(
+                'flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2',
+                i < steps.length - 1 && 'pb-3',
+              )}
+            >
+              <span className="text-[12.5px] font-medium text-stone-100">{s.title}</span>
+              <span className="truncate text-[10.5px] text-stone-400">{s.desc}</span>
             </div>
           </li>
         ))}
       </ol>
-      <div className="border-t border-stone-100 px-3.5 py-2.5 dark:border-stone-800/70">
-        <div className="eval-eyebrow mb-1.5 text-stone-400 dark:text-stone-500">数据源</div>
+      <div className="border-t border-white/[0.08] px-4 pt-2.5 pb-3.5">
+        <div className="eval-eyebrow mb-1.5 text-stone-500">数据源</div>
         <div className="flex flex-wrap gap-1">
           {sources.map((s) => (
             <span
               key={s}
-              className="rounded-sm border border-stone-200 bg-stone-50 px-1.5 py-0.5 font-mono text-[10px] text-stone-500 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-400"
+              className="rounded-[4px] border border-white/[0.08] bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] text-stone-400"
             >
               {s}
             </span>
           ))}
         </div>
       </div>
-    </section>
+    </motion.section>
   )
 }
 
@@ -91,6 +187,9 @@ export default function Home() {
     summary: 'Z.ai GLM-4.6（内置）',
     isBuiltin: true,
   })
+
+  /** idle 首屏：一屏工作室布局（lg+ 锁定视口高度，内部滚动）；其余阶段正常文档流 */
+  const isIdleStudio = flow.phase === 'idle' && !flow.loadingHistoryJob
 
   // 首次加载读取 LLM 引擎状态（失败静默保持内置）
   useEffect(() => {
@@ -136,7 +235,12 @@ export default function Home() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#fafaf9] text-stone-900 dark:bg-stone-950 dark:text-stone-100">
+    <div
+      className={cn(
+        'flex min-h-screen flex-col bg-[#fafaf9] text-stone-900 dark:bg-stone-950 dark:text-stone-100',
+        isIdleStudio && 'studio-bg lg:h-dvh lg:min-h-0 lg:overflow-hidden',
+      )}
+    >
       <AppHeader
         onOpenHistory={() => setHistoryOpen(true)}
         onHome={handleNewEvaluation}
@@ -145,8 +249,8 @@ export default function Home() {
         engineIsBuiltin={engine.isBuiltin}
       />
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-4 sm:px-5 sm:py-5">
-        {/* 非 idle 阶段：紧凑流程指示器（idle 阶段的流程信息由侧栏 PipelineCard 承载） */}
+      <main className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col px-4 py-4 sm:px-5 lg:px-6 lg:py-4">
+        {/* 非 idle 阶段：紧凑流程指示器（idle 阶段由 Hero + 右栏管线导引承载） */}
         {flow.phase !== 'idle' && !flow.loadingHistoryJob && (
           <Stepper step={step} className="mb-4 sm:mb-5" />
         )}
@@ -159,10 +263,13 @@ export default function Home() {
         ) : (
           <AnimatePresence mode="wait">
             {flow.phase === 'idle' && (
-              <motion.div key="idle" {...viewMotion}>
-                {/* 紧凑双栏：左 = 工作台表单；右 = 最近评估 + 流程信息 */}
-                <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
-                  <div className="min-w-0 lg:col-span-7">
+              <motion.div key="idle" {...viewMotion} className="flex min-h-0 flex-1 flex-col">
+                {/* 主视觉（全宽单行，紧凑） */}
+                <StudioHero />
+
+                {/* 工作台双栏：左 = 评估表单；右 = 管线导引 + 最近评估 */}
+                <div className="mt-4 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-12 lg:grid-rows-[minmax(0,1fr)]">
+                  <div className="min-h-0 lg:col-span-8">
                     <InputPanel
                       submitting={flow.submitting}
                       submitError={flow.submitError}
@@ -170,14 +277,17 @@ export default function Home() {
                       onClearSubmitError={flow.clearSubmitError}
                     />
                   </div>
-                  <aside className="flex min-w-0 flex-col gap-4 lg:col-span-5" aria-label="最近评估与流程信息">
+                  <aside
+                    className="flex min-h-0 flex-col gap-4 lg:col-span-4"
+                    aria-label="评估管线与最近评估"
+                  >
+                    <WorkflowGuide />
                     <RecentEvaluations
                       refreshKey={historyKey}
                       onOpenJob={openHistoryJob}
                       onOpenBatchReport={openBatchReport}
                       onOpenHistory={() => setHistoryOpen(true)}
                     />
-                    <PipelineCard />
                   </aside>
                 </div>
               </motion.div>

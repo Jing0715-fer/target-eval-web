@@ -172,3 +172,102 @@
 .dark .eval-scroll::-webkit-scrollbar-thumb:hover {
   background: oklch(0.45 0 0);
 }
+
+/* 滚动区上下缘渐隐（提示可滚动，卡片内仪器窗口感） */
+.eval-scroll-fade {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    black 10px,
+    black calc(100% - 10px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    black 10px,
+    black calc(100% - 10px),
+    transparent 100%
+  );
+}
+
+/* ---------- 工作室首屏（idle 一屏布局） ---------- */
+
+/* 底纹：暖纸底 + 角部翡翠光晕 + 坐标纸细网格 */
+.studio-bg {
+  background-color: #f6f6f3;
+  background-image:
+    radial-gradient(
+      1100px 480px at 8% -10%,
+      oklch(0.596 0.145 163.225 / 0.08),
+      transparent 62%
+    ),
+    radial-gradient(
+      900px 420px at 104% 112%,
+      oklch(0.596 0.145 163.225 / 0.06),
+      transparent 58%
+    ),
+    linear-gradient(rgba(120, 113, 108, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 113, 108, 0.05) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    28px 28px,
+    28px 28px;
+}
+.dark .studio-bg {
+  background-color: oklch(0.147 0 0);
+  background-image:
+    radial-gradient(
+      1100px 480px at 8% -10%,
+      oklch(0.696 0.17 162.48 / 0.09),
+      transparent 62%
+    ),
+    radial-gradient(
+      900px 420px at 104% 112%,
+      oklch(0.696 0.17 162.48 / 0.07),
+      transparent 58%
+    ),
+    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+}
+
+/* 墨色面板（右栏评估管线导引）：石墨底 + 翡翠角部辉光 */
+.studio-ink {
+  background-color: #1c1917;
+  background-image:
+    radial-gradient(
+      440px 210px at 90% -14%,
+      oklch(0.696 0.17 162.48 / 0.2),
+      transparent 60%
+    ),
+    radial-gradient(
+      320px 170px at -8% 110%,
+      oklch(0.596 0.145 163.225 / 0.14),
+      transparent 55%
+    );
+}
+.dark .studio-ink {
+  background-color: #100e0d;
+}
+
+/* 键位徽标（快捷键提示） */
+.eval-kbd {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 4px;
+  border: 1px solid oklch(0.88 0 0);
+  border-bottom-width: 2px;
+  background: #fff;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: oklch(0.44 0 0);
+}
+.dark .eval-kbd {
+  border-color: oklch(0.37 0 0);
+  background: oklch(0.26 0 0);
+  color: oklch(0.75 0 0);
+}

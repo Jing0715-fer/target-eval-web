@@ -404,11 +404,11 @@ export function RecentEvaluations({
     <motion.section
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, delay: 0.1, ease: 'easeOut' }}
-      className="overflow-hidden rounded-xl border border-stone-200/90 bg-white shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-24px_rgba(28,25,23,0.18)] dark:border-stone-800 dark:bg-stone-900 dark:shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_32px_-24px_rgba(0,0,0,0.5)]"
+      transition={{ duration: 0.3, delay: 0.14, ease: 'easeOut' }}
+      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-stone-200/80 bg-white ring-1 ring-stone-950/[0.03] shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-20px_rgba(28,25,23,0.16)] dark:border-stone-800 dark:bg-stone-900 dark:ring-white/[0.04] dark:shadow-[0_1px_2px_rgba(0,0,0,0.4),0_16px_40px_-24px_rgba(0,0,0,0.6)]"
       aria-label="最近评估"
     >
-      <div className="flex items-center gap-2 border-b border-stone-100 px-3.5 py-2.5 dark:border-stone-800/70">
+      <div className="flex shrink-0 items-center gap-2 border-b border-stone-100 px-3.5 py-2.5 dark:border-stone-800/70">
         <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">Recent</span>
         <h2 className="text-[13px] font-semibold text-stone-800 dark:text-stone-100">最近评估</h2>
         <PrivacyBadge />
@@ -430,7 +430,7 @@ export function RecentEvaluations({
           ))}
         </div>
       ) : empty ? (
-        <div className="flex flex-col items-center gap-1.5 px-3.5 py-7 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-1.5 px-3.5 py-7 text-center">
           <div className="flex size-9 items-center justify-center rounded-full bg-stone-100 dark:bg-stone-800">
             <History className="size-4 text-stone-400" />
           </div>
@@ -440,7 +440,7 @@ export function RecentEvaluations({
           </p>
         </div>
       ) : (
-        <div className="eval-scroll max-h-[340px] overflow-y-auto px-1.5 py-1.5">
+        <div className="eval-scroll eval-scroll-fade min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
           {batches.slice(0, 3).map((b) => (
             <BatchReportRow key={b.id} report={b} onOpen={onOpenBatchReport} dense />
           ))}
@@ -463,6 +463,19 @@ export function RecentEvaluations({
           )}
         </div>
       )}
+
+      {/* 卡底锚点：全部历史入口（消解尾部留白） */}
+      <div className="shrink-0 border-t border-stone-100 px-2.5 py-2 dark:border-stone-800/70">
+        <button
+          type="button"
+          onClick={onOpenHistory}
+          className="flex min-h-8 w-full items-center justify-center gap-1.5 rounded-md text-[11.5px] font-medium text-stone-500 transition-colors outline-none hover:bg-stone-100/70 hover:text-stone-800 focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 dark:text-stone-400 dark:hover:bg-stone-800/50 dark:hover:text-stone-200"
+        >
+          <History className="size-3.5" aria-hidden />
+          查看全部历史评估
+          <ArrowRight className="size-3" aria-hidden />
+        </button>
+      </div>
 
       {/* 删除确认 */}
       <AlertDialog open={confirmDelete != null} onOpenChange={(v) => !v && setConfirmDelete(null)}>

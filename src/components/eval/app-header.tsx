@@ -45,7 +45,7 @@ export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, e
         className="h-[2px] bg-gradient-to-r from-emerald-800 via-emerald-700/70 to-transparent dark:from-emerald-600 dark:via-emerald-600/60"
         aria-hidden
       />
-      <div className="mx-auto flex h-11 w-full max-w-6xl items-center gap-2.5 px-4 sm:px-5">
+      <div className="mx-auto flex h-11 w-full max-w-7xl items-center gap-2.5 px-4 sm:px-5 lg:px-6">
         <button
           type="button"
           onClick={() => canGoHome && onHome?.()}

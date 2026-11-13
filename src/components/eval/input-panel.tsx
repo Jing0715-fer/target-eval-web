@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   ChevronDown,
   CircleAlert,
@@ -75,7 +75,76 @@ function ligandRawFromParsed(p: LigandFileParsed, fileName: string): string {
   return fileName.replace(/\.[^.]+$/, '').trim().slice(0, 60)
 }
 
-/** 输入视图（idle）：紧凑双栏工作台卡片 — 靶点 / 配体 / 目标 / 高级选项 / 提交 */
+// ─── 步骤轨道区段 ─────────────────────────────────────────────────────────────
+
+/** 表单步骤区段：左侧编号节点 + 连续竖轨（完成后节点点亮为翡翠实心），引导逐项填写 */
+function StepSection({
+  no,
+  title,
+  hint,
+  tone = 'empty',
+  right,
+  last = false,
+  children,
+}: {
+  no: string
+  title: string
+  hint?: string
+  /** done = 已完成（实心翡翠） · optional = 可选未填（虚线框） · empty = 待填写（必填） */
+  tone?: 'done' | 'optional' | 'empty'
+  right?: ReactNode
+  /** 末段：轨道向下渐隐 */
+  last?: boolean
+  children: ReactNode
+}) {
+  return (
+    <section
+      className={cn(
+        'px-4 py-3',
+        // 首段（01）无上边线；后续段以发丝线分隔（轨道连续穿行）
+        no !== '01' && 'border-t border-stone-100/90 dark:border-stone-800/60',
+      )}
+    >
+      <div className="flex gap-3">
+        {/* 步骤轨道：连线（贯穿上下段）+ 编号节点 */}
+        <div className="flex flex-col items-center" aria-hidden>
+          {no !== '01' && <span className="-mt-3 h-3 w-px bg-stone-200 dark:bg-stone-800" />}
+          <span
+            className={cn(
+              'flex size-5 shrink-0 items-center justify-center rounded-[5px] border font-mono text-[9.5px] font-semibold tabular-nums transition-colors duration-300',
+              tone === 'done'
+                ? 'border-emerald-700 bg-emerald-700 text-white shadow-[0_0_0_3px_rgba(4,120,87,0.14)] dark:border-emerald-500 dark:bg-emerald-500 dark:text-stone-950 dark:shadow-[0_0_0_3px_rgba(16,185,129,0.18)]'
+                : tone === 'optional'
+                  ? 'border-dashed border-stone-300 bg-white text-stone-400 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-500'
+                  : 'border-stone-300 bg-white text-stone-500 dark:border-stone-600 dark:bg-stone-900 dark:text-stone-400',
+            )}
+          >
+            {no}
+          </span>
+          {last ? (
+            <span className="w-px flex-1 bg-gradient-to-b from-stone-200 to-transparent dark:from-stone-800" />
+          ) : (
+            <span className="mt-1.5 w-px flex-1 bg-stone-200 dark:bg-stone-800" />
+          )}
+        </div>
+
+        {/* 字段内容：标题行 + 输入区 */}
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <h3 className="text-[13px] font-semibold tracking-tight text-stone-800 dark:text-stone-100">
+              {title}
+            </h3>
+            {hint && <span className="text-[11px] text-stone-400 dark:text-stone-500">{hint}</span>}
+            {right && <span className="ml-auto flex flex-wrap items-center gap-1.5">{right}</span>}
+          </div>
+          {children}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/** 输入视图（idle）：一屏工作台卡片 — 步骤轨道（靶点 / 配体 / 目标）+ 高级选项 + 提交条 */
 export function InputPanel({ submitting, submitError, onStart, onClearSubmitError }: InputPanelProps) {
   const [mode, setMode] = useState<TabMode>('uniprot')
 
@@ -145,6 +214,14 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [blastEnabled, setBlastEnabled] = useState(true)
   const [forceBlast, setForceBlast] = useState(false)
   const [maxPdb, setMaxPdb] = useState(150)
+
+  // 快捷键提示文案（挂载后按平台修正，避免 SSR 水合不一致）
+  const [kbdHint, setKbdHint] = useState('⌘ ↵')
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && !/Mac|iPhone|iPad/.test(navigator.platform ?? navigator.userAgent)) {
+      setKbdHint('Ctrl ↵')
+    }
+  }, [])
 
   /** 上传成功后自动执行 LLM 智能解析（不阻塞选择评估对象） */
   const runInsights = async (uploadId: string) => {
@@ -336,77 +413,91 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     await onStart(requests)
   }
 
-  // ─── 字段头（编号 + 标题 + 右侧实时元信息，紧凑单行）──────────────────────
-
-  const FieldHead = ({ no, title, hint, children }: { no: string; title: string; hint?: string; children?: ReactNode }) => (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <span className="font-mono text-[10px] font-semibold tabular-nums text-stone-300 dark:text-stone-600">{no}</span>
-      <span className="text-[13px] font-semibold tracking-tight text-stone-800 dark:text-stone-100">{title}</span>
-      {hint && <span className="text-[11px] text-stone-400 dark:text-stone-500">{hint}</span>}
-      {children && <span className="ml-auto flex flex-wrap items-center gap-1.5">{children}</span>}
-    </div>
-  )
+  // ⌘/Ctrl + Enter 快捷开始评估（不设依赖数组：始终绑定最新闭包）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault()
+        if (inputReady && !submitting) void handleStart()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
 
   const inputBase =
     'w-full rounded-md border border-stone-200 bg-white text-stone-900 shadow-none outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-stone-400 focus-visible:border-emerald-500 focus-visible:ring-[3px] focus-visible:ring-emerald-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus-visible:border-emerald-600 dark:focus-visible:ring-emerald-500/15'
 
   const hintText = 'flex items-center gap-1 text-[11px]'
 
-  return (
-    <div className="flex flex-col gap-4">
-      {/* 工作台卡片（紧凑） */}
-      <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-24px_rgba(28,25,23,0.18)] dark:border-stone-800 dark:bg-stone-900 dark:shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_32px_-24px_rgba(0,0,0,0.5)]">
-        <Tabs value={mode} onValueChange={(v) => setMode(v as TabMode)}>
-          {/* 卡头：标题 + 分段控件式模式切换（同一行） */}
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-100 px-4 py-2.5 dark:border-stone-800/70">
-            <div className="flex min-w-0 items-baseline gap-2">
-              <h1 className="font-display text-[15px] leading-none font-bold tracking-tight text-stone-900 dark:text-stone-50">
-                新建评估
-              </h1>
-              <span className="hidden truncate text-[11px] text-stone-400 md:inline dark:text-stone-500">
-                靶点结构解析可行性 · 三方法评估报告
-              </span>
-            </div>
-            <TabsList className="ml-auto h-8 w-auto justify-start gap-0.5 rounded-md bg-stone-100/80 p-0.5 dark:bg-stone-800/70">
-              {([
-                { value: 'uniprot', label: 'UniProt ID', icon: Dna },
-                { value: 'sequence', label: '序列', icon: FileText },
-                { value: 'docx', label: '评估表', icon: Paperclip },
-              ] as const).map(({ value, label, icon: Icon }) => (
-                <TabsTrigger
-                  key={value}
-                  value={value}
-                  className="h-7 gap-1.5 rounded-[5px] px-2.5 text-[11.5px] font-medium text-stone-500 shadow-none transition-all data-[state=active]:bg-white data-[state=active]:text-emerald-800 data-[state=active]:shadow-[0_1px_3px_rgba(28,25,23,0.12)] sm:px-3 dark:text-stone-400 dark:data-[state=active]:bg-stone-950 dark:data-[state=active]:text-emerald-400 [&_svg]:size-3"
-                >
-                  <Icon aria-hidden />
-                  {label}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </div>
+  // ─── 步骤头元信息（按当前输入模式计算徽章与提示） ───────────────────────────
 
-          <div className="flex flex-col divide-y divide-stone-100 dark:divide-stone-800/70">
+  const badgeCls =
+    'rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400'
+  const targetHint =
+    mode === 'uniprot' ? 'UniProt accession' : mode === 'sequence' ? 'FASTA 或裸序列' : '上传 Word 评估表'
+  const step1Badge: ReactNode =
+    mode === 'uniprot' && uniprotMulti ? (
+      <span className={badgeCls}>{uniprotParsed.valid.length} 个靶点 · 批量评估</span>
+    ) : mode === 'sequence' && seqMulti ? (
+      <span className={badgeCls}>{seqEntries.length} 条序列 · 批量评估</span>
+    ) : mode === 'docx' && selectedUniprots.length > 1 ? (
+      <span className={badgeCls}>{selectedUniprots.length} 个靶点 · 批量评估</span>
+    ) : null
+
+  const startLabel = submitting
+    ? '正在创建评估作业…'
+    : mode === 'docx' && selectedUniprots.length > 1
+      ? `开始评估（${selectedUniprots.length} 个靶点）`
+      : mode === 'uniprot' && uniprotMulti
+        ? `开始评估（${uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT).length} 个靶点）`
+        : mode === 'sequence' && seqMulti
+          ? `开始评估（${seqEntries.slice(0, MAX_BATCH_UNIPROT).length} 条序列）`
+          : '开始评估'
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-stone-200/80 bg-white ring-1 ring-stone-950/[0.03] shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-20px_rgba(28,25,23,0.16)] dark:border-stone-800 dark:bg-stone-900 dark:ring-white/[0.04] dark:shadow-[0_1px_2px_rgba(0,0,0,0.4),0_16px_40px_-24px_rgba(0,0,0,0.6)]">
+      <Tabs value={mode} onValueChange={(v) => setMode(v as TabMode)} className="flex min-h-0 flex-1 flex-col gap-0">
+        {/* 卡头工具条：输入方式切换（分段控件） */}
+        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-100 bg-stone-50/60 px-4 py-2 dark:border-stone-800/70 dark:bg-stone-950/40">
+          <span className="eval-eyebrow text-stone-400 dark:text-stone-500">Input · 输入方式</span>
+          <TabsList className="ml-auto h-8 w-auto justify-start gap-0.5 rounded-lg bg-stone-200/50 p-0.5 dark:bg-stone-800/70">
+            {([
+              { value: 'uniprot', label: 'UniProt ID', icon: Dna },
+              { value: 'sequence', label: '序列', icon: FileText },
+              { value: 'docx', label: '评估表', icon: Paperclip },
+            ] as const).map(({ value, label, icon: Icon }) => (
+              <TabsTrigger
+                key={value}
+                value={value}
+                className="h-7 gap-1.5 rounded-[6px] px-2.5 text-[11.5px] font-medium text-stone-500 shadow-none transition-all data-[state=active]:bg-white data-[state=active]:text-emerald-800 data-[state=active]:shadow-[0_1px_3px_rgba(28,25,23,0.12)] sm:px-3 dark:text-stone-400 dark:data-[state=active]:bg-stone-950 dark:data-[state=active]:text-emerald-400 [&_svg]:size-3"
+              >
+                <Icon aria-hidden />
+                {label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </div>
+
+        {/* 字段区（卡片内的滚动窗口，上下缘渐隐） */}
+        <div className="eval-scroll eval-scroll-fade min-h-0 flex-1 overflow-y-auto">
+          <div className="flex flex-col">
             {/* ── 01 靶点输入 ─────────────────────────────────────── */}
-            <div className="px-4 py-3.5">
+            <StepSection
+              no="01"
+              title="靶点输入"
+              hint={targetHint}
+              tone={inputReady ? 'done' : 'empty'}
+              right={step1Badge}
+            >
               <TabsContent value="uniprot" className="mt-0">
                 <div className="flex flex-col gap-2">
-                  <FieldHead
-                    no="01"
-                    title="靶点输入"
-                    hint="UniProt accession"
-                  >
-                    {uniprotMulti && (
-                      <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
-                        {uniprotParsed.valid.length} 个靶点 · 批量评估
-                      </span>
-                    )}
-                  </FieldHead>
                   <Textarea
                     aria-label="UniProt ID 输入"
                     value={uniprot}
                     onChange={(e) => setUniprot(e.target.value)}
                     placeholder={'支持多个 UniProt ID，逗号 / 空格 / 换行分隔（最多 ' + MAX_BATCH_UNIPROT + ' 个），如 P00533、P04637'}
-                    className={cn(inputBase, 'min-h-[72px] resize-y px-3 py-2 font-mono text-[13px] leading-[22px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[12px] placeholder:leading-[20px]')}
+                    className={cn(inputBase, 'min-h-[64px] resize-y px-3 py-2 font-mono text-[13px] leading-[22px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[12px] placeholder:leading-[20px]')}
                     spellCheck={false}
                   />
                   {uniprot.trim() !== '' && uniprotParsed.invalid.length > 0 && (
@@ -455,11 +546,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   {/* 可选伴随序列：与 UniProt 合并为一次评估 */}
                   <Collapsible open={companionOpen} onOpenChange={setCompanionOpen} className="mt-0.5">
                     <div className="rounded-md border border-stone-200 dark:border-stone-800">
-                      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-2 rounded-md px-3 text-[11.5px] font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60">
+                      <CollapsibleTrigger className="flex min-h-8 w-full items-center gap-2 rounded-md px-3 text-[11.5px] font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60">
                         <Dna className={cn('size-3.5', companionValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
                         补充构建序列（可选）
                         {companionValid && (
-                          <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                          <span className={badgeCls}>
                             {companionInfo.count.toLocaleString()} aa · 将合并评估
                           </span>
                         )}
@@ -479,7 +570,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                             value={companionText}
                             onChange={(e) => setCompanionText(e.target.value)}
                             placeholder={'粘贴该靶点的构建序列（截短体/突变体，FASTA 或裸序列）。与 UniProt 属同一靶点时将合并为一次评估，并自动分析构建边界（对应全长区间）。'}
-                            className={cn(inputBase, 'min-h-[72px] resize-y px-3 py-2 font-mono text-xs leading-relaxed')}
+                            className={cn(inputBase, 'min-h-[64px] resize-y px-3 py-2 font-mono text-xs leading-relaxed')}
                             spellCheck={false}
                             aria-label="补充构建序列（可选）"
                           />
@@ -505,7 +596,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     <div className="rounded-md border border-stone-200 dark:border-stone-800">
                       <CollapsibleTrigger
                         className={cn(
-                          'flex min-h-9 w-full items-center gap-2 rounded-md px-3 text-[11.5px] font-medium outline-none transition-colors',
+                          'flex min-h-8 w-full items-center gap-2 rounded-md px-3 text-[11.5px] font-medium outline-none transition-colors',
                           rangeEnabled
                             ? 'text-stone-600 hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60'
                             : 'cursor-not-allowed text-stone-300 dark:text-stone-600',
@@ -514,7 +605,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                         <Ruler className={cn('size-3.5', rangeValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
                         评估范围（可选）
                         {rangeValid && (
-                          <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                          <span className={badgeCls}>
                             残基 {rangeStartN}-{rangeEndN}
                           </span>
                         )}
@@ -593,17 +684,6 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
               <TabsContent value="sequence" className="mt-0">
                 <div className="flex flex-col gap-2">
-                  <FieldHead
-                    no="01"
-                    title="靶点输入"
-                    hint="FASTA 或裸序列"
-                  >
-                    {seqMulti && (
-                      <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
-                        {seqEntries.length} 条序列 · 批量评估
-                      </span>
-                    )}
-                  </FieldHead>
                   <div className="relative">
                     <Textarea
                       aria-label="氨基酸序列输入"
@@ -650,7 +730,6 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
               <TabsContent value="docx" className="mt-0">
                 <div className="flex flex-col gap-2">
-                  <FieldHead no="01" title="靶点输入" hint="上传 Word 评估表" />
                   <DocxUploadPanel
                     upload={upload}
                     uploading={uploading}
@@ -672,164 +751,162 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   />
                 </div>
               </TabsContent>
-            </div>
+            </StepSection>
 
             {/* ── 02 配体输入（v2.0）─────────────────────────────────── */}
-            <div className="px-4 py-3.5">
-              <div className="flex flex-col gap-2">
-                <FieldHead
-                  no="02"
-                  title="配体 · 化合物"
-                  hint={mode === 'docx' ? '可选 · 评估表提及的配体将自动识别' : '可选'}
-                >
-                  {ligandChips.length > 0 && (
-                    <span className="font-mono text-[10px] text-stone-400 dark:text-stone-500">
-                      {ligandChips.length}/{MAX_LIGANDS}
-                    </span>
-                  )}
-                </FieldHead>
-
-                <div
-                  className={cn(
-                    'flex flex-col gap-2 rounded-md border border-stone-200 bg-stone-50/60 p-2 transition-colors focus-within:border-emerald-400 focus-within:bg-white dark:border-stone-700 dark:bg-stone-800/40 dark:focus-within:border-emerald-600 dark:focus-within:bg-stone-900',
-                  )}
-                >
-                  {ligandChips.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {ligandChips.map(c => (
-                        <span
-                          key={c.id}
-                          className="group inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-md border border-stone-200 bg-white pl-2 pr-1 shadow-[0_1px_2px_rgba(28,25,23,0.05)] dark:border-stone-700 dark:bg-stone-900"
-                        >
-                          {c.source === 'file'
-                            ? <Paperclip className="size-3 shrink-0 text-emerald-700 dark:text-emerald-500" aria-hidden />
-                            : <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-500">T</span>}
-                          <span className="truncate font-mono text-[11px] text-stone-700 dark:text-stone-200" title={c.raw}>
-                            {c.raw.length > 34 ? c.raw.slice(0, 33) + '…' : c.raw}
-                          </span>
-                          {c.source === 'file' && c.parsed && (
-                            <span className="shrink-0 rounded-sm bg-emerald-100 px-1 py-0.5 font-mono text-[9px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
-                              {c.parsed.compId
-                                ? `ID ${c.parsed.compId}`
-                                : c.parsed.formula
-                                  ? c.parsed.formula
-                                  : c.parsed.name
-                                    ? '已解析'
-                                    : '线索'}
-                            </span>
-                          )}
-                          {c.source === 'file' && !c.parsed && (
-                            <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-0.5 font-mono text-[9px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-400">未识别格式</span>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => removeLigandChip(c.id)}
-                            aria-label="移除配体"
-                            className="flex size-5.5 shrink-0 items-center justify-center rounded text-stone-400 transition-colors hover:bg-stone-100 hover:text-red-600 dark:hover:bg-stone-800 dark:hover:text-red-400"
-                          >
-                            <X className="size-3" />
-                          </button>
+            <StepSection
+              no="02"
+              title="配体 · 化合物"
+              hint={mode === 'docx' ? '可选 · 评估表提及的配体将自动识别' : '可选 · 名称 / 分子式 / 三位 ID'}
+              tone={ligandChips.length > 0 ? 'done' : 'optional'}
+              right={
+                ligandChips.length > 0 ? (
+                  <span className="font-mono text-[10px] text-stone-400 dark:text-stone-500">
+                    {ligandChips.length}/{MAX_LIGANDS}
+                  </span>
+                ) : undefined
+              }
+            >
+              <div
+                className={cn(
+                  'flex flex-col gap-2 rounded-md border border-stone-200 bg-stone-50/60 p-2 transition-colors focus-within:border-emerald-400 focus-within:bg-white dark:border-stone-700 dark:bg-stone-800/40 dark:focus-within:border-emerald-600 dark:focus-within:bg-stone-900',
+                )}
+              >
+                {ligandChips.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {ligandChips.map(c => (
+                      <span
+                        key={c.id}
+                        className="group inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-md border border-stone-200 bg-white pl-2 pr-1 shadow-[0_1px_2px_rgba(28,25,23,0.05)] dark:border-stone-700 dark:bg-stone-900"
+                      >
+                        {c.source === 'file'
+                          ? <Paperclip className="size-3 shrink-0 text-emerald-700 dark:text-emerald-500" aria-hidden />
+                          : <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-500">T</span>}
+                        <span className="truncate font-mono text-[11px] text-stone-700 dark:text-stone-200" title={c.raw}>
+                          {c.raw.length > 34 ? c.raw.slice(0, 33) + '…' : c.raw}
                         </span>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      aria-label="配体输入"
-                      value={ligandDraft}
-                      onChange={(e) => setLigandDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ',' || e.key === '；' || e.key === ';') {
-                          e.preventDefault()
-                          commitLigandDraft()
-                        }
-                      }}
-                      disabled={ligandChips.length >= MAX_LIGANDS}
-                      placeholder={ligandChips.length >= MAX_LIGANDS
-                        ? `已达上限 ${MAX_LIGANDS} 条`
-                        : '名称 / 分子式 / 三位 ID，回车添加 — 如 伊马替尼 · C9H8O4 · ATP · STU'}
-                      className="h-9 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-stone-900 outline-none ring-0 transition-colors placeholder:text-stone-400 focus-visible:ring-0 dark:text-stone-100 dark:placeholder:text-stone-600"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={commitLigandDraft}
-                      disabled={!ligandDraft.trim() || ligandChips.length >= MAX_LIGANDS}
-                      className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
-                    >
-                      <Plus className="size-3.5" aria-hidden />
-                      添加
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => ligandFileInputRef.current?.click()}
-                      disabled={ligandChips.length >= MAX_LIGANDS}
-                      className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
-                    >
-                      <Paperclip className="size-3.5" aria-hidden />
-                      配体文件
-                    </Button>
-                    <input
-                      ref={ligandFileInputRef}
-                      type="file"
-                      accept={LIGAND_FILE_ACCEPT}
-                      className="hidden"
-                      multiple
-                      onChange={(e) => {
-                        const files = Array.from(e.target.files ?? [])
-                        for (const f of files) void handleLigandFile(f)
-                        e.target.value = ''
-                      }}
-                    />
+                        {c.source === 'file' && c.parsed && (
+                          <span className="shrink-0 rounded-sm bg-emerald-100 px-1 py-0.5 font-mono text-[9px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                            {c.parsed.compId
+                              ? `ID ${c.parsed.compId}`
+                              : c.parsed.formula
+                                ? c.parsed.formula
+                                : c.parsed.name
+                                  ? '已解析'
+                                  : '线索'}
+                          </span>
+                        )}
+                        {c.source === 'file' && !c.parsed && (
+                          <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-0.5 font-mono text-[9px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-400">未识别格式</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeLigandChip(c.id)}
+                          aria-label="移除配体"
+                          className="flex size-5.5 shrink-0 items-center justify-center rounded text-stone-400 transition-colors hover:bg-stone-100 hover:text-red-600 dark:hover:bg-stone-800 dark:hover:text-red-400"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </span>
+                    ))}
                   </div>
-                </div>
+                )}
 
-                <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
-                  支持中英文名、分子式、品牌药名与三位 ID；SDF / MOL / SMI / PDB 文件自动提取名称、分子式与残基名。非标准输入经
-                  <span className="font-mono text-[10px] text-stone-500 dark:text-stone-400"> 别名表 · PDBe 检索 · AI </span>
-                  多策略归一到 RCSB 三位化学组分 ID，并检索含该配体的 PDB 结构列表。
-                </p>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    aria-label="配体输入"
+                    value={ligandDraft}
+                    onChange={(e) => setLigandDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ',' || e.key === '；' || e.key === ';') {
+                        e.preventDefault()
+                        commitLigandDraft()
+                      }
+                    }}
+                    disabled={ligandChips.length >= MAX_LIGANDS}
+                    placeholder={ligandChips.length >= MAX_LIGANDS
+                      ? `已达上限 ${MAX_LIGANDS} 条`
+                      : '名称 / 分子式 / 三位 ID，回车添加 — 如 伊马替尼 · C9H8O4 · ATP · STU'}
+                    className="h-9 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-stone-900 outline-none ring-0 transition-colors placeholder:text-stone-400 focus-visible:ring-0 dark:text-stone-100 dark:placeholder:text-stone-600"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={commitLigandDraft}
+                    disabled={!ligandDraft.trim() || ligandChips.length >= MAX_LIGANDS}
+                    className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
+                  >
+                    <Plus className="size-3.5" aria-hidden />
+                    添加
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => ligandFileInputRef.current?.click()}
+                    disabled={ligandChips.length >= MAX_LIGANDS}
+                    className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
+                  >
+                    <Paperclip className="size-3.5" aria-hidden />
+                    配体文件
+                  </Button>
+                  <input
+                    ref={ligandFileInputRef}
+                    type="file"
+                    accept={LIGAND_FILE_ACCEPT}
+                    className="hidden"
+                    multiple
+                    onChange={(e) => {
+                      const files = Array.from(e.target.files ?? [])
+                      for (const f of files) void handleLigandFile(f)
+                      e.target.value = ''
+                    }}
+                  />
+                </div>
               </div>
-            </div>
+
+              <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+                支持中英文名、分子式、品牌药名与三位 ID；SDF / MOL / SMI / PDB 文件自动提取名称、分子式与残基名。非标准输入经
+                <span className="font-mono text-[10px] text-stone-500 dark:text-stone-400"> 别名表 · PDBe 检索 · AI </span>
+                多策略归一到 RCSB 三位化学组分 ID，并检索含该配体的 PDB 结构列表。
+              </p>
+            </StepSection>
 
             {/* ── 03 客户目标 ───────────────────────────────────────── */}
-            <div className="relative px-4 py-3.5">
-              <div
-                aria-hidden
-                className="absolute inset-y-3 left-0 w-[3px] rounded-full bg-amber-400/80 dark:bg-amber-600/70"
+            <StepSection
+              no="03"
+              title="客户目标 / 科学问题"
+              hint="可选 · 建议填写"
+              tone={goal.trim() !== '' ? 'done' : 'optional'}
+              last
+              right={
+                goalAutoFilled ? (
+                  <span className="eval-eyebrow flex items-center gap-1 rounded-sm bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
+                    <Sparkles className="size-2.5" aria-hidden />
+                    已从评估表自动填入
+                  </span>
+                ) : (
+                  <span className="eval-eyebrow rounded-sm bg-amber-100 px-1.5 py-0.5 text-amber-800 dark:bg-amber-900/50 dark:text-amber-400">
+                    AI 将提取
+                  </span>
+                )
+              }
+            >
+              <Textarea
+                aria-label="客户目标输入"
+                value={goal}
+                onChange={(e) => {
+                  setGoal(e.target.value)
+                  setGoalAutoFilled(false)
+                }}
+                placeholder="例如：解析 EGFR 激酶域与抑制剂复合物的冷冻电镜结构，评估 CRO 可行性（上传评估表后 AI 将自动提取并填入）"
+                className={cn(inputBase, 'min-h-[52px] resize-y px-3 py-2 text-[13px] leading-[22px]')}
               />
-              <div className="flex flex-col gap-2">
-                <FieldHead no="03" title="客户目标 / 科学问题" hint="建议填写">
-                  {goalAutoFilled ? (
-                    <span className="eval-eyebrow flex items-center gap-1 rounded-sm bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
-                      <Sparkles className="size-2.5" aria-hidden />
-                      已从评估表自动填入
-                    </span>
-                  ) : (
-                    <span className="eval-eyebrow rounded-sm bg-amber-100 px-1.5 py-0.5 text-amber-800 dark:bg-amber-900/50 dark:text-amber-400">
-                      AI 将提取
-                    </span>
-                  )}
-                </FieldHead>
-                <Textarea
-                  aria-label="客户目标输入"
-                  value={goal}
-                  onChange={(e) => {
-                    setGoal(e.target.value)
-                    setGoalAutoFilled(false)
-                  }}
-                  placeholder="例如：解析 EGFR 激酶域与抑制剂复合物的冷冻电镜结构，评估 CRO 可行性（上传评估表后 AI 将自动提取并填入）"
-                  className={cn(inputBase, 'min-h-[54px] resize-y px-3 py-2 text-[13px] leading-[22px]')}
-                />
-                <p className="text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">
-                  明确的客户目标将直接用于 LLM 报告中的可行性结论与实验策略推荐（可选）
-                </p>
-              </div>
-            </div>
+              <p className="text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">
+                明确的客户目标将直接用于 LLM 报告中的可行性结论与实验策略推荐（可选）
+              </p>
+            </StepSection>
 
             {/* ── 高级选项（卡片内静默折叠）──────────────────────────── */}
             <Collapsible open={advOpen} onOpenChange={setAdvOpen}>
@@ -910,47 +987,50 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                 </CollapsibleContent>
               </div>
             </Collapsible>
+          </div>
+        </div>
 
-            {/* ── 提交条（卡片底栏）────────────────────────────────── */}
-            <div className="bg-stone-50/60 px-4 py-3 dark:bg-stone-950/40">
-              {submitError && (
-                <Alert variant="destructive" className="mb-2.5 rounded-md border-red-300 py-2.5 dark:border-red-900">
-                  <CircleAlert />
-                  <AlertTitle className="text-[13px]">无法开始评估</AlertTitle>
-                  <AlertDescription className="text-xs">
-                    {submitError}
-                    {!/上限|繁忙|排队|稍后再试|明日再试|正在或排队/.test(submitError) && (
-                      <span className="text-[11px] text-stone-500">（评估服务可能尚未就绪，请稍后重试）</span>
-                    )}
-                  </AlertDescription>
-                </Alert>
-              )}
-              <Button
-                size="lg"
-                disabled={!inputReady || submitting}
-                onClick={handleStart}
-                className="group h-10 w-full rounded-lg bg-emerald-800 text-[13.5px] font-semibold tracking-[0.02em] text-white shadow-none transition-all hover:bg-emerald-700 disabled:opacity-40 dark:bg-emerald-700 dark:hover:bg-emerald-600"
-              >
-                {submitting ? (
-                  <LoaderCircle className="size-4 animate-spin" />
-                ) : (
-                  <Target className="size-4 transition-transform duration-200 group-hover:scale-110" />
+        {/* ── 提交条（卡底固定）────────────────────────────────── */}
+        <div className="shrink-0 border-t border-stone-100 bg-gradient-to-b from-white to-stone-50/70 px-4 py-2.5 dark:border-stone-800/70 dark:from-stone-900 dark:to-stone-950/60">
+          {submitError && (
+            <Alert variant="destructive" className="mb-2.5 rounded-md border-red-300 py-2.5 dark:border-red-900">
+              <CircleAlert />
+              <AlertTitle className="text-[13px]">无法开始评估</AlertTitle>
+              <AlertDescription className="text-xs">
+                {submitError}
+                {!/上限|繁忙|排队|稍后再试|明日再试|正在或排队/.test(submitError) && (
+                  <span className="text-[11px] text-stone-500">（评估服务可能尚未就绪，请稍后重试）</span>
                 )}
-                {submitting
-                  ? '正在创建评估作业…'
-                  : mode === 'docx' && selectedUniprots.length > 1
-                    ? `开始评估（${selectedUniprots.length} 个靶点）`
-                    : mode === 'uniprot' && uniprotMulti
-                      ? `开始评估（${uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT).length} 个靶点）`
-                      : mode === 'sequence' && seqMulti
-                        ? `开始评估（${seqEntries.slice(0, MAX_BATCH_UNIPROT).length} 条序列）`
-                        : '开始评估'}
-                {!submitting && <span className="ml-0.5 font-mono text-[12px] transition-transform duration-200 group-hover:translate-x-0.5">→</span>}
-              </Button>
+              </AlertDescription>
+            </Alert>
+          )}
+          <div className="flex items-center gap-3">
+            <Button
+              size="lg"
+              disabled={!inputReady || submitting}
+              onClick={handleStart}
+              className="group relative h-10 flex-1 overflow-hidden rounded-lg bg-gradient-to-b from-emerald-700 to-emerald-800 text-[13.5px] font-semibold tracking-[0.02em] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_20px_-8px_rgba(4,120,87,0.55)] transition-all hover:from-emerald-600 hover:to-emerald-700 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_10px_24px_-8px_rgba(4,120,87,0.6)] disabled:opacity-55 disabled:saturate-[0.6] disabled:shadow-none dark:from-emerald-600 dark:to-emerald-800 dark:hover:from-emerald-500 dark:hover:to-emerald-700"
+            >
+              {submitting ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Target className="size-4 transition-transform duration-200 group-hover:scale-110" />
+              )}
+              {startLabel}
+              {!submitting && <span className="ml-0.5 font-mono text-[12px] transition-transform duration-200 group-hover:translate-x-0.5">→</span>}
+              {/* 悬停流光 */}
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/[0.09] to-transparent transition-transform duration-700 group-hover:translate-x-full"
+              />
+            </Button>
+            <div className="hidden shrink-0 flex-col items-end gap-1 sm:flex">
+              <span className="eval-kbd">{kbdHint}</span>
+              <span className="text-[10px] leading-none text-stone-400 dark:text-stone-500">开始评估</span>
             </div>
           </div>
-        </Tabs>
-      </div>
+        </div>
+      </Tabs>
     </div>
   )
 }
