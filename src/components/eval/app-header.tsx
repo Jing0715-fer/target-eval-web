@@ -14,7 +14,7 @@ function ThemeToggle() {
     <Button
       variant="ghost"
       size="icon"
-      className="size-9 rounded-md text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+      className="size-8 rounded-md text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
       aria-label="切换深浅色主题"
       onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
     >
@@ -36,30 +36,31 @@ export interface AppHeaderProps {
   engineIsBuiltin?: boolean
 }
 
-/** 顶栏：衬线字标（可点击返回）+ 历史记录 + LLM 引擎配置 + 主题切换 */
+/** 紧凑顶栏（h-12）：衬线字标（可点击返回）+ 历史记录 + LLM 引擎配置 + 主题切换 */
 export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, engineIsBuiltin = true }: AppHeaderProps) {
   return (
-    <header className="sticky top-0 z-40 border-b border-stone-200/90 bg-[#fafaf9]/90 backdrop-blur-md dark:border-stone-800/90 dark:bg-stone-950/90">
-      {/* 顶部细线（期刊风双线） */}
-      <div className="h-[3px] bg-emerald-800 dark:bg-emerald-700" aria-hidden />
-      <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-3 px-4 sm:px-6">
+    <header className="sticky top-0 z-40 border-b border-stone-200/90 bg-[#fafaf9]/92 backdrop-blur-md dark:border-stone-800/90 dark:bg-stone-950/92">
+      {/* 顶部发丝渐变线（emerald → 透明） */}
+      <div
+        className="h-[2px] bg-gradient-to-r from-emerald-800 via-emerald-700/70 to-transparent dark:from-emerald-600 dark:via-emerald-600/60"
+        aria-hidden
+      />
+      <div className="mx-auto flex h-11 w-full max-w-6xl items-center gap-2.5 px-4 sm:px-5">
         <button
           type="button"
           onClick={() => canGoHome && onHome?.()}
           aria-label={canGoHome ? '返回首页，开始新的评估' : 'TargetEval 首页'}
           className={cn(
-            'flex min-w-0 items-center gap-2.5 rounded-md py-1 pr-2 text-left outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
+            'flex min-w-0 items-center gap-2 rounded-md py-0.5 pr-2 text-left outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
             canGoHome && 'cursor-pointer'
           )}
         >
-          <span className="flex size-2 shrink-0 rounded-[2px] bg-emerald-700 dark:bg-emerald-500" aria-hidden />
-          <span className="min-w-0 leading-tight">
-            <span className="font-display block truncate text-[17px] font-bold tracking-tight text-stone-900 dark:text-stone-50">
-              TargetEval
-            </span>
-            <span className="eval-eyebrow block text-stone-400 dark:text-stone-500">
-              结构解析可行性评估
-            </span>
+          <span className="size-1.5 shrink-0 rounded-[1.5px] bg-emerald-700 dark:bg-emerald-500" aria-hidden />
+          <span className="font-display truncate text-[15px] font-bold tracking-tight text-stone-900 dark:text-stone-50">
+            TargetEval
+          </span>
+          <span className="eval-eyebrow hidden truncate text-stone-400 md:block dark:text-stone-500">
+            结构解析可行性评估
           </span>
         </button>
 
@@ -68,7 +69,7 @@ export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, e
             <Button
               variant="ghost"
               onClick={onHome}
-              className="mr-1 hidden h-9 gap-1.5 rounded-md px-3 text-xs font-medium text-stone-500 hover:text-emerald-800 dark:text-stone-400 dark:hover:text-emerald-400 sm:inline-flex"
+              className="mr-1 hidden h-8 gap-1.5 rounded-md px-2.5 text-xs font-medium text-stone-500 hover:text-emerald-800 dark:text-stone-400 dark:hover:text-emerald-400 sm:inline-flex"
             >
               <ArrowLeft className="size-3.5" />
               新建评估
@@ -77,7 +78,7 @@ export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, e
           <Button
             variant="ghost"
             onClick={onOpenHistory}
-            className="h-9 gap-1.5 rounded-md px-3 text-xs font-medium text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+            className="h-8 gap-1.5 rounded-md px-2.5 text-xs font-medium text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
           >
             <History className="size-3.5" />
             <span className="hidden sm:inline">历史评估</span>
@@ -88,12 +89,12 @@ export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, e
             onClick={onOpenLlmConfig}
             aria-label="LLM 分析引擎配置"
             title="LLM 分析引擎配置"
-            className="relative size-9 rounded-md text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+            className="relative size-8 rounded-md text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
           >
             <SlidersHorizontal className="size-4" />
             {!engineIsBuiltin && (
               <span
-                className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-emerald-500"
+                className="absolute top-1 right-1 size-1.5 rounded-full bg-emerald-500"
                 aria-label="正在使用自定义 LLM 引擎"
               />
             )}
@@ -104,7 +105,7 @@ export function AppHeader({ onOpenHistory, onHome, canGoHome, onOpenLlmConfig, e
             rel="noopener noreferrer"
             aria-label="GitHub 仓库"
             title="GitHub 仓库"
-            className="inline-flex size-9 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800/60 dark:hover:text-stone-100"
+            className="inline-flex size-8 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800/60 dark:hover:text-stone-100"
           >
             <Github className="size-4" />
           </a>

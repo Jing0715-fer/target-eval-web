@@ -29,11 +29,14 @@ function JobRow({
   onOpen,
   onDelete,
   deleting,
+  dense = false,
 }: {
   job: JobListItem
   onOpen: (id: string) => void
   onDelete?: (id: string) => void
   deleting?: boolean
+  /** 紧凑模式（侧栏列表：无卡片边框、更小字号） */
+  dense?: boolean
 }) {
   return (
     <div
@@ -46,22 +49,30 @@ function JobRow({
           onOpen(job.id)
         }
       }}
-      className="flex min-h-14 cursor-pointer items-center gap-3 rounded-md border border-stone-200 bg-white px-4 py-3 transition-colors outline-none hover:border-emerald-300 hover:bg-stone-50 focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-800 dark:hover:bg-stone-900/60"
+      className={cn(
+        'group cursor-pointer items-center gap-2.5 outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 dark:focus-visible:ring-emerald-500/30',
+        dense
+          ? 'flex min-h-11 rounded-md px-2.5 py-1.5 hover:bg-stone-100/80 dark:hover:bg-stone-800/60'
+          : 'flex min-h-14 rounded-md border border-stone-200 bg-white px-4 py-3 hover:border-emerald-300 hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-800 dark:hover:bg-stone-900/60',
+      )}
     >
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium text-stone-800 dark:text-stone-200">
+        <div className={cn(
+          'truncate font-medium text-stone-800 dark:text-stone-200',
+          dense ? 'text-[13px]' : 'text-sm',
+        )}>
           {job.proteinName || job.title || job.uniprotId || '未命名评估'}
         </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-stone-500 dark:text-stone-500">
+        <div className="mt-px flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-stone-500 dark:text-stone-500">
           {job.uniprotId && <span className="font-mono">{job.uniprotId}</span>}
           <span>{formatDateTime(job.createdAt)}</span>
           {job.pdbCount != null && <span>· {job.pdbCount} PDB</span>}
           {job.coverage != null && <span>· 覆盖 {formatPercent(job.coverage)}</span>}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1.5">
         {job.overallScore != null && (
-          <span className="text-sm font-bold tabular-nums text-stone-800 dark:text-stone-200">
+          <span className="text-[13px] font-bold tabular-nums text-stone-800 dark:text-stone-200">
             {Number(job.overallScore.toFixed(1))}
           </span>
         )}
@@ -71,7 +82,10 @@ function JobRow({
             variant="ghost"
             size="icon"
             aria-label="删除该评估记录"
-            className="size-8 text-stone-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+            className={cn(
+              'text-stone-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40',
+              dense ? 'size-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100' : 'size-8',
+            )}
             disabled={deleting}
             onClick={(e) => {
               e.stopPropagation()
@@ -130,9 +144,12 @@ function PrivacyBadge({ className }: { className?: string }) {
 function BatchReportRow({
   report,
   onOpen,
+  dense = false,
 }: {
   report: BatchReportListItem
   onOpen: (id: string) => void
+  /** 紧凑模式（侧栏列表） */
+  dense?: boolean
 }) {
   return (
     <div
@@ -145,23 +162,34 @@ function BatchReportRow({
           onOpen(report.id)
         }
       }}
-      className="flex min-h-14 cursor-pointer items-center gap-3 rounded-md border border-stone-200 bg-white px-4 py-3 transition-colors outline-none hover:border-violet-300 hover:bg-stone-50 focus-visible:ring-[3px] focus-visible:ring-violet-500/40 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-violet-800 dark:hover:bg-stone-900/60"
+      className={cn(
+        'group cursor-pointer items-center gap-2.5 outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-violet-500/40 dark:focus-visible:ring-violet-500/30',
+        dense
+          ? 'flex min-h-11 rounded-md px-2.5 py-1.5 hover:bg-stone-100/80 dark:hover:bg-stone-800/60'
+          : 'flex min-h-14 rounded-md border border-stone-200 bg-white px-4 py-3 hover:border-violet-300 hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-violet-800 dark:hover:bg-stone-900/60',
+      )}
     >
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-violet-100 text-violet-700 dark:bg-violet-950/40 dark:text-violet-400">
-        <Layers className="size-4" />
+      <div className={cn(
+        'flex shrink-0 items-center justify-center rounded-md bg-violet-100 text-violet-700 dark:bg-violet-950/40 dark:text-violet-400',
+        dense ? 'size-7' : 'size-9',
+      )}>
+        <Layers className={dense ? 'size-3.5' : 'size-4'} />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium text-stone-800 dark:text-stone-200">
+        <div className={cn(
+          'truncate font-medium text-stone-800 dark:text-stone-200',
+          dense ? 'text-[13px]' : 'text-sm',
+        )}>
           {report.title}
         </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-stone-500 dark:text-stone-500">
+        <div className="mt-px flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-stone-500 dark:text-stone-500">
           <span>{report.jobIds.length} 个靶点</span>
           <span>{formatDateTime(report.createdAt)}</span>
           {report.status === 'running' && <span className="text-amber-600">· 生成中</span>}
           {report.status === 'error' && <span className="text-red-500">· 生成失败</span>}
         </div>
       </div>
-      <ArrowRight className="size-4 shrink-0 text-stone-400" />
+      <ArrowRight className="size-3.5 shrink-0 text-stone-300 transition-colors group-hover:text-violet-500 dark:text-stone-600" />
     </div>
   )
 }
@@ -323,7 +351,7 @@ export function HistoryDialog({
   )
 }
 
-/* ---------------- idle 视图底部「最近评估」 ---------------- */
+/* ---------------- idle 视图侧栏「最近评估」 ---------------- */
 
 export function RecentEvaluations({
   refreshKey,
@@ -370,55 +398,65 @@ export function RecentEvaluations({
     }
   }
 
+  const empty = jobs != null && batches != null && jobs.length === 0 && batches.length === 0
+
   return (
     <motion.section
-      initial={{ opacity: 0, y: 12 }}
+      initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, delay: 0.15, ease: 'easeOut' }}
-      className="mt-10"
+      transition={{ duration: 0.3, delay: 0.1, ease: 'easeOut' }}
+      className="overflow-hidden rounded-xl border border-stone-200/90 bg-white shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-24px_rgba(28,25,23,0.18)] dark:border-stone-800 dark:bg-stone-900 dark:shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_32px_-24px_rgba(0,0,0,0.5)]"
+      aria-label="最近评估"
     >
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 className="flex flex-wrap items-center gap-2.5 text-sm font-semibold text-stone-700 dark:text-stone-300">
-          <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">Recent</span>
-          最近评估
-          <PrivacyBadge />
-        </h2>
+      <div className="flex items-center gap-2 border-b border-stone-100 px-3.5 py-2.5 dark:border-stone-800/70">
+        <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">Recent</span>
+        <h2 className="text-[13px] font-semibold text-stone-800 dark:text-stone-100">最近评估</h2>
+        <PrivacyBadge />
         <Button
           variant="ghost"
           size="sm"
           onClick={onOpenHistory}
-          className="h-9 gap-1 text-xs text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
+          className="ml-auto h-7 gap-1 rounded-md px-2 text-[11px] text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
         >
           查看全部
-          <ArrowRight className="size-3.5" />
+          <ArrowRight className="size-3" />
         </Button>
       </div>
 
       {jobs === null || batches === null ? (
-        <div className="flex flex-col gap-2">
-          {[0, 1].map((i) => (
-            <Skeleton key={i} className="h-14 w-full rounded-lg" />
+        <div className="flex flex-col gap-2 px-3.5 py-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-10 w-full rounded-md" />
           ))}
         </div>
-      ) : jobs.length === 0 && batches.length === 0 ? (
-        <EmptyHistoryState compact />
+      ) : empty ? (
+        <div className="flex flex-col items-center gap-1.5 px-3.5 py-7 text-center">
+          <div className="flex size-9 items-center justify-center rounded-full bg-stone-100 dark:bg-stone-800">
+            <History className="size-4 text-stone-400" />
+          </div>
+          <p className="text-[13px] font-medium text-stone-600 dark:text-stone-400">暂无评估记录</p>
+          <p className="text-[11px] text-stone-400 dark:text-stone-500">
+            完成第一次靶点评估后，记录将显示在此处
+          </p>
+        </div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="eval-scroll max-h-[340px] overflow-y-auto px-1.5 py-1.5">
           {batches.slice(0, 3).map((b) => (
-            <BatchReportRow key={b.id} report={b} onOpen={onOpenBatchReport} />
+            <BatchReportRow key={b.id} report={b} onOpen={onOpenBatchReport} dense />
           ))}
-          {jobs.slice(0, 5).map((j) => (
+          {jobs.slice(0, 6).map((j) => (
             <JobRow
               key={j.id}
               job={j}
               onOpen={onOpenJob}
               onDelete={(id) => setConfirmDelete(jobs.find((x) => x.id === id) ?? null)}
               deleting={deletingId === j.id}
+              dense
             />
           ))}
-          {(jobs.length > 5 || batches.length > 3) && (
-            <div className="flex justify-center pt-1">
-              <span className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
+          {(jobs.length > 6 || batches.length > 3) && (
+            <div className="px-2.5 pt-1 pb-0.5 text-center">
+              <span className="font-mono text-[10.5px] text-stone-400 dark:text-stone-500">
                 共 {batches.length} 份合并报告 · {jobs.length} 条单靶点记录
               </span>
             </div>

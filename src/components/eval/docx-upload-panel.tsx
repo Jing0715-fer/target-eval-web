@@ -108,7 +108,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             handleFile(e.dataTransfer.files?.[0])
           }}
           className={cn(
-            'flex min-h-40 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border-2 border-dashed px-6 py-8 text-center outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
+            'flex min-h-28 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-md border-2 border-dashed px-6 py-5 text-center outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
             dragOver
               ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/40'
               : 'border-stone-300 bg-stone-50/60 hover:border-emerald-500 hover:bg-emerald-50/30 dark:border-stone-700 dark:bg-stone-900/40 dark:hover:border-emerald-600',
@@ -116,11 +116,11 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
           )}
         >
           {uploading ? (
-            <LoaderCircle className="size-7 animate-spin text-emerald-700" />
+            <LoaderCircle className="size-6 animate-spin text-emerald-700" />
           ) : (
-            <FileUp className="size-7 text-stone-400 dark:text-stone-500" />
+            <FileUp className="size-6 text-stone-400 dark:text-stone-500" />
           )}
-          <div className="text-sm font-medium text-stone-700 dark:text-stone-300">
+          <div className="text-[13px] font-medium text-stone-700 dark:text-stone-300">
             {uploading
               ? uploadProgress?.phase === 'uploading'
                 ? `正在上传评估表… ${Math.min(100, Math.round((uploadProgress.loaded / Math.max(1, uploadProgress.total)) * 100))}%`
@@ -136,10 +136,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             </div>
           )}
           {uploading && uploadProgress?.phase === 'parsing' && (
-            <div className="text-[11px] text-stone-400 dark:text-stone-500">分块上传完成，服务器后台解析中（多图识别约需 10–90 秒）…</div>
+            <div className="text-[11px] text-stone-400 dark:text-stone-500">分块上传完成，后台解析中（多图识别约需 10–90 秒）…</div>
           )}
-          <div className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
-            支持 .docx 格式（≤ 20MB），上传后自动解析 UniProt ID、序列与实验图片（自动区分 SDS-PAGE 胶图与 SEC 分子筛图），并由 AI 提取目标与科学问题
+          <div className="font-mono text-[10.5px] leading-relaxed text-stone-400 dark:text-stone-500">
+            .docx（≤ 20MB）· 自动解析 UniProt ID、序列与实验图片，AI 提取目标与科学问题
           </div>
         </div>
         <input
@@ -169,9 +169,9 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
   const eHomologs = elideSequenceRuns(insights?.homologs)
   const eConcerns = (insights?.keyConcerns ?? []).map(elideSequenceRuns)
   return (
-    <div className="flex flex-col gap-4 rounded-md border border-stone-200 bg-stone-50/50 p-4 dark:border-stone-800 dark:bg-stone-900/40">
+    <div className="flex flex-col gap-3 rounded-md border border-stone-200 bg-stone-50/50 p-3.5 dark:border-stone-800 dark:bg-stone-900/40">
       {/* 解析摘要 */}
-      <div className="flex flex-wrap items-center gap-2 text-sm">
+      <div className="flex flex-wrap items-center gap-2 text-[13px]">
         <CircleCheckBig className="size-4 shrink-0 text-emerald-700" />
         <span className="font-medium text-stone-800 dark:text-stone-200">评估表解析完成</span>
         <span className="text-xs text-stone-500 dark:text-stone-500">
@@ -369,7 +369,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   }}
                   title={disabled ? `已达一次 ${maxBatchUniprot} 个靶点上限` : selected ? '点击取消选择该靶点' : '点击选中该靶点'}
                   className={cn(
-                    'min-h-10 rounded-md border px-3.5 font-mono text-sm transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 disabled:cursor-not-allowed disabled:opacity-40',
+                    'min-h-9 rounded-md border px-3 font-mono text-[13px] transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40 disabled:cursor-not-allowed disabled:opacity-40',
                     selected
                       ? 'border-emerald-700 bg-emerald-800 font-semibold text-white'
                       : 'border-stone-300 bg-white text-stone-700 hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:border-emerald-600 dark:hover:text-emerald-400'
@@ -403,7 +403,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                     onSelectSequence(selected ? null : i)
                   }}
                   className={cn(
-                    'rounded-md border p-3 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
+                    'rounded-md border p-2.5 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-emerald-500/40',
                     selected
                       ? 'border-emerald-700 bg-emerald-50 ring-1 ring-emerald-700 dark:border-emerald-600 dark:bg-emerald-950/40'
                       : 'border-stone-200 bg-white hover:border-emerald-400 dark:border-stone-800 dark:bg-stone-900 dark:hover:border-emerald-700'
@@ -464,13 +464,13 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               )
             })()}
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {parsed.images.map((img) => (
               <div
                 key={img.id}
                 className="overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900"
               >
-                <div className="relative h-28 bg-stone-100 dark:bg-stone-800">
+                <div className="relative h-24 bg-stone-100 dark:bg-stone-800">
                   <img
                     src={`/api/assets/${img.id}`}
                     alt={img.caption || '实验图片'}

@@ -29,6 +29,59 @@ function isAnalysisStage(stage: string | null | undefined): boolean {
   return /score|rating|llm|report|generat|summary/i.test(stage ?? '')
 }
 
+/** 侧栏信息卡：评估流程（纵向编号轨）+ 数据源标签 */
+function PipelineCard() {
+  const steps = [
+    { no: '01', label: '输入', desc: 'UniProt · 序列 · 评估表' },
+    { no: '02', label: '数据收集', desc: '结构 · 文献 · 同源检索' },
+    { no: '03', label: '分析生成', desc: '配体归一 · LLM 综合分析' },
+    { no: '04', label: '报告', desc: '三方法可行性 · 实验策略' },
+  ]
+  const sources = ['UniProt', 'RCSB PDB', 'PDBe', 'PubMed', 'NCBI BLAST', 'AlphaFold DB']
+  return (
+    <section
+      aria-label="评估流程与数据源"
+      className="overflow-hidden rounded-xl border border-stone-200/90 bg-white shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-24px_rgba(28,25,23,0.18)] dark:border-stone-800 dark:bg-stone-900 dark:shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_32px_-24px_rgba(0,0,0,0.5)]"
+    >
+      <div className="flex items-center gap-2 border-b border-stone-100 px-3.5 py-2.5 dark:border-stone-800/70">
+        <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">Pipeline</span>
+        <h2 className="text-[13px] font-semibold text-stone-800 dark:text-stone-100">评估流程</h2>
+      </div>
+      <ol className="flex flex-col px-3.5 py-3">
+        {steps.map((s, i) => (
+          <li key={s.no} className="flex gap-2.5">
+            <div className="flex flex-col items-center" aria-hidden>
+              <span className="flex size-5.5 shrink-0 items-center justify-center rounded-[5px] border border-emerald-200 bg-emerald-50 font-mono text-[9.5px] font-semibold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-400">
+                {s.no}
+              </span>
+              {i < steps.length - 1 && <span className="w-px flex-1 bg-stone-200 dark:bg-stone-800" />}
+            </div>
+            <div className={i < steps.length - 1 ? 'min-w-0 flex-1 pb-3' : 'min-w-0 flex-1'}>
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <span className="text-[12.5px] font-medium text-stone-800 dark:text-stone-200">{s.label}</span>
+                <span className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">{s.desc}</span>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className="border-t border-stone-100 px-3.5 py-2.5 dark:border-stone-800/70">
+        <div className="eval-eyebrow mb-1.5 text-stone-400 dark:text-stone-500">数据源</div>
+        <div className="flex flex-wrap gap-1">
+          {sources.map((s) => (
+            <span
+              key={s}
+              className="rounded-sm border border-stone-200 bg-stone-50 px-1.5 py-0.5 font-mono text-[10px] text-stone-500 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-400"
+            >
+              {s}
+            </span>
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 export default function Home() {
   const flow = useEvaluationFlow()
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -92,11 +145,14 @@ export default function Home() {
         engineIsBuiltin={engine.isBuiltin}
       />
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 sm:py-8">
-        <Stepper step={step} className="mb-8 sm:mb-10" />
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-4 sm:px-5 sm:py-5">
+        {/* 非 idle 阶段：紧凑流程指示器（idle 阶段的流程信息由侧栏 PipelineCard 承载） */}
+        {flow.phase !== 'idle' && !flow.loadingHistoryJob && (
+          <Stepper step={step} className="mb-4 sm:mb-5" />
+        )}
 
         {flow.loadingHistoryJob ? (
-          <div className="flex items-center justify-center gap-2 py-24 text-sm text-stone-500">
+          <div className="flex items-center justify-center gap-2 py-16 text-sm text-stone-500">
             <LoaderCircle className="size-5 animate-spin text-emerald-700" />
             正在加载评估作业…
           </div>
@@ -104,12 +160,26 @@ export default function Home() {
           <AnimatePresence mode="wait">
             {flow.phase === 'idle' && (
               <motion.div key="idle" {...viewMotion}>
-                <InputPanel
-                  submitting={flow.submitting}
-                  submitError={flow.submitError}
-                  onStart={flow.startEvaluation}
-                  onClearSubmitError={flow.clearSubmitError}
-                />
+                {/* 紧凑双栏：左 = 工作台表单；右 = 最近评估 + 流程信息 */}
+                <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
+                  <div className="min-w-0 lg:col-span-7">
+                    <InputPanel
+                      submitting={flow.submitting}
+                      submitError={flow.submitError}
+                      onStart={flow.startEvaluation}
+                      onClearSubmitError={flow.clearSubmitError}
+                    />
+                  </div>
+                  <aside className="flex min-w-0 flex-col gap-4 lg:col-span-5" aria-label="最近评估与流程信息">
+                    <RecentEvaluations
+                      refreshKey={historyKey}
+                      onOpenJob={openHistoryJob}
+                      onOpenBatchReport={openBatchReport}
+                      onOpenHistory={() => setHistoryOpen(true)}
+                    />
+                    <PipelineCard />
+                  </aside>
+                </div>
               </motion.div>
             )}
 
@@ -140,7 +210,7 @@ export default function Home() {
             {flow.phase === 'done' && flow.job && (
               <motion.div key={`done-${flow.job.id}`} {...viewMotion}>
                 {flow.batch && flow.batch.items.length > 1 && (
-                  <div className="mb-6">
+                  <div className="mb-4">
                     <BatchBar
                       batch={flow.batch}
                       currentJobId={flow.job.id}
@@ -166,16 +236,6 @@ export default function Home() {
               </motion.div>
             )}
           </AnimatePresence>
-        )}
-
-        {/* idle 视图底部：最近评估 */}
-        {flow.phase === 'idle' && !flow.loadingHistoryJob && (
-          <RecentEvaluations
-            refreshKey={historyKey}
-            onOpenJob={openHistoryJob}
-            onOpenBatchReport={openBatchReport}
-            onOpenHistory={() => setHistoryOpen(true)}
-          />
         )}
       </main>
 

@@ -75,7 +75,7 @@ function ligandRawFromParsed(p: LigandFileParsed, fileName: string): string {
   return fileName.replace(/\.[^.]+$/, '').trim().slice(0, 60)
 }
 
-/** 输入视图（idle）：编号工作台卡片 — 靶点 / 配体 / 目标 / 高级选项 / 提交 */
+/** 输入视图（idle）：紧凑双栏工作台卡片 — 靶点 / 配体 / 目标 / 高级选项 / 提交 */
 export function InputPanel({ submitting, submitError, onStart, onClearSubmitError }: InputPanelProps) {
   const [mode, setMode] = useState<TabMode>('uniprot')
 
@@ -336,55 +336,47 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     await onStart(requests)
   }
 
-  // ─── 字段头（编号 + 标题 + 右侧实时元信息）─────────────────────────────────
+  // ─── 字段头（编号 + 标题 + 右侧实时元信息，紧凑单行）──────────────────────
 
   const FieldHead = ({ no, title, hint, children }: { no: string; title: string; hint?: string; children?: ReactNode }) => (
-    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-      <span className="font-mono text-[11px] font-semibold text-stone-400 dark:text-stone-500">{no}</span>
-      <span className="text-sm font-semibold tracking-tight text-stone-800 dark:text-stone-100">{title}</span>
-      {hint && <span className="text-xs text-stone-400 dark:text-stone-500">{hint}</span>}
-      {children && <span className="ml-auto flex flex-wrap items-center gap-2">{children}</span>}
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="font-mono text-[10px] font-semibold tabular-nums text-stone-300 dark:text-stone-600">{no}</span>
+      <span className="text-[13px] font-semibold tracking-tight text-stone-800 dark:text-stone-100">{title}</span>
+      {hint && <span className="text-[11px] text-stone-400 dark:text-stone-500">{hint}</span>}
+      {children && <span className="ml-auto flex flex-wrap items-center gap-1.5">{children}</span>}
     </div>
   )
 
   const inputBase =
-    'w-full rounded-lg border border-stone-200 bg-white text-stone-900 shadow-none outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-stone-400 focus-visible:border-emerald-500 focus-visible:ring-4 focus-visible:ring-emerald-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus-visible:border-emerald-600 dark:focus-visible:ring-emerald-500/15'
+    'w-full rounded-md border border-stone-200 bg-white text-stone-900 shadow-none outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-stone-400 focus-visible:border-emerald-500 focus-visible:ring-[3px] focus-visible:ring-emerald-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus-visible:border-emerald-600 dark:focus-visible:ring-emerald-500/15'
+
+  const hintText = 'flex items-center gap-1 text-[11px]'
 
   return (
-    <div className="flex flex-col gap-7">
-      {/* 刊头 */}
-      <header className="flex flex-col gap-3.5">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b border-stone-200 pb-5 dark:border-stone-800">
-          <div className="flex flex-col gap-1.5">
-            <p className="eval-eyebrow text-emerald-800 dark:text-emerald-500">
-              Target Structure Feasibility · New Evaluation
-            </p>
-            <h1 className="font-display text-[26px] leading-tight font-bold tracking-tight text-stone-900 sm:text-[32px] dark:text-stone-50">
-              靶点结构解析可行性评估
-            </h1>
-          </div>
-          <p className="max-w-sm text-right text-[13px] leading-relaxed text-stone-500 dark:text-stone-400 sm:text-left">
-            聚合 <span className="font-mono text-[11px] text-stone-600 dark:text-stone-300">UniProt · RCSB · PDBe · PubMed · BLAST · AlphaFold</span>
-            {' '}数据，生成结构研究全景综述与三方法（X-ray / Cryo-EM / NMR）可行性评估报告。
-          </p>
-        </div>
-      </header>
-
-      {/* 工作台卡片 */}
-      <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white shadow-[0_1px_2px_rgba(28,25,23,0.04),0_16px_40px_-24px_rgba(28,25,23,0.16)] dark:border-stone-800 dark:bg-stone-900 dark:shadow-[0_1px_2px_rgba(0,0,0,0.3),0_16px_40px_-24px_rgba(0,0,0,0.5)]">
+    <div className="flex flex-col gap-4">
+      {/* 工作台卡片（紧凑） */}
+      <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-24px_rgba(28,25,23,0.18)] dark:border-stone-800 dark:bg-stone-900 dark:shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_32px_-24px_rgba(0,0,0,0.5)]">
         <Tabs value={mode} onValueChange={(v) => setMode(v as TabMode)}>
-          {/* 分段控件式模式切换 */}
-          <div className="border-b border-stone-100 px-4 pt-4 pb-0 sm:px-6 dark:border-stone-800/70">
-            <TabsList className="h-auto w-full justify-start gap-1 rounded-lg bg-stone-100/80 p-1 dark:bg-stone-800/70">
+          {/* 卡头：标题 + 分段控件式模式切换（同一行） */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-100 px-4 py-2.5 dark:border-stone-800/70">
+            <div className="flex min-w-0 items-baseline gap-2">
+              <h1 className="font-display text-[15px] leading-none font-bold tracking-tight text-stone-900 dark:text-stone-50">
+                新建评估
+              </h1>
+              <span className="hidden truncate text-[11px] text-stone-400 md:inline dark:text-stone-500">
+                靶点结构解析可行性 · 三方法评估报告
+              </span>
+            </div>
+            <TabsList className="ml-auto h-8 w-auto justify-start gap-0.5 rounded-md bg-stone-100/80 p-0.5 dark:bg-stone-800/70">
               {([
                 { value: 'uniprot', label: 'UniProt ID', icon: Dna },
-                { value: 'sequence', label: '氨基酸序列', icon: FileText },
-                { value: 'docx', label: 'Word 评估表', icon: Paperclip },
+                { value: 'sequence', label: '序列', icon: FileText },
+                { value: 'docx', label: '评估表', icon: Paperclip },
               ] as const).map(({ value, label, icon: Icon }) => (
                 <TabsTrigger
                   key={value}
                   value={value}
-                  className="h-9 gap-2 rounded-md px-3.5 text-xs font-medium text-stone-500 shadow-none transition-all data-[state=active]:bg-white data-[state=active]:text-emerald-800 data-[state=active]:shadow-[0_1px_3px_rgba(28,25,23,0.12)] sm:px-4 sm:text-[13px] dark:text-stone-400 dark:data-[state=active]:bg-stone-950 dark:data-[state=active]:text-emerald-400 [&_svg]:size-3.5"
+                  className="h-7 gap-1.5 rounded-[5px] px-2.5 text-[11.5px] font-medium text-stone-500 shadow-none transition-all data-[state=active]:bg-white data-[state=active]:text-emerald-800 data-[state=active]:shadow-[0_1px_3px_rgba(28,25,23,0.12)] sm:px-3 dark:text-stone-400 dark:data-[state=active]:bg-stone-950 dark:data-[state=active]:text-emerald-400 [&_svg]:size-3"
                 >
                   <Icon aria-hidden />
                   {label}
@@ -395,9 +387,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
           <div className="flex flex-col divide-y divide-stone-100 dark:divide-stone-800/70">
             {/* ── 01 靶点输入 ─────────────────────────────────────── */}
-            <div className="px-4 py-5 sm:px-6">
+            <div className="px-4 py-3.5">
               <TabsContent value="uniprot" className="mt-0">
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-2">
                   <FieldHead
                     no="01"
                     title="靶点输入"
@@ -413,24 +405,24 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     aria-label="UniProt ID 输入"
                     value={uniprot}
                     onChange={(e) => setUniprot(e.target.value)}
-                    placeholder={'支持多个 UniProt ID，用逗号、空格或换行分隔（最多 ' + MAX_BATCH_UNIPROT + ' 个），例如：\nP00533 (EGFR)\nP04637 (p53)\nQ9NZ08'}
-                    className={cn(inputBase, 'min-h-[104px] resize-y px-3.5 py-3 font-mono text-[15px] leading-[26px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[13.5px] placeholder:leading-[24px]')}
+                    placeholder={'支持多个 UniProt ID，逗号 / 空格 / 换行分隔（最多 ' + MAX_BATCH_UNIPROT + ' 个），如 P00533、P04637'}
+                    className={cn(inputBase, 'min-h-[72px] resize-y px-3 py-2 font-mono text-[13px] leading-[22px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[12px] placeholder:leading-[20px]')}
                     spellCheck={false}
                   />
                   {uniprot.trim() !== '' && uniprotParsed.invalid.length > 0 && (
-                    <p className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
+                    <p className={cn(hintText, 'text-red-600 dark:text-red-400')}>
                       <CircleAlert className="size-3.5" />
-                      {uniprotParsed.invalid.length} 个格式不正确：{uniprotParsed.invalid.slice(0, 5).join('、')}{uniprotParsed.invalid.length > 5 ? '…' : ''}（UniProt accession 为 6 或 10 位，如 P00533、Q9NZ08）
+                      {uniprotParsed.invalid.length} 个格式不正确：{uniprotParsed.invalid.slice(0, 5).join('、')}{uniprotParsed.invalid.length > 5 ? '…' : ''}（accession 为 6 或 10 位，如 P00533）
                     </p>
                   )}
                   {uniprotOverLimit && (
-                    <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                    <p className={cn(hintText, 'text-amber-600 dark:text-amber-400')}>
                       <CircleAlert className="size-3.5" />
-                      超过上限 {MAX_BATCH_UNIPROT} 个，将只评估前 {MAX_BATCH_UNIPROT} 个：{uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT).join('、')}
+                      超过上限 {MAX_BATCH_UNIPROT} 个，将只评估前 {MAX_BATCH_UNIPROT} 个
                     </p>
                   )}
                   {uniprotValid && (
-                    <p className="flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
+                    <p className={cn(hintText, 'text-emerald-700 dark:text-emerald-400')}>
                       <CircleCheckBig className="size-3.5" />
                       {uniprotMulti
                         ? `已识别 ${uniprotParsed.valid.length} 个靶点，将批量评估并分析关系性与共有结构`
@@ -438,14 +430,14 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     </p>
                   )}
                   {uniprot.trim() === '' && (
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-stone-400 dark:text-stone-500">
-                      <span className="eval-eyebrow">示例</span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="eval-eyebrow text-stone-400 dark:text-stone-500">示例</span>
                       {EXAMPLE_UNIPROTS.map((ex) => (
                         <button
                           key={ex.id}
                           type="button"
                           onClick={() => setUniprot(ex.id)}
-                          className="min-h-8 rounded-md border border-stone-200 bg-stone-50 px-2.5 font-mono text-[11px] text-stone-600 transition-colors hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300 dark:hover:border-emerald-600 dark:hover:text-emerald-400"
+                          className="min-h-7 rounded-md border border-stone-200 bg-stone-50 px-2 font-mono text-[10.5px] text-stone-600 transition-colors hover:border-emerald-500 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300 dark:hover:border-emerald-600 dark:hover:text-emerald-400"
                         >
                           {ex.id} · {ex.name}
                         </button>
@@ -453,7 +445,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       <button
                         type="button"
                         onClick={() => setUniprot(EXAMPLE_UNIPROTS.map(ex => ex.id).join(', '))}
-                        className="min-h-8 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 font-mono text-[11px] text-emerald-700 transition-colors hover:border-emerald-500 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-400"
+                        className="min-h-7 rounded-md border border-emerald-200 bg-emerald-50 px-2 font-mono text-[10.5px] text-emerald-700 transition-colors hover:border-emerald-500 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-400"
                       >
                         多靶点示例（EGFR + p53）
                       </button>
@@ -461,10 +453,10 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   )}
 
                   {/* 可选伴随序列：与 UniProt 合并为一次评估 */}
-                  <Collapsible open={companionOpen} onOpenChange={setCompanionOpen} className="mt-1.5">
-                    <div className="rounded-lg border border-stone-200 dark:border-stone-800">
-                      <CollapsibleTrigger className="flex min-h-12 w-full items-center gap-2.5 rounded-lg px-4 text-xs font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60">
-                        <Dna className={cn('size-4', companionValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
+                  <Collapsible open={companionOpen} onOpenChange={setCompanionOpen} className="mt-0.5">
+                    <div className="rounded-md border border-stone-200 dark:border-stone-800">
+                      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-2 rounded-md px-3 text-[11.5px] font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60">
+                        <Dna className={cn('size-3.5', companionValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
                         补充构建序列（可选）
                         {companionValid && (
                           <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
@@ -472,28 +464,28 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                           </span>
                         )}
                         <span className="ml-auto hidden font-mono text-[10px] font-normal text-stone-400 sm:inline dark:text-stone-500">
-                          {companionValid ? '以 UniProt 为主 · 序列做构建边界分析' : '同一靶点时自动合并，避免重复评估'}
+                          {companionValid ? 'UniProt 为主 · 序列做构建边界' : '同一靶点时自动合并'}
                         </span>
                         <ChevronDown
                           className={cn(
-                            'size-4 shrink-0 text-stone-400 transition-transform duration-200',
+                            'size-3.5 shrink-0 text-stone-400 transition-transform duration-200',
                             companionOpen && 'rotate-180',
                           )}
                         />
                       </CollapsibleTrigger>
                       <CollapsibleContent className="data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-1">
-                        <div className="flex flex-col gap-2 border-t border-stone-100 px-4 py-3.5 dark:border-stone-800/70">
+                        <div className="flex flex-col gap-2 border-t border-stone-100 px-3 py-2.5 dark:border-stone-800/70">
                           <Textarea
                             value={companionText}
                             onChange={(e) => setCompanionText(e.target.value)}
-                            placeholder={'粘贴该靶点的构建序列（截短体/突变体，FASTA 或裸序列）。\n与 UniProt 属同一靶点时将合并为一次评估，并自动分析构建边界（对应全长区间）。'}
-                            className={cn(inputBase, 'min-h-[96px] resize-y px-3.5 py-3 font-mono text-xs leading-relaxed')}
+                            placeholder={'粘贴该靶点的构建序列（截短体/突变体，FASTA 或裸序列）。与 UniProt 属同一靶点时将合并为一次评估，并自动分析构建边界（对应全长区间）。'}
+                            className={cn(inputBase, 'min-h-[72px] resize-y px-3 py-2 font-mono text-xs leading-relaxed')}
                             spellCheck={false}
                             aria-label="补充构建序列（可选）"
                           />
                           {companionText.trim() !== '' && (
                             <p className={cn(
-                              'flex items-center gap-1 text-xs',
+                              hintText,
                               companionValid ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400',
                             )}>
                               <CircleCheckBig className="size-3.5" />
@@ -509,17 +501,17 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   </Collapsible>
 
                   {/* v1.23 评估范围限定（可选）— 仅单靶点无伴随序列时启用 */}
-                  <Collapsible open={rangeOpen} onOpenChange={setRangeOpen} className="mt-1.5">
-                    <div className="rounded-lg border border-stone-200 dark:border-stone-800">
+                  <Collapsible open={rangeOpen} onOpenChange={setRangeOpen} className="mt-0.5">
+                    <div className="rounded-md border border-stone-200 dark:border-stone-800">
                       <CollapsibleTrigger
                         className={cn(
-                          'flex min-h-12 w-full items-center gap-2.5 rounded-lg px-4 text-xs font-medium outline-none transition-colors',
+                          'flex min-h-9 w-full items-center gap-2 rounded-md px-3 text-[11.5px] font-medium outline-none transition-colors',
                           rangeEnabled
                             ? 'text-stone-600 hover:bg-stone-50 dark:text-stone-400 dark:hover:bg-stone-900/60'
                             : 'cursor-not-allowed text-stone-300 dark:text-stone-600',
                         )}
                       >
-                        <Ruler className={cn('size-4', rangeValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
+                        <Ruler className={cn('size-3.5', rangeValid ? 'text-emerald-700 dark:text-emerald-500' : 'text-stone-400')} />
                         评估范围（可选）
                         {rangeValid && (
                           <span className="rounded-sm bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
@@ -530,20 +522,20 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                           {!rangeEnabled
                             ? '多靶点/有伴随序列时不可用'
                             : rangeValid
-                              ? '过滤 PDB/BLAST 命中为与该区间重叠的结构'
-                              : '限定分析与该区间重叠的结构'}
+                              ? '过滤为该区间重叠的结构'
+                              : '限定重叠结构'}
                         </span>
                         <ChevronDown
                           className={cn(
-                            'size-4 shrink-0 text-stone-400 transition-transform duration-200',
+                            'size-3.5 shrink-0 text-stone-400 transition-transform duration-200',
                             rangeOpen && 'rotate-180',
                           )}
                         />
                       </CollapsibleTrigger>
                       <CollapsibleContent className="data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-1">
-                        <div className="flex flex-col gap-2.5 border-t border-stone-100 px-4 py-3.5 dark:border-stone-800/70">
-                          <div className="flex flex-wrap items-end gap-3">
-                            <div className="flex flex-col gap-1.5">
+                        <div className="flex flex-col gap-2 border-t border-stone-100 px-3 py-2.5 dark:border-stone-800/70">
+                          <div className="flex flex-wrap items-end gap-2.5">
+                            <div className="flex flex-col gap-1">
                               <Label htmlFor="range-start" className="eval-eyebrow text-stone-500 dark:text-stone-400">起始残基</Label>
                               <Input
                                 id="range-start"
@@ -552,12 +544,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                                 value={rangeStart}
                                 onChange={(e) => setRangeStart(e.target.value)}
                                 placeholder="如 695"
-                                className={cn(inputBase, 'h-10 w-28 px-3 font-mono text-sm')}
+                                className={cn(inputBase, 'h-9 w-24 px-2.5 font-mono text-[13px]')}
                                 disabled={!rangeEnabled}
                               />
                             </div>
-                            <span className="pb-3 text-stone-300 dark:text-stone-600">—</span>
-                            <div className="flex flex-col gap-1.5">
+                            <span className="pb-2.5 text-stone-300 dark:text-stone-600">—</span>
+                            <div className="flex flex-col gap-1">
                               <Label htmlFor="range-end" className="eval-eyebrow text-stone-500 dark:text-stone-400">结束残基</Label>
                               <Input
                                 id="range-end"
@@ -566,29 +558,29 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                                 value={rangeEnd}
                                 onChange={(e) => setRangeEnd(e.target.value)}
                                 placeholder="如 1022"
-                                className={cn(inputBase, 'h-10 w-28 px-3 font-mono text-sm')}
+                                className={cn(inputBase, 'h-9 w-24 px-2.5 font-mono text-[13px]')}
                                 disabled={!rangeEnabled}
                               />
                             </div>
                             {rangeValid && (
-                              <span className="pb-3 font-mono text-[11px] text-emerald-700 dark:text-emerald-400">
+                              <span className="pb-2 font-mono text-[11px] text-emerald-700 dark:text-emerald-400">
                                 覆盖 {rangeEndN - rangeStartN + 1} aa
                               </span>
                             )}
                           </div>
                           {!rangeEnabled && (
-                            <p className="text-xs text-stone-400 dark:text-stone-500">
-                              范围限定仅在单个 UniProt ID 且无伴随序列时可用（多靶点各自范围不同；伴随序列已隐含构建边界）。
+                            <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+                              仅单个 UniProt ID 且无伴随序列时可用（多靶点各自范围不同；伴随序列已隐含构建边界）。
                             </p>
                           )}
                           {rangeEnabled && (rangeStart !== '' || rangeEnd !== '') && !rangeValid && (
-                            <p className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
+                            <p className={cn(hintText, 'text-red-600 dark:text-red-400')}>
                               <CircleAlert className="size-3.5" />
                               范围无效：需 1 ≤ 起始 ≤ 结束（如 EGFR 激酶域 695-1022）
                             </p>
                           )}
                           {rangeValid && (
-                            <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+                            <p className="text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">
                               将过滤 PDB 列表与 BLAST 同源命中，仅保留链范围（UniProt 交叉引用）或查询区间与 {rangeStartN}-{rangeEndN} 重叠的结构；报告题目与摘要中也会体现该范围。无范围信息的结构默认保留。
                             </p>
                           )}
@@ -600,7 +592,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
               </TabsContent>
 
               <TabsContent value="sequence" className="mt-0">
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-2">
                   <FieldHead
                     no="01"
                     title="靶点输入"
@@ -617,31 +609,31 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       aria-label="氨基酸序列输入"
                       value={sequenceText}
                       onChange={(e) => setSequenceText(e.target.value)}
-                      placeholder={'支持多条 FASTA 序列（每个 > 标题段一条，最多 ' + MAX_BATCH_UNIPROT + ' 条），例如：\n>EGFR kinase domain\nMVPKPVA...\n>p53 DNA-binding domain\nSSSVPSQ...'}
-                      className={cn(inputBase, 'min-h-[188px] resize-y px-3.5 py-3 font-mono text-[13.5px] leading-[24px] sm:min-h-[212px]')}
+                      placeholder={'支持多条 FASTA 序列（每个 > 标题段一条，最多 ' + MAX_BATCH_UNIPROT + ' 条），如：\n>EGFR kinase domain\nMVPKPVA...\n>p53 DNA-binding domain\nSSSVPSQ...'}
+                      className={cn(inputBase, 'min-h-[120px] resize-y px-3 py-2 font-mono text-[12.5px] leading-[21px]')}
                       spellCheck={false}
                     />
                     {seqInfo.count > 0 && (
-                      <span className="pointer-events-none absolute right-3 bottom-2.5 rounded-sm bg-stone-100/90 px-1.5 py-0.5 font-mono text-[10px] text-stone-500 dark:bg-stone-800/90 dark:text-stone-400">
+                      <span className="pointer-events-none absolute right-2.5 bottom-2 rounded-sm bg-stone-100/90 px-1.5 py-0.5 font-mono text-[10px] text-stone-500 dark:bg-stone-800/90 dark:text-stone-400">
                         {seqInfo.count.toLocaleString()} aa
                       </span>
                     )}
                   </div>
                   {seqOverLimit && (
-                    <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                    <p className={cn(hintText, 'text-amber-600 dark:text-amber-400')}>
                       <CircleAlert className="size-3.5" />
                       超过上限 {MAX_BATCH_UNIPROT} 条，将只评估前 {MAX_BATCH_UNIPROT} 条序列
                     </p>
                   )}
                   {seqMulti ? (
-                    <p className="flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
+                    <p className={cn(hintText, 'text-emerald-700 dark:text-emerald-400')}>
                       <CircleCheckBig className="size-3.5" />
                       已识别 {seqEntries.length} 条序列（{seqValidEntries.length} 条 ≥{MIN_SEQUENCE_LENGTH} aa），将批量评估并分析关系性与共有结构
                     </p>
                   ) : seqInfo.count > 0 && (
                     <p
                       className={cn(
-                        'flex items-center gap-1 text-xs',
+                        hintText,
                         seqInfo.count >= MIN_SEQUENCE_LENGTH
                           ? 'text-emerald-700 dark:text-emerald-400'
                           : 'text-amber-600 dark:text-amber-400',
@@ -657,7 +649,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
               </TabsContent>
 
               <TabsContent value="docx" className="mt-0">
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-2">
                   <FieldHead no="01" title="靶点输入" hint="上传 Word 评估表" />
                   <DocxUploadPanel
                     upload={upload}
@@ -683,12 +675,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             </div>
 
             {/* ── 02 配体输入（v2.0）─────────────────────────────────── */}
-            <div className="px-4 py-5 sm:px-6">
-              <div className="flex flex-col gap-3">
+            <div className="px-4 py-3.5">
+              <div className="flex flex-col gap-2">
                 <FieldHead
                   no="02"
                   title="配体 · 化合物"
-                  hint={mode === 'docx' ? '可选 · 评估表中提及的配体将自动识别' : '可选'}
+                  hint={mode === 'docx' ? '可选 · 评估表提及的配体将自动识别' : '可选'}
                 >
                   {ligandChips.length > 0 && (
                     <span className="font-mono text-[10px] text-stone-400 dark:text-stone-500">
@@ -699,7 +691,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
                 <div
                   className={cn(
-                    'flex flex-col gap-2.5 rounded-lg border border-stone-200 bg-stone-50/60 p-2.5 transition-colors focus-within:border-emerald-400 focus-within:bg-white dark:border-stone-700 dark:bg-stone-800/40 dark:focus-within:border-emerald-600 dark:focus-within:bg-stone-900',
+                    'flex flex-col gap-2 rounded-md border border-stone-200 bg-stone-50/60 p-2 transition-colors focus-within:border-emerald-400 focus-within:bg-white dark:border-stone-700 dark:bg-stone-800/40 dark:focus-within:border-emerald-600 dark:focus-within:bg-stone-900',
                   )}
                 >
                   {ligandChips.length > 0 && (
@@ -707,12 +699,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       {ligandChips.map(c => (
                         <span
                           key={c.id}
-                          className="group inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-md border border-stone-200 bg-white pl-2.5 pr-1 shadow-[0_1px_2px_rgba(28,25,23,0.05)] dark:border-stone-700 dark:bg-stone-900"
+                          className="group inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-md border border-stone-200 bg-white pl-2 pr-1 shadow-[0_1px_2px_rgba(28,25,23,0.05)] dark:border-stone-700 dark:bg-stone-900"
                         >
                           {c.source === 'file'
                             ? <Paperclip className="size-3 shrink-0 text-emerald-700 dark:text-emerald-500" aria-hidden />
                             : <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-500">T</span>}
-                          <span className="truncate font-mono text-[11.5px] text-stone-700 dark:text-stone-200" title={c.raw}>
+                          <span className="truncate font-mono text-[11px] text-stone-700 dark:text-stone-200" title={c.raw}>
                             {c.raw.length > 34 ? c.raw.slice(0, 33) + '…' : c.raw}
                           </span>
                           {c.source === 'file' && c.parsed && (
@@ -733,16 +725,16 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                             type="button"
                             onClick={() => removeLigandChip(c.id)}
                             aria-label="移除配体"
-                            className="flex size-6 shrink-0 items-center justify-center rounded text-stone-400 transition-colors hover:bg-stone-100 hover:text-red-600 dark:hover:bg-stone-800 dark:hover:text-red-400"
+                            className="flex size-5.5 shrink-0 items-center justify-center rounded text-stone-400 transition-colors hover:bg-stone-100 hover:text-red-600 dark:hover:bg-stone-800 dark:hover:text-red-400"
                           >
-                            <X className="size-3.5" />
+                            <X className="size-3" />
                           </button>
                         </span>
                       ))}
                     </div>
                   )}
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
                     <input
                       aria-label="配体输入"
                       value={ligandDraft}
@@ -756,8 +748,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       disabled={ligandChips.length >= MAX_LIGANDS}
                       placeholder={ligandChips.length >= MAX_LIGANDS
                         ? `已达上限 ${MAX_LIGANDS} 条`
-                        : '名称 / 分子式 / 三位 ID，如 伊马替尼 · C9H8O4 · ATP · STU'}
-                      className="h-11 min-w-0 flex-1 rounded-md border-0 bg-transparent px-3 text-sm text-stone-900 outline-none ring-0 transition-colors placeholder:text-stone-400 focus-visible:ring-0 dark:text-stone-100 dark:placeholder:text-stone-600"
+                        : '名称 / 分子式 / 三位 ID，回车添加 — 如 伊马替尼 · C9H8O4 · ATP · STU'}
+                      className="h-9 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-stone-900 outline-none ring-0 transition-colors placeholder:text-stone-400 focus-visible:ring-0 dark:text-stone-100 dark:placeholder:text-stone-600"
                     />
                     <Button
                       type="button"
@@ -765,7 +757,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       size="sm"
                       onClick={commitLigandDraft}
                       disabled={!ligandDraft.trim() || ligandChips.length >= MAX_LIGANDS}
-                      className="h-9 gap-1.5 rounded-md border-stone-200 px-3 text-xs font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
+                      className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
                     >
                       <Plus className="size-3.5" aria-hidden />
                       添加
@@ -776,7 +768,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       size="sm"
                       onClick={() => ligandFileInputRef.current?.click()}
                       disabled={ligandChips.length >= MAX_LIGANDS}
-                      className="h-9 gap-1.5 rounded-md border-stone-200 px-3 text-xs font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
+                      className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
                     >
                       <Paperclip className="size-3.5" aria-hidden />
                       配体文件
@@ -796,21 +788,21 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   </div>
                 </div>
 
-                <p className="text-xs leading-relaxed text-stone-400 dark:text-stone-500">
-                  支持中英文名、分子式、品牌药名与三位 ID（如 ATP、伊马替尼、C9H8O4、STU）；SDF / MOL / SMI / PDB 文件自动提取名称、分子式与残基名。非标准输入经
-                  <span className="font-mono text-[11px] text-stone-500 dark:text-stone-400"> 别名表 · PDBe 检索 · AI </span>
+                <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+                  支持中英文名、分子式、品牌药名与三位 ID；SDF / MOL / SMI / PDB 文件自动提取名称、分子式与残基名。非标准输入经
+                  <span className="font-mono text-[10px] text-stone-500 dark:text-stone-400"> 别名表 · PDBe 检索 · AI </span>
                   多策略归一到 RCSB 三位化学组分 ID，并检索含该配体的 PDB 结构列表。
                 </p>
               </div>
             </div>
 
             {/* ── 03 客户目标 ───────────────────────────────────────── */}
-            <div className="relative px-4 py-5 sm:px-6">
+            <div className="relative px-4 py-3.5">
               <div
                 aria-hidden
-                className="absolute inset-y-4 left-0 w-[3px] rounded-full bg-amber-400/80 dark:bg-amber-600/70"
+                className="absolute inset-y-3 left-0 w-[3px] rounded-full bg-amber-400/80 dark:bg-amber-600/70"
               />
-              <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-2">
                 <FieldHead no="03" title="客户目标 / 科学问题" hint="建议填写">
                   {goalAutoFilled ? (
                     <span className="eval-eyebrow flex items-center gap-1 rounded-sm bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-400">
@@ -831,38 +823,38 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     setGoalAutoFilled(false)
                   }}
                   placeholder="例如：解析 EGFR 激酶域与抑制剂复合物的冷冻电镜结构，评估 CRO 可行性（上传评估表后 AI 将自动提取并填入）"
-                  className={cn(inputBase, 'min-h-[88px] resize-y px-3.5 py-3 text-sm leading-[25px]')}
+                  className={cn(inputBase, 'min-h-[54px] resize-y px-3 py-2 text-[13px] leading-[22px]')}
                 />
-                <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
-                  明确的客户目标将直接用于 LLM 报告中的可行性结论与实验策略推荐（可选；评估表中提取的目标会自动填入）
+                <p className="text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">
+                  明确的客户目标将直接用于 LLM 报告中的可行性结论与实验策略推荐（可选）
                 </p>
               </div>
             </div>
 
-            {/* ── 高级选项（卡片底部，静默折叠）──────────────────────── */}
+            {/* ── 高级选项（卡片内静默折叠）──────────────────────────── */}
             <Collapsible open={advOpen} onOpenChange={setAdvOpen}>
               <div className="border-t border-stone-100 dark:border-stone-800/70">
-                <CollapsibleTrigger className="flex min-h-[52px] w-full items-center gap-2.5 px-4 text-sm font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 sm:px-6 dark:text-stone-300 dark:hover:bg-stone-900/60">
-                  <Settings2 className="size-4 text-stone-400" />
+                <CollapsibleTrigger className="flex min-h-10 w-full items-center gap-2 px-4 text-[12.5px] font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-300 dark:hover:bg-stone-900/60">
+                  <Settings2 className="size-3.5 text-stone-400" />
                   高级选项
-                  <span className="ml-auto font-mono text-[11px] font-normal text-stone-400 dark:text-stone-500">
+                  <span className="ml-auto font-mono text-[10.5px] font-normal text-stone-400 dark:text-stone-500">
                     BLAST {blastEnabled ? (forceBlast ? '强制' : '自动') : '关闭'} · PDB ≤ {maxPdb}
                   </span>
                   <ChevronDown
                     className={cn(
-                      'size-4 text-stone-400 transition-transform duration-200',
+                      'size-3.5 text-stone-400 transition-transform duration-200',
                       advOpen && 'rotate-180',
                     )}
                   />
                 </CollapsibleTrigger>
                 <CollapsibleContent className="data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-1">
-                  <div className="grid gap-5 border-t border-stone-100 px-4 py-4 sm:px-6 dark:border-stone-800/70 sm:grid-cols-2">
+                  <div className="grid gap-4 border-t border-stone-100 px-4 py-3 dark:border-stone-800/70 sm:grid-cols-2">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="text-sm font-medium text-stone-800 dark:text-stone-200">
+                        <div className="text-[13px] font-medium text-stone-800 dark:text-stone-200">
                           自动 BLAST 同源检索
                         </div>
-                        <div className="mt-0.5 text-xs leading-relaxed text-stone-500 dark:text-stone-500">
+                        <div className="mt-0.5 text-[11px] leading-relaxed text-stone-500 dark:text-stone-500">
                           结构覆盖不足时自动执行 NCBI BLAST 检索同源结构
                         </div>
                       </div>
@@ -876,10 +868,10 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="text-sm font-medium text-stone-800 dark:text-stone-200">
+                        <div className="text-[13px] font-medium text-stone-800 dark:text-stone-200">
                           强制 BLAST
                         </div>
-                        <div className="mt-0.5 text-xs leading-relaxed text-stone-500 dark:text-stone-500">
+                        <div className="mt-0.5 text-[11px] leading-relaxed text-stone-500 dark:text-stone-500">
                           无论覆盖情况如何，始终执行同源结构检索
                         </div>
                       </div>
@@ -893,74 +885,71 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     </div>
 
                     <div className="sm:col-span-2">
-                      <div className="text-sm font-medium text-stone-800 dark:text-stone-200">
-                        PDB 结构详情数量上限
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-[13px] font-medium text-stone-800 dark:text-stone-200">
+                          PDB 结构详情数量上限
+                          <span className="ml-2 text-[11px] font-normal text-stone-500 dark:text-stone-500">
+                            限制逐条拉取的 RCSB 结构详情数量，越大耗时越长
+                          </span>
+                        </div>
+                        <Select value={String(maxPdb)} onValueChange={(v) => setMaxPdb(Number(v))}>
+                          <SelectTrigger className="h-9 w-full rounded-md sm:w-36" aria-label="PDB 详情数上限">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[50, 100, 150, 300].map((n) => (
+                              <SelectItem key={n} value={String(n)}>
+                                {n} 条
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </div>
-                      <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-500">
-                        限制逐条拉取的 RCSB 结构详情数量，越大耗时越长
-                      </div>
-                      <Select value={String(maxPdb)} onValueChange={(v) => setMaxPdb(Number(v))}>
-                        <SelectTrigger className="mt-2 h-10 w-full rounded-md sm:w-44" aria-label="PDB 详情数上限">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {[50, 100, 150, 300].map((n) => (
-                            <SelectItem key={n} value={String(n)}>
-                              {n} 条
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
                     </div>
                   </div>
                 </CollapsibleContent>
               </div>
             </Collapsible>
+
+            {/* ── 提交条（卡片底栏）────────────────────────────────── */}
+            <div className="bg-stone-50/60 px-4 py-3 dark:bg-stone-950/40">
+              {submitError && (
+                <Alert variant="destructive" className="mb-2.5 rounded-md border-red-300 py-2.5 dark:border-red-900">
+                  <CircleAlert />
+                  <AlertTitle className="text-[13px]">无法开始评估</AlertTitle>
+                  <AlertDescription className="text-xs">
+                    {submitError}
+                    {!/上限|繁忙|排队|稍后再试|明日再试|正在或排队/.test(submitError) && (
+                      <span className="text-[11px] text-stone-500">（评估服务可能尚未就绪，请稍后重试）</span>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
+              <Button
+                size="lg"
+                disabled={!inputReady || submitting}
+                onClick={handleStart}
+                className="group h-10 w-full rounded-lg bg-emerald-800 text-[13.5px] font-semibold tracking-[0.02em] text-white shadow-none transition-all hover:bg-emerald-700 disabled:opacity-40 dark:bg-emerald-700 dark:hover:bg-emerald-600"
+              >
+                {submitting ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <Target className="size-4 transition-transform duration-200 group-hover:scale-110" />
+                )}
+                {submitting
+                  ? '正在创建评估作业…'
+                  : mode === 'docx' && selectedUniprots.length > 1
+                    ? `开始评估（${selectedUniprots.length} 个靶点）`
+                    : mode === 'uniprot' && uniprotMulti
+                      ? `开始评估（${uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT).length} 个靶点）`
+                      : mode === 'sequence' && seqMulti
+                        ? `开始评估（${seqEntries.slice(0, MAX_BATCH_UNIPROT).length} 条序列）`
+                        : '开始评估'}
+                {!submitting && <span className="ml-0.5 font-mono text-[12px] transition-transform duration-200 group-hover:translate-x-0.5">→</span>}
+              </Button>
+            </div>
           </div>
         </Tabs>
-      </div>
-
-      {/* 提交错误提示 */}
-      {submitError && (
-        <Alert variant="destructive" className="rounded-md border-red-300 dark:border-red-900">
-          <CircleAlert />
-          <AlertTitle>无法开始评估</AlertTitle>
-          <AlertDescription>
-            {submitError}
-            {!/上限|繁忙|排队|稍后再试|明日再试|正在或排队/.test(submitError) && (
-              <span className="text-xs text-stone-500">（评估服务可能尚未就绪，请稍后重试）</span>
-            )}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* 开始评估 */}
-      <div className="flex flex-col gap-3">
-        <Button
-          size="lg"
-          disabled={!inputReady || submitting}
-          onClick={handleStart}
-          className="group h-[52px] w-full rounded-lg bg-emerald-800 text-[15px] font-semibold tracking-[0.04em] text-white shadow-none transition-all hover:bg-emerald-700 disabled:opacity-40 dark:bg-emerald-700 dark:hover:bg-emerald-600"
-        >
-          {submitting ? (
-            <LoaderCircle className="size-5 animate-spin" />
-          ) : (
-            <Target className="size-4.5 transition-transform duration-200 group-hover:scale-110" />
-          )}
-          {submitting
-            ? '正在创建评估作业…'
-            : mode === 'docx' && selectedUniprots.length > 1
-              ? `开始评估（${selectedUniprots.length} 个靶点）`
-              : mode === 'uniprot' && uniprotMulti
-                ? `开始评估（${uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT).length} 个靶点）`
-                : mode === 'sequence' && seqMulti
-                  ? `开始评估（${seqEntries.slice(0, MAX_BATCH_UNIPROT).length} 条序列）`
-                  : '开始评估'}
-          {!submitting && <span className="ml-1 font-mono text-[13px] transition-transform duration-200 group-hover:translate-x-0.5">→</span>}
-        </Button>
-        <p className="text-center font-mono text-[11px] tracking-wide text-stone-400 dark:text-stone-500">
-          UNIPROT — RCSB — PDBE — PUBMED — BLAST — ALPHAFOLD — LIGAND — LLM ANALYSIS
-        </p>
       </div>
     </div>
   )

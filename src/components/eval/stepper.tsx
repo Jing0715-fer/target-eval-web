@@ -11,18 +11,18 @@ const STEPS = [
 ]
 
 /**
- * 流程指示器（极简编号风）：mono 数字 + 文字 + 发丝线连接
+ * 紧凑流程指示器（极简编号风）：mono 数字 + 文字 + 发丝线连接
  * @param step 已完成的步骤数（0-4）。done 时传 4 表示全部完成。
  */
 export function Stepper({ step, className }: { step: number; className?: string }) {
   return (
-    <ol className={cn('flex items-center gap-2 sm:gap-3', className)} aria-label="评估流程步骤">
+    <ol className={cn('flex items-center gap-1.5 sm:gap-2.5', className)} aria-label="评估流程步骤">
       {STEPS.map((s, i) => {
         const done = i < step
         const active = i === step
         return (
-          <li key={s.label} className="flex min-w-0 flex-1 items-center gap-2 sm:gap-2.5">
-            <span className="flex shrink-0 items-center gap-1.5">
+          <li key={s.label} className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+            <span className="flex shrink-0 items-center gap-1">
               <span
                 className={cn(
                   'eval-eyebrow tabular-nums transition-colors',
@@ -33,7 +33,7 @@ export function Stepper({ step, className }: { step: number; className?: string 
               </span>
               <span
                 className={cn(
-                  'text-xs font-medium whitespace-nowrap transition-colors',
+                  'text-[11px] font-medium whitespace-nowrap transition-colors',
                   done || active
                     ? 'text-stone-800 dark:text-stone-200'
                     : 'text-stone-300 dark:text-stone-600'
