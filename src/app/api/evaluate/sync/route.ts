@@ -21,9 +21,9 @@ import { db } from '@/lib/db'
 import { createJobSnapshot, getJobSnapshot, makeReporter, markStatus } from '@/lib/eval/job-manager'
 import { runPipeline, type InlineEvalTable, type PipelineResult } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
-import { setLlmConfigOverride } from '@/lib/eval/llm-provider'
+import { runWithLlmOverride } from '@/lib/eval/llm-provider'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
-import type { EvaluationOptions, InputMode } from '@/lib/eval/types'
+import { MAX_PDB_UNLIMITED, type EvaluationOptions, type FormInsights, type InputMode } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -120,7 +120,8 @@ export async function POST(req: Request) {
   const options: EvaluationOptions = {
     skipBlast: body.options?.skipBlast ?? false,
     forceBlast: body.options?.forceBlast ?? false,
-    maxPdb: Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
+    // v2.5：MAX_PDB_UNLIMITED（10000）= 不限；普通值仍在 20-300 区间
+    maxPdb: body.options?.maxPdb === MAX_PDB_UNLIMITED ? MAX_PDB_UNLIMITED : Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
     reportMode: 'single', // 无状态批次不支持合并报告 → 恒为独立报告
     range,
   }
@@ -135,22 +136,71 @@ export async function POST(req: Request) {
     .filter(l => l.raw.length > 0)
     .slice(0, 8)
 
-  // 评估表内联数据消毒（全文 ≤14KB 与直传路由同口径；图片 ≤8 张带 dataUri）
-  const evalTable: InlineEvalTable | undefined = body.evalTable
-    ? {
-        fullText: typeof body.evalTable.fullText === 'string' ? body.evalTable.fullText.slice(0, 14 * 1024) : undefined,
-        goalHints: Array.isArray(body.evalTable.goalHints)
-          ? body.evalTable.goalHints.filter(x => typeof x === 'string').slice(0, 12).map(x => x.slice(0, 200))
-          : undefined,
-        images: Array.isArray(body.evalTable.images)
-          ? body.evalTable.images
-              .filter(x => x && typeof x.id === 'string')
-              .slice(0, 8)
-              .map(x => ({ ...x, dataUri: typeof x.dataUri === 'string' && x.dataUri.startsWith('data:') ? x.dataUri : undefined }))
-          : undefined,
-        insights: body.evalTable.insights && Array.isArray(body.evalTable.insights.goals) ? body.evalTable.insights : undefined,
-      }
-    : undefined
+/** v2.5 安全加固：内联 dataUri 严格白名单（仅限服务端同类产出格式，防 src 属性闭合注入）与体积上限 */
+const INLINE_DATA_URI_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/
+const INLINE_IMAGE_MAX_CHARS = 2 * 1024 * 1024 // base64 文本上限（≈1.5MB 二进制）
+
+/** v2.5：内联 insights 字段逐项截断（与 docx-llm sanitize 同口径，防超大载荷进 LLM prompt） */
+function sanitizeInlineInsights(v: unknown): FormInsights | undefined {
+  if (!v || typeof v !== 'object' || !Array.isArray((v as { goals?: unknown }).goals)) return undefined
+  const o = v as Record<string, unknown>
+  const capStr = (x: unknown, n: number): string | undefined => {
+    if (typeof x !== 'string') return undefined
+    const s = x.replace(/\s+/g, ' ').trim().slice(0, n)
+    return s || undefined
+  }
+  const capArr = (x: unknown, items: number, itemLen: number): string[] => {
+    if (!Array.isArray(x)) return []
+    return x.filter((y): y is string => typeof y === 'string').map(y => y.trim().slice(0, itemLen)).filter(Boolean).slice(0, items)
+  }
+  const out: FormInsights = {
+    goals: capArr(o.goals, 8, 200),
+    scientificQuestions: capArr(o.scientificQuestions, 6, 160),
+    source: o.source === 'llm' ? 'llm' : 'regex',
+  }
+  const proteinName = capStr(o.proteinName, 100)
+  if (proteinName) out.proteinName = proteinName
+  const organism = capStr(o.organism, 60)
+  if (organism) out.organism = organism
+  const experimentalSummary = capStr(o.experimentalSummary, 400)
+  if (experimentalSummary) out.experimentalSummary = experimentalSummary
+  const sequenceNotes = capStr(o.sequenceNotes, 300)
+  if (sequenceNotes) out.sequenceNotes = sequenceNotes
+  const homologs = capStr(o.homologs, 300)
+  if (homologs) out.homologs = homologs
+  const keyConcerns = capArr(o.keyConcerns, 5, 120)
+  if (keyConcerns.length) out.keyConcerns = keyConcerns
+  const geneNames = capArr(o.geneNames, 5, 20)
+  if (geneNames.length) out.geneNames = geneNames
+  const ligands = capArr(o.ligands, 8, 60)
+  if (ligands.length) out.ligands = ligands
+  return out
+}
+
+// 评估表内联数据消毒（全文 ≤14KB 与直传路由同口径；图片 ≤8 张，dataUri 严格白名单 + ≤≈1.5MB；
+// insights 逐字段截断 —— v2.5：原实现整体透传，无界载荷会进 LLM prompt 且 dataUri 未验证可注入属性）
+const evalTable: InlineEvalTable | undefined = body.evalTable
+  ? {
+      fullText: typeof body.evalTable.fullText === 'string' ? body.evalTable.fullText.slice(0, 14 * 1024) : undefined,
+      goalHints: Array.isArray(body.evalTable.goalHints)
+        ? body.evalTable.goalHints.filter(x => typeof x === 'string').slice(0, 12).map(x => x.slice(0, 200))
+        : undefined,
+      images: Array.isArray(body.evalTable.images)
+        ? body.evalTable.images
+            .filter(x => x && typeof x.id === 'string')
+            .slice(0, 8)
+            .map(x => ({
+              ...x,
+              dataUri: typeof x.dataUri === 'string'
+                && INLINE_DATA_URI_RE.test(x.dataUri)
+                && x.dataUri.length <= INLINE_IMAGE_MAX_CHARS
+                ? x.dataUri
+                : undefined,
+            }))
+        : undefined,
+      insights: sanitizeInlineInsights(body.evalTable.insights),
+    }
+  : undefined
 
   // DB 建行（尽力而为：失败不阻塞，用随机 id 跑管线）
   let jobId = ''
@@ -172,15 +222,15 @@ export async function POST(req: Request) {
     jobId = `s_${randomUUID().slice(0, 12)}`
   }
 
-  // v2.4 引擎配置覆写（请求期间生效）
-  if (body.llm && typeof body.llm.providerKey === 'string' && typeof body.llm.model === 'string' && body.llm.model.trim()) {
-    setLlmConfigOverride({
-      providerKey: body.llm.providerKey,
-      baseUrl: typeof body.llm.baseUrl === 'string' ? body.llm.baseUrl : undefined,
-      apiKey: typeof body.llm.apiKey === 'string' ? body.llm.apiKey : undefined,
-      model: body.llm.model.trim(),
-    })
-  }
+  // v2.5 安全修复：引擎配置覆写改为 AsyncLocalStorage 请求作用域（原全局单例会被并发请求互相污染）
+  const llmOverride = body.llm && typeof body.llm.providerKey === 'string' && typeof body.llm.model === 'string' && body.llm.model.trim()
+    ? {
+        providerKey: body.llm.providerKey,
+        baseUrl: typeof body.llm.baseUrl === 'string' ? body.llm.baseUrl : undefined,
+        apiKey: typeof body.llm.apiKey === 'string' ? body.llm.apiKey : undefined,
+        model: body.llm.model.trim(),
+      }
+    : null
 
   const encoder = new TextEncoder()
   const snapshot = createJobSnapshot(jobId)
@@ -247,7 +297,8 @@ export async function POST(req: Request) {
         try {
           // 完成数据持有者（闭包赋值绕过 TS 控制流收窄）
           const holder: { r: PipelineResult | null } = { r: null }
-          await runPipeline(
+          // v2.5：管线在引擎覆写的请求作用域内执行（AsyncLocalStorage 随 await 链传播）
+          await runWithLlmOverride(llmOverride, () => runPipeline(
             {
               jobId,
               mode,
@@ -255,7 +306,7 @@ export async function POST(req: Request) {
               sequence,
               uploadId,
               evalTable,
-              goal: body.goal,
+              goal: typeof body.goal === 'string' ? body.goal.slice(0, 2000) : undefined,
               batchNote: body.batchNote?.trim().slice(0, 500) || undefined,
               ligands,
               options,
@@ -266,7 +317,7 @@ export async function POST(req: Request) {
               ...makeReporter(jobId),
               onComplete: r => { holder.r = r },
             },
-          )
+          ))
           const result = holder.r
           markStatus(jobId, 'done')
           // 最终事件：完整 JobDetail（与 GET /api/jobs/[id] 同构）+ 内联 HTML 报告
@@ -313,7 +364,6 @@ export async function POST(req: Request) {
         } finally {
           cleanup()
           req.signal.removeEventListener('abort', onCallerAbort)
-          setLlmConfigOverride(null) // 清理请求级引擎覆写
           syncG.__syncEvalActive = Math.max(0, (syncG.__syncEvalActive ?? 1) - 1)
           try { controller.close() } catch { /* already closed */ }
         }

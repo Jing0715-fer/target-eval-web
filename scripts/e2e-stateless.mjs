@@ -41,6 +41,14 @@ async function main() {
   if (!upJson.ok) throw new Error('上传失败: ' + JSON.stringify(upJson).slice(0, 200))
   log('  uploadId:', upJson.uploadId, '· stateless:', upJson.stateless, '· uniprots:', upJson.parsed.uniprotIds, '· fullText:', (upJson.fullText || '').length, 'chars · goalHints:', (upJson.parsed.goalHints || []).length)
 
+  // v2.5：直传响应的 goalHints 已结构化（无空标签行、无模板段）
+  const gh = upJson.parsed.goalHints || []
+  log('  v2.5 goalHints =', JSON.stringify(gh))
+  if (gh.length < 3) throw new Error('FAIL: v2.5 goalHints 少于 3 条（预期目标未提取）')
+  if (gh.some(g => /^预期目标|^一、项目目的|^四、项目目标/.test(g) && g.replace(/：$/, '').length <= 8))
+    throw new Error('FAIL: v2.5 goalHints 仍含空标签行')
+  if (!gh.some(g => /Resmetirom/.test(g))) throw new Error('FAIL: v2.5 goalHints 未含 Resmetirom 目标行')
+
   // ── 2. insights 内联解析 ──
   log('── [2] insights 内联解析 ──')
   const ins = await jfetch('/api/evaluate/insights', {
@@ -52,6 +60,15 @@ async function main() {
   if (!insJson.ok) throw new Error('insights 失败: ' + JSON.stringify(insJson).slice(0, 200))
   const insights = insJson.insights
   log('  source:', insights.source, '· goals:', insights.goals?.length, '· ligands:', JSON.stringify(insights.ligands))
+
+  // v2.5：无论 LLM 可用与否，goals 应覆盖两条核心预期目标（三维结构 + Resmetirom 结合），
+  // ligands 应含 Resmetirom（LLM 路径或规则兜底路径均可）
+  const igoals = (insights.goals || []).map(g => String(g))
+  if (igoals.length < 2) throw new Error('FAIL: insights goals 少于 2 条（预期目标未提取）')
+  if (!igoals.some(g => /整体三维结构/.test(g))) throw new Error('FAIL: insights goals 缺「预期目标一：整体三维结构」')
+  if (!igoals.some(g => /Resmetirom/.test(g))) throw new Error('FAIL: insights goals 缺「预期目标二：Resmetirom 结合模式」')
+  if (!(insights.ligands || []).some(l => /resmetirom/i.test(l)))
+    throw new Error('FAIL: insights.ligands 未含 Resmetirom（规则兜底应提名）')
 
   // ── 3. 同步流式评估 ──
   log('── [3] 同步流式评估（O94952 + Resmetirom + evalTable 内联）──')
@@ -128,6 +145,11 @@ async function main() {
   log('  总事件数:', events, '· 进度事件:', progressEvents, '· 耗时:', ((Date.now() - t0) / 1000).toFixed(1) + 's')
   log('  status:', job.status, '· summary.uniprot:', job.summary?.uniprot?.uniprotId, job.summary?.uniprot?.proteinName)
   log('  pdbs:', job.pdbs?.length, '· blastHits:', job.blastHits?.length, '· literature:', job.literature?.length)
+
+  // v2.5：报告含 Resmetirom（配体研究数据入报告）
+  const ligInReport = /Resmetirom/i.test(final.reportHtml || '') || /Resmetirom/i.test(job.reportMarkdown || '')
+  log('  v2.5 报告含 Resmetirom:', ligInReport)
+  if (!ligInReport) throw new Error('FAIL: 报告未包含 Resmetirom 配体研究数据')
   log('  reportMarkdown:', (job.reportMarkdown || '').length, 'chars · reportHtml:', (final.reportHtml || '').length, 'chars')
 
   const ligands = job.summary?.ligands ?? []

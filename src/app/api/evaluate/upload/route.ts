@@ -100,6 +100,13 @@ export async function POST(req: Request) {
   const stateless = url.searchParams.get('stateless') === '1'
   const noVlm = stateless || url.searchParams.get('noVlm') === '1'
 
+  // v2.5：Content-Length 预检（读体前拒绝超限 —— multipart 边界开销 ~1KB，阈值留 512B 余量；
+  // 防止先整体读入超大请求体再 413 的内存放大）
+  const declared = Number(req.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > DOCX_MAX_BYTES + 512) {
+    return NextResponse.json({ ok: false, error: `文件过大（上限 20MB）` }, { status: 413 })
+  }
+
   let file: File | null = null
   try {
     const form = await req.formData()

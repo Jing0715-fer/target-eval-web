@@ -71,10 +71,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const owner = getOwner(req)
 
   // 1) DB 行（评估作业登记）— 附带精确路径与 mime；校验所属作业归属
+  // v2.5：与 isOwnedBy 同口径（cookie → ipKey 两层回退；原仅比对 owner.key，无 cookie 创建作业后拿到 cookie 的用户会 404 于自己上传的实验图）
   const asset = await db.reportAsset.findUnique({ where: { id } }).catch(() => null)
   if (asset) {
     const job = await db.evaluationJob.findUnique({ where: { id: asset.jobId }, select: { ownerKey: true } }).catch(() => null)
-    if (job?.ownerKey && job.ownerKey !== owner.key) {
+    if (job?.ownerKey && job.ownerKey !== owner.key && job.ownerKey !== owner.ipKey) {
       return NextResponse.json({ error: '图片不存在' }, { status: 404 })
     }
     const candidates = [asset.path, asset.path + (MIME_TO_EXT[asset.mime] ?? '')]

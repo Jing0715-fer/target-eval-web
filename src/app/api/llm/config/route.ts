@@ -78,7 +78,17 @@ export async function POST(req: Request) {
   if (!apiKey && body.keepKey) {
     try {
       const prev = await db.llmConfig.findFirst({ where: { isActive: true, providerKey } })
-      if (prev?.apiKey) apiKey = prev.apiKey
+      if (prev?.apiKey) {
+        // v2.5 安全修复：沿用的 Key 只允许发往与保存时完全一致的服务地址 ——
+        // 否则「keepKey + 恶意 baseUrl」可把已存 Key 定向送往任意外部地址（密钥外泄）
+        if (prev.baseUrl && baseUrl !== prev.baseUrl) {
+          return NextResponse.json(
+            { ok: false, error: '服务地址已变更，为保护已保存的 API Key 请重新输入（或先删除原配置）' },
+            { status: 400 },
+          )
+        }
+        apiKey = prev.apiKey
+      }
     } catch { /* 忽略 */ }
   }
   if (meta.needsKey && !apiKey && providerKey !== 'custom') {

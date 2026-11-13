@@ -10,7 +10,7 @@ import { runPipeline } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
 import { checkJobQuota, quotaResponse, scheduleJobTtlCleanup, QuotaError } from '@/lib/eval/gatekeeper'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
-import type { BlastGroup, EvaluationOptions, InputMode } from '@/lib/eval/types'
+import { MAX_PDB_UNLIMITED, type BlastGroup, type EvaluationOptions, type InputMode } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -96,7 +96,8 @@ export async function POST(req: Request) {
   const options: EvaluationOptions = {
     skipBlast: body.options?.skipBlast ?? false,
     forceBlast: body.options?.forceBlast ?? false,
-    maxPdb: Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
+    // v2.5：MAX_PDB_UNLIMITED（10000）= 不限；普通值仍在 20-300 区间
+    maxPdb: body.options?.maxPdb === MAX_PDB_UNLIMITED ? MAX_PDB_UNLIMITED : Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
     reportMode: body.options?.reportMode === 'deferred' ? 'deferred' : 'single',
     range,
   }
@@ -160,7 +161,7 @@ export async function POST(req: Request) {
           uniprot: uniprot?.toUpperCase(),
           sequence,
           uploadId,
-          goal: body.goal,
+          goal: body.goal?.slice(0, 2000), // v2.5：与 DB 落库同口径截断（防无界载荷进 LLM prompt）
           batchNote,
           homologBlast,
           ligands,

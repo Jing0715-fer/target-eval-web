@@ -9,9 +9,14 @@ export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'canceled'
 export type InputMode = 'uniprot' | 'sequence' | 'docx'
 export type AssetKind = 'gel' | 'sec' | 'other'
 
+/** v2.5：PDB 结构详情上限的「无限」哨兵值（JSON 无法携带 Infinity，用大数表示）。
+ *  实际由 RCSB 检索分页上限（1000 条/靶点）封顶，逐条详情拉取不设上限。 */
+export const MAX_PDB_UNLIMITED = 10_000
+
 export interface EvaluationOptions {
   skipBlast: boolean
   forceBlast: boolean
+  /** 逐条拉取的 RCSB 结构详情数量上限；MAX_PDB_UNLIMITED = 不限 */
   maxPdb: number
   /** 报告生成模式：single = 各靶点独立报告（默认）；deferred = 跳过单靶点报告，数据并入合并报告（关联靶点批量评估用） */
   reportMode?: 'single' | 'deferred'
@@ -838,3 +843,25 @@ export function looksLikeProteinSequence(s: string): boolean {
   const valid = seq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').length
   return valid / seq.length >= 0.9
 }
+
+/* ---------------- 评估表文本结构辅助（客户端 / 服务端共用） ---------------- */
+
+/** 评估表末尾的「填写范例 / 填写说明」模板段标记（非客户填写内容） */
+const FORM_TEMPLATE_TAIL_RE = /填写范例|范例说明|填写说明|示例说明|以下为(?:填写)?范例/
+
+/**
+ * 截去评估表末尾的填写范例 / 说明模板段（模板中的「一、项目目的：例如……」等
+ * 是表单自带说明而非客户目标，提取客户信息前应先剔除）。找不到标记时原样返回。
+ */
+export function cutFormTemplateTail(text: string): string {
+  const idx = text.search(FORM_TEMPLATE_TAIL_RE)
+  return idx > 0 ? text.slice(0, idx) : text
+}
+
+/** 目标类字段标签（评估表常见行式：编号可有可无、冒号可有可无） */
+export const GOAL_LABEL_RE =
+  /^(?:\d+\s*[.、]\s*)?(?:[一二三四五六七八九十]{1,3}\s*[、.．]\s*)?(?:预期目标[一二三四五六七八九十\d]{0,3}|项目目的|项目目标|客户目标|研究目的|研究目标|项目需求|预期成果|交付目标|拟解决的关键问题|拟解决问题)\s*[：:]?\s*(.*)$/
+
+/** 目标标签独占一行时，取后续行作值需要排除的「表单区段标题 / 无关字段」样式 */
+export const FORM_SECTION_HEADER_RE =
+  /^(?:[一二三四五六七八九十]{1,3}\s*[、.．]\s*)?(?:基本信息|服务需求|样品信息|项目情况简述|项目预算|项目期望完成时间|其他项目|联系信息|审批|意见|签名|日期|预算|期望完成时间)\b|^[一二三四五六七八九十]{1,3}\s*[、.．]/

@@ -281,8 +281,9 @@ export async function GET(req: Request) {
 
   const record = await db.batchReport.findUnique({ where: { id } })
   if (!record) return notFound()
-  // v1.17「按 IP 智能显示」：cookie 键 / IP-hash 键 / 同来源 IP 掩码任一命中即放行
-  if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey && record.ownerMask !== owner.mask) {
+  // 归属校验（v2.5：与 request-guard.isOwnedBy 统一两层回退，移除同 IP 段掩码分支 ——
+  // 代理重写 XFF 的部署下该分支会让「知道 ID 者皆可访问」）
+  if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) {
     return notFound()
   }
 

@@ -10,6 +10,7 @@
  * 内存策略：激活配置全局单例缓存（TTL 30s + 主动失效），API key 仅后端持有；
  * 模型列表响应截断 ≤300 条，防超大响应。
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { db } from '@/lib/db'
 
 // ─── 供应商注册表 ─────────────────────────────────────────────────────────────
@@ -73,8 +74,15 @@ const g = globalThis as unknown as {
   __llmCfg?: { config: ActiveLlmConfig | null; loadedAt: number }
 }
 
-/** 读取激活配置（无 = 内置 z-ai）。DB 故障时静默回退内置。 */
+/** v2.5 安全修复：请求级引擎覆写存 AsyncLocalStorage（随 await 链传播，请求间隔离）。 */
+const llmOverrideStorage = new AsyncLocalStorage<ActiveLlmConfig>()
+
+/** 读取激活配置（无 = 内置 z-ai）。DB 故障时静默回退内置。
+ *  v2.5 安全修复：请求级覆写（AsyncLocalStorage）优先于全局配置 —— 原实现把覆写
+ *  写入全局单例，同实例并发请求会互相污染（A 的评估数据可能发往 B 配置的端点）。 */
 export async function getActiveLlmConfig(): Promise<ActiveLlmConfig | null> {
+  const reqScoped = llmOverrideStorage.getStore()
+  if (reqScoped) return reqScoped
   const c = g.__llmCfg
   if (c && Date.now() - c.loadedAt < CACHE_TTL_MS) return c.config
   let config: ActiveLlmConfig | null = null
@@ -106,26 +114,31 @@ export function invalidateLlmConfigCache(): void {
  * 同步评估路由接受前端随请求内联携带的配置（仅本次请求期间生效）。
  * 安全说明：Key 本就由该用户在配置面板输入，回到同一用户发起的请求中，无新增暴露面。
  */
-export function setLlmConfigOverride(override: {
+export function buildLlmOverrideConfig(override: {
   providerKey: string
   baseUrl?: string
   apiKey?: string
   model: string
-} | null): ActiveLlmConfig | null {
-  if (!override) {
-    g.__llmCfg = undefined
-    return null
-  }
+}): ActiveLlmConfig {
   const meta = getProviderMeta(override.providerKey)
-  const config: ActiveLlmConfig = {
+  return {
     providerKey: (meta?.key ?? 'custom') as ProviderKey,
     label: meta?.label ?? override.providerKey,
     baseUrl: override.baseUrl || meta?.baseUrl || '',
     apiKey: override.apiKey ?? '',
     model: override.model,
   }
-  g.__llmCfg = { config, loadedAt: Date.now() }
-  return config
+}
+
+/** 在请求作用域覆写引擎配置执行 fn（fn 内所有 LLM 调用走覆写端点） */
+export function runWithLlmOverride<T>(override: {
+  providerKey: string
+  baseUrl?: string
+  apiKey?: string
+  model: string
+} | null, fn: () => Promise<T>): Promise<T> {
+  if (!override) return fn()
+  return llmOverrideStorage.run(buildLlmOverrideConfig(override), fn)
 }
 
 /** 当前引擎摘要（报告元数据/页脚展示用） */

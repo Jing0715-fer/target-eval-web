@@ -24,6 +24,7 @@
 import { llmChat } from './llm'
 import { apiCache } from './cache'
 import { LIGAND_JUNK_IDS } from './ligand-parse'
+import { cutFormTemplateTail } from './types'
 import { pubchemLookupName, rcsbChemicalCandidates, type PubChemCompound } from './pubchem'
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
@@ -587,4 +588,114 @@ export function extractLigandsFromText(text: string): LigandMention[] {
 /** 别名表展示名（报告/前端「已识别配体」徽标用） */
 export function ligandDisplayName(res: LigandResolution): string {
   return res.name || res.compId || res.raw
+}
+
+// ─── 评估表配体候选的模式提取（v2.5）──────────────────────────────────────
+
+/**
+ * 模式提名黑名单：结构生物学语境中「紧邻配体关键词」的高频非配体拉丁词
+ * （技术名词 / 蛋白域名 / 细胞系 / 数据库名等）。全小写比较。
+ */
+const LIGAND_MENTION_JUNK = new Set([
+  'alphafold', 'blast', 'uniprot', 'pdb', 'rcsb', 'pdbe', 'pubmed', 'pubchem',
+  'cryo', 'cryoem', 'cryo-em', 'x-ray', 'xray', 'nmr', 'spr', 'bli', 'itc',
+  'skp', 'skp1', 'scf', 'apo', 'gel', 'sec', 'sds', 'page', 'akta',
+  'his', 'gst', 'gfp', 'mbp', 'bsa', 'dna', 'rna', 'cdna', 'hek', 'cho',
+  'ecoli', 'coli', 'fasta', 'bsl', 'bsl-1', 'bsl-2', 'vlp', 'idt', 'map',
+  // 注意：GDP/ATP 等是真实配体（在别名表），不列入黑名单
+])
+
+/** 纯拉丁配体名（字母开头，允许连字符/数字/空格词组） */
+const LATIN_NAME_RE = /^[A-Za-z][A-Za-z0-9\-']{1,29}(?:\s+[A-Za-z][A-Za-z0-9\-']{0,29}){0,2}$/
+
+/** 剥掉值末尾的中文标点/句读 */
+function trimMentionTail(v: string): string {
+  return v.replace(/[.,;、，。；：:）)\s]+$/, '').trim()
+}
+
+function isJunkMention(v: string, acronymOk = false): boolean {
+  const key = v.toLowerCase()
+  if (LIGAND_MENTION_JUNK.has(key)) return true
+  // 纯大写短缩写（≤4 位）多为技术缩写而非配体名：NAD/FAD 等已在别名表精确处理；
+  // 但「配体：」字段值里显式写出的 ATP/GTP 是真实配体 → acronymOk 放行
+  if (!acronymOk && /^[A-Z]{1,4}$/.test(v)) return true
+  // 疑似 PDB ID（4 位字母数字混合）或 UniProt accession（字母+数字长串）
+  if (/^[0-9A-Za-z]{4}$/.test(v) && /\d/.test(v)) return true
+  if (/^[A-Za-z]\d[\dA-Za-z]{4,}$/.test(v) || /^\d[A-Za-z][\dA-Za-z]{3,}$/.test(v)) return true
+  return false
+}
+
+/**
+ * 从评估表全文提取配体候选名称（规则提取，LLM 不可用时的兜底路径）：
+ *  1. 字段式：「配体：/化合物：/药物名称：…」后的值（支持顿号/逗号列表；
+ *     拉丁名直接收，中文名需命中别名表）
+ *  2. 邻接式：「与 Resmetirom 配体结合模式」「蛋白与 XX 抑制剂复合物」——
+ *     中文评估表里最常见的提名写法
+ *  3. 后缀式：「XX 配体 / XX 抑制剂 / XX 底物」
+ *  4. 别名表字典扫描（ATP / 伊马替尼 / 血红素……精确已知配体）
+ *  候选仅是「原始名称」，后续仍经 resolveLigandInput 多策略归一（RCSB / PDBe / PubChem）。
+ *  保守策略：表尾「填写范例说明」模板段不参与扫描；黑名单过滤技术名词。
+ */
+export function extractLigandCandidatesFromText(text: string): string[] {
+  const body = cutFormTemplateTail(text)
+  const found: string[] = []
+  const seen = new Set<string>()
+
+  const push = (v: string, acronymOk = false): void => {
+    const name = trimMentionTail(v)
+    if (!name || name.length < 3 || name.length > 60) return
+    const key = name.toLowerCase()
+    if (seen.has(key)) return
+    if (isJunkMention(name, acronymOk)) return
+    seen.add(key)
+    found.push(name)
+    if (found.length >= 8) return
+  }
+
+  // 1) 字段式：值可为列表（顿号/逗号/分号分隔），也可为单个名称
+  const fieldRe = /(?:配体|化合物|小分子|药物|抑制剂|激动剂|拮抗剂|底物|辅因子|共晶配体)\s*(?:名称|信息|列表)?\s*[：:]\s*([^\n]{2,120})/gi
+  let m: RegExpExecArray | null
+  while ((m = fieldRe.exec(body))) {
+    const value = m[1] ?? ''
+    // 列表式：顿号分隔的多个名称；句子式取首个句读前的头段
+    const items = value.includes('、') ? value.split('、') : [value.split(/[,，。；;（(]/)[0] ?? '']
+    for (const item of items) {
+      const v = trimMentionTail(item)
+      if (!v) continue
+      if (LATIN_NAME_RE.test(v)) push(v, true) // 字段值里显式写出的 ATP/GTP 等缩写是真实配体
+      else if (/[\u4e00-\u9fff]/.test(v) && v.length >= 2 && v.length <= 12 && ALIAS_LOOKUP.get(normalizeLigandRaw(v))) {
+        push(v) // 中文名必须命中别名表（伊马替尼/血红素……），防「见附件/同上」类噪音
+      }
+    }
+    if (found.length >= 8) break
+  }
+
+  // 1b) 标签独占一行（表格单元格拆行，如「配体」\n「Resmetirom」）→ 下一行拉丁名
+  const lines = body.split(/\r?\n/).map(l => l.trim())
+  for (let i = 0; i < lines.length - 1 && found.length < 8; i++) {
+    if (/^(?:配体|化合物|小分子|药物|抑制剂|底物|辅因子|配体名称|化合物名称|配体\/化合物)$/.test(lines[i])) {
+      const nxt = lines[i + 1]
+      if (nxt && LATIN_NAME_RE.test(nxt)) push(nxt)
+    }
+  }
+
+  // 2) 邻接式：与 X 配体/化合物/抑制剂…（中文评估表最常见写法）
+  const adjRe = /(?:与|和|同)\s*([A-Za-z][A-Za-z0-9\-']{1,29}(?:\s+[A-Za-z][A-Za-z0-9\-']{1,29}){0,2})\s*(?:的)?\s*(?:配体|化合物|小分子|抑制剂|激动剂|拮抗剂|底物|辅因子|变构剂|调节剂)/g
+  while ((m = adjRe.exec(body)) && found.length < 8) {
+    push(m[1] ?? '')
+  }
+
+  // 3) 后缀式：X 配体 / X 抑制剂（英文行文 / 「加入 ATP 底物」等）
+  const sufRe = /\b([A-Za-z][A-Za-z0-9\-']{2,29})\s+(?:配体|抑制剂|激动剂|拮抗剂|底物|辅因子|ligand|inhibitor|agonist|antagonist|substrate|cofactor)\b/g
+  while ((m = sufRe.exec(body)) && found.length < 8) {
+    push(m[1] ?? '')
+  }
+
+  // 4) 别名表字典扫描（已知配体精确命中；长 key 保守策略防误报）
+  for (const dict of extractLigandsFromText(body)) {
+    if (found.length >= 8) break
+    push(dict.matched.length <= 4 ? dict.matched.toUpperCase() : dict.matched)
+  }
+
+  return found.slice(0, 8)
 }

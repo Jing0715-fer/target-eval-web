@@ -9,6 +9,8 @@
  *  - 输入 ≤ 14KB 文本、输出 ≤ 4KB，内存有界
  */
 import { llmChat } from './llm'
+import { extractGoalHints } from './docx'
+import { extractLigandCandidatesFromText } from './ligand'
 import { elideSequenceRuns } from './seq-elide'
 import type { FormInsights } from './types'
 
@@ -23,8 +25,8 @@ const SYSTEM = `你是一位结构生物学 CRO 项目的评估分析师。用�
   "experimentalSummary": "实验数据与样品状态要点：表达系统/纯度/得率/稳定性/已有的胶图或SEC结果文字描述等，综合成 ≤300 字摘要（无相关内容则省略）",
   "sequenceNotes": "构建/序列说明：截短边界、突变位点、标签、linker 等（无则省略，≤200 字）",
   "homologs": "文档中提及的同源蛋白/参考蛋白/已有结构信息（无则省略，≤200 字）",
-  "keyConcerns": ["风险与关注点：样品量不足、蛋白不稳定、翻译后修饰等（最多 5 条，无则省略）"]
-    "ligands": ["文档中提及的配体/化合物/辅因子/药物（中英文俗名均可，如 ATP、血红素、伊马替尼、staurosporine；只提取文档真实提及的，最多 8 条，未提及则省略）"],
+  "keyConcerns": ["风险与关注点：样品量不足、蛋白不稳定、翻译后修饰等（最多 5 条，无则省略）"],
+  "ligands": ["文档中提及的配体/化合物/辅因子/药物（中英文俗名均可，如 ATP、血红素、伊马替尼、staurosporine；只提取文档真实提及的，最多 8 条，未提及则省略）"],
 }
 注意：goals 和 scientificQuestions 是两个不同维度——goals 是客户想要达成什么（如"解析 apo 与复合物结构"），scientificQuestions 是科学上待回答的问题（如"抑制活性氧还依赖的二聚化界面是否保守"）。只提取文档中真实存在的信息，禁止推测编造。
 任何字段都不要原样复述完整氨基酸/核苷酸序列（≥40 个连续字母的片段会被系统自动省略为占位标记）：序列相关内容只写边界（如 33-308）、截短、突变位点、标签、linker 与长度等要点。`
@@ -57,9 +59,16 @@ function sanitizeStr(v: unknown, maxLen: number): string | undefined {
   return s || undefined
 }
 
-/** 规则兜底（LLM 不可用时）：goalHints → goals（同样省略长序列片段） */
-export function fallbackInsights(goalHints: string[]): FormInsights {
-  return { goals: goalHints.slice(0, 4).map(elideSequenceRuns), scientificQuestions: [], source: 'regex' }
+/** 规则兜底（LLM 不可用时）：v2.5 直接对全文做结构化提取 ——
+ *  目标：预期目标N / 项目目的等表格字段的「标签行 + 值行」配对（剔除表尾填写范例模板段）；
+ *  配体：字段式 / 「与 X 配体」邻接式 / 字典扫描提名，后续经 resolveLigandInput 归一。 */
+export function fallbackInsights(text: string, goalHints: string[]): FormInsights {
+  const structuredGoals = text.trim() ? extractGoalHints(text) : []
+  const goals = (structuredGoals.length ? structuredGoals : goalHints.slice(0, 4)).map(elideSequenceRuns)
+  const insights: FormInsights = { goals, scientificQuestions: [], source: 'regex' }
+  const ligands = text.trim() ? extractLigandCandidatesFromText(text) : []
+  if (ligands.length) insights.ligands = ligands.slice(0, 8)
+  return insights
 }
 
 /**
@@ -72,7 +81,7 @@ export async function extractFormInsights(
   signal?: AbortSignal,
 ): Promise<FormInsights> {
   const trimmed = text.trim()
-  if (trimmed.length < 20) return fallbackInsights(goalHints)
+  if (trimmed.length < 20) return fallbackInsights(text, goalHints)
 
   const prompt = `评估表全文如下（Word 提取文本，可能含 OCR 噪音）：
 
@@ -83,10 +92,10 @@ ${trimmed.slice(0, 14000)}
 请按系统指令输出 JSON。`
 
   const r = await llmChat(prompt, SYSTEM, signal)
-  if (!r.ok) return fallbackInsights(goalHints)
+  if (!r.ok) return fallbackInsights(text, goalHints)
 
   const obj = extractJson(r.text)
-  if (!obj) return fallbackInsights(goalHints)
+  if (!obj) return fallbackInsights(text, goalHints)
 
   const goals = sanitizeStrArray(obj.goals, 6, 160)
   const questions = sanitizeStrArray(obj.scientificQuestions, 6, 160)

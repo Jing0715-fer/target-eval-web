@@ -122,21 +122,28 @@ export async function POST(req: Request) {
   return NextResponse.json({ ok: true, insights, cached: false })
 }
 
-/** 墙钟预算内的 LLM 提取；超时/失败返回规则兜底（不写缓存，重试可获真实结果） */
+/** 墙钟预算内的 LLM 提取；超时/失败返回规则兜底（v2.5 兜底为全文结构化提取，不写缓存，重试可获真实结果）。
+ *  v2.5：超时同时向 LLM 调用传 AbortSignal（底层重试最长可拖 ~19 分钟，不再让其后台空转），并清理定时器。 */
 async function runExtraction(text: string, goalHints: string[]): Promise<{ insights: FormInsights; timedOut: boolean }> {
   let timedOut = false
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => {
+    timedOut = true
+    ctrl.abort()
+    resolveNow(fallbackInsights(text, goalHints))
+  }, INSIGHTS_BUDGET_MS)
+  let resolveNow: (v: FormInsights) => void = () => {}
   try {
     const insights = await Promise.race([
-      extractFormInsights(text, goalHints),
+      extractFormInsights(text, goalHints, ctrl.signal),
       new Promise<FormInsights>((resolve) => {
-        setTimeout(() => {
-          timedOut = true
-          resolve(fallbackInsights(goalHints))
-        }, INSIGHTS_BUDGET_MS)
+        resolveNow = resolve
       }),
     ])
     return { insights, timedOut }
   } catch {
-    return { insights: fallbackInsights(goalHints), timedOut: false }
+    return { insights: fallbackInsights(text, goalHints), timedOut: false }
+  } finally {
+    clearTimeout(timer)
   }
 }

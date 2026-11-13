@@ -30,6 +30,7 @@ import { countResidues, parseMultiUniprotIds, parseMultiFasta, type FastaEntry }
 import { fetchDocxInsights, isStatelessEnv, uploadEvaluateDocx, type UploadProgress } from './api'
 import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
 import type { EvaluateOptions, EvaluateRequest, FormInsights, InputMode, UploadResponse } from './types'
+import { MAX_PDB_UNLIMITED } from './types'
 import type { StartResult } from './use-evaluation-flow'
 import { parseLigandFileText, type LigandFileParsed } from '@/lib/eval/ligand-parse'
 
@@ -214,6 +215,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [blastEnabled, setBlastEnabled] = useState(true)
   const [forceBlast, setForceBlast] = useState(false)
   const [maxPdb, setMaxPdb] = useState(150)
+  // 移动端配体说明展开（sm 起全展开无需切换）
+  const [ligandHintOpen, setLigandHintOpen] = useState(false)
 
   // 快捷键提示文案（挂载后按平台修正，避免 SSR 水合不一致）
   const [kbdHint, setKbdHint] = useState('⌘ ↵')
@@ -865,7 +868,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     disabled={ligandChips.length >= MAX_LIGANDS}
                     placeholder={ligandChips.length >= MAX_LIGANDS
                       ? `已达上限 ${MAX_LIGANDS} 条`
-                      : '名称 / 分子式 / ID，回车或逗号添加 — 多个配体可用逗号分隔，如：Resmetirom, ATP, C9H8O4'}
+                      : '名称 / 分子式 / ID，回车或逗号添加（如 Resmetirom, ATP, C9H8O4）'}
                     className="h-10 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-foreground outline-none ring-0 transition-colors placeholder:text-muted-foreground/70 focus-visible:ring-0"
                   />
                   <Button
@@ -907,10 +910,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                 </div>
               </div>
 
-              <p className="text-[11px] leading-relaxed text-muted-foreground/80">
+              <p className={cn('text-[11px] leading-relaxed text-muted-foreground/80', !ligandHintOpen && 'line-clamp-3 sm:line-clamp-none')}>
                 支持中英文名、分子式、品牌药名与化学组分 ID，多个配体用逗号/顿号分隔；SDF / MOL / SMI / PDB 文件自动提取名称、分子式与残基名。非标准输入经
                 <span className="font-mono text-[10px] text-muted-foreground"> 别名表 · PDBe 检索 · PubChem · AI </span>
                 多策略归一到 RCSB 化学组分 ID（PubChem 详情兜底），并检索含该配体的 PDB 结构列表。
+                <button type="button" className="ml-1 font-mono text-[10px] text-primary hover:underline sm:hidden" onClick={() => setLigandHintOpen(v => !v)} aria-expanded={ligandHintOpen} aria-label={ligandHintOpen ? '收起配体说明' : '展开配体说明'}>
+                  {ligandHintOpen ? '－收起' : '…展开'}
+                </button>
               </p>
             </StepSection>
 
@@ -956,7 +962,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   <Settings2 className="size-3.5 shrink-0 text-muted-foreground/60" />
                   高级选项
                   <span className="ml-auto truncate font-mono text-[10.5px] font-normal text-muted-foreground/70">
-                    BLAST {blastEnabled ? (forceBlast ? '强制' : '自动') : '关闭'} · PDB ≤ {maxPdb}
+                    BLAST {blastEnabled ? (forceBlast ? '强制' : '自动') : '关闭'} · PDB {maxPdb >= MAX_PDB_UNLIMITED ? '≤ ∞' : `≤ ${maxPdb}`}
                   </span>
                   <ChevronDown
                     className={cn(
@@ -1007,7 +1013,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                         <div className="text-[13px] font-medium text-foreground">
                           PDB 结构详情数量上限
                           <span className="ml-2 text-[11px] font-normal text-muted-foreground">
-                            限制逐条拉取的 RCSB 结构详情数量，越大耗时越长
+                            限制逐条拉取的 RCSB 结构详情数量，越大耗时越长（不限 = 拉取该靶点全部结构）
                           </span>
                         </div>
                         <Select value={String(maxPdb)} onValueChange={(v) => setMaxPdb(Number(v))}>
@@ -1015,14 +1021,19 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {[50, 100, 150, 300].map((n) => (
+                            {[50, 100, 150, 300, MAX_PDB_UNLIMITED].map((n) => (
                               <SelectItem key={n} value={String(n)}>
-                                {n} 条
+                                {n >= MAX_PDB_UNLIMITED ? '不限（全部）' : `${n} 条`}
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                       </div>
+                      {maxPdb >= MAX_PDB_UNLIMITED && (
+                        <p className="mt-1.5 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                          已选择不限：将逐条拉取该靶点的全部关联结构（检索分页上限 1000 条），靶点结构多时拉取耗时可能明显增加（约每条 0.2–1 秒）
+                        </p>
+                      )}
                     </div>
                   </div>
                 </CollapsibleContent>

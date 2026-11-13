@@ -18,7 +18,8 @@ const LIGAND_JUNK = new Set([
   'UNL', 'UNX',
 ])
 
-/** 按 UniProt accession 检索关联 PDB ID 列表（去重）。 */
+/** 按 UniProt accession 检索关联 PDB ID 列表（去重）。
+ *  v2.5：rows 上限 1000（RCSB search v2 分页限制内），适配「不限」详情拉取模式。 */
 export async function fetchPdbIdsForUniprot(uniprotId: string, max = 500): Promise<string[]> {
   const body = {
     query: {
@@ -32,7 +33,7 @@ export async function fetchPdbIdsForUniprot(uniprotId: string, max = 500): Promi
     },
     return_type: 'entry',
     request_options: {
-      paginate: { start: 0, rows: Math.min(500, max) },
+      paginate: { start: 0, rows: Math.min(1000, max) },
       sort: [{ sort_by: 'rcsb_accession_info.initial_release_date', direction: 'desc' }],
     },
   }

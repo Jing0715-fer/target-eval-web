@@ -7,6 +7,7 @@
 import type { BlastStatusInfo } from '@/lib/eval/types'
 
 export type { BlastStatusInfo, BlastStatusCode } from '@/lib/eval/types'
+export { MAX_PDB_UNLIMITED } from '@/lib/eval/types'
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'canceled'
 

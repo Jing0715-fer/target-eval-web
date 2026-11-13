@@ -13,7 +13,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import mammoth from 'mammoth'
-import { looksLikeProteinSequence, UNIPROT_RE, type AssetKind, type DocxParsed, type ParsedImage, type ParsedSequence } from './types'
+import { cutFormTemplateTail, FORM_SECTION_HEADER_RE, GOAL_LABEL_RE, looksLikeProteinSequence, UNIPROT_RE, type AssetKind, type DocxParsed, type ParsedImage, type ParsedSequence } from './types'
 import { detectAntibody } from './antibody'
 import { classifyImagesVlm, convertMetafilesToPng, normalizeRasterImage, SOURCE_IMAGE_MAX_BYTES } from './image-process'
 
@@ -177,18 +177,60 @@ export function extractGenes(text: string): string[] {
   return [...genes]
 }
 
-/** 提取客户目标/项目需求类语句 */
+/** 提取客户目标/项目需求类语句。
+ *  v2.5 结构化提取：Word 表格中「标签独占一行、值在下一行」（如 预期目标一：\n解析XX蛋白的三维结构）
+ *  与「标签 + 冒号 + 值」两种行式均支持；先剔除表尾「填写范例说明」模板段（模板里的
+ *  「例如：确定抗原-抗体结合模式……」是表单自带示例，不是客户目标）；纯标签无值、
+ *  区段标题等噪音行不再进入结果。
+ */
 export function extractGoalHints(text: string): string[] {
-  const hints: string[] = []
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-  const goalRe = /目的|目标|需求|客户|要求|希望|拟|计划|project.*goal|objective|aim/i
-  for (const line of lines) {
-    if (goalRe.test(line) && line.length >= 6 && line.length <= 400) {
-      hints.push(line.slice(0, 300))
-      if (hints.length >= 8) break
+  const goals: string[] = []
+  const seen = new Set<string>()
+  const lines = cutFormTemplateTail(text).split(/\r?\n/).map(l => l.trim())
+
+  const pushGoal = (v: string): void => {
+    const raw = v.trim()
+    if (raw.length < 6 || raw.length > 400) return // 过短（区段标题/字段名）/过长（段落正文）
+    if (/^例如|^示例|^范例如/.test(raw)) return // 表单示例文案
+    if (/^[（(]\s*(?:客户|待|暂|未|无|略|空|见)/.test(raw)) return // 占位符（（客户未填写）/（待定）/（见附件）…）
+    const key = raw.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    goals.push(raw.slice(0, 300))
+  }
+
+  // ── 第一遍：结构化 标签 → 值（评估表最可靠的目标来源） ──
+  for (let i = 0; i < lines.length && goals.length < 8; i++) {
+    const line = lines[i]
+    if (!line) continue
+    const m = line.match(GOAL_LABEL_RE)
+    if (!m) continue
+    const inlineValue = (m[1] ?? '').trim()
+    if (inlineValue) {
+      pushGoal(inlineValue)
+      continue
+    }
+    // 标签独占一行 → 取后续最近的非空行作值（至多向下看 3 行）
+    for (let j = i + 1; j < Math.min(lines.length, i + 4); j++) {
+      const nxt = lines[j]
+      if (!nxt) continue
+      // 下一行仍是标签（空目标字段接续）或区段标题 → 本标签无值，放弃
+      if (GOAL_LABEL_RE.test(nxt) || FORM_SECTION_HEADER_RE.test(nxt)) break
+      pushGoal(nxt)
+      break
     }
   }
-  return hints
+
+  // ── 第二遍：泛关键词兜底（含「目的/目标/需求/希望/拟…」的非表格语句） ──
+  const goalRe = /目的|目标|需求|客户|要求|希望|拟|计划|project.*goal|objective|aim/i
+  for (const line of lines) {
+    if (goals.length >= 8) break
+    if (!line || GOAL_LABEL_RE.test(line)) continue // 标签行已由第一遍处理
+    if (goalRe.test(line) && line.length >= 6 && line.length <= 400 && !seen.has(line.toLowerCase())) {
+      pushGoal(line)
+    }
+  }
+  return goals
 }
 
 /** 清理图注行的 HTML 残留（如 " /> 属性尾巴）与纯标点噪音；无有效内容返回 '' */

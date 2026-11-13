@@ -52,3 +52,7 @@ prompt
 server.log
 # Skills directory
 /skills/
+# v2.5 运行时数据与隐私保护：客户上传的评估表（含个人信息）与解析产物不入库
+/upload/
+/tool-results/
+/db/reports/u_*/

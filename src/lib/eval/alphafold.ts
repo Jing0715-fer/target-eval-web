@@ -60,12 +60,15 @@ export async function fetchAlphafoldPrediction(uniprotId: string): Promise<Alpha
   const hit = apiCache.get<AlphafoldPrediction | null>(key)
   if (hit !== undefined) return hit
   let out: AlphafoldPrediction | null = null
+  let definitive = false // v2.5：404（无模型）或成功入缓存；网络/超时不入缓存（原实现把瞬时失败缓存为永久 null，该靶点报告长期无头图）
   try {
     const res = await fetch(`${AFDB_API}/${encodeURIComponent(id)}`, {
       headers: { Accept: 'application/json', 'User-Agent': AFDB_UA },
       signal: AbortSignal.timeout(15_000),
     })
+    if (res.status === 404) definitive = true
     if (res.ok) {
+      definitive = true
       const arr = (await res.json()) as AfApiResponse[]
       const e = Array.isArray(arr) ? arr[0] : undefined
       if (e?.pdbUrl) {
@@ -90,7 +93,7 @@ export async function fetchAlphafoldPrediction(uniprotId: string): Promise<Alpha
   } catch {
     out = null
   }
-  apiCache.set(key, out)
+  if (definitive) apiCache.set(key, out)
   return out
 }
 

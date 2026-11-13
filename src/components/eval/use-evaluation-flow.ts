@@ -750,6 +750,14 @@ export function useEvaluationFlow() {
 
     const okItems = finished.filter(x => x.status === 'done' && x.jobId)
 
+    // v2.5 P2 修复：关联批次仅 1 个靶点成功时（合并报告需 ≥2）不再静默降级 ——
+    // 显式说明原因，避免 UI 声称「合并报告见切换栏」但切换栏并无报告的误导
+    if (related && okItems.length === 1) {
+      const failedCount = finished.filter(x => x.status === 'error').length
+      st.mergedError = `本批次判定为关联复合物，但仅 1 个靶点评估成功${failedCount ? `（${failedCount} 个失败/中断）` : ''}。合并报告需要至少 2 个成功靶点；可先查看该靶点的数据汇总，重试失败靶点后再生成合并报告。`
+      setBatch(snapshot())
+    }
+
     // ── ③ 生成合并评估报告（v1.22：无论关联与否都生成 — 含关系分析 + 共有结构 + 对比矩阵）。
     // 关联批次：各靶点 deferred 模式（无独立报告），合并报告是唯一交付物。
     // 非关联批次：各靶点 single 模式（有独立报告），合并报告额外提供关系性 + 共有结构分析。

@@ -346,7 +346,7 @@ export function HistoryDialog({
           <AlertDialogHeader>
             <AlertDialogTitle>删除这条评估记录？</AlertDialogTitle>
             <AlertDialogDescription>
-              将删除「{confirmDelete?.proteinName || confirmDelete?.title || confirmDelete?.uniprotId || '未命名评估'}」的作业记录、生成的报告与上传的实验图片，且不可恢复。
+              将删除「{confirmDelete?.proteinName || confirmDelete?.title || confirmDelete?.uniprotId || '未命名评估'}」的作业记录与生成的报告，且不可恢复。上传的实验图片由系统按保留策略统一回收，不受本次删除影响。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -465,10 +465,10 @@ export function RecentEvaluations({
         </div>
       ) : (
         <div className="eval-scroll eval-scroll-fade min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-          {batches.slice(0, 3).map((b) => (
+          {batches.slice(0, 4).map((b) => (
             <BatchReportRow key={b.id} report={b} onOpen={onOpenBatchReport} dense />
           ))}
-          {jobs.slice(0, 6).map((j) => (
+          {jobs.slice(0, 8).map((j) => (
             <JobRow
               key={j.id}
               job={j}
@@ -478,7 +478,7 @@ export function RecentEvaluations({
               dense
             />
           ))}
-          {(jobs.length > 6 || batches.length > 3) && (
+          {(jobs.length > 8 || batches.length > 4) && (
             <div className="px-2.5 pt-1.5 pb-1 text-center">
               <span className="font-mono text-[10px] text-muted-foreground/60">
                 共 {batches.length} 份合并报告 · {jobs.length} 条单靶点记录
@@ -507,7 +507,7 @@ export function RecentEvaluations({
           <AlertDialogHeader>
             <AlertDialogTitle>删除这条评估记录？</AlertDialogTitle>
             <AlertDialogDescription>
-              将删除「{confirmDelete?.proteinName || confirmDelete?.title || confirmDelete?.uniprotId || '未命名评估'}」的作业记录、生成的报告与上传的实验图片，且不可恢复。
+              将删除「{confirmDelete?.proteinName || confirmDelete?.title || confirmDelete?.uniprotId || '未命名评估'}」的作业记录与生成的报告，且不可恢复。上传的实验图片由系统按保留策略统一回收，不受本次删除影响。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

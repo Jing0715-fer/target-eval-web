@@ -28,7 +28,9 @@ export interface PubChemCompound {
   smiles?: string
 }
 
-/** PubChem 名称检索（含同义词 / 品牌药名），未命中或网络失败返回 null */
+/** PubChem 名称检索（含同义词 / 品牌药名），未命中或网络失败返回 null。
+ *  v2.5：仅确定性「无此名称」（404）或成功结果入缓存；网络/超时/5xx 不入缓存 ——
+ *  原实现把瞬时失败缓存为永久 null，后续同批次同名解析长期命中坏缓存。 */
 export async function pubchemLookupName(name: string, signal?: AbortSignal): Promise<PubChemCompound | null> {
   const q = name.trim().slice(0, 160)
   if (!q) return null
@@ -36,12 +38,15 @@ export async function pubchemLookupName(name: string, signal?: AbortSignal): Pro
   const hit = apiCache.get<PubChemCompound | null>(key)
   if (hit !== undefined) return hit
   let out: PubChemCompound | null = null
+  let definitive = false // true = 结果可入缓存（成功或 HTTP 404 确认无此名称）
   try {
     const res = await fetch(
       `${PUG_BASE}/compound/name/${encodeURIComponent(q)}/property/MolecularFormula,MolecularWeight,IUPACName,ConnectivitySMILES,Title/JSON`,
       { headers: { Accept: 'application/json' }, signal: signal ?? AbortSignal.timeout(15_000) },
     )
+    if (res.status === 404) definitive = true // PubChem 确认无此名称（确定性失败，可缓存）
     if (res.ok) {
+      definitive = true
       const j = (await res.json()) as {
         PropertyTable?: { Properties?: Array<Record<string, unknown>> }
       }
@@ -63,7 +68,7 @@ export async function pubchemLookupName(name: string, signal?: AbortSignal): Pro
   } catch {
     out = null
   }
-  apiCache.set(key, out)
+  if (definitive) apiCache.set(key, out) // 网络/超时/5xx 不入缓存，下次重试
   return out
 }
 
@@ -79,18 +84,22 @@ interface RcsbSearchResponse {
   result_set?: Array<{ identifier?: string; score?: number }>
 }
 
-/** 实体 ID → 三位（或新式 4-5 位）化学组分 ID */
+/** 实体 ID → 三位（或新式 4-5 位）化学组分 ID。
+ *  v2.5：404（实体无配体）或成功入缓存；网络/超时不入缓存。 */
 async function fetchEntityCompId(entry: string, entity: string, signal?: AbortSignal): Promise<string | null> {
   const key = `rcsb:npent:${entry}_${entity}`
   const hit = apiCache.get<string | null>(key)
   if (hit !== undefined) return hit
   let out: string | null = null
+  let definitive = false
   try {
     const res = await fetch(`https://data.rcsb.org/rest/v1/core/nonpolymer_entity/${entry}/${entity}`, {
       headers: { Accept: 'application/json' },
       signal: signal ?? AbortSignal.timeout(12_000),
     })
+    if (res.status === 404) definitive = true
     if (res.ok) {
+      definitive = true
       const j = (await res.json()) as {
         rcsb_nonpolymer_entity_container_identifiers?: { nonpolymer_comp_id?: string }
       }
@@ -100,7 +109,7 @@ async function fetchEntityCompId(entry: string, entity: string, signal?: AbortSi
   } catch {
     out = null
   }
-  apiCache.set(key, out)
+  if (definitive) apiCache.set(key, out)
   return out
 }
 
@@ -109,6 +118,7 @@ async function fetchEntityCompId(entry: string, entity: string, signal?: AbortSi
  * 'exact'   取前几个命中实体（score 1.0）反查组分 ID；
  * 'similar' fingerprint 相似，取前 12 实体反查组分 ID（保留各自最高相似度）。
  * 204（无命中）或任何失败 → 空数组（调用方继续后续策略）。
+ * v2.5：仅确定性结果（200/204）入缓存，网络/超时失败不入缓存。
  */
 export async function rcsbChemicalCandidates(
   smiles: string,
@@ -121,6 +131,7 @@ export async function rcsbChemicalCandidates(
   const hit = apiCache.get<ChemCandidate[]>(key)
   if (hit !== undefined) return hit
   const out: ChemCandidate[] = []
+  let definitive = false
   try {
     const res = await fetch(RCSB_SEARCH, {
       method: 'POST',
@@ -141,7 +152,9 @@ export async function rcsbChemicalCandidates(
       }),
       signal: signal ?? AbortSignal.timeout(25_000),
     })
+    if (res.status === 204) definitive = true // RCSB 确认无匹配（可缓存）
     if (res.status !== 204 && res.ok) {
+      definitive = true
       const j = (await res.json()) as RcsbSearchResponse
       const parsed: Array<{ entry: string; entity: string; score: number }> = []
       for (const r of j.result_set ?? []) {
@@ -159,6 +172,6 @@ export async function rcsbChemicalCandidates(
   } catch {
     /* 失败 → 空 */
   }
-  apiCache.set(key, out)
+  if (definitive) apiCache.set(key, out)
   return out
 }

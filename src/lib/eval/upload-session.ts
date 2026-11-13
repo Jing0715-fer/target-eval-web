@@ -94,16 +94,16 @@ function validId(id: string): boolean {
 }
 
 /**
- * 会话归属校验（与 request-guard.isOwnedBy 同口径的三层回退）：
+ * 会话归属校验（v2.5：与 request-guard.isOwnedBy 统一为两层回退，移除 ownerMask 分支）：
  *  - s.ownerKey 与 owner.key 完全相等（cookie 路径，最严格）
  *  - s.ownerKey 与 owner.ipKey 相等（IP-hash 路径，无 cookie 时回退）
- *  - s.ownerMask 与 owner.mask 相等（同来源 IP 段，cookie 丢失后兜底）
  *
- * 公网 Z.ai 预览面板的 cookie 不稳定（ALB 重写为 SameSite=lax，跨站 iframe
- * 不回送），单纯 cookie 相等会误判；三层回退使「同会话发起的请求」均通过。
+ * 历史「公网 Z.ai 预览面板 cookie 不稳定」场景由 ipKey 回退覆盖；ownerMask（同来源
+ * IP 段）匹配在 v1.21 已从 request-guard 移除（代理重写 XFF 时会退化为「知道 ID 即可
+ * 访问」），此处同步对齐，避免同一安全基线在多处分叉。
  */
-function sessionOwnedBy(s: Pick<UploadSession, 'ownerKey' | 'ownerMask'>, owner: RequestOwner): boolean {
-  return s.ownerKey === owner.key || s.ownerKey === owner.ipKey || s.ownerMask === owner.mask
+function sessionOwnedBy(s: Pick<UploadSession, 'ownerKey'>, owner: RequestOwner): boolean {
+  return s.ownerKey === owner.key || s.ownerKey === owner.ipKey
 }
 
 // ─── init ─────────────────────────────────────────────────────────────────────

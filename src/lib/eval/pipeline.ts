@@ -29,9 +29,9 @@ import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
-import { extractLigandsFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, type LigandInput, type LigandResolution } from './ligand'
+import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, type LigandInput, type LigandResolution } from './ligand'
 import { alphafoldFigureFor } from './alphafold'
-import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
+import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
 /** v2.4 无状态（函数计算）部署：评估表数据由前端内联携带（服务器磁盘不跨请求保留） */
 export interface InlineEvalTable {
@@ -148,7 +148,8 @@ function releaseBlastFamily(groupKey: string, jobId: string): void {
 export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): Promise<void> {
   const t0 = Date.now()
   const { signal, report, log } = cb
-  const maxPdb = Math.min(300, Math.max(20, input.options.maxPdb || 150))
+  // v2.5：MAX_PDB_UNLIMITED（10000）= 不限（由 RCSB 检索分页上限封顶）；普通值 20-300
+  const maxPdb = input.options.maxPdb === MAX_PDB_UNLIMITED ? MAX_PDB_UNLIMITED : Math.min(300, Math.max(20, input.options.maxPdb || 150))
 
   // ─── 阶段 1：输入解析 ──────────────────────────────────────────────────────
   report('input', '解析输入…', 0.3)
@@ -347,7 +348,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   let totalPdbFound = 0
   if (uniprotInfo) {
     report('rcsb', 'RCSB 检索关联 PDB 结构…', 0.05)
-    const pdbIds = await fetchPdbIdsForUniprot(uniprotInfo.uniprotId, 500)
+    // v2.5：不限模式拉满检索分页（1000 条/靶点）；普通模式维持 500 条检索窗口
+    const pdbIds = await fetchPdbIdsForUniprot(uniprotInfo.uniprotId, maxPdb >= MAX_PDB_UNLIMITED ? 1000 : 500)
     totalPdbFound = pdbIds.length
     log(`RCSB 检索到 ${pdbIds.length} 个关联 PDB`)
     if (pdbIds.length > 0) {
@@ -377,14 +379,18 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   let ligandResults: LigandResolution[] = []
   {
     const candidates: LigandInput[] = [...(input.ligands ?? [])]
-    // 评估表识别：字典扫描（保守长 key）+ LLM 提取（insights.ligands，若有）
-    if (input.uploadId) {
+    // 评估表识别（v2.5 三通道）：字典扫描（保守长 key）+ 模式提名（「与 X 配体」等行文）
+    // + LLM/规则提取结果（insights.ligands，若有）。有 uploadId 或内联 evalTable 全文均可。
+    if (uploadFullText) {
       for (const m of extractLigandsFromText(uploadFullText)) {
         candidates.push({ raw: m.compId, source: 'eval-table' })
       }
-      for (const name of insights?.ligands ?? []) {
-        if (name.trim()) candidates.push({ raw: name.trim().slice(0, 160), source: 'eval-table' })
+      for (const name of extractLigandCandidatesFromText(uploadFullText)) {
+        candidates.push({ raw: name, source: 'eval-table' })
       }
+    }
+    for (const name of insights?.ligands ?? []) {
+      if (name.trim()) candidates.push({ raw: name.trim().slice(0, 160), source: 'eval-table' })
     }
     // 归一去重（同 raw 不重复解析；同批次多靶点由 LRU 缓存共享外部调用）
     const seen = new Map<string, LigandInput>()
@@ -417,14 +423,21 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       await Promise.all(Array.from({ length: Math.min(3, unique.length) }, () => worker()))
       // 已识别配体 → 检索含该配体的结构列表
       const directSet = new Set(directPdbs.map(p => p.pdbId))
-      for (const r of resolved) {
-        if (!r.ok || !r.compId) continue
-        try {
-          const s = await fetchLigandStructures(r.compId, directSet, signal)
-          r.totalStructures = s.total
-          r.structures = s.structures.slice(0, 12)
-        } catch { /* 检索失败不影响归一结果 */ }
+      // v2.5：结构列表检索并发化（原串行 for 循环最坏 8×15s ≈ 2 分钟；与归一阶段同款 3-worker 池）
+      const targets = resolved.filter(r => r.ok && r.compId)
+      let structCursor = 0
+      const structWorker = async () => {
+        while (structCursor < targets.length) {
+          if (signal.aborted) return
+          const r = targets[structCursor++]
+          try {
+            const s = await fetchLigandStructures(r.compId, directSet, signal)
+            r.totalStructures = s.total
+            r.structures = s.structures.slice(0, 12)
+          } catch { /* 检索失败不影响归一结果 */ }
+        }
       }
+      await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => structWorker()))
       ligandResults = resolved
       const okList = resolved.filter(r => r.ok)
       if (resolved.length) {
@@ -557,7 +570,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
             uniprotInfo = info
             // 回填后补做 RCSB + PDBe（一次性，不再展开子进度）
             report('rcsb', '回填 UniProt 后补检索 PDB…', 0.5)
-            const pdbIds = await fetchPdbIdsForUniprot(info.uniprotId, 500)
+            // v2.5：不限模式同样拉满检索分页（与主路径一致），普通模式维持 500 检索窗口
+            const pdbIds = await fetchPdbIdsForUniprot(info.uniprotId, maxPdb >= MAX_PDB_UNLIMITED ? 1000 : 500)
             totalPdbFound = pdbIds.length
             if (pdbIds.length) {
               const r = await fetchPdbEntries(pdbIds, maxPdb, (d, t) => report('rcsb', `补拉 PDB 详情 ${d}/${t}`, d / t), signal)
