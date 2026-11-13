@@ -356,6 +356,45 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       </table></div></details>` : ''}
     </div>` : ''
 
+  // v1.26：分子量增重策略（小分子量靶点）— 评分卡内嵌（不单独成章，与聚集形式同区呈现）
+  const mwA = ctx.mwAugment
+  const mwAdj = ctx.scores.mwAugmentAdjust
+  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwBadgeColor = mwA?.assemblyKda != null && mwA.assemblyKda >= 100 ? '#065f46' : mwA?.assemblyKda != null && mwA.assemblyKda >= 50 ? '#b45309' : '#78716c'
+  const mwStripHtml = mwA?.applicable ? `
+    <div class="oligo-strip mw-strip">
+      <div class="oligo-strip-head">
+        <span class="oligo-badge" style="background:${mwBadgeColor}">小分子量靶点</span>
+        <span class="oligo-strip-label">分子量<b>单体 ~${mwA.monomerKda} kDa${mwA.assemblyKda != null ? ` → 装配 ~${mwA.assemblyKda} kDa` : ''}</b></span>
+        <span class="oligo-stoich">${esc(mwPathZh)}</span>
+        ${mwAdj ? `<span class="oligo-chips">${adjChip('X-ray', mwAdj.xray)}${adjChip('Cryo-EM', mwAdj.cryoem)}${adjChip('NMR', mwAdj.nmr)}</span>` : ''}
+      </div>
+      ${mwAdj ? `<p class="oligo-strip-note">${esc(mwAdj.note)}（分子量调整已计入 Cryo-EM 分数与综合评分；X-ray/NMR 不受增重影响${mwA.assemblyKda != null ? '；装配分子量已知时，聚集形式维度的 Cryo-EM 分量并入本维度计分（避免双重加分）' : ''}）</p>` : ''}
+      ${mwA.complexes.length || mwA.partners.some(p => p.kda != null) || mwA.conflicts.length ? `
+      <details class="fold"><summary>增重路径明细（复合物结构 ${mwA.complexes.length} · 互作伙伴 ${mwA.partners.filter(p => p.kda != null).length} · 目的比对 ${mwA.conflicts.length} 条）</summary>
+        ${mwA.complexes.length ? `
+        <p class="note"><b>已有复合物结构 — 组分总分子量统计</b>（RCSB 实体/装配口径）</p>
+        <div class="tbl-wrap"><table class="tbl-data">
+          <thead><tr><th style="width:86px">PDB</th><th style="width:150px">方法 · 分辨率</th><th>组分（+ 总分子量）</th><th style="width:110px">装配总 MW</th></tr></thead>
+          <tbody>${mwA.complexes.map(c => `
+            <tr>
+              <td class="td-id"><a href="https://www.rcsb.org/structure/${c.pdbId}" target="_blank" rel="noopener">${c.pdbId}</a></td>
+              <td>${esc(c.method.slice(0, 18))}${c.resolution != null ? ` · ${c.resolution}Å` : ''}</td>
+              <td class="t-title">${c.components.map(x => `<span class="${x.isTarget ? 'mw-target' : 'mw-partner'}">${esc(x.name.slice(0, 34))} ~${x.kda} kDa</span>`).join(' + ')}<br><span class="mw-basis">${esc(c.note)}</span></td>
+              <td><b>~${c.totalKda} kDa</b></td>
+            </tr>`).join('')}</tbody>
+        </table></div>` : ''}
+        ${(() => { const ps = mwA.partners.filter(p => p.kda != null); return ps.length ? `
+        <p class="note"><b>UniProt 互作伙伴</b>（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
+        <ul class="mw-list">${ps.slice(0, 8).map(p => `<li><span class="mw-partner">${esc((p.geneName ?? p.proteinName ?? p.accession).slice(0, 40))}</span> <span class="mono">${esc(p.accession)}</span> — ${p.lengthAa} aa，~${p.kda} kDa${mwA.assemblyPath === 'partner' ? '（已按最大伙伴计入装配估计）' : ''}</li>`).join('')}</ul>` : '' })()}
+        <p class="note"><b>技术增重工具箱</b>（无生物装配路径时的兜底策略；需评估开发周期）</p>
+        <ul class="mw-list">${mwA.options.map(o => `<li><b>${esc(o.name)}</b>（${esc(o.addKda)}）— ${esc(o.note)}</li>`).join('')}</ul>
+        ${mwA.conflicts.length ? `
+        <p class="note"><b>与客户目的的比对</b>（加入的蛋白是否与目的冲突 — 契合 / 需注意 / 冲突）</p>
+        <ul class="mw-list">${mwA.conflicts.map(c => `<li><span class="mw-conf-tag mw-${c.level}">${c.level === 'aligned' ? '契合' : c.level === 'caution' ? '需注意' : '冲突'}</span> ${esc(c.text)}</li>`).join('')}</ul>` : ''}
+      </details>` : ''}
+    </div>` : ''
+
   const scoreHtml = `
   <div class="score-card">
     ${scoreBar('X-ray 结晶', ctx.scores.xray, scoreColor(ctx.scores.xray.score))}
@@ -369,6 +408,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div>· 综合：${esc(ctx.scores.rationale.overall)}</div>
     </div>
     ${oligoStripHtml}
+    ${mwStripHtml}
   </div>`
 
   // 实验图分组展示：gel / sec / other 各成小组，类型一目了然
@@ -547,6 +587,19 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .adj-zero { background:#f5f5f4; color:var(--sub); border:1px solid var(--line); }
   .oligo-strip-note { font-size:12.5px; color:var(--sub); margin:8px 0 0; }
   .note { font-size:12px; color:var(--sub); margin-top:6px; }
+
+  /* ── v1.26 分子量增重条（沿用聚集形式条布局，复用 .oligo-strip 类）── */
+  .mw-target { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; border-radius:3px; padding:0 5px; font-weight:600; }
+  .mw-partner { background:#fffbeb; color:#92400e; border:1px solid #fde68a; border-radius:3px; padding:0 5px; font-weight:600; }
+  .mw-basis { font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  ul.mw-list { list-style:none; margin:2px 0 10px; }
+  ul.mw-list li { position:relative; padding:5px 0 5px 16px; border-bottom:1px solid var(--hairline); font-size:12.5px; color:var(--sub); line-height:1.7; }
+  ul.mw-list li:last-child { border-bottom:none; }
+  ul.mw-list li::before { content:'·'; position:absolute; left:4px; color:var(--accent-2); font-weight:700; }
+  .mw-conf-tag { display:inline-block; min-width:44px; text-align:center; font-family:var(--mono); font-size:10.5px; font-weight:700; border-radius:3px; padding:0 6px; margin-right:6px; vertical-align:1px; }
+  .mw-aligned { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
+  .mw-caution { background:#fffbeb; color:#b45309; border:1px solid #fde68a; }
+  .mw-conflict { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
 
   /* ── 文献 ── */
   ol.lit-list { list-style:none; }

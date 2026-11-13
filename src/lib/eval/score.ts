@@ -10,8 +10,14 @@
  *    · 异源复合物（hetero-complex）：需共表达/体外组装 — X-ray 组装后结晶扣分、
  *      Cryo-EM 复合物优势加分、NMR 超范围扣分
  *    · 单体（monomer）：无组装考量，不调整
+ *  - v1.26：分子量增重策略维度（小分子量靶点，mw-augment.ts）—
+ *    装配/复合物有效分子量接管 Cryo-EM 分量的计分（与聚集形式维度避免双重加分）：
+ *    · 装配 ≥100 kDa → Cryo-EM +1（进入常规区间）
+ *    · 装配 50-100 kDa → 0（边缘区间，需 VPP/优化条件）
+ *    · 装配 <50 kDa → -1（颗粒对齐困难，需技术增重）
+ *    · 无生物装配路径 → 技术增重可行 0 / 与目的冲突 -1
  */
-import type { MethodStats, OligomerAdjustInfo, OligomerAnalysis, PdbEntry, Scores, UniprotFeature, BlastHit } from './types'
+import type { MethodStats, MwAugmentAdjustInfo, MwAugmentAnalysis, OligomerAdjustInfo, OligomerAnalysis, PdbEntry, Scores, UniprotFeature, BlastHit } from './types'
 
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n))
@@ -39,11 +45,52 @@ export interface ScoreInput {
   coveragePercent: number
   /** 聚集形式（寡聚态）分析结果（可缺省 — 历史路径/分析失败） */
   oligomer?: OligomerAnalysis | null
+  /** v1.26：分子量增重策略分析（可缺省 — 历史路径/未运行） */
+  mwAugment?: MwAugmentAnalysis | null
 }
 
 export interface ScoreResult extends Scores {
   /** 各方法的一句话依据（报告用） */
   rationale: { xray: string; cryoem: string; nmr: string; overall: string }
+}
+
+/**
+ * v1.26：分子量增重策略对评分的调整（小分子量靶点维度）。
+ * 当前仅 Cryo-EM 有非零调整：装配/复合物有效分子量决定颗粒可成像性。
+ * X-ray（分子量非结晶瓶颈，伴侣策略属战术层面）与 NMR（增重无益，
+ * 装配超范围已由聚集形式维度扣分）均不调整。
+ */
+export function computeMwAugmentAdjust(
+  mw: MwAugmentAnalysis | null | undefined,
+): MwAugmentAdjustInfo | null {
+  if (!mw || !mw.applicable) return null
+  const assemblyKda = mw.assemblyKda
+  const hasConflict = mw.conflicts.some(c => c.level === 'conflict')
+  let cryoem = 0
+  let note = ''
+  if (assemblyKda != null && assemblyKda >= 100) {
+    cryoem = 1
+    note = `装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间${mw.assemblyPath === 'complex' ? '（已有复合物结构先例）' : mw.assemblyPath === 'partner' ? '（互作伙伴推断，无结构先例，组装需验证）' : '（自身寡聚装配）'}`
+  } else if (assemblyKda != null && assemblyKda >= 50) {
+    cryoem = 0
+    note = `装配后 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件`
+  } else if (assemblyKda != null) {
+    cryoem = -1
+    note = `装配后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
+  } else {
+    cryoem = hasConflict ? -1 : 0
+    note = hasConflict
+      ? '无生物装配增重路径，且技术增重与客户目的存在冲突 — Cryo-EM 按小分子量单体评估，可行性受限'
+      : '无生物装配增重路径 — Cryo-EM 可行性取决于技术增重策略（Fab/ferritin 支架等），样品开发工作量与周期相应增加'
+  }
+  return {
+    monomerKda: mw.monomerKda,
+    assemblyKda,
+    xray: 0,
+    cryoem,
+    nmr: 0,
+    note,
+  }
 }
 
 /** v1.25：聚集形式对三方法的调整明细（评分卡展示 + 前端/报告消费） */
@@ -126,6 +173,12 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
   // ── 聚集形式（寡聚态）调整（v1.25：整数幅度，后置于舍入之后 → 必然体现在最终分）──
   const oligo = computeOligomerAdjust(input.oligomer, sequenceLength)
 
+  // ── 分子量增重策略调整（v1.26：小分子量靶点，装配 MW 驱动 Cryo-EM 分量）──
+  const mwAdj = computeMwAugmentAdjust(input.mwAugment)
+  // 分子量维度接管聚集形式维度的 Cryo-EM 分量（有装配分子量数据时）— 避免双重加分
+  const mwTakeover = mwAdj != null && mwAdj.assemblyKda != null
+  const oligoCryoemScored = mwTakeover ? 0 : (oligo?.cryoem ?? 0)
+
   // ── X-ray（基础分）──
   let xray = 5
   if (sequenceLength < 500) xray += 2
@@ -160,10 +213,10 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
   const bestIdentity = blastHits.length > 0 ? Math.max(...blastHits.map(b => b.identity)) : 0
   const boost = bestIdentity >= 80 ? 2 : bestIdentity >= 50 ? 1 : bestIdentity >= 30 ? 0 : -1
 
-  // ── 聚集形式调整（整数、最后应用 → 调整值即最终分变化值）──
-  const xrayFinal = clamp(xray + boost + (oligo?.xray ?? 0), 1, 10)
-  const cryoemFinal = clamp(cryoem + boost + (oligo?.cryoem ?? 0), 1, 10)
-  const nmrFinal = clamp(nmr + (oligo?.nmr ?? 0), 1, 10)
+  // ── 调整叠加（整数、最后应用 → 调整值即最终分变化值）──
+  const xrayFinal = clamp(xray + boost + (oligo?.xray ?? 0) + (mwAdj?.xray ?? 0), 1, 10)
+  const cryoemFinal = clamp(cryoem + boost + oligoCryoemScored + (mwAdj?.cryoem ?? 0), 1, 10)
+  const nmrFinal = clamp(nmr + (oligo?.nmr ?? 0) + (mwAdj?.nmr ?? 0), 1, 10)
 
   const overall = Math.max(xrayFinal, cryoemFinal, nmrFinal)
 
@@ -184,7 +237,8 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
     sequenceLength > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间' : sequenceLength >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）' : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
     tmCount >= 2 ? '多次跨膜膜蛋白，Cryo-EM 是首选方法' : '',
     highResCryoem > 0 ? `已有 ${highResCryoem} 个 ≤3.5Å 的 Cryo-EM 结构` : cryoemCount > 0 ? `已有 ${cryoemCount} 个 Cryo-EM 结构` : '',
-    oligo && oligo.cryoem > 0 ? `聚集形式加成 ${fmtAdj(oligo.cryoem)}：寡聚装配使有效分子量增大/复合物特征形貌利于 Cryo-EM` : '',
+    oligo && oligo.cryoem > 0 && !mwTakeover ? `聚集形式加成 ${fmtAdj(oligo.cryoem)}：寡聚装配使有效分子量增大/复合物特征形貌利于 Cryo-EM` : '',
+    mwAdj ? `分子量维度（单体 ~${mwAdj.monomerKda} kDa${mwAdj.assemblyKda != null ? ` → 装配 ~${mwAdj.assemblyKda} kDa` : '，无装配路径'}）：${mwAdj.note}${mwTakeover ? '；装配分子量已知时，聚集形式的 Cryo-EM 分量并入本维度计分（避免双重加分）' : ''}` : '',
   ].filter(Boolean).join('；')
   r.nmr = [
     sequenceLength < 300 ? '小分子量（<300 aa），NMR 适合' : sequenceLength < 500 ? '中等偏大，NMR 周期较长' : '分子量过大（>500 aa），超出 NMR 常规范围',
@@ -192,7 +246,8 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
     oligo && oligo.nmr < 0 ? `聚集形式扣分 ${fmtAdj(oligo.nmr)}：寡聚/复合物形式使表观分子量超出 NMR 适用范围` : '',
   ].filter(Boolean).join('；')
   r.overall = `序列覆盖率 ${coveragePercent}%；已有结构 ${directPdbs.length} 个（X-ray ${xrayCount} / Cryo-EM ${cryoemCount} / NMR ${nmrCount}）${bestResolution != null ? `，最佳分辨率 ${bestResolution}Å` : ''}；BLAST 同源加成 ${fmtAdj(boost)}` +
-    (oligo ? `；聚集形式调整（${oligo.label}${oligo.stoichiometry ? ` · ${oligo.stoichiometry}` : ''}）：X-ray ${fmtAdj(oligo.xray)} / Cryo-EM ${fmtAdj(oligo.cryoem)} / NMR ${fmtAdj(oligo.nmr)}` : '')
+    (oligo ? `；聚集形式调整（${oligo.label}${oligo.stoichiometry ? ` · ${oligo.stoichiometry}` : ''}）：X-ray ${fmtAdj(oligo.xray)} / Cryo-EM ${mwTakeover ? `并入分子量维度` : fmtAdj(oligo.cryoem)} / NMR ${fmtAdj(oligo.nmr)}` : '') +
+    (mwAdj ? `；分子量增重调整（单体 ~${mwAdj.monomerKda} kDa${mwAdj.assemblyKda != null ? ` → 装配 ~${mwAdj.assemblyKda} kDa` : ''}）：Cryo-EM ${fmtAdj(mwAdj.cryoem)}（X-ray/NMR 不受分子量增重影响）` : '')
 
   return {
     xray: { score: xrayFinal, maxScore: 10, rating: `${rating(xrayFinal)}·${ratingZh(xrayFinal)}` },
@@ -201,6 +256,7 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
     overall: { score: overall, maxScore: 10, rating: `${rating(overall)}·${ratingZh(overall)}` },
     rationale: r as ScoreResult['rationale'],
     oligomerAdjust: oligo ?? undefined,
+    mwAugmentAdjust: mwAdj ?? undefined,
     methodStats,
   }
 }

@@ -21,13 +21,14 @@ import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
 import { analyzeOligomericState } from './oligomer'
+import { analyzeMwAugmentation } from './mw-augment'
 import { generateReportSections, type ReportContext } from './report'
 import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
-import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
+import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
   jobId: string
@@ -527,6 +528,22 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     literature,
   })
   log(`聚集形式分析：${oligomer.summary}（证据 ${oligomer.evidence.length} 条，置信度${oligomer.confidence === 'high' ? '高' : oligomer.confidence === 'medium' ? '中' : '低'}）`)
+
+  // v1.26：分子量增重策略（小分子量靶点）— UniProt 伙伴长度 + RCSB 复合物装配 + 冲突分析
+  report('score', '分析分子量与增重策略（小分子量靶点）…', 0.4)
+  const mwAugment: MwAugmentAnalysis = await analyzeMwAugmentation({
+    uniprot: uniprotInfo,
+    sequenceLength: uniprotInfo?.sequenceLength ?? sequence.length,
+    oligomer,
+    directPdbs,
+    goal: goal || undefined,
+    goalHints,
+    signal,
+  })
+  log(mwAugment.applicable
+    ? `分子量增重分析：单体 ~${mwAugment.monomerKda} kDa${mwAugment.assemblyKda != null ? ` → 装配 ~${mwAugment.assemblyKda} kDa（${mwAugment.assemblyPath}；复合物结构 ${mwAugment.complexes.length} 个；伙伴 ${mwAugment.partners.filter(p => p.kda != null).length} 个）` : '，无装配增重路径'}（冲突分析 ${mwAugment.conflicts.length} 条）`
+    : `分子量增重分析：不适用（单体 ~${mwAugment.monomerKda} kDa ≥ 50 kDa）`)
+
   report('score', '计算可行性评分…', 0.5)
   const scores = computeScores({
     sequenceLength: uniprotInfo?.sequenceLength ?? sequence.length,
@@ -535,6 +552,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     blastHits,
     coveragePercent: coverage?.coveragePercent ?? 0,
     oligomer,
+    mwAugment,
   })
   log(`评分完成：X-ray ${scores.xray.score}/10 · Cryo-EM ${scores.cryoem.score}/10 · NMR ${scores.nmr.score}/10 · 总体 ${scores.overall.score}/10`)
   report('score', '评分完成', 1)
@@ -575,6 +593,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       images,
       scores,
       oligomer,
+      mwAugment,
     }
 
     report('report', 'LLM 生成评估分析（第 1/3 段：摘要与背景）…', 0.15)
@@ -614,6 +633,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
         images,
         scores,
         oligomer,
+        mwAugment,
       },
       methodStats: scores.methodStats,
       llmMarkdown: generated.fullMarkdown,
@@ -652,6 +672,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       xray: scores.xray, cryoem: scores.cryoem, nmr: scores.nmr, overall: scores.overall,
       /** v1.25：聚集形式调整明细（评分卡展示；无分析时缺省） */
       oligomerAdjust: scores.oligomerAdjust,
+      /** v1.26：分子量增重调整明细（评分卡展示；不适用时缺省） */
+      mwAugmentAdjust: scores.mwAugmentAdjust,
     },
     methodStats: scores.methodStats,
     ligandCount: new Set(directPdbs.flatMap(p => p.ligands.map(l => l.split('(')[0].trim()))).size,
@@ -662,6 +684,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     coverageText: coverageText || undefined,
     gapText: gapText || undefined,
     oligomer,
+    /** v1.26：分子量增重策略分析（小分子量靶点；applicable=false 时亦存档） */
+    mwAugment,
     reportLlmOk: deferReport ? undefined : generated.ok,
     reportDeferred: deferReport || undefined,
     batchNote: input.batchNote,

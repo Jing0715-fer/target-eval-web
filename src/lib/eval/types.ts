@@ -177,6 +177,8 @@ export interface Scores {
   overall: ScoreItem
   /** v1.25：聚集形式（寡聚态）对三方法的调整明细（整数；无分析时缺省 — 历史作业） */
   oligomerAdjust?: OligomerAdjustInfo
+  /** v1.26：分子量增重策略（小分子量靶点）调整明细（整数；无分析/不适用时缺省） */
+  mwAugmentAdjust?: MwAugmentAdjustInfo
 }
 
 /** v1.25：聚集形式调整明细（score.ts computeOligomerAdjust 产出；评分卡展示） */
@@ -229,6 +231,95 @@ export interface OligomerAnalysis {
   evidence: OligomerEvidence[]
   /** 对结构解析策略的影响要点 */
   notes: string[]
+}
+
+// ─── 分子量增重策略分析（v1.26，小分子量靶点）──────────────────────────
+
+/** 复合物/装配中的一个蛋白组分 */
+export interface MwComponent {
+  /** 组分名（蛋白名/PDB entity 描述/基因名） */
+  name: string
+  /** 组分 UniProt（靶点自身或互作伙伴） */
+  uniprotId?: string
+  /** 残基数（结构装配取链长估计，全长取 UniProt 长度） */
+  lengthAa: number
+  /** 组分分子量估计（kDa，≈ 残基数 × 0.11） */
+  kda: number
+  /** 是否靶点自身 */
+  isTarget: boolean
+}
+
+/** 已有复合物结构（含组分明细与总分子量） */
+export interface MwComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  /** 组分列表（含靶点自身，isTarget 标记） */
+  components: MwComponent[]
+  /** 装配总分子量（kDa） */
+  totalKda: number
+  /** 估计口径：assembly = RCSB 生物装配；entity = 去重实体（装配信息缺失时的近似） */
+  basis: 'assembly' | 'entity'
+  /** 口径说明（展示用） */
+  note: string
+}
+
+/** 通用增重策略选项（技术手段，非生理组分） */
+export interface MwAugmentOption {
+  /** 策略名 */
+  name: string
+  /** 增重幅度（kDa，文本：可含 "×24" 等） */
+  addKda: string
+  /** 适用性说明（利弊） */
+  note: string
+}
+
+/** 与用户目的的冲突分析条目 */
+export interface MwConflictNote {
+  /** aligned = 与目的契合；caution = 需注意；conflict = 存在冲突 */
+  level: 'aligned' | 'caution' | 'conflict'
+  text: string
+}
+
+/** 分子量增重策略分析结果（mw-augment.ts 产出，评分/报告/前端消费） */
+export interface MwAugmentAnalysis {
+  /** 是否为小分子量靶点场景（单体 < 50 kDa / < 450 aa） */
+  applicable: boolean
+  /** 单体分子量（kDa，≈ 残基 × 0.11） */
+  monomerKda: number
+  /** 单体分子量区间结论（展示用一句话） */
+  zoneNote: string
+  /** 生物装配有效分子量（kDa）：寡聚体/已有复合物，无路径时为 null */
+  assemblyKda: number | null
+  /** 装配分子量计算依据（展示用） */
+  assemblyBasis: string
+  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；partner = 互作伙伴推断（无结构） */
+  assemblyPath: 'oligomer' | 'complex' | 'partner' | null
+  /** 已有复合物结构（组分明细 + 总分子量；按分辨率排序） */
+  complexes: MwComplex[]
+  /** UniProt 互作伙伴（非自身；长度已知时含 lengthAa/kda） */
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  /** 通用增重策略（小靶点场景的技术工具箱） */
+  options: MwAugmentOption[]
+  /** 与用户目的的冲突分析（无目的信息时给 caution 默认条目） */
+  conflicts: MwConflictNote[]
+  /** 综合要点（评分依据 + LLM 提示 + 报告展示） */
+  notes: string[]
+}
+
+/** v1.26：分子量增重策略对评分的调整明细（score.ts 产出；评分卡展示） */
+export interface MwAugmentAdjustInfo {
+  /** 单体分子量（kDa） */
+  monomerKda: number
+  /** 装配有效分子量（kDa，可为 null） */
+  assemblyKda: number | null
+  /** 三方法调整值（整数；当前仅 cryoem 有非零值 — 分子量维度主要影响 Cryo-EM） */
+  xray: number
+  cryoem: number
+  nmr: number
+  /** 一句话调整依据 */
+  note: string
 }
 
 // ─── 作业汇总（前端 JobSummary）──────────────────────────────────────────────
@@ -309,6 +400,8 @@ export interface JobSummary {
   gapText?: string
   /** 聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
+  /** 分子量增重策略分析（v1.26+ 作业存在；历史作业缺省；applicable=false 时也存档） */
+  mwAugment?: MwAugmentAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
   /** 报告已延迟：本靶点不生成独立报告，数据并入合并评估报告（v1.8+ 关联靶点批量） */

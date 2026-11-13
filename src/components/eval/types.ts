@@ -172,6 +172,8 @@ export interface MergedTargetLite {
   literature: LiteratureItem[]
   /** v1.24：聚集形式（寡聚态）分析；历史作业缺省 */
   oligomer?: OligomerAnalysis
+  /** v1.26：分子量增重策略分析（仅 applicable 时有意义）；历史作业缺省 */
+  mwAugment?: MwAugmentAnalysis | null
 }
 
 /** 合并评估报告（关联靶点批量生成） */
@@ -327,6 +329,8 @@ export interface Scores {
   overall: ScoreItem
   /** v1.25：聚集形式调整明细 */
   oligomerAdjust?: OligomerAdjustInfo
+  /** v1.26：分子量增重调整明细（小分子量靶点） */
+  mwAugmentAdjust?: MwAugmentAdjustInfo
 }
 
 export interface MethodStats {
@@ -359,6 +363,63 @@ export interface OligomerAnalysis {
   notes: string[]
 }
 
+// ─── 分子量增重策略分析（v1.26，小分子量靶点）────────────────────
+
+export interface MwComponent {
+  name: string
+  uniprotId?: string
+  lengthAa: number
+  kda: number
+  isTarget: boolean
+}
+
+export interface MwComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  components: MwComponent[]
+  totalKda: number
+  basis: 'assembly' | 'entity'
+  note: string
+}
+
+export interface MwAugmentOption {
+  name: string
+  addKda: string
+  note: string
+}
+
+export interface MwConflictNote {
+  level: 'aligned' | 'caution' | 'conflict'
+  text: string
+}
+
+/** 分子量增重策略分析结果（与后端 lib/eval/types.ts 契约一致） */
+export interface MwAugmentAnalysis {
+  applicable: boolean
+  monomerKda: number
+  zoneNote: string
+  assemblyKda: number | null
+  assemblyBasis: string
+  assemblyPath: 'oligomer' | 'complex' | 'partner' | null
+  complexes: MwComplex[]
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  options: MwAugmentOption[]
+  conflicts: MwConflictNote[]
+  notes: string[]
+}
+
+/** v1.26：分子量增重调整明细（评分卡展示） */
+export interface MwAugmentAdjustInfo {
+  monomerKda: number
+  assemblyKda: number | null
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
+}
+
 /** 合并评估（UniProt+序列同靶点）时的构建信息 */
 export interface ConstructInfo {
   providedLength: number
@@ -385,6 +446,8 @@ export interface JobSummary {
   blast?: BlastStatusInfo
   /** 聚集形式（寡聚态）分析（v1.24+；历史作业缺省） */
   oligomer?: OligomerAnalysis
+  /** 分子量增重策略分析（v1.26+；历史作业缺省；后端存档含 applicable=false） */
+  mwAugment?: MwAugmentAnalysis | null
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */

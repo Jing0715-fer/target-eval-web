@@ -325,6 +325,17 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
       ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
       : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
 
+  /** v1.26：分子量增重策略（小分子量靶点）— 融入评分卡（不单独成章） */
+  const mw = summary.mwAugment?.applicable ? summary.mwAugment : null
+  const mwAdj = summary.scores?.mwAugmentAdjust ?? null
+  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwBadgeCls = mw?.assemblyKda != null && mw.assemblyKda >= 100
+    ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+    : mw?.assemblyKda != null && mw.assemblyKda >= 50
+      ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+      : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+  const sizedPartners = mw?.partners.filter(p => p.kda != null) ?? []
+
   return (
     <div className="flex flex-col gap-8">
       {/* 0. 返回导航条 */}
@@ -519,6 +530,129 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                         </li>
                       ))}
                     </ul>
+                  </details>
+                )}
+              </div>
+            )}
+            {mw && (
+              <div className="flex flex-col gap-3 border-t border-dashed border-stone-200 pt-4 dark:border-stone-800">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className={cn('inline-flex min-h-7 items-center rounded-md border px-2.5 text-xs font-semibold', mwBadgeCls)}>
+                    小分子量靶点
+                  </span>
+                  <span className="text-xs text-stone-500 dark:text-stone-400">
+                    分子量
+                    <b className="mx-1 font-semibold text-stone-800 dark:text-stone-200">
+                      单体 ~{mw.monomerKda} kDa{mw.assemblyKda != null ? ` → 装配 ~${mw.assemblyKda} kDa` : ''}
+                    </b>
+                  </span>
+                  <span className="rounded-md border border-stone-200 bg-stone-50 px-2.5 py-1 font-mono text-[11px] text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300">
+                    {mwPathZh}
+                  </span>
+                  {mwAdj && (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-[10px] tracking-wider text-stone-400 dark:text-stone-500">调整</span>
+                      <AdjChip label="X-ray" v={mwAdj.xray} />
+                      <AdjChip label="Cryo-EM" v={mwAdj.cryoem} />
+                      <AdjChip label="NMR" v={mwAdj.nmr} />
+                    </span>
+                  )}
+                </div>
+                {mwAdj ? (
+                  <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">
+                    {mwAdj.note}（分子量调整已计入 Cryo-EM 分数与综合评分；X-ray/NMR 不受增重影响{mw.assemblyKda != null ? '；装配分子量已知时，聚集形式的 Cryo-EM 分量并入本维度计分（避免双重加分）' : ''}）
+                  </p>
+                ) : (
+                  <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">{mw.zoneNote}</p>
+                )}
+                {(mw.complexes.length > 0 || sizedPartners.length > 0 || mw.conflicts.length > 0) && (
+                  <details className="group overflow-hidden rounded-lg border border-stone-200 dark:border-stone-800">
+                    <summary className="flex cursor-pointer select-none items-center gap-1.5 border-b border-stone-200 bg-stone-50 px-3.5 py-2 text-[11px] font-medium text-emerald-800 list-none transition-colors hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/80 dark:text-emerald-500 dark:hover:bg-stone-800/60 [&::-webkit-details-marker]:hidden">
+                      <ChevronDown className="size-3.5 shrink-0 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+                      增重路径明细 · 复合物结构 {mw.complexes.length} · 互作伙伴 {sizedPartners.length} · 目的比对 {mw.conflicts.length} 条
+                    </summary>
+                    <div className="flex flex-col gap-4 px-3.5 py-3.5">
+                      {mw.complexes.length > 0 && (
+                        <div className="flex flex-col gap-2">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">已有复合物结构 — 组分总分子量统计</p>
+                          <ul className="divide-y divide-stone-100 dark:divide-stone-800/60">
+                            {mw.complexes.map(c => (
+                              <li key={c.pdbId} className="flex flex-col gap-1 py-2.5 sm:flex-row sm:items-baseline sm:gap-3">
+                                <a
+                                  href={`https://www.rcsb.org/structure/${c.pdbId}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="w-20 shrink-0 font-mono text-[11px] font-semibold text-emerald-800 hover:underline dark:text-emerald-500"
+                                >
+                                  {c.pdbId}
+                                </a>
+                                <span className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">
+                                  {c.components.map(x => (
+                                    <span
+                                      key={`${c.pdbId}-${x.name}-${x.kda}`}
+                                      className={cn(
+                                        'mr-1.5 inline-block rounded-sm border px-1.5 py-0.5 text-[11px]',
+                                        x.isTarget
+                                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                          : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-500',
+                                      )}
+                                    >
+                                      {x.isTarget ? '靶点' : x.name.slice(0, 36)} ~{x.kda} kDa
+                                    </span>
+                                  ))}
+                                  <b className="ml-1 text-stone-800 dark:text-stone-200">= 装配 ~{c.totalKda} kDa</b>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-stone-400 dark:text-stone-500">{c.note}</span>
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {sizedPartners.length > 0 && (
+                        <div className="flex flex-col gap-1.5">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">UniProt 互作伙伴（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
+                          <p className="text-xs leading-6 text-stone-600 dark:text-stone-300">
+                            {sizedPartners.slice(0, 6).map(p => `${p.geneName ?? p.proteinName ?? p.accession}（${p.accession}，${p.lengthAa} aa ~${p.kda} kDa）`).join('、')}
+                          </p>
+                        </div>
+                      )}
+                      <div className="flex flex-col gap-1.5">
+                        <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">技术增重工具箱</p>
+                        <ul className="flex flex-col gap-1.5">
+                          {mw.options.map(o => (
+                            <li key={o.name} className="text-xs leading-6 text-stone-600 dark:text-stone-300">
+                              <b className="text-stone-800 dark:text-stone-200">{o.name}</b>
+                              <span className="mx-1.5 font-mono text-[10.5px] text-emerald-700 dark:text-emerald-500">{o.addKda}</span>
+                              — {o.note}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      {mw.conflicts.length > 0 && (
+                        <div className="flex flex-col gap-1.5">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">与客户目的的比对（加入的蛋白是否与目的冲突）</p>
+                          <ul className="flex flex-col gap-1.5">
+                            {mw.conflicts.map((c, i) => (
+                              <li key={`conflict-${i}`} className="flex items-baseline gap-2 text-xs leading-6 text-stone-600 dark:text-stone-300">
+                                <span
+                                  className={cn(
+                                    'inline-flex shrink-0 items-center rounded-sm border px-1.5 py-0.5 font-mono text-[10px] font-bold',
+                                    c.level === 'aligned'
+                                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                      : c.level === 'caution'
+                                        ? 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-500'
+                                        : 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400',
+                                  )}
+                                >
+                                  {c.level === 'aligned' ? '契合' : c.level === 'caution' ? '需注意' : '冲突'}
+                                </span>
+                                <span className="min-w-0 flex-1">{c.text}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
                   </details>
                 )}
               </div>
