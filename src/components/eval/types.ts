@@ -395,6 +395,25 @@ export interface MwConflictNote {
   text: string
 }
 
+/** v1.27：同源结构形成的大复合物（BLAST 扩展检索） */
+export interface MwHomologComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  /** BLAST 同源 identity（%） */
+  identity: number
+  /** 同源复合物自身装配总分子量（kDa） */
+  totalKda: number
+  /** 按靶点单体换算的估计装配分子量（kDa） */
+  estimatedKda: number
+  basis: 'assembly' | 'entity'
+  /** 组分摘要 */
+  componentSummary: string
+  /** 推断说明 */
+  note: string
+}
+
 /** 分子量增重策略分析结果（与后端 lib/eval/types.ts 契约一致） */
 export interface MwAugmentAnalysis {
   applicable: boolean
@@ -402,8 +421,12 @@ export interface MwAugmentAnalysis {
   zoneNote: string
   assemblyKda: number | null
   assemblyBasis: string
-  assemblyPath: 'oligomer' | 'complex' | 'partner' | null
+  assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
   complexes: MwComplex[]
+  /** v1.27：同源结构形成的大复合物（历史作业缺省） */
+  homologComplexes?: MwHomologComplex[]
+  /** v1.27：同源扩展检索说明（历史作业缺省） */
+  homologSearchNote?: string
   partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
   options: MwAugmentOption[]
   conflicts: MwConflictNote[]
@@ -414,6 +437,8 @@ export interface MwAugmentAnalysis {
 export interface MwAugmentAdjustInfo {
   monomerKda: number
   assemblyKda: number | null
+  /** v1.27：装配路径（历史作业缺省） */
+  assemblyPath?: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
   xray: number
   cryoem: number
   nmr: number

@@ -1,5 +1,5 @@
 /**
- * 分子量增重策略分析（v1.26）— 小分子量靶点（单体 < 50 kDa）的结构解析可行性关键维度：
+ * 分子量增重策略分析（v1.26 / v1.27）— 小分子量靶点（单体 < 50 kDa）的结构解析可行性关键维度：
  *
  * 用户需求：
  *  - 单体分子量较小时，需考虑如何增加样品分子量（Cryo-EM 颗粒尺寸/数据采集的关键门槛）
@@ -11,20 +11,26 @@
  * 增重路径（按证据强度）：
  *  1. complex — 已有复合物结构（RCSB 实体/装配数据；含 PDB 内的技术性组分先例如 Fab/MBP）
  *  2. oligomer — 自身寡聚（oligomer.ts 的拷贝数 → 有效 MW = N × 单体）
- *  3. partner — UniProt 互作伙伴（1:1 假设的二元素装配估计，无结构先例）
+ *  3. homolog-complex（v1.27）— 同源复合物推断：单体小且上述直接路径装配均不足
+ *     50 kDa 时，经 BLAST 同源命中扩展检索 RCSB 装配，若同源结构形成 ≥50 kDa
+ *     复合物/寡聚装配，则将同源亚基尺寸按靶点单体换算后作为装配 MW 估计
+ *     （寡聚状态/互作界面在同一家族内常保守，需实验验证）
+ *  4. partner — UniProt 互作伙伴（1:1 假设的二元素装配估计，无结构先例）
  * 取可用路径中装配分子量最高者作为 assemblyKda；技术工具箱（Fab/nanobody/MBP/ferritin）
  * 作为兜底策略在 notes/options 中给出。
  *
- * 网络访问：UniProt 伙伴长度批量查询 + RCSB GraphQL（装配/实体），全部防御式降级，
- * 失败不阻塞主管线（返回已有数据 + 说明）。
+ * 网络访问：UniProt 伙伴长度批量查询 + RCSB GraphQL（装配/实体；直接复合物与
+ * 同源扩展两阶段），全部防御式降级，失败不阻塞主管线（返回已有数据 + 说明）。
  */
 import { cachedJsonFetch } from './cache'
 import type {
+  BlastHit,
   MwAugmentAnalysis,
   MwAugmentOption,
   MwComplex,
   MwComponent,
   MwConflictNote,
+  MwHomologComplex,
   OligomerAnalysis,
   PdbEntry,
   UniprotInfo,
@@ -154,15 +160,17 @@ interface GqlEntry {
   exptl?: Array<{ method?: string }>
   rcsb_entry_info?: { resolution_combined?: number[] }
   polymer_entities?: Array<{
-    rcsb_polymer_entity_container_identifiers?: { uniprot_ids?: string[] }
+    rcsb_polymer_entity_container_identifiers?: { uniprot_ids?: string[]; auth_asym_ids?: string[] }
     rcsb_polymer_entity?: { pdbx_description?: string }
     entity_poly?: { pdbx_seq_one_letter_code_can?: string; type?: string }
   }>
   assemblies?: Array<{
-    pdbx_struct_assembly?: { oligomeric_details?: string }
-    rcsb_assembly_info?: { formula_weight?: number }
+    pdbx_struct_assembly?: { oligomeric_details?: string; oligomeric_count?: number }
+    rcsb_assembly_info?: { formula_weight?: number; polymer_entity_instance_count?: number }
   }>
 }
+
+type GqlAssembly = NonNullable<GqlEntry['assemblies']>[number]
 
 async function gqlEntries(pdbIds: string[], query: string, signal?: AbortSignal): Promise<GqlEntry[]> {
   if (!pdbIds.length) return []
@@ -251,6 +259,200 @@ export async function fetchComplexAssemblyInfo(
   return out
 }
 
+// ─── v1.27：同源复合物扩展检索（BLAST 命中 → RCSB 装配）─────────────────
+
+/** 同源复合物检索结果条目（fetchHomologComplexInfo 产出 → buildMwAugmentAnalysis 消费） */
+export interface HomologComplexInfo extends ComplexAssemblyInfo {
+  /** BLAST 同源 identity（%） */
+  identity: number
+  /** 同源复合物自身装配总分子量（kDa；RCSB 装配权重缺失时为实体口径估计） */
+  totalKda: number
+  /** 估计口径：assembly = RCSB 生物装配；entity = 拷贝数×实体/去重实体 */
+  basis: 'assembly' | 'entity'
+  /** 按靶点单体换算的估计装配分子量（kDa） */
+  estimatedKda: number
+  /** 组分摘要（展示用） */
+  componentSummary: string
+  /** 是否同源寡聚装配（单一种类蛋白实体多拷贝） */
+  isHomoOligomer: boolean
+  /** 推断说明 */
+  note: string
+}
+
+/** 同源检索的最小 identity（%）— 低于此值复合物形成倾向的推断不可靠 */
+const HOMOLOG_MIN_IDENTITY = 25
+
+/** 复合物/寡聚标题信号（候选优先级提升用） */
+const COMPLEX_SIGNAL_RE = /\b(hetero(?:dimer|trimer|tetramer|pentamer|hexamer|oligomer|complex)|complex (?:with|of)|homo(?:dimer|trimer|tetramer|pentamer|hexamer|oligomer)|(?:^|\s)(?:di|tri|tetra|penta|hexa|hepta|octa)mer(?:ic|ic)?\b)/i
+
+/** 寡聚计量词 → 拷贝数 */
+const COPY_PREFIX: Record<string, number> = {
+  di: 2, tri: 3, tetra: 4, penta: 5, hexa: 6, hepta: 7, octa: 8, nona: 9, deca: 10, undeca: 11, dodeca: 12,
+}
+
+/** 从 oligomeric_details 解析同源寡聚拷贝数（如 "homotetrameric" → 4） */
+export function parseHomoCopies(details: string | null | undefined): number | null {
+  if (!details) return null
+  const d = details.toLowerCase()
+  if (!d.includes('homo')) return null
+  const mNum = d.match(/homo\s*(\d+)\s*-?\s*mer/)
+  if (mNum) {
+    const n = parseInt(mNum[1], 10)
+    return n >= 2 && n <= 24 ? n : null
+  }
+  const mWord = d.match(/homo(di|tri|tetra|penta|hexa|hepta|octa|nona|deca|undeca|dodeca)mer/)
+  if (mWord) return COPY_PREFIX[mWord[1]] ?? null
+  return null // "homo-oligomeric" 等数量未知
+}
+
+/**
+ * v1.27：经 BLAST 同源命中扩展检索大复合物（≥50 kDa 装配）。
+ *
+ * 触发条件（analyzeMwAugmentation 内判定）：小分子量靶点 且 直接路径
+ * （已有复合物/自身寡聚/互作伙伴）装配均不足 50 kDa。
+ *
+ * 候选选择：identity 前 8 + 复合物/寡聚标题信号补充 8（去重后上限 16，GraphQL 12 id/批）。
+ * 换算口径：同源亚基尺寸替换为靶点单体 —
+ *  - 同源寡聚装配：估计 = 拷贝数 × 靶点单体
+ *  - 同源异源复合物：估计 = 同源装配总 MW − 同源亚基（单拷贝）+ 靶点单体
+ * 仅保留换算后 ≥50 kDa 的条目（按估计装配分子量降序，取前 6）。
+ */
+export async function fetchHomologComplexInfo(
+  blastHits: BlastHit[],
+  directPdbIds: Set<string>,
+  sequenceLength: number,
+  signal?: AbortSignal,
+): Promise<{ searched: number; complexes: HomologComplexInfo[] }> {
+  const seen = new Set<string>()
+  const pool = blastHits.filter(b => {
+    const id = b.pdbId.toUpperCase()
+    if (seen.has(id)) return false
+    seen.add(id)
+    return b.identity >= HOMOLOG_MIN_IDENTITY && !directPdbIds.has(id)
+  })
+  if (!pool.length) return { searched: 0, complexes: [] }
+
+  // 候选：高 identity 优先（推断力最强）+ 标题含复合物/寡聚信号的补充（更可能是大装配）
+  const topByIdentity = [...pool].sort((a, b) => b.identity - a.identity).slice(0, 8)
+  const topIn = new Set(topByIdentity.map(b => b.pdbId.toUpperCase()))
+  const topBySignal = pool
+    .filter(b => !topIn.has(b.pdbId.toUpperCase()) && COMPLEX_SIGNAL_RE.test(b.description))
+    .sort((a, b) => b.identity - a.identity)
+    .slice(0, 8)
+  const candidates = [...topByIdentity, ...topBySignal].slice(0, 16)
+  if (!candidates.length) return { searched: 0, complexes: [] }
+
+  const hitById = new Map(candidates.map(b => [b.pdbId.toUpperCase(), b]))
+
+  // GraphQL 批量拉取（12 id/批）
+  const ids = candidates.map(b => b.pdbId.toUpperCase())
+  let entries: GqlEntry[] = []
+  const BATCH = 12
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const chunk = ids.slice(i, i + BATCH)
+    let got = await gqlEntries(chunk, FULL_QUERY, signal)
+    if (!got.length) got = await gqlEntries(chunk, MIN_QUERY, signal)
+    if (got.length) entries = entries.concat(got)
+    if (signal?.aborted) break
+  }
+  if (!entries.length) return { searched: 0, complexes: [] }
+
+  const monomerKda = aaToKda(sequenceLength)
+  const out: HomologComplexInfo[] = []
+
+  for (const e of entries) {
+    const pdbId = String(e.rcsb_id ?? '').toUpperCase()
+    const hit = hitById.get(pdbId)
+    if (!hit || !/^[0-9A-Z]{4}$/.test(pdbId)) continue
+
+    // 蛋白实体（≥30 aa，排除核酸/短肽）→ 按种类去重（uniprot 或描述）
+    const groups = new Map<string, { desc: string; len: number; uniprot: string }>()
+    for (const pe of e.polymer_entities ?? []) {
+      if (pe.entity_poly?.type != null && !/polypeptide/i.test(pe.entity_poly.type)) continue
+      const len = (pe.entity_poly?.pdbx_seq_one_letter_code_can ?? '').replace(/\s+/g, '').length
+      if (len < 30) continue
+      const uniprot = (pe.rcsb_polymer_entity_container_identifiers?.uniprot_ids ?? [])[0]?.toUpperCase() ?? ''
+      const desc = pe.rcsb_polymer_entity?.pdbx_description ?? 'polymer entity'
+      const key = uniprot || desc.slice(0, 40)
+      if (!groups.has(key)) groups.set(key, { desc, len, uniprot })
+    }
+    if (!groups.size) continue
+
+    // 装配：取 formula_weight 最大的生物装配
+    const bestAssembly = (e.assemblies ?? []).reduce<GqlAssembly | undefined>(
+      (best, a) => ((a.rcsb_assembly_info?.formula_weight ?? 0) > (best?.rcsb_assembly_info?.formula_weight ?? 0) ? a : best),
+      undefined,
+    )
+    const fw = bestAssembly?.rcsb_assembly_info?.formula_weight ?? null
+    const details = bestAssembly?.pdbx_struct_assembly?.oligomeric_details ?? null
+    const oligoCount = bestAssembly?.pdbx_struct_assembly?.oligomeric_count ?? null
+    const instanceCount = bestAssembly?.rcsb_assembly_info?.polymer_entity_instance_count ?? null
+
+    const list = [...groups.values()]
+    let totalKda: number
+    let basis: 'assembly' | 'entity'
+    let estimatedKda: number
+    let componentSummary: string
+    let note: string
+    let isHomoOligomer: boolean
+
+    if (list.length === 1) {
+      // ── 同源寡聚装配：估计 = 拷贝数 × 靶点单体 ──
+      const sole = list[0]
+      const entityKda = aaToKda(sole.len)
+      const copies = oligoCount
+        ?? parseHomoCopies(details)
+        ?? (fw != null && fw > 0 && entityKda > 0 ? Math.max(2, Math.round(fw / entityKda)) : null)
+        ?? (instanceCount != null && instanceCount >= 2 ? instanceCount : null)
+      if (copies == null || copies < 2 || copies > 24) continue // 无法证明多聚装配 → 不构成增重路径
+      totalKda = fw != null && fw > 0 ? Math.round(fw * 10) / 10 : Math.round(copies * entityKda)
+      basis = fw != null && fw > 0 ? 'assembly' : 'entity'
+      estimatedKda = Math.round(monomerKda * copies)
+      componentSummary = `${copies} × 同源亚基（~${entityKda} kDa/链${sole.desc ? ` · ${sole.desc.slice(0, 26)}` : ''}）`
+      isHomoOligomer = true
+      note = `同源寡聚装配（${details ?? `${copies} 聚体`}）— 对称装配界面在同源家族内常保守（identity ${Math.round(hit.identity)}%），靶点寡聚化需 SEC-MALS 验证`
+    } else {
+      // ── 同源异源复合物：同源实体 = 长度最接近查询序列的种类；估计 = 总 MW − 同源亚基 + 靶点单体（单拷贝） ──
+      const sorted = [...list].sort((a, b) => Math.abs(a.len - sequenceLength) - Math.abs(b.len - sequenceLength))
+      const homologEntity = sorted[0]
+      const partners = sorted.slice(1)
+      const entitySumKda = aaToKda(list.reduce((s, g) => s + g.len, 0))
+      totalKda = fw != null && fw > 0 ? Math.round(fw * 10) / 10 : entitySumKda
+      basis = fw != null && fw > 0 ? 'assembly' : 'entity'
+      const homologKda = aaToKda(homologEntity.len)
+      // 同源亚基替换为靶点单体（按单拷贝估计；其余组分保持同源尺寸）
+      estimatedKda = Math.round((totalKda - homologKda + monomerKda) * 10) / 10
+      const hasArtificial = partners.some(p => ARTIFICIAL_RE.test(p.desc))
+      componentSummary = `同源亚基（~${homologKda} kDa${homologEntity.desc ? ` · ${homologEntity.desc.slice(0, 24)}` : ''}）+ ${partners.map(p => `${p.desc.slice(0, 24)}（~${aaToKda(p.len)} kDa）`).join(' + ')}`
+      isHomoOligomer = false
+      note = hasArtificial
+        ? `同源复合物含技术性组分（Fab/标签等）— 该家族已有伴侣增重先例；针对靶点的 Fab/标签需另行开发`
+        : `同源异源复合物（identity ${Math.round(hit.identity)}%）— 靶点与对应伙伴的互作未经验证，共表达前建议 pull-down/SPR 确认`
+    }
+
+    if (estimatedKda < EM_MARGINAL_KDA) continue // 换算后仍不足 50 kDa → 不构成有效增重路径
+    out.push({
+      pdbId,
+      title: e.struct?.title ?? hit.description ?? '',
+      method: e.exptl?.[0]?.method ?? '',
+      resolution: e.rcsb_entry_info?.resolution_combined?.[0] ?? hit.resolution ?? null,
+      entities: list.map(g => ({ description: g.desc, lengthAa: g.len, uniprotIds: g.uniprot ? [g.uniprot] : [] })),
+      assemblyWeightKda: fw,
+      oligomericDetails: details,
+      identity: hit.identity,
+      totalKda,
+      basis,
+      estimatedKda,
+      componentSummary,
+      isHomoOligomer,
+      note,
+    })
+  }
+
+  out.sort((a, b) => b.estimatedKda - a.estimatedKda || b.identity - a.identity)
+  return { searched: entries.length, complexes: out.slice(0, 6) }
+}
+
 // ─── 技术增重工具箱（小靶点场景；常量定义）──────────────────────────────
 
 const TECH_OPTIONS: MwAugmentOption[] = [
@@ -273,11 +475,15 @@ function buildConflicts(
   hasGoal: boolean,
   assemblyPath: MwAugmentAnalysis['assemblyPath'],
   assemblyKda: number | null,
+  homologIdentity: number | null,
 ): MwConflictNote[] {
   const out: MwConflictNote[] = []
   if (!hasGoal) {
     out.push({ level: 'caution', text: '未提供明确客户目的 — 增重组分是否与研究目标冲突需与客户确认（尤其涉及生理伙伴/标签的方案）' })
-    return out
+    if (assemblyPath === 'homolog-complex') {
+      out.push({ level: 'caution', text: `同源复合物为推断证据（identity ${homologIdentity ?? '—'}%）— 加入的伙伴/寡聚化是否改变研究对象状态，需先验证互作再评估目的兼容性` })
+    }
+    return out.slice(0, 4)
   }
   const wantComplex = GOAL_COMPLEX_RE.test(goalText)
   const wantMonomer = GOAL_MONOMER_RE.test(goalText)
@@ -295,6 +501,19 @@ function buildConflicts(
     } else {
       out.push({ level: 'caution', text: '引入生理伙伴增重前需确认目的兼容性：若需 apo/游离态结构或定量结合数据，伙伴结合会改变样品状态（结合态 vs 游离态需分别评估）' })
     }
+  } else if (assemblyPath === 'homolog-complex') {
+    // v1.27：同源复合物推断 — 证据强度低于直接结构，且加入组分可能改变研究对象
+    if (wantComplex) {
+      out.push({ level: 'aligned', text: `客户目的涉及复合物/相互作用 — 同源复合物增重路径与目的方向契合（identity ${homologIdentity ?? '—'}%，装配形式在同一家族内常保守）；需先验证靶点与对应伙伴的互作` })
+    } else if (wantMonomer) {
+      out.push({
+        level: 'conflict',
+        text: '客户目的指向单体/游离态 — 同源复合物推断意味着靶点可能以复合物形式存在或被装配增重，会改变研究对象（锁定构象、遮蔽界面）；如确需增重，优先选不产生生理界面的技术组分（标签/支架），并保留对照实验',
+      })
+    } else {
+      out.push({ level: 'caution', text: '同源复合物为推断证据（非靶点直接结构）— 伙伴互作与化学计量未经实验验证，共表达/体外组装前建议先做 pull-down/SPR 验证；若目的对样品状态敏感（apo/结合态），需分别评估' })
+    }
+    out.push({ level: 'caution', text: `同源推断的置信度取决于 identity（${homologIdentity ?? '—'}%）：≥40% 时寡聚界面通常保守，30-40% 为边缘，<30% 仅作参考 — 报告中需按实际 identity 说明验证优先级` })
   } else if (assemblyPath === 'oligomer') {
     out.push({ level: 'aligned', text: '自身寡聚增重（对称装配）一般不引入异源组分 — 与多数研究目的兼容；需注意寡聚化界面残基是研究对象时的构建边界保留' })
   }
@@ -324,6 +543,10 @@ export interface MwAugmentInput {
   complexes: Map<string, ComplexAssemblyInfo>
   goal?: string
   goalHints?: string[]
+  /** v1.27：BLAST 同源命中（直接路径装配 <50 kDa 时触发同源复合物扩展检索；analyzeMwAugmentation 消费） */
+  blastHits?: BlastHit[]
+  /** v1.27：同源复合物扩展检索结果（第二阶段填充 — fetchHomologComplexInfo 产出） */
+  homologSearch?: { searched: number; complexes: HomologComplexInfo[] }
 }
 
 /** 单体分子量区间解读 */
@@ -448,25 +671,75 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
     assemblyBasis = `UniProt 互作伙伴推断：单体 + ${p.geneName ?? p.proteinName ?? p.accession}（${p.accession}，~${p.kda} kDa）按 1:1 估计 = ~${partnerAssemblyKda} kDa（无结构先例，实际化学计量需 SEC-MALS 验证）`
   }
 
+  // ── v1.27 路径 4：同源复合物推断（BLAST 扩展检索 — 直接路径装配均不足 50 kDa 时接管）──
+  const homologComplexes: MwHomologComplex[] = (input.homologSearch?.complexes ?? []).map(h => ({
+    pdbId: h.pdbId,
+    title: h.title,
+    method: h.method,
+    resolution: h.resolution,
+    identity: h.identity,
+    totalKda: h.totalKda,
+    estimatedKda: h.estimatedKda,
+    basis: h.basis,
+    componentSummary: h.componentSummary,
+    note: h.note,
+  }))
+  const bestHomolog = homologComplexes[0] ?? null
+  if ((assemblyKda ?? 0) < EM_MARGINAL_KDA && bestHomolog && bestHomolog.estimatedKda >= EM_MARGINAL_KDA) {
+    assemblyKda = bestHomolog.estimatedKda
+    assemblyPath = 'homolog-complex'
+    assemblyBasis = `同源复合物推断：BLAST 命中 ${bestHomolog.pdbId}（identity ${Math.round(bestHomolog.identity)}%）${bestHomolog.basis === 'assembly' ? '生物装配' : '实体估计'}口径 ~${bestHomolog.totalKda} kDa（${bestHomolog.componentSummary}），同源亚基按靶点单体（~${monomerKda} kDa）换算后 ≈ ~${bestHomolog.estimatedKda} kDa；寡聚状态/互作界面在同一家族内常保守，靶点能否形成同等装配需实验验证`
+  }
+
+  // ── v1.27：同源扩展检索说明（触发原因 + 检索范围 + 结果）──
+  let homologSearchNote = ''
+  if ((assemblyKda ?? 0) < EM_MARGINAL_KDA || assemblyPath === 'homolog-complex') {
+    const directKdaText = assemblyPath === 'homolog-complex'
+      ? `直接路径（寡聚/已有复合物/伙伴）装配均不足 ${EM_MARGINAL_KDA} kDa`
+      : assemblyKda != null
+        ? `直接路径装配仅 ~${assemblyKda} kDa（不足 ${EM_MARGINAL_KDA} kDa）`
+        : '无生物装配路径'
+    const hs = input.homologSearch
+    if (hs != null && hs.searched > 0 && hs.complexes.length > 0) {
+      const maxId = Math.max(...hs.complexes.map(c => Math.round(c.identity)))
+      homologSearchNote = `${directKdaText} — 经 BLAST 同源结构扩展检索（检索 ${hs.searched} 个同源结构），发现 ${hs.complexes.length} 个形成 ≥${EM_MARGINAL_KDA} kDa 复合物的同源结构（最高 identity ${maxId}%，最大换算装配 ~${hs.complexes[0].estimatedKda} kDa）`
+    } else if (hs != null && hs.searched > 0) {
+      homologSearchNote = `${directKdaText} — 经 BLAST 同源结构扩展检索（检索 ${hs.searched} 个同源结构），未发现形成 ≥${EM_MARGINAL_KDA} kDa 复合物的同源结构：Cryo-EM 增重需依赖技术组分（Fab/ferritin 支架等，见工具箱）`
+    } else if (hs != null) {
+      homologSearchNote = `${directKdaText} — 无 identity ≥${HOMOLOG_MIN_IDENTITY}% 的 BLAST 同源候选（或同源结构装配信息不可用），同源扩展检索未获得可用证据`
+    } else if ((input.blastHits?.length ?? 0) > 0) {
+      homologSearchNote = `${directKdaText} — 同源扩展检索不可用（网络失败/中断），建议重跑评估或人工检索同源复合物`
+    } else {
+      homologSearchNote = `${directKdaText} — 无 BLAST 同源命中可扩展检索（同源检索跳过/失败或 0 命中），建议人工确认同源家族是否形成大复合物`
+    }
+  } else {
+    homologSearchNote = `直接装配路径 ~${assemblyKda} kDa 已 ≥${EM_MARGINAL_KDA} kDa — 未触发同源扩展检索`
+  }
+
   // ── 冲突分析 ──
   const goalText = [input.goal ?? '', ...(input.goalHints ?? [])].join(' ').trim()
   const hasGoal = goalText.length > 0
-  const conflicts = buildConflicts(goalText, hasGoal, assemblyPath, assemblyKda)
+  const conflicts = buildConflicts(goalText, hasGoal, assemblyPath, assemblyKda, bestHomolog != null ? Math.round(bestHomolog.identity) : null)
 
   // ── 综合要点 ──
   notes.push(zoneOf(monomerKda).note)
   if (assemblyKda != null) {
     const zone = assemblyKda >= EM_ROUTINE_KDA
-      ? '≥100 kDa — 进入 Cryo-EM 常规可行区间'
+      ? `≥${EM_ROUTINE_KDA} kDa — 进入 Cryo-EM 常规可行区间`
       : assemblyKda >= EM_MARGINAL_KDA
         ? `${EM_MARGINAL_KDA}-${EM_ROUTINE_KDA} kDa 边缘区间 — 可行但需相位板（VPP）/优化玻璃化条件`
         : `<${EM_MARGINAL_KDA} kDa — 仍低于 Cryo-EM 常规门槛，颗粒对齐困难`
-    notes.push(`装配有效分子量 ~${assemblyKda} kDa（${assemblyBasis}）：${zone}`)
+    const pathPrefix = assemblyPath === 'homolog-complex' ? '（同源推断 — 装配需实验验证）' : ''
+    notes.push(`装配有效分子量 ~${assemblyKda} kDa${pathPrefix}（${assemblyBasis}）：${zone}`)
   } else {
     notes.push('无生物装配增重路径（无寡聚拷贝数、无复合物结构、无已注释伙伴）— Cryo-EM 可行性取决于技术增重策略（见下方工具箱），开发工作量与周期相应增加')
   }
+  if (homologSearchNote) notes.push(homologSearchNote)
   if (complexes.length > 1) {
     notes.push(`共 ${complexes.length} 个已有复合物结构可作增重路径参考（${complexes.map(c => `${c.pdbId} ~${c.totalKda} kDa`).slice(0, 4).join('、')}）`)
+  }
+  if (homologComplexes.length > 1) {
+    notes.push(`共 ${homologComplexes.length} 个同源结构形成 ≥${EM_MARGINAL_KDA} kDa 复合物可作增重路径参考（${homologComplexes.map(c => `${c.pdbId} ~${c.estimatedKda} kDa/identity ${Math.round(c.identity)}%`).slice(0, 4).join('、')}）— 同源证据按 identity 高低排序取舍，组装验证前置`)
   }
   notes.push('NMR 维度：增重对 NMR 无益（分子量越大越难）— 小分子量本身是 NMR 优势区间，装配分子量超出 ~50 kDa 后 NMR 需分段/截短策略')
   notes.push('X-ray 维度：分子量不是结晶瓶颈；Fab/MBP 等伴侣策略同时是助结晶手段（伴侣界面可主导晶格堆积）')
@@ -479,6 +752,8 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
     assemblyBasis,
     assemblyPath,
     complexes: complexes.slice(0, 6),
+    homologComplexes,
+    homologSearchNote,
     partners,
     options: TECH_OPTIONS,
     conflicts,
@@ -488,8 +763,12 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
 
 /**
  * 端到端分析（含网络数据获取）：
- * UniProt 伙伴长度 + RCSB 复合物装配 + 同步构建。
+ * UniProt 伙伴长度 + RCSB 复合物装配（直接）+ 同源复合物扩展检索（v1.27，两阶段）+ 同步构建。
  * 网络失败自动降级（空数据继续），不抛异常。
+ *
+ * v1.27 第二阶段：小分子量靶点 且 直接路径（已有复合物/自身寡聚/互作伙伴）
+ * 装配均不足 50 kDa 时，经 BLAST 同源命中扩展检索 RCSB 装配 —
+ * 若同源结构形成 ≥50 kDa 复合物，则按同源亚基换算作为装配 MW 估计（homolog-complex 路径）。
  */
 export async function analyzeMwAugmentation(
   input: Omit<MwAugmentInput, 'partners' | 'complexes'> & { signal?: AbortSignal },
@@ -507,5 +786,15 @@ export async function analyzeMwAugmentation(
     fetchPartnerLengths(input.uniprot).catch(() => [] as PartnerMwInfo[]),
     fetchComplexAssemblyInfo(input.directPdbs, input.signal).catch(() => new Map<string, ComplexAssemblyInfo>()),
   ])
-  return buildMwAugmentAnalysis({ ...input, partners, complexes })
+  let analysis = buildMwAugmentAnalysis({ ...input, partners, complexes })
+
+  // v1.27 阶段 2：直接路径装配不足 50 kDa 且有 BLAST 同源命中 → 扩展检索同源大复合物
+  if (analysis.applicable && (analysis.assemblyKda ?? 0) < EM_MARGINAL_KDA && (input.blastHits?.length ?? 0) > 0 && !input.signal?.aborted) {
+    const directIds = new Set(input.directPdbs.map(p => p.pdbId.toUpperCase()))
+    const hs = await fetchHomologComplexInfo(input.blastHits ?? [], directIds, seqLen, input.signal).catch(() => null)
+    if (hs != null) {
+      analysis = buildMwAugmentAnalysis({ ...input, partners, complexes, homologSearch: hs })
+    }
+  }
+  return analysis
 }

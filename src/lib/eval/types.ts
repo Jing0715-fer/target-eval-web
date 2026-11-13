@@ -282,6 +282,26 @@ export interface MwConflictNote {
   text: string
 }
 
+/** v1.27：同源结构形成的大复合物（BLAST 扩展检索 — 直接路径装配不足 50 kDa 时触发） */
+export interface MwHomologComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  /** BLAST 同源 identity（%） */
+  identity: number
+  /** 同源复合物自身装配总分子量（kDa，RCSB 口径） */
+  totalKda: number
+  /** 按靶点单体换算的估计装配分子量（kDa — 同源亚基尺寸替换为靶点单体尺寸） */
+  estimatedKda: number
+  /** 估计口径：assembly = RCSB 生物装配；entity = 去重实体（装配信息缺失时的近似） */
+  basis: 'assembly' | 'entity'
+  /** 组分摘要（如 "4 × 同源亚基（~27 kDa/链）" / "同源亚基 + 伙伴名（~65 kDa）"） */
+  componentSummary: string
+  /** 推断说明（同源保守性/验证建议） */
+  note: string
+}
+
 /** 分子量增重策略分析结果（mw-augment.ts 产出，评分/报告/前端消费） */
 export interface MwAugmentAnalysis {
   /** 是否为小分子量靶点场景（单体 < 50 kDa / < 450 aa） */
@@ -290,14 +310,18 @@ export interface MwAugmentAnalysis {
   monomerKda: number
   /** 单体分子量区间结论（展示用一句话） */
   zoneNote: string
-  /** 生物装配有效分子量（kDa）：寡聚体/已有复合物，无路径时为 null */
+  /** 生物装配有效分子量（kDa）：寡聚体/已有复合物/同源复合物，无路径时为 null */
   assemblyKda: number | null
   /** 装配分子量计算依据（展示用） */
   assemblyBasis: string
-  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；partner = 互作伙伴推断（无结构） */
-  assemblyPath: 'oligomer' | 'complex' | 'partner' | null
+  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（无结构） */
+  assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
   /** 已有复合物结构（组分明细 + 总分子量；按分辨率排序） */
   complexes: MwComplex[]
+  /** v1.27：同源结构形成的大复合物（直接路径不足 50 kDa 时 BLAST 扩展检索；历史作业缺省） */
+  homologComplexes?: MwHomologComplex[]
+  /** v1.27：同源扩展检索说明（检索范围/未触发原因；未触发时为空串，历史作业缺省） */
+  homologSearchNote?: string
   /** UniProt 互作伙伴（非自身；长度已知时含 lengthAa/kda） */
   partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
   /** 通用增重策略（小靶点场景的技术工具箱） */
@@ -314,6 +338,8 @@ export interface MwAugmentAdjustInfo {
   monomerKda: number
   /** 装配有效分子量（kDa，可为 null） */
   assemblyKda: number | null
+  /** v1.27：装配路径（评分卡/报告展示；历史作业缺省） */
+  assemblyPath?: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
   /** 三方法调整值（整数；当前仅 cryoem 有非零值 — 分子量维度主要影响 Cryo-EM） */
   xray: number
   cryoem: number

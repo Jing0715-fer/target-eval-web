@@ -356,22 +356,26 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       </table></div></details>` : ''}
     </div>` : ''
 
-  // v1.26：分子量增重策略（小分子量靶点）— 评分卡内嵌（不单独成章，与聚集形式同区呈现）
+  // v1.26/v1.27：分子量增重策略（小分子量靶点）— 评分卡内嵌（不单独成章，与聚集形式同区呈现）
   const mwA = ctx.mwAugment
   const mwAdj = ctx.scores.mwAugmentAdjust
-  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
-  const mwBadgeColor = mwA?.assemblyKda != null && mwA.assemblyKda >= 100 ? '#065f46' : mwA?.assemblyKda != null && mwA.assemblyKda >= 50 ? '#b45309' : '#78716c'
+  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwBadgeColor = mwA?.assemblyPath === 'homolog-complex'
+    ? (mwA.assemblyKda != null && mwA.assemblyKda >= 100 ? '#0f766e' : '#b45309')
+    : mwA?.assemblyKda != null && mwA.assemblyKda >= 100 ? '#065f46' : mwA?.assemblyKda != null && mwA.assemblyKda >= 50 ? '#b45309' : '#78716c'
+  const mwHomologs = mwA?.homologComplexes ?? []
   const mwStripHtml = mwA?.applicable ? `
     <div class="oligo-strip mw-strip">
       <div class="oligo-strip-head">
         <span class="oligo-badge" style="background:${mwBadgeColor}">小分子量靶点</span>
-        <span class="oligo-strip-label">分子量<b>单体 ~${mwA.monomerKda} kDa${mwA.assemblyKda != null ? ` → 装配 ~${mwA.assemblyKda} kDa` : ''}</b></span>
+        <span class="oligo-strip-label">分子量<b>单体 ~${mwA.monomerKda} kDa${mwA.assemblyKda != null ? ` → 装配 ~${mwA.assemblyKda} kDa${mwA.assemblyPath === 'homolog-complex' ? '（同源推断）' : ''}` : ''}</b></span>
         <span class="oligo-stoich">${esc(mwPathZh)}</span>
         ${mwAdj ? `<span class="oligo-chips">${adjChip('X-ray', mwAdj.xray)}${adjChip('Cryo-EM', mwAdj.cryoem)}${adjChip('NMR', mwAdj.nmr)}</span>` : ''}
       </div>
       ${mwAdj ? `<p class="oligo-strip-note">${esc(mwAdj.note)}（分子量调整已计入 Cryo-EM 分数与综合评分；X-ray/NMR 不受增重影响${mwA.assemblyKda != null ? '；装配分子量已知时，聚集形式维度的 Cryo-EM 分量并入本维度计分（避免双重加分）' : ''}）</p>` : ''}
-      ${mwA.complexes.length || mwA.partners.some(p => p.kda != null) || mwA.conflicts.length ? `
-      <details class="fold"><summary>增重路径明细（复合物结构 ${mwA.complexes.length} · 互作伙伴 ${mwA.partners.filter(p => p.kda != null).length} · 目的比对 ${mwA.conflicts.length} 条）</summary>
+      ${mwA.homologSearchNote ? `<p class="oligo-strip-note">${esc(mwA.homologSearchNote)}</p>` : ''}
+      ${mwA.complexes.length || mwHomologs.length || mwA.partners.some(p => p.kda != null) || mwA.conflicts.length ? `
+      <details class="fold"><summary>增重路径明细（复合物结构 ${mwA.complexes.length} · 同源复合物 ${mwHomologs.length} · 互作伙伴 ${mwA.partners.filter(p => p.kda != null).length} · 目的比对 ${mwA.conflicts.length} 条）</summary>
         ${mwA.complexes.length ? `
         <p class="note"><b>已有复合物结构 — 组分总分子量统计</b>（RCSB 实体/装配口径）</p>
         <div class="tbl-wrap"><table class="tbl-data">
@@ -382,6 +386,20 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
               <td>${esc(c.method.slice(0, 18))}${c.resolution != null ? ` · ${c.resolution}Å` : ''}</td>
               <td class="t-title">${c.components.map(x => `<span class="${x.isTarget ? 'mw-target' : 'mw-partner'}">${esc(x.name.slice(0, 34))} ~${x.kda} kDa</span>`).join(' + ')}<br><span class="mw-basis">${esc(c.note)}</span></td>
               <td><b>~${c.totalKda} kDa</b></td>
+            </tr>`).join('')}</tbody>
+        </table></div>` : ''}
+        ${mwHomologs.length ? `
+        <p class="note"><b>同源结构形成的大复合物（BLAST 扩展检索）</b>— 直接装配路径不足 50 kDa 时检索；同源亚基按靶点单体换算</p>
+        <div class="tbl-wrap"><table class="tbl-data">
+          <thead><tr><th style="width:86px">PDB</th><th style="width:64px">Identity</th><th style="width:132px">方法 · 分辨率</th><th>组分（同源装配口径）</th><th style="width:96px">同源装配</th><th style="width:96px">靶点换算</th></tr></thead>
+          <tbody>${mwHomologs.map(h => `
+            <tr>
+              <td class="td-id"><a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a></td>
+              <td><b>${Math.round(h.identity)}%</b></td>
+              <td>${esc(h.method.slice(0, 16))}${h.resolution != null ? ` · ${h.resolution}Å` : ''}</td>
+              <td class="t-title">${esc(h.componentSummary)}<br><span class="mw-basis">${esc(h.note)}</span></td>
+              <td>~${h.totalKda} kDa</td>
+              <td><b>~${h.estimatedKda} kDa</b></td>
             </tr>`).join('')}</tbody>
         </table></div>` : ''}
         ${(() => { const ps = mwA.partners.filter(p => p.kda != null); return ps.length ? `

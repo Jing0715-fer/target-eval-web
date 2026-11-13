@@ -169,13 +169,19 @@ function targetDigest(t: MergedTargetData): string {
     }
     if (t.oligomer.notes.length) lines.push(`寡聚态影响要点: ${t.oligomer.notes.join('；')}`)
   }
-  // v1.26：分子量增重策略（小分子量靶点）— 融入各靶点小节（不另立小节）
+  // v1.26/v1.27：分子量增重策略（小分子量靶点）— 融入各靶点小节（不另立小节）
   if (t.mwAugment?.applicable) {
     const mw = t.mwAugment
     const mwAdj = t.scores.mwAugmentAdjust
-    lines.push(`分子量: 单体 ~${mw.monomerKda} kDa${mw.assemblyKda != null ? ` → 装配 ~${mw.assemblyKda} kDa（${mw.assemblyPath === 'complex' ? '已有复合物结构' : mw.assemblyPath === 'oligomer' ? '自身寡聚' : '互作伙伴推断'}）` : '（无生物装配增重路径）'}`)
+    const pathZh = mw.assemblyPath === 'complex' ? '已有复合物结构' : mw.assemblyPath === 'oligomer' ? '自身寡聚' : mw.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST，需实验验证）' : '互作伙伴推断'
+    lines.push(`分子量: 单体 ~${mw.monomerKda} kDa${mw.assemblyKda != null ? ` → 装配 ~${mw.assemblyKda} kDa（${pathZh}）` : '（无生物装配增重路径）'}`)
+    if (mw.homologSearchNote) lines.push(`同源扩展检索: ${mw.homologSearchNote}`)
     if (mw.complexes.length) {
       lines.push(`已有复合物结构（组分总分子量）: ${mw.complexes.map(c => `${c.pdbId} = ${c.components.length} 组分合计 ~${c.totalKda} kDa（${c.basis === 'assembly' ? '生物装配口径' : '去重实体口径'}）`).join('；')}`)
+    }
+    const homologs = mw.homologComplexes ?? []
+    if (homologs.length) {
+      lines.push(`同源结构形成的大复合物（BLAST 扩展检索，同源亚基按靶点换算）: ${homologs.map(h => `${h.pdbId}（identity ${Math.round(h.identity)}%）同源装配 ~${h.totalKda} kDa → 靶点换算 ~${h.estimatedKda} kDa`).join('；')}`)
     }
     if (mwAdj) lines.push(`分子量维度评分调整（已计入 Cryo-EM 分数）: ${mwAdj.cryoem > 0 ? '+' : ''}${mwAdj.cryoem} — ${mwAdj.note}`)
     if (mw.conflicts.length) {
@@ -534,7 +540,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         </div>
         <p class="oligo-summary">${esc(o.summary)}</p>
         ${t.scores.oligomerAdjust ? `<p class="oligo-summary" style="font-size:12px">评分调整：X-ray ${t.scores.oligomerAdjust.xray > 0 ? '+' : ''}${t.scores.oligomerAdjust.xray} / Cryo-EM ${t.scores.oligomerAdjust.cryoem > 0 ? '+' : ''}${t.scores.oligomerAdjust.cryoem} / NMR ${t.scores.oligomerAdjust.nmr > 0 ? '+' : ''}${t.scores.oligomerAdjust.nmr} — ${esc(t.scores.oligomerAdjust.note)}</p>` : ''}
-        ${t.mwAugment?.applicable ? `<p class="oligo-summary" style="font-size:12px">分子量增重：单体 ~${t.mwAugment.monomerKda} kDa${t.mwAugment.assemblyKda != null ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa（${t.mwAugment.assemblyPath === 'complex' ? '已有复合物结构' : t.mwAugment.assemblyPath === 'oligomer' ? '自身寡聚' : '互作伙伴推断'}）` : '（无生物装配路径）'}${t.scores.mwAugmentAdjust ? `；Cryo-EM 调整 ${t.scores.mwAugmentAdjust.cryoem > 0 ? '+' : ''}${t.scores.mwAugmentAdjust.cryoem} — ${esc(t.scores.mwAugmentAdjust.note)}` : ''}</p>` : ''}
+        ${t.mwAugment?.applicable ? `<p class="oligo-summary" style="font-size:12px">分子量增重：单体 ~${t.mwAugment.monomerKda} kDa${t.mwAugment.assemblyKda != null ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa（${t.mwAugment.assemblyPath === 'complex' ? '已有复合物结构' : t.mwAugment.assemblyPath === 'oligomer' ? '自身寡聚' : t.mwAugment.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : '互作伙伴推断'}）` : '（无生物装配路径）'}${t.scores.mwAugmentAdjust ? `；Cryo-EM 调整 ${t.scores.mwAugmentAdjust.cryoem > 0 ? '+' : ''}${t.scores.mwAugmentAdjust.cryoem} — ${esc(t.scores.mwAugmentAdjust.note)}` : ''}${(t.mwAugment.homologComplexes ?? []).length ? `<br>同源复合物：${(t.mwAugment.homologComplexes ?? []).map(h => `${h.pdbId}（identity ${Math.round(h.identity)}%，靶点换算 ~${h.estimatedKda} kDa）`).join('、')}` : (t.mwAugment.homologSearchNote ? `<br>${esc(t.mwAugment.homologSearchNote)}` : '')}</p>` : ''}
         ${o.evidence.length ? `<div class="oligo-ev">${o.evidence.map(e => `<div class="oligo-ev-line"><span class="oligo-ev-src">${esc(describeEvidenceSource(e.source))}</span><span class="oligo-ev-ref">${esc(e.ref)}</span><span class="oligo-ev-text">${esc(e.text)}</span></div>`).join('')}</div>` : ''}
       </div>`
       }).join('')}

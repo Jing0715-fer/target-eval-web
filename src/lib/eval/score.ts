@@ -16,6 +16,9 @@
  *    · 装配 50-100 kDa → 0（边缘区间，需 VPP/优化条件）
  *    · 装配 <50 kDa → -1（颗粒对齐困难，需技术增重）
  *    · 无生物装配路径 → 技术增重可行 0 / 与目的冲突 -1
+ *  - v1.27：同源复合物扩展路径（homolog-complex）— 单体小且直接路径装配
+ *    不足 50 kDa 时，BLAST 同源命中结构形成的大复合物按靶点单体换算后
+ *    接管 Cryo-EM 计分（identity ≥40% 与直接路径同权；<40% 远缘不加分）
  */
 import type { MethodStats, MwAugmentAdjustInfo, MwAugmentAnalysis, OligomerAdjustInfo, OligomerAnalysis, PdbEntry, Scores, UniprotFeature, BlastHit } from './types'
 
@@ -55,28 +58,49 @@ export interface ScoreResult extends Scores {
 }
 
 /**
- * v1.26：分子量增重策略对评分的调整（小分子量靶点维度）。
+ * v1.26/v1.27：分子量增重策略对评分的调整（小分子量靶点维度）。
  * 当前仅 Cryo-EM 有非零调整：装配/复合物有效分子量决定颗粒可成像性。
  * X-ray（分子量非结晶瓶颈，伴侣策略属战术层面）与 NMR（增重无益，
  * 装配超范围已由聚集形式维度扣分）均不调整。
+ *
+ * v1.27 同源复合物路径（homolog-complex）：装配 MW 为同源推断 —
+ *  - 换算装配 ≥100 kDa 且 identity ≥40%：+1（寡聚界面在同一家族内常保守）
+ *  - 换算装配 ≥100 kDa 但 identity <40%（远缘）：0（界面保守性弱，按边缘证据处理）
+ *  - 换算装配 50-100 kDa：0（边缘区间，与直接路径同口径 — 需 VPP/优化条件）
  */
 export function computeMwAugmentAdjust(
   mw: MwAugmentAnalysis | null | undefined,
 ): MwAugmentAdjustInfo | null {
   if (!mw || !mw.applicable) return null
   const assemblyKda = mw.assemblyKda
+  const isHomolog = mw.assemblyPath === 'homolog-complex'
+  const homologIdentity = mw.homologComplexes?.[0] != null ? Math.round(mw.homologComplexes[0].identity) : null
   const hasConflict = mw.conflicts.some(c => c.level === 'conflict')
   let cryoem = 0
   let note = ''
   if (assemblyKda != null && assemblyKda >= 100) {
-    cryoem = 1
-    note = `装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间${mw.assemblyPath === 'complex' ? '（已有复合物结构先例）' : mw.assemblyPath === 'partner' ? '（互作伙伴推断，无结构先例，组装需验证）' : '（自身寡聚装配）'}`
+    if (isHomolog) {
+      if (homologIdentity != null && homologIdentity >= 40) {
+        cryoem = 1
+        note = `同源复合物推断（identity ${homologIdentity}%）：装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间；寡聚界面在同一家族内常保守，但靶点能否形成同等装配需 SEC-MALS/共表达验证`
+      } else {
+        cryoem = 0
+        note = `同源复合物推断（identity ${homologIdentity ?? '—'}%，远缘）：换算装配 ~${assemblyKda} kDa — 同源互作界面保守性较弱，按边缘证据评估（不加分）；组装验证与互作确认前置`
+      }
+    } else {
+      cryoem = 1
+      note = `装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间${mw.assemblyPath === 'complex' ? '（已有复合物结构先例）' : mw.assemblyPath === 'partner' ? '（互作伙伴推断，无结构先例，组装需验证）' : '（自身寡聚装配）'}`
+    }
   } else if (assemblyKda != null && assemblyKda >= 50) {
     cryoem = 0
-    note = `装配后 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件`
+    note = isHomolog
+      ? `同源复合物推断（identity ${homologIdentity ?? '—'}%）：换算装配 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件，且靶点组装需实验验证`
+      : `装配后 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件`
   } else if (assemblyKda != null) {
     cryoem = -1
-    note = `装配后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
+    note = isHomolog
+      ? `同源复合物换算后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
+      : `装配后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
   } else {
     cryoem = hasConflict ? -1 : 0
     note = hasConflict
@@ -86,6 +110,7 @@ export function computeMwAugmentAdjust(
   return {
     monomerKda: mw.monomerKda,
     assemblyKda,
+    assemblyPath: mw.assemblyPath,
     xray: 0,
     cryoem,
     nmr: 0,

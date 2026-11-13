@@ -325,15 +325,21 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
       ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
       : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
 
-  /** v1.26：分子量增重策略（小分子量靶点）— 融入评分卡（不单独成章） */
+  /** v1.26/v1.27：分子量增重策略（小分子量靶点）— 融入评分卡（不单独成章） */
   const mw = summary.mwAugment?.applicable ? summary.mwAugment : null
   const mwAdj = summary.scores?.mwAugmentAdjust ?? null
-  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
-  const mwBadgeCls = mw?.assemblyKda != null && mw.assemblyKda >= 100
-    ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
-    : mw?.assemblyKda != null && mw.assemblyKda >= 50
-      ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
-      : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mw?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwHomologs = mw?.homologComplexes ?? []
+  const mwIsHomologPath = mw?.assemblyPath === 'homolog-complex'
+  const mwBadgeCls = mwIsHomologPath
+    ? (mw?.assemblyKda != null && mw.assemblyKda >= 100
+        ? 'border-teal-300 bg-teal-50 text-teal-800 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-400'
+        : 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400')
+    : mw?.assemblyKda != null && mw.assemblyKda >= 100
+      ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+      : mw?.assemblyKda != null && mw.assemblyKda >= 50
+        ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+        : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
   const sizedPartners = mw?.partners.filter(p => p.kda != null) ?? []
 
   return (
@@ -543,7 +549,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   <span className="text-xs text-stone-500 dark:text-stone-400">
                     分子量
                     <b className="mx-1 font-semibold text-stone-800 dark:text-stone-200">
-                      单体 ~{mw.monomerKda} kDa{mw.assemblyKda != null ? ` → 装配 ~${mw.assemblyKda} kDa` : ''}
+                      单体 ~{mw.monomerKda} kDa{mw.assemblyKda != null ? ` → 装配 ~${mw.assemblyKda} kDa${mwIsHomologPath ? '（同源推断）' : ''}` : ''}
                     </b>
                   </span>
                   <span className="rounded-md border border-stone-200 bg-stone-50 px-2.5 py-1 font-mono text-[11px] text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300">
@@ -565,11 +571,16 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 ) : (
                   <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">{mw.zoneNote}</p>
                 )}
-                {(mw.complexes.length > 0 || sizedPartners.length > 0 || mw.conflicts.length > 0) && (
+                {mw.homologSearchNote && (
+                  <p className="rounded-md border border-teal-200/70 bg-teal-50/60 px-3 py-2 text-xs leading-6 text-teal-800 dark:border-teal-900 dark:bg-teal-950/30 dark:text-teal-300">
+                    {mw.homologSearchNote}
+                  </p>
+                )}
+                {(mw.complexes.length > 0 || mwHomologs.length > 0 || sizedPartners.length > 0 || mw.conflicts.length > 0) && (
                   <details className="group overflow-hidden rounded-lg border border-stone-200 dark:border-stone-800">
                     <summary className="flex cursor-pointer select-none items-center gap-1.5 border-b border-stone-200 bg-stone-50 px-3.5 py-2 text-[11px] font-medium text-emerald-800 list-none transition-colors hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/80 dark:text-emerald-500 dark:hover:bg-stone-800/60 [&::-webkit-details-marker]:hidden">
                       <ChevronDown className="size-3.5 shrink-0 transition-transform duration-200 group-open:rotate-180" aria-hidden />
-                      增重路径明细 · 复合物结构 {mw.complexes.length} · 互作伙伴 {sizedPartners.length} · 目的比对 {mw.conflicts.length} 条
+                      增重路径明细 · 复合物结构 {mw.complexes.length} · 同源复合物 {mwHomologs.length} · 互作伙伴 {sizedPartners.length} · 目的比对 {mw.conflicts.length} 条
                     </summary>
                     <div className="flex flex-col gap-4 px-3.5 py-3.5">
                       {mw.complexes.length > 0 && (
@@ -602,6 +613,37 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                                   ))}
                                   <b className="ml-1 text-stone-800 dark:text-stone-200">= 装配 ~{c.totalKda} kDa</b>
                                   <span className="mt-0.5 block font-mono text-[10.5px] text-stone-400 dark:text-stone-500">{c.note}</span>
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {mwHomologs.length > 0 && (
+                        <div className="flex flex-col gap-2">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">
+                            同源结构形成的大复合物（BLAST 扩展检索）— 直接装配路径不足 50 kDa 时检索；同源亚基按靶点单体换算
+                          </p>
+                          <ul className="divide-y divide-stone-100 dark:divide-stone-800/60">
+                            {mwHomologs.map(h => (
+                              <li key={h.pdbId} className="flex flex-col gap-1 py-2.5 sm:flex-row sm:items-baseline sm:gap-3">
+                                <a
+                                  href={`https://www.rcsb.org/structure/${h.pdbId}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="w-20 shrink-0 font-mono text-[11px] font-semibold text-teal-700 hover:underline dark:text-teal-400"
+                                >
+                                  {h.pdbId}
+                                </a>
+                                <span className="w-14 shrink-0 font-mono text-[11px] font-bold text-teal-700 dark:text-teal-400">
+                                  {Math.round(h.identity)}%
+                                </span>
+                                <span className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">
+                                  {h.componentSummary}
+                                  <b className="ml-1 text-stone-800 dark:text-stone-200">
+                                    = 同源装配 ~{h.totalKda} kDa → 靶点换算 ~{h.estimatedKda} kDa
+                                  </b>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-stone-400 dark:text-stone-500">{h.note}</span>
                                 </span>
                               </li>
                             ))}

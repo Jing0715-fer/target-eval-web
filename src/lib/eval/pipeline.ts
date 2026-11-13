@@ -529,19 +529,21 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   })
   log(`聚集形式分析：${oligomer.summary}（证据 ${oligomer.evidence.length} 条，置信度${oligomer.confidence === 'high' ? '高' : oligomer.confidence === 'medium' ? '中' : '低'}）`)
 
-  // v1.26：分子量增重策略（小分子量靶点）— UniProt 伙伴长度 + RCSB 复合物装配 + 冲突分析
+  // v1.26/v1.27：分子量增重策略（小分子量靶点）— UniProt 伙伴长度 + RCSB 复合物装配
+  // + 冲突分析；直接路径装配不足 50 kDa 时经 BLAST 同源命中扩展检索大复合物（v1.27）
   report('score', '分析分子量与增重策略（小分子量靶点）…', 0.4)
   const mwAugment: MwAugmentAnalysis = await analyzeMwAugmentation({
     uniprot: uniprotInfo,
     sequenceLength: uniprotInfo?.sequenceLength ?? sequence.length,
     oligomer,
     directPdbs,
+    blastHits,
     goal: goal || undefined,
     goalHints,
     signal,
   })
   log(mwAugment.applicable
-    ? `分子量增重分析：单体 ~${mwAugment.monomerKda} kDa${mwAugment.assemblyKda != null ? ` → 装配 ~${mwAugment.assemblyKda} kDa（${mwAugment.assemblyPath}；复合物结构 ${mwAugment.complexes.length} 个；伙伴 ${mwAugment.partners.filter(p => p.kda != null).length} 个）` : '，无装配增重路径'}（冲突分析 ${mwAugment.conflicts.length} 条）`
+    ? `分子量增重分析：单体 ~${mwAugment.monomerKda} kDa${mwAugment.assemblyKda != null ? ` → 装配 ~${mwAugment.assemblyKda} kDa（${mwAugment.assemblyPath}；复合物结构 ${mwAugment.complexes.length} 个；同源复合物 ${(mwAugment.homologComplexes ?? []).length} 个；伙伴 ${mwAugment.partners.filter(p => p.kda != null).length} 个）` : '，无装配增重路径'}（冲突分析 ${mwAugment.conflicts.length} 条）`
     : `分子量增重分析：不适用（单体 ~${mwAugment.monomerKda} kDa ≥ 50 kDa）`)
 
   report('score', '计算可行性评分…', 0.5)
