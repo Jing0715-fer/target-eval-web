@@ -217,9 +217,9 @@ scripts/                         # BLAST 队列诊断 / 同源算法回归等运
    }
    ```
    未接代理时直连请求同属 `direct` 归属组（本地调试用；公网必须接代理隔离用户）
-2. **网关超时**：所有请求均为短请求（分块上传 / 后台解析 / 异步报告），<60s 超时的网关无需特殊配置
+2. **网关超时（v2.6 可续跑分段评估）**：无状态网关 ~90s 切断长连接时，前端自动走分段续跑 — 每段 POST ≤55s 预算（`EVAL_SYNC_SEGMENT_MS` 可调），到点服务端交还 checkpoint 快照，前端立即携快照续跑直至终态（BLAST RID 跨段轮询 / PDB·配体·LLM 报告增量续跑）；分块上传 / 后台解析 / 异步报告本身均为短请求
 3. **数据与备份**：`db/custom.db` 与 `db/reports/` 含用户数据；终态记录 7 天自动清理
-4. **配额环境变量**：`EVAL_MAX_QUEUE`(8) · `EVAL_MAX_ACTIVE_PER_IP`(2) · `EVAL_MAX_JOBS_PER_DAY`(30) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_JOB_CONCURRENCY`(2) · `EVAL_JOB_TTL_DAYS`(7)
+4. **配额环境变量**：`EVAL_MAX_QUEUE`(8) · `EVAL_MAX_ACTIVE_PER_IP`(2) · `EVAL_MAX_JOBS_PER_DAY`(30) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_JOB_CONCURRENCY`(2) · `EVAL_JOB_TTL_DAYS`(7) · `EVAL_SYNC_SEGMENT_MS`(55000，分段评估单段预算)
 5. 外部 LLM API Key 明文存本地 SQLite，面向内网 / 单机沙箱设计；不可信人群公网开放前建议改用内置引擎或为配置面板加访问控制
 
 ## 版本演进
