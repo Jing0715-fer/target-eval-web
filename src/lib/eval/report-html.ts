@@ -563,7 +563,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
         const sub = best
           ? `${best.componentsWithStructure}/${best.components.length - 1} 组分有结构${best.assemblyKda != null ? ` · 装配 ~${best.assemblyKda} kDa` : ''}`
           : `${ctx.interaction!.binaryPartners.length} 个伙伴有结构`
-        return `<div class="glance-tile"><div class="gt-label">互作复合物</div><div class="gt-value">${esc(val)}</div><div class="gt-sub">${esc(sub)}${itxAdjLevel(ctx) === 'curated' ? ' · Complex Portal' : ' · IntAct'}</div></div>`
+        return `<div class="glance-tile"><div class="gt-label">互作复合物</div><div class="gt-value">${esc(val)}</div><div class="gt-sub">${esc(sub)} · ${best ? 'Complex Portal' : 'IntAct'}</div></div>`
       })()
     : ''
 
