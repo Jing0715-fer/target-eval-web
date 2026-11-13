@@ -276,6 +276,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const assets = job.assets ?? []
   const ms = summary.methodStats
   const blastInfo = summary.blast ?? null
+  const ligands = summary.ligands ?? []
   const reportMd = job.reportMarkdown?.trim() || null
   const reportLlmFailed = summary.reportLlmOk === false
   const reportDeferred = summary.reportDeferred === true
@@ -292,6 +293,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const reportNo = nextNo()
   const assetsNo = assets.length > 0 ? nextNo() : null
   const pdbNo = nextNo()
+  const ligandNo = ligands.length > 0 ? nextNo() : null
   const blastNo = nextNo()
   const litNo = literature.length > 0 ? nextNo() : null
 
@@ -665,6 +667,79 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         <SectionHeader no={pdbNo} title="PDB 结构清单" en="Structures" count={`${pdbs.length} 个`} />
         <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} />
       </motion.section>
+
+      {/* 7.5 配体研究数据（v2.0：非标准输入归一 + 含该配体结构） */}
+      {ligands.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.28, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+        >
+          <div id="sec-ligands">
+            <SectionHeader
+              no={ligandNo!}
+              title="配体研究数据"
+              en="Ligand Research"
+              count={`${ligands.filter(l => l.ok).length}/${ligands.length} 识别`}
+            />
+          </div>
+          <div className="grid gap-3.5 md:grid-cols-2">
+            {ligands.map(l => l.ok ? (
+              <Card key={`${l.raw}-ok`} className="gap-0 overflow-hidden rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
+                <CardContent className="flex flex-col gap-3 px-4.5 py-4">
+                  <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+                    <span className="inline-flex min-h-7 items-center rounded-md border border-emerald-200 bg-emerald-50 px-2.5 font-mono text-sm font-bold tracking-wide text-emerald-800 dark:border-emerald-900/70 dark:bg-emerald-950/40 dark:text-emerald-400">{l.compId}</span>
+                    <span className="min-w-0 flex-1 text-sm font-semibold text-stone-800 dark:text-stone-200">{l.name || l.raw}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
+                    <span>分子式 <b className="font-mono text-stone-700 dark:text-stone-300">{l.formula || '—'}</b></span>
+                    {l.weight != null && <span>MW <b className="font-mono text-stone-700 dark:text-stone-300">{l.weight.toFixed(1)}</b></span>}
+                    <span>含该配体结构 <b className="font-mono text-stone-700 dark:text-stone-300">{l.totalStructures}</b> 个</span>
+                  </div>
+                  {l.structures.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {l.structures.slice(0, 12).map(s => (
+                        <a
+                          key={s.pdbId}
+                          href={`https://www.rcsb.org/structure/${s.pdbId}`}
+                          target="_blank"
+                          rel="noopener"
+                          title={`${s.title}${s.resolution != null ? ` · ${s.resolution}Å` : ''}${s.method ? ` · ${s.method}` : ''}${s.alsoTarget ? ' · 本靶点直接结构' : ''}`}
+                          className={cn(
+                            'inline-flex min-h-7 items-center rounded-md border px-2 font-mono text-[11px] font-semibold transition-colors',
+                            s.alsoTarget
+                              ? 'border-emerald-300 bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400'
+                              : 'border-stone-200 bg-stone-50 text-stone-700 hover:border-emerald-300 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400',
+                          )}
+                        >
+                          {s.pdbId}{s.resolution != null && <span className="ml-1.5 font-normal text-stone-400 dark:text-stone-500">{s.resolution.toFixed(1)}</span>}
+                          {s.alsoTarget && <span className="ml-1 text-emerald-700 dark:text-emerald-500">★</span>}
+                        </a>
+                      ))}
+                      {l.totalStructures > 12 && (
+                        <span className="inline-flex min-h-7 items-center px-1 font-mono text-[11px] text-stone-400 dark:text-stone-500">+{l.totalStructures - 12}</span>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-stone-400 dark:text-stone-500">暂无含该配体的 PDB 结构记录</p>
+                  )}
+                  <p className="border-t border-dashed border-stone-200 pt-2.5 font-mono text-[10px] tracking-wide text-stone-400 dark:border-stone-800 dark:text-stone-500">
+                    输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card key={`${l.raw}-fail`} className="gap-0 rounded-lg border-dashed border-amber-300 bg-amber-50/40 shadow-none dark:border-amber-800 dark:bg-amber-950/20">
+                <CardContent className="flex flex-col gap-1.5 px-4.5 py-4">
+                  <div className="text-sm font-semibold text-stone-800 dark:text-stone-200">{l.raw.length > 44 ? l.raw.slice(0, 43) + '…' : l.raw}</div>
+                  <p className="text-xs text-amber-700 dark:text-amber-400">未能归一到 PDB 化学组分 — {l.error ?? '未知原因'}</p>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </motion.section>
+      )}
 
       {/* 8. BLAST 同源表（0 命中/跳过/失败时展示状态说明，不再凭空消失） */}
       <motion.section

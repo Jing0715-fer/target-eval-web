@@ -113,6 +113,18 @@ function shortLigand(l: string, nameMax = 22): string {
   return name.length > nameMax ? `${id} (${name.slice(0, nameMax - 1)}…)` : `${id} (${name})`
 }
 
+/** 配体归一策略 → 中文短标签 */
+function strategyZh(s: string): string {
+  switch (s) {
+    case 'direct-id': return '直接ID'
+    case 'alias': return '别名表'
+    case 'pdb-search': return 'PDBe检索'
+    case 'llm': return 'AI'
+    case 'llm+pdb-search': return 'AI+检索'
+    default: return s || '—'
+  }
+}
+
 /** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题） */
 function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, LiteratureItem>): string {
   return pdbs.slice(0, max).map(p => {
@@ -272,6 +284,14 @@ export interface ReportRenderInput {
   /** 分析引擎摘要（如 “Z.ai GLM-4.6（内置）” / “OpenAI · gpt-4o”） */
   engineSummary: string
   /** 图片文件路径解析（由 pipeline 提供，图片存于 db/reports/{id}/assets/） */
+  /** v2.0：AlphaFold 预测结构图（base64 data URI + 元数据；报告头右侧展示） */
+  alphafoldFigure?: {
+    dataUri: string
+    modelId: string
+    globalPlddt: number | null
+    version: number
+    fracVeryHigh: number | null
+  }
   resolveImagePath: (meta: ParsedImage) => string
 }
 
@@ -319,6 +339,41 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   // v1.7+：BLAST 章节在 0 命中/跳过/失败时也渲染状态说明（不再凭空消失）
   const blastRan = ctx.blastStatus && (ctx.blastStatus.status === 'ok' || ctx.blastStatus.status === 'no-hits')
   const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus)
+  const ligNo = (ctx.ligands?.length ?? 0) > 0 ? ++secNo : 0
+  const ligandSecHtml = (ctx.ligands?.length ?? 0) > 0 ? `
+  <section class="sec" id="ligands">
+    <h2>${cnNums[ligNo - 1]}、配体研究数据<span class="sec-en">Ligands · ${ctx.ligands!.filter(l => l.ok).length}/${ctx.ligands!.length}</span></h2>
+    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / AI 兜底）映射为 RCSB 三位化学组分 ID；结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为本靶点直接结构的条目。</p>
+    <div class="lig-grid">
+    ${ctx.ligands!.map(l => {
+      if (!l.ok) return `
+      <div class="lig-card lig-fail">
+        <div class="lig-head"><span class="lig-id lig-id-fail">?</span><span class="lig-name">${esc(l.raw.length > 40 ? l.raw.slice(0, 39) + '…' : l.raw)}</span></div>
+        <div class="lig-meta"><span>未能归一 — ${esc(l.error ?? '未知原因')}</span></div>
+      </div>`
+      const best = l.structures.find(s => s.resolution != null)?.resolution
+      const chips = l.structures.slice(0, 12).map(s =>
+        `<a class="${s.alsoTarget ? 'lig-also' : ''}" href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener" title="${esc(s.title)}${s.resolution != null ? ` · ${s.resolution}Å` : ''}${s.method ? ` · ${s.method}` : ''}${s.alsoTarget ? ' · 本靶点直接结构' : ''}">${s.pdbId}${s.resolution != null ? ` <i>${s.resolution.toFixed(1)}</i>` : ''}</a>`,
+      ).join('')
+      return `
+      <div class="lig-card">
+        <div class="lig-head">
+          <span class="lig-id">${esc(l.compId)}</span>
+          <span class="lig-name">${esc(l.name || l.raw)}</span>
+          <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(strategyZh(l.strategy))}${l.source === 'eval-table' ? ' · 评估表' : l.source === 'file' ? ' · 文件' : ''}</span>
+        </div>
+        <div class="lig-meta">
+          <span>分子式 <b>${esc(l.formula || '—')}</b></span>
+          ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
+          <span>含该配体结构 <b>${l.totalStructures}</b> 个</span>
+          ${best != null ? `<span>最佳分辨率 <b>${best.toFixed(2)} Å</b></span>` : ''}
+        </div>
+        ${l.structures.length ? `
+        <div class="lig-pdbs">${chips}${l.totalStructures > 12 ? `<span class="lig-more">+${l.totalStructures - 12}</span>` : ''}</div>` : `<div class="lig-pdbs lig-none">暂无含该配体的 PDB 结构记录</div>`}
+      </div>`
+    }).join('')}
+    </div>
+  </section>` : ''
   const blastNo = showBlastSec ? ++secNo : 0
   const litNo = ctx.literature.length ? ++secNo : 0
   const assetsNo = embedded.length ? ++secNo : 0
@@ -403,22 +458,31 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
 
   const pdbCountHtml = `${ctx.directPdbs.length}${input.totalPdbFound > ctx.directPdbs.length ? ` / 检索命中 ${input.totalPdbFound}` : ''}`
 
+  const afFigureHtml = input.alphafoldFigure ? `
+      <figure class="af-fig">
+        <img src="${input.alphafoldFigure.dataUri}" alt="AlphaFold 预测结构（pLDDT 着色）">
+        <figcaption><b>AlphaFold 预测结构</b> · pLDDT 着色<br>${esc(input.alphafoldFigure.modelId)} · v${input.alphafoldFigure.version} · 平均 pLDDT ${input.alphafoldFigure.globalPlddt ?? '—'}<br><a href="https://alphafold.ebi.ac.uk/entry/${u ? u.uniprotId : ''}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+      </figure>` : ''
+
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <title>靶点结构解析可行性评估报告 — ${esc(proteinTitle)}</title>
 <style>
   :root {
     --ink:#1c1917; --sub:#57534e; --faint:#a8a29e; --line:#e7e5e4; --hairline:#efedeb;
     --accent:#065f46; --accent-2:#047857; --accent-bg:#f0fdf7; --bg:#fcfcfb; --paper:#ffffff;
-    --serif:Georgia,"Times New Roman","Songti SC","Noto Serif SC","SimSun","STSong",serif;
-    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Courier New",monospace;
+    --serif:"Source Serif 4","Noto Serif SC",Georgia,"Songti SC","STSong","SimSun","Times New Roman",serif;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,"Courier New",monospace;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   html { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  body { font-family:var(--serif); color:var(--ink); background:var(--bg); line-height:1.85; font-size:14.5px; }
+  body { font-family:var(--serif); color:var(--ink); background:var(--bg); line-height:1.92; font-size:15px; letter-spacing:.006em; }
   .mono { font-family:var(--mono); }
   ::-webkit-scrollbar{width:10px;height:10px}
   ::-webkit-scrollbar-thumb{background:#d6d3d1;border-radius:99px;border:3px solid var(--paper)}
@@ -437,7 +501,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .rpt-head { padding-bottom:22px; margin-bottom:30px; border-bottom:1px solid var(--ink); position:relative; }
   .rpt-head::after { content:''; display:block; position:absolute; left:0; bottom:3px; width:100%; border-bottom:3px solid var(--ink); }
   .rpt-eyebrow { font-family:var(--mono); color:var(--accent); font-weight:600; font-size:10.5px; letter-spacing:2.4px; text-transform:uppercase; margin-bottom:14px; }
-  h1.rpt-title { font-size:27px; line-height:1.4; margin-bottom:6px; font-weight:700; }
+  h1.rpt-title { font-size:28px; line-height:1.4; margin-bottom:6px; font-weight:900; }
   .rpt-subtitle { font-size:13px; color:var(--sub); font-style:italic; margin-bottom:18px; }
   .meta-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:9px 22px; font-size:12.5px; color:var(--sub); }
   .meta-grid b { color:var(--ink); font-weight:600; margin-right:2px; }
@@ -578,6 +642,35 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .fig-group { margin:18px 0 4px !important; font-size:14.5px !important; color:#064e3b; display:flex; align-items:baseline; gap:8px; }
   .fig-group-count { font-family:var(--mono); font-size:10.5px; font-weight:500; color:var(--faint); letter-spacing:1px; }
 
+  /* ── 报告头图与元信息并排（v2.0 AlphaFold）── */
+  .rpt-headflex { display:flex; gap:28px; align-items:flex-start; }
+  .rpt-headflex .meta-grid { flex:1 1 auto; }
+  .af-fig { flex:0 0 300px; margin:0; text-align:center; align-self:flex-start; }
+  .af-fig img { display:block; width:300px; max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; padding:6px; box-shadow:0 1px 3px rgba(28,25,23,.06); }
+  .af-fig figcaption { margin-top:9px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
+  .af-fig figcaption b { color:var(--ink); font-weight:600; }
+  .af-fig figcaption a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
+  @media (max-width:720px){ .rpt-headflex{flex-direction:column} .af-fig{flex-basis:auto; width:100%; max-width:380px; margin:4px auto 0} }
+
+  /* ── 配体卡（v2.0）── */
+  .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:14px; margin-top:8px; }
+  .lig-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:14px 18px; break-inside:avoid; }
+  .lig-fail { border-style:dashed; opacity:.78; }
+  .lig-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
+  .lig-id { font-family:var(--mono); font-size:14.5px; font-weight:700; color:#065f46; background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; }
+  .lig-id-fail { color:#92400e; background:#fffbeb; border-color:#fde68a; }
+  .lig-name { font-size:13px; font-weight:600; color:var(--ink); overflow-wrap:anywhere; min-width:120px; }
+  .lig-src { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--faint); letter-spacing:.4px; }
+  .lig-meta { display:flex; flex-wrap:wrap; gap:4px 16px; margin-top:9px; font-size:11.5px; color:var(--sub); }
+  .lig-meta b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .lig-pdbs { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; padding-top:10px; border-top:1px dashed var(--hairline); }
+  .lig-pdbs a { font-family:var(--mono); font-size:10.5px; font-weight:600; color:var(--accent); background:var(--accent-bg); border:1px solid #c7ece0; border-radius:3px; padding:1px 8px; text-decoration:none; white-space:nowrap; }
+  .lig-pdbs a i { font-style:normal; color:var(--faint); font-weight:400; margin-left:3px; }
+  .lig-pdbs a.lig-also { background:#e0faf1; border-color:#71cdb2; color:#04503c; }
+  .lig-pdbs a:hover { background:#d9f5e8; }
+  .lig-more { align-self:center; font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  .lig-none { font-size:12px; color:var(--faint); border-top:1px dashed var(--hairline); margin-top:10px; padding-top:8px; }
+
   /* ── 页脚 ── */
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:var(--mono); }
   .warn-box { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:4px; padding:12px 16px; font-size:12.5px; margin:14px 0; }
@@ -590,6 +683,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     <div class="rpt-eyebrow">TargetEval · Structure Feasibility Report</div>
     <h1 class="rpt-title">${esc(proteinTitle)}</h1>
     <div class="rpt-subtitle">蛋白靶点结构解析可行性评估报告</div>
+    <div class="rpt-headflex">
     <div class="meta-grid">
       <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : '—（序列直接输入）'}</div>
       <div><b>蛋白名称</b> ${esc(u?.proteinName ?? '—')}</div>
@@ -607,6 +701,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
       <div><b>报告日期</b> ${dateStr}</div>
     </div>
+    ${afFigureHtml}
+    </div>
     <div class="rpt-badges">
       <span class="badge">综合评分 ${ctx.scores.overall.score}/10 · ${esc(ctx.scores.overall.rating)}</span>
       <span class="badge">数据源：UniProt · RCSB · PDBe${blastRan ? (ctx.blastStatus?.provider === 'rcsb' ? ' · RCSB 序列检索' : ' · BLAST') : ''}${ctx.literature.length ? ' · PubMed' : ''}</span>
@@ -621,6 +717,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       ${ctx.insights ? '<li><a href="#insights">客户评估表要点</a></li>' : ''}
       <li><a href="#scores">可行性评分（含聚集形式调整）</a></li>
       <li><a href="#pdbs">PDB 结构清单</a></li>
+      ${ligandSecHtml ? '<li><a href="#ligands">配体研究数据</a></li>' : ''}
       ${showBlastSec ? '<li><a href="#blast">BLAST 同源结构</a></li>' : ''}
       ${ctx.literature.length ? '<li><a href="#literature">关键文献</a></li>' : ''}
       ${embedded.length ? '<li><a href="#assets">客户实验数据（评估表）</a></li>' : ''}
@@ -664,6 +761,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : ''))
     : '<p>该靶点（或该 UniProt）暂无直接关联的 PDB 结构。同源结构请见 BLAST 章节。</p>'}
   </section>
+
+  ${ligandSecHtml}
 
   ${showBlastSec ? `
   <section class="sec" id="blast">

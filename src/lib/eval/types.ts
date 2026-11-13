@@ -3,6 +3,8 @@
  * 与前端 src/components/eval/types.ts 契约保持一致。
  */
 
+import type { LigandResolution } from './ligand'
+
 export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'canceled'
 export type InputMode = 'uniprot' | 'sequence' | 'docx'
 export type AssetKind = 'gel' | 'sec' | 'other'
@@ -310,11 +312,32 @@ export interface JobSummary {
   /** 聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
+  /** v2.0：配体归一与研究数据（用户输入/上传文件/评估表识别 → RCSB 三位 ID + 含该配体结构列表） */
+  ligands?: LigandResolution[]
+  /** v2.0：AlphaFold 预测结构信息（报告头图来源；无预测/渲染失败时 available=false） */
+  alphafold?: AlphafoldSummaryInfo
   reportLlmOk?: boolean
   /** 报告已延迟：本靶点不生成独立报告，数据并入合并评估报告（v1.8+ 关联靶点批量） */
   reportDeferred?: boolean
   /** 批次关系说明（v1.8+ 非关联批量时 LLM 在报告中说明独立/复合物定位） */
   batchNote?: string
+}
+
+// ─── AlphaFold 预测结构（v2.0 报告头图）────────────────────────────
+
+/** 作业摘要中的 AlphaFold 信息（图片本体以 base64 嵌入 HTML 报告，摘要只存元数据） */
+export interface AlphafoldSummaryInfo {
+  available: boolean
+  /** 模型标识（如 AF-P00533-F1） */
+  modelId?: string
+  /** 平均 pLDDT（0-100） */
+  globalPlddt?: number | null
+  /** 模型版本 */
+  version?: number
+  /** pLDDT ≥90 区段占比（0-1） */
+  fracVeryHigh?: number | null
+  /** 渲染失败/无预测原因（available=false 时） */
+  note?: string
 }
 
 // ─── 靶点关系判断（v1.8 批量评估；v1.10 增 homologous）────────────
@@ -453,6 +476,8 @@ export interface FormInsights {
   /** 风险与关注点 */
   keyConcerns?: string[]
   /** 解析来源：llm = 大模型提取；regex = 规则兜底 */
+  /** v2.0：文档中提及的配体/化合物（中英文名均可，最多 8 条 — 供配体归一管线消费） */
+  ligands?: string[]
   source: 'llm' | 'regex'
 }
 

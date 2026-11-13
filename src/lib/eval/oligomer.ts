@@ -94,6 +94,8 @@ export interface OligomerEvidence {
 }
 
 export interface OligomerAnalysis {
+  /** v1.25：判定标签 (v1.25) */
+  label?: string
   /** 聚集形式判定汇总（一句话，报告/评分引用），如 "同源二聚体（homodimer）" */
   summary: string
   category: OligomerCategory

@@ -47,6 +47,8 @@ export interface EvaluateRequest {
   batchNote?: string
   /** ≥90% 高一致同源组委托（v1.11）：组内首个提交 BLAST 的作业为代表，其余共享结果 */
   homologBlast?: BlastGroup
+  /** v2.0：配体输入（名称/分子式/三位 ID / 上传文件提取线索，≤8 条） */
+  ligands?: Array<{ raw: string; source?: 'text' | 'file' | 'eval-table'; fileName?: string }>
   options: EvaluateOptions
 }
 
@@ -386,6 +388,10 @@ export interface JobSummary {
   /** 聚集形式（寡聚态）分析（v1.24+；历史作业缺省） */
   oligomer?: OligomerAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
+  /** v2.0：配体归一与研究数据（输入/评估表识别 → 三位 ID + 含该配体结构） */
+  ligands?: LigandResolution[]
+  /** v2.0：AlphaFold 预测信息（报告头图元数据） */
+  alphafold?: AlphafoldSummaryInfo
   reportLlmOk?: boolean
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */
   reportDeferred?: boolean
@@ -409,6 +415,46 @@ export interface PdbEntry {
   isNmr: boolean
   /** 该结构覆盖的 UniProt 残基编号范围（如 "A=695-1022"；旧记录无此字段） */
   chainRanges?: string
+}
+
+// ─── 配体研究数据（v2.0；与后端 lib/eval/ligand.ts 契约一致）──────────────────
+
+export interface LigandStructureLite {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  releaseDate: string
+  /** 同时是本靶点的直接结构（RCSB UniProt 检索交集） */
+  alsoTarget: boolean
+}
+
+export interface LigandResolution {
+  raw: string
+  source: 'text' | 'file' | 'eval-table'
+  fileName?: string
+  ok: boolean
+  compId: string
+  name: string
+  formula: string
+  weight: number | null
+  /** 归一策略（direct-id / alias / pdb-search / llm / llm+pdb-search） */
+  strategy: string
+  error?: string
+  /** 含该配体的结构总数 */
+  totalStructures: number
+  /** 展示用结构列表（≤12，按分辨率升序） */
+  structures: LigandStructureLite[]
+}
+
+export interface AlphafoldSummaryInfo {
+  available: boolean
+  modelId?: string
+  /** 平均 pLDDT（0-100） */
+  globalPlddt?: number | null
+  version?: number
+  fracVeryHigh?: number | null
+  note?: string
 }
 
 // ─── 共有结构（多靶点交集）──────────────────────────────────────────────────────

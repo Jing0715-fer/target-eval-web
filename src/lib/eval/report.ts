@@ -8,6 +8,8 @@
  */
 import type { BlastHit, BlastStatusInfo, FormInsights, LiteratureItem, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
+import type { AlphafoldSummaryInfo } from './types'
+import type { LigandResolution } from './ligand'
 import { describeBlastStatus } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { llmChat } from './llm'
@@ -38,6 +40,10 @@ export interface ReportContext {
   scores: Scores & { rationale: { xray: string; cryoem: string; nmr: string; overall: string } }
   /** v1.24：聚集形式（寡聚态）分析（oligomer.ts 产出） */
   oligomer?: OligomerAnalysis
+  /** v2.0：配体归一结果（用户输入/上传文件/评估表识别；LLM 消费） */
+  ligands?: LigandResolution[]
+  /** v2.0：AlphaFold 预测信息（报告头图元数据） */
+  alphafold?: AlphafoldSummaryInfo
 }
 
 const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目负责人视角），为蛋白靶点撰写专业的结构解析可行性评估报告。写作要求：
@@ -187,6 +193,25 @@ function buildDigest(ctx: ReportContext): string {
     lines.push('（该 UniProt 无直接关联 PDB 结构）')
   }
 
+  if (ctx.ligands?.length) {
+    lines.push('')
+    lines.push('【配体研究数据（非标准输入已归一到 RCSB 三位 ID）】')
+    for (const l of ctx.ligands) {
+      if (l.ok) {
+        const rep = l.structures.slice(0, 6).map(s => `${s.pdbId}${s.resolution != null ? `（${s.resolution}Å）` : ''}`).join('、')
+        const alsoTarget = l.structures.filter(s => s.alsoTarget).map(s => s.pdbId).join('、')
+        lines.push(`- ${l.raw} → ${l.compId}（${l.name}；分子式 ${l.formula || '—'}${l.weight != null ? `，MW ${l.weight}` : ''}；归一策略 ${l.strategy}）：含该配体的 PDB 结构 ${l.totalStructures} 个${rep ? `，代表结构 ${rep}` : ''}${alsoTarget ? `；其中 ${alsoTarget} 同时是本靶点的直接结构（共结晶/复合物先例）` : ''}`)
+      } else {
+        lines.push(`- ${l.raw}：未能归一到 PDB 化学组分（${l.error ?? '未知原因'}）— 如实说明，不要虚构`)
+      }
+    }
+    lines.push('（请在「已有结构研究全景」的配体态小节与实验方案建议中利用上述数据：结合含该配体结构的数量、方法与分辨率分布，评估靶点-配体复合物结构解析的先例与可行性；禁止编造未列出的 PDB ID）')
+  }
+  if (ctx.alphafold?.available) {
+    lines.push('')
+    lines.push(`【AlphaFold 预测】${ctx.alphafold.modelId ?? ''}（模型 v${ctx.alphafold.version ?? '?'}）：平均 pLDDT ${ctx.alphafold.globalPlddt ?? '—'}${ctx.alphafold.fracVeryHigh != null ? `，pLDDT ≥90 区段占 ${Math.round(ctx.alphafold.fracVeryHigh * 100)}%` : ''}`)
+    lines.push('（报告头部已附 pLDDT 着色的 AlphaFold 预测结构图；pLDDT ≥70 区段构象可信度较高，可作为构建设计与 Cryo-EM 分子量估计的参考 — 引用时须注明其为计算预测而非实验结构）')
+  }
   if (ctx.coverage) {
     lines.push('')
     lines.push(`【结构覆盖情况】序列覆盖率 ${ctx.coverage.coveragePercent}%（PDBe 映射）`)

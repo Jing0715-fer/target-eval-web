@@ -29,6 +29,8 @@ interface EvaluateBody {
   batchNote?: string
   /** ≥90% 高一致同源组委托（v1.11）：组内首个到达 BLAST 阶段的作业为代表，其余共享结果不重复检索 */
   homologBlast?: Partial<BlastGroup>
+  /** v2.0：配体输入（名称/分子式/三位 ID；上传文件提取的线索），最多 8 条 */
+  ligands?: Array<{ raw: string; source?: 'text' | 'file' | 'eval-table'; fileName?: string }>
   options?: Partial<EvaluationOptions>
 }
 
@@ -99,6 +101,17 @@ export async function POST(req: Request) {
     range,
   }
   const batchNote = body.batchNote?.trim().slice(0, 500) || undefined
+  // v2.0 配体输入消毒（去空/截断/上限 8 条）
+  const rawLigands: Array<{ raw: string; source?: 'text' | 'file' | 'eval-table'; fileName?: string }> = Array.isArray(body.ligands) ? body.ligands : []
+  const ligands = rawLigands
+    .map(l => ({
+      raw: String(l?.raw ?? '').trim().slice(0, 160),
+      source: l?.source === 'file' ? 'file' as const : l?.source === 'eval-table' ? 'eval-table' as const : 'text' as const,
+      fileName: typeof l?.fileName === 'string' ? l.fileName.slice(0, 80) : undefined,
+    }))
+    .filter(l => l.raw.length > 0)
+    .slice(0, 8)
+
 
   // v1.11 同源家族 BLAST 委托（宽松校验：字段形态不对则忽略，不影响常规评估）
   const hb = body.homologBlast
@@ -150,6 +163,7 @@ export async function POST(req: Request) {
           goal: body.goal,
           batchNote,
           homologBlast,
+          ligands,
           options,
         },
         { signal: snap.abort.signal, report, log },

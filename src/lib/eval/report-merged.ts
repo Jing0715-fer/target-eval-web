@@ -14,6 +14,7 @@ import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown } from './report-html'
 import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type OligomerAnalysis, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution, type SharedStructure } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
+import type { LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
@@ -44,6 +45,7 @@ export interface MergedTargetData {
   durationMs: number
   /** v1.24：聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
+  ligands?: LigandResolution[]
 }
 
 /** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属） */
@@ -63,6 +65,7 @@ export interface MergedTargetLite {
   literature: LiteratureItem[]
   /** v1.24：聚集形式（寡聚态）分析 */
   oligomer?: OligomerAnalysis
+  ligands?: LigandResolution[]
 }
 
 /** 轻量化：网页合并视图（v1.24 起全部携带 — PDB/BLAST/文献不再截断，全部展示） */
@@ -96,6 +99,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       scores?: Scores; methodStats?: MethodStats; coverage?: number; ligandCount?: number; literatureCount?: number
       blast?: BlastStatusInfo; construct?: ConstructInfo; durationMs?: number; coverageText?: string; gapText?: string
       oligomer?: OligomerAnalysis
+  ligands?: LigandResolution[]
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -127,6 +131,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       construct: summary.construct,
       durationMs: summary.durationMs ?? 0,
       oligomer: summary.oligomer,
+      ligands: summary.ligands,
     })
   }
   return targets
@@ -149,6 +154,14 @@ function targetDigest(t: MergedTargetData): string {
   lines.push(`评分: X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10 · 总体 ${t.scores.overall.score}/10（${t.scores.overall.rating}）`)
   const ms = t.methodStats
   lines.push(`PDB 结构: ${t.directPdbs.length} 个（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）${ms.bestResolution != null ? `，最佳 ${ms.bestResolution}Å` : ''} · 覆盖率 ${t.coveragePercent}%${t.coverageText ? `（已覆盖: ${t.coverageText.slice(0, 160)}）` : ''}${t.gapText ? ` · 未覆盖区间: ${t.gapText.slice(0, 160)}` : ''} · 配体 ${t.ligandCount} 种 · 文献 ${t.literatureCount} 篇`)
+  // v2.0：配体归一数据（批次内共享 — 输入相同，结果一致）
+  if (t.ligands?.length) {
+    const okLig = t.ligands.filter(l => l.ok)
+    if (okLig.length) {
+      lines.push(`配体: ${okLig.map(l => `${l.raw} → ${l.compId}（含该配体结构 ${l.totalStructures} 个${l.structures.some(s => s.alsoTarget) ? `，${l.structures.filter(s => s.alsoTarget).map(s => s.pdbId).slice(0, 4).join('、')} 为本靶点直接结构` : ''}`).join('；').slice(0, 320)}`)
+    }
+    for (const l of t.ligands.filter(x => !x.ok)) lines.push(`配体未识别: ${l.raw}（${l.error ?? '未知原因'}）`)
+  }
   if (t.construct) {
     lines.push(`客户构建: ${t.construct.providedLength} aa（与全长一致性 ${t.construct.identity}%${t.construct.start != null && t.construct.end != null ? `，估计区间 ${t.construct.start}-${t.construct.end}` : ''}）`)
   }
@@ -623,6 +636,40 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   </section>` : ''
 
   // v1.15：评估表 AI 解析要点（LLM 失败时作为兜底证据；正常时作为可溯源原始要点）
+  // v2.0：配体研究数据（批次共享，取首个有数据的靶点）
+  const batchLigands = targets.find(t => (t.ligands?.length ?? 0) > 0)?.ligands ?? []
+  const ligandCard = (l: LigandResolution): string => {
+    if (!l.ok) return `
+    <div class="lig-card lig-fail">
+      <div class="lig-head"><span class="lig-id lig-id-fail">?</span><span class="lig-name">${esc(l.raw.length > 40 ? l.raw.slice(0, 39) + '…' : l.raw)}</span></div>
+      <div class="lig-meta"><span>未能归一 — ${esc(l.error ?? '未知原因')}</span></div>
+    </div>`
+    const best = l.structures.find(s => s.resolution != null)?.resolution
+    return `
+    <div class="lig-card">
+      <div class="lig-head">
+        <span class="lig-id">${esc(l.compId)}</span>
+        <span class="lig-name">${esc(l.name || l.raw)}</span>
+        <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(l.strategy)}</span>
+      </div>
+      <div class="lig-meta">
+        <span>分子式 <b>${esc(l.formula || '—')}</b></span>
+        ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
+        <span>含该配体结构 <b>${l.totalStructures}</b> 个</span>
+        ${best != null ? `<span>最佳分辨率 <b>${best.toFixed(2)} Å</b></span>` : ''}
+      </div>
+      ${l.structures.length ? `
+      <div class="lig-pdbs">${l.structures.slice(0, 12).map(s => `<a class="${s.alsoTarget ? 'lig-also' : ''}" href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener" title="${esc(s.title)}${s.resolution != null ? ` · ${s.resolution}Å` : ''}${s.alsoTarget ? ' · 本靶点直接结构' : ''}">${s.pdbId}${s.resolution != null ? ` <i>${s.resolution.toFixed(1)}</i>` : ''}</a>`).join('')}${l.totalStructures > 12 ? `<span class="lig-more">+${l.totalStructures - 12}</span>` : ''}</div>` : `<div class="lig-pdbs lig-none">暂无含该配体的 PDB 结构记录</div>`}
+    </div>`
+  }
+  const ligandsHtml = batchLigands.length ? `
+  <section class="sec" id="ligands">
+    <h2>配体研究数据<span class="sec-en">Ligands · ${batchLigands.filter(l => l.ok).length}/${batchLigands.length}</span></h2>
+    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / AI 兜底）映射为 RCSB 三位化学组分 ID；结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为批次内靶点直接结构的条目。</p>
+    <div class="lig-grid">${batchLigands.map(ligandCard).join('')}
+    </div>
+  </section>` : ''
+
   const ins = input.insights
   const insightsHtml = ins && (ins.goals?.length || ins.scientificQuestions?.length || ins.experimentalSummary || ins.sequenceNotes || ins.homologs || ins.keyConcerns?.length) ? `
   <section class="sec" id="insights">
@@ -641,11 +688,31 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <title>${esc(reportTitle)} · ${esc(targets.map(t => t.label).join(' + '))}</title>
 <style>
+  .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:14px; margin-top:8px; }
+  .lig-card { background:#fff; border:1px solid var(--line); border-radius:6px; padding:14px 18px; break-inside:avoid; }
+  .lig-fail { border-style:dashed; opacity:.78; }
+  .lig-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
+  .lig-id { font-family:ui-monospace,Menlo,monospace; font-size:14.5px; font-weight:700; color:#065f46; background:#f0fdf7; border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; }
+  .lig-id-fail { color:#92400e; background:#fffbeb; border-color:#fde68a; }
+  .lig-name { font-size:13px; font-weight:600; color:var(--ink); overflow-wrap:anywhere; min-width:120px; }
+  .lig-src { margin-left:auto; font-family:ui-monospace,Menlo,monospace; font-size:10px; color:var(--faint); letter-spacing:.4px; }
+  .lig-meta { display:flex; flex-wrap:wrap; gap:4px 16px; margin-top:9px; font-size:11.5px; color:var(--sub); }
+  .lig-meta b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .lig-pdbs { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; padding-top:10px; border-top:1px dashed #efedeb; }
+  .lig-pdbs a { font-family:ui-monospace,Menlo,monospace; font-size:10.5px; font-weight:600; color:var(--accent); background:#f0fdf7; border:1px solid #c7ece0; border-radius:3px; padding:1px 8px; text-decoration:none; white-space:nowrap; }
+  .lig-pdbs a i { font-style:normal; color:var(--faint); font-weight:400; margin-left:3px; }
+  .lig-pdbs a.lig-also { background:#e0faf1; border-color:#71cdb2; color:#04503c; }
+  .lig-pdbs a:hover { background:#d9f5e8; }
+  .lig-more { align-self:center; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--faint); }
+  .lig-none { font-size:12px; color:var(--faint); border-top:1px dashed #efedeb; margin-top:10px; padding-top:8px; }
   :root { --ink:#1c1917; --sub:#57534e; --faint:#a8a29e; --line:#e7e5e4; --accent:#047857; --accent-2:#059669; --paper:#fffdf9; }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:"Source Han Serif SC","Noto Serif SC","Songti SC",Georgia,serif; background:#f0efec; color:var(--ink); font-size:14.5px; line-height:1.85; }
+  body { font-family:"Source Serif 4","Noto Serif SC","Source Han Serif SC","Songti SC",Georgia,serif; background:#f0efec; color:var(--ink); font-size:15px; line-height:1.92; }
   .page { max-width:920px; margin:0 auto; background:var(--paper); padding:56px 56px 48px; }
   .rpt-head { border-bottom:1px solid var(--ink); position:relative; padding-bottom:22px; margin-bottom:26px; }
   .rpt-head::after { content:''; position:absolute; left:0; bottom:3px; width:100%; border-bottom:3px solid var(--ink); }
@@ -758,6 +825,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     <ol>
       <li><a href="#llm">合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
       ${insightsHtml ? '<li><a href="#insights">客户评估表要点</a></li>' : ''}
+      ${ligandsHtml ? '<li><a href="#ligands">配体研究数据</a></li>' : ''}
       <li><a href="#matrix">跨靶点对比矩阵</a></li>
       ${matrixHtml ? '<li><a href="#homolog">' + (isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性') + '</a></li>' : ''}
       ${attributionHtml ? '<li><a href="#attribution">评估表序列归属</a></li>' : ''}
@@ -777,6 +845,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   </section>
 
   ${insightsHtml}
+  ${ligandsHtml}
 
   <section class="sec" id="matrix">
     <h2>二、跨靶点对比矩阵<span class="sec-en">Comparison Matrix</span></h2>

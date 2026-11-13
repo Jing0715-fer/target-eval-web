@@ -27,7 +27,9 @@ import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
-import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type SequenceComparison, type UniprotInfo } from './types'
+import { extractLigandsFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, type LigandInput, type LigandResolution } from './ligand'
+import { alphafoldFigureFor } from './alphafold'
+import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type JobSummary, type LiteratureItem, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
 export interface PipelineInput {
   jobId: string
@@ -40,6 +42,8 @@ export interface PipelineInput {
   batchNote?: string
   /** ≥90% 高一致同源组（v1.11）：组内首个提交 BLAST 的作业为代表，其余跳过并共享结果 */
   homologBlast?: BlastGroup
+  /** v2.0：配体输入（名称/分子式/三位 ID / 文件提取线索，≤8 条）；评估表识别在管线内自动补充 */
+  ligands?: LigandInput[]
   options: EvaluationOptions
 }
 
@@ -60,10 +64,10 @@ function backfillChainRanges(pdbs: PdbEntry[], info: UniprotInfo | null | undefi
 }
 
 /** 上传解析结果持久化文件 */
-async function readUploadParsed(uploadId: string): Promise<{ goalHints: string[]; images?: ParsedImage[] } | null> {
+async function readUploadParsed(uploadId: string): Promise<{ goalHints: string[]; images?: ParsedImage[]; fullText?: string } | null> {
   try {
     const raw = await fs.readFile(path.join(process.cwd(), 'db', 'reports', uploadId, 'parsed.json'), 'utf-8')
-    return JSON.parse(raw) as { goalHints: string[]; images?: ParsedImage[] }
+    return JSON.parse(raw) as { goalHints: string[]; images?: ParsedImage[]; fullText?: string }
   } catch {
     return null
   }
@@ -130,6 +134,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   let images: ParsedImage[] = []
   let assetDir = ''
   let providedSequence = '' // 客户提供的伴随序列（合并评估：UniProt 为主 + 序列做构建边界分析）
+  let uploadFullText = ''
   let comparison: SequenceComparison | null = null
 
   if (input.uploadId) {
@@ -137,6 +142,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     if (parsed) {
       if (parsed.goalHints?.length) goalHints = parsed.goalHints
       images = parsed.images ?? []
+      if (parsed.fullText) uploadFullText = parsed.fullText
     } else {
       log('评估表解析数据缺失（上传目录可能已过期清理），胶图/SEC 图片与目标提示不可用，建议重新上传评估表', 'warn')
     }
@@ -323,6 +329,70 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   } else {
     report('rcsb', '无 UniProt ID，跳过直接检索（BLAST 阶段识别结构）', 1)
     log('跳过 RCSB 直接检索：暂无 UniProt ID')
+  }
+
+  // ─── 阶段 3.5：配体归一与研究检索（v2.0；置于 RCSB 后、与 BLAST 等待期重叠）────────
+  let ligandResults: LigandResolution[] = []
+  {
+    const candidates: LigandInput[] = [...(input.ligands ?? [])]
+    // 评估表识别：字典扫描（保守长 key）+ LLM 提取（insights.ligands，若有）
+    if (input.uploadId) {
+      for (const m of extractLigandsFromText(uploadFullText)) {
+        candidates.push({ raw: m.compId, source: 'eval-table' })
+      }
+      for (const name of insights?.ligands ?? []) {
+        if (name.trim()) candidates.push({ raw: name.trim().slice(0, 160), source: 'eval-table' })
+      }
+    }
+    // 归一去重（同 raw 不重复解析；同批次多靶点由 LRU 缓存共享外部调用）
+    const seen = new Map<string, LigandInput>()
+    for (const c of candidates) {
+      const key = normalizeLigandRaw(c.raw).replace(/[\s-]/g, '')
+      if (!key || seen.has(key)) continue
+      seen.set(key, c)
+    }
+    const unique = [...seen.values()].slice(0, 8)
+    if (unique.length > 0) {
+      report('rcsb', `归一配体输入 ${unique.length} 项（ID/别名/PDBe 检索/AI 多策略）…`, 0.96)
+      const resolved: LigandResolution[] = []
+      let cursor = 0
+      const worker = async () => {
+        while (cursor < unique.length) {
+          if (signal.aborted) return
+          const item = unique[cursor++]
+          try {
+            resolved.push(await resolveLigandInput(item, signal))
+          } catch (e) {
+            if (signal.aborted) throw e
+            resolved.push({
+              raw: item.raw, source: item.source, fileName: item.fileName, ok: false,
+              compId: '', name: '', formula: '', weight: null, strategy: '',
+              totalStructures: 0, structures: [], error: '解析异常',
+            })
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(3, unique.length) }, () => worker()))
+      // 已识别配体 → 检索含该配体的结构列表
+      const directSet = new Set(directPdbs.map(p => p.pdbId))
+      for (const r of resolved) {
+        if (!r.ok || !r.compId) continue
+        try {
+          const s = await fetchLigandStructures(r.compId, directSet, signal)
+          r.totalStructures = s.total
+          r.structures = s.structures.slice(0, 12)
+        } catch { /* 检索失败不影响归一结果 */ }
+      }
+      ligandResults = resolved
+      const okList = resolved.filter(r => r.ok)
+      if (resolved.length) {
+        log(`配体归一完成：${okList.length}/${resolved.length} 项识别${okList.length ? `（${okList.map(r => `${r.raw} → ${r.compId}·${r.strategy}·${r.totalStructures} 结构`).join('；').slice(0, 400)}）` : ''}`)
+        for (const r of resolved.filter(x => !x.ok)) {
+          log(`配体未识别：「${r.raw}」— ${r.error ?? '未知原因'}`, 'warn')
+        }
+        report('rcsb', `配体归一完成（${okList.length}/${resolved.length} 项识别）`, 1)
+      }
+    }
   }
 
   // ─── 阶段 4：PDBe 覆盖率 ──────────────────────────────────────────────────
@@ -540,6 +610,35 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
   report('score', '评分完成', 1)
 
   // ─── 阶段 8：LLM 报告 ────────────────────────────────────────────────────
+  // ─── 阶段 7.5：AlphaFold 预测结构（v2.0 报告头图）────────────────────────────
+  let afFigure: { dataUri: string; modelId: string; globalPlddt: number | null; version: number; fracVeryHigh: number | null } | undefined
+  let afSummary: AlphafoldSummaryInfo | undefined
+  if (uniprotInfo) {
+    try {
+      report('report', '获取 AlphaFold 预测结构…', 0.06)
+      const fig = await alphafoldFigureFor(uniprotInfo.uniprotId)
+      if (fig) {
+        afFigure = {
+          dataUri: 'data:image/png;base64,' + fig.png.toString('base64'),
+          modelId: fig.meta.modelId,
+          globalPlddt: fig.meta.globalPlddt,
+          version: fig.meta.latestVersion,
+          fracVeryHigh: fig.meta.fracVeryHigh,
+        }
+        afSummary = {
+          available: true, modelId: fig.meta.modelId, globalPlddt: fig.meta.globalPlddt,
+          version: fig.meta.latestVersion, fracVeryHigh: fig.meta.fracVeryHigh,
+        }
+        log(`AlphaFold 预测获取成功：${fig.meta.modelId}（平均 pLDDT ${fig.meta.globalPlddt ?? '—'}，v${fig.meta.latestVersion}）— pLDDT 着色结构图已渲染`)
+      } else {
+        afSummary = { available: false, note: '该靶点在 AlphaFold DB 无预测或渲染失败' }
+        log('AlphaFold 预测结构：不可用（无预测/渲染失败），报告将以无图呈现')
+      }
+    } catch {
+      afSummary = { available: false, note: 'AlphaFold 预测获取失败' }
+    }
+  }
+
   // 图片元数据已在阶段 1 从 parsed.json 读取；这里仅定位资产目录
   if (input.uploadId) {
     assetDir = path.join(process.cwd(), 'db', 'reports', input.uploadId, 'assets')
@@ -575,6 +674,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       images,
       scores,
       oligomer,
+      ligands: ligandResults.length ? ligandResults : undefined,
+      alphafold: afSummary,
     }
 
     report('report', 'LLM 生成评估分析（第 1/3 段：摘要与背景）…', 0.15)
@@ -614,6 +715,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
         images,
         scores,
         oligomer,
+        ligands: ligandResults.length ? ligandResults : undefined,
+        alphafold: afSummary,
       },
       methodStats: scores.methodStats,
       llmMarkdown: generated.fullMarkdown,
@@ -623,6 +726,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       durationMs: Date.now() - t0,
       totalPdbFound,
       engineSummary,
+      alphafoldFigure: afFigure,
       resolveImagePath: (meta) => {
         const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
         return path.join(assetDir, `${meta.id}.${ext}`)
@@ -662,6 +766,8 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
     coverageText: coverageText || undefined,
     gapText: gapText || undefined,
     oligomer,
+    ligands: ligandResults.length ? ligandResults : undefined,
+    alphafold: afSummary,
     reportLlmOk: deferReport ? undefined : generated.ok,
     reportDeferred: deferReport || undefined,
     batchNote: input.batchNote,

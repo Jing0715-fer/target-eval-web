@@ -21,9 +21,7 @@ tsconfig.tsbuildinfo
 /build
 
 # runtime data（评估作业数据库与报告产物）
-/db/*.db
-/db/*.db-journal
-/db/reports/
+/db/
 /upload/
 /download/
 
