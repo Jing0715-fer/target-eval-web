@@ -16,7 +16,7 @@
  *
  * 内存策略：每复合物组分 ≤6、binary 伙伴 ≤6、每组分代表结构 3 — 命中集恒小。
  */
-import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
+import { fetchPdbEntries, fetchPdbIdsForUniprot, fetchEntriesMetaBatch, entryMetaToPdbEntry } from './rcsb'
 import { cachedJsonFetch } from './cache'
 import type { InteractionAnalysis, InteractionBinaryInfo, InteractionComplexInfo, InteractionComponent, InteractionSharedPdb, PdbEntry, UniprotInfo } from './types'
 
@@ -104,22 +104,49 @@ async function fetchRepresentativePdbs(accession: string, take: number, signal?:
   }
 }
 
-/** 共有结构详情拉取上限（展示条数） */
-const MAX_SHARED_SHOW = 10
-/** 单独结构代表条数/组分 */
+/** 共有结构详情拉取上限（v1.31 全量列表 — 报告展开/折叠均可见，超出仅计数） */
+const MAX_SHARED_META = 120
+/** 单组分单独结构详情拉取上限（v1.31 全量列表 — 报告折叠展开可见） */
+const SOLO_META_PER_COMPONENT = 80
+/** 单复合物详情拉取总预算（GraphQL 50/批 — shared 优先，solo 按组分均分剩余额度） */
+const TOTAL_META_BUDGET = 300
+/** 单独结构代表条数/组分（兼容旧消费方：评分卡/摘要） */
 const SOLO_REPR_PER_COMPONENT = 3
-/** 单独结构详情拉取条数/组分（排序后截取代表） */
-const SOLO_FETCH_PER_COMPONENT = 8
+
+/** UniProt accession → 基因名（用于共有结构的「额外组分」标注，如 FBXO22） */
+async function fetchGeneNames(accessions: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const uniq = [...new Set(accessions)].slice(0, 80)
+  if (!uniq.length) return out
+  const query = `accession:(${uniq.join(' OR ')})`
+  const url = `https://rest.uniprot.org/uniprotkb/search?query=${encodeURIComponent(query)}&fields=accession,gene_names&format=json&size=${Math.min(100, uniq.length * 2)}`
+  const raw = await cachedJsonFetch<{
+    results?: Array<{ primaryAccession?: string; genes?: Array<{ geneName?: { value?: string } }> }>
+  }>(url, { timeoutMs: 15_000 })
+  for (const r of raw?.results ?? []) {
+    if (!r.primaryAccession) continue
+    const g = r.genes?.map(x => x.geneName?.value).find(Boolean)
+    if (g) out.set(r.primaryAccession, g.slice(0, 24))
+  }
+  return out
+}
 
 /**
- * v1.30 组分结构分组检索：对每个组分拉全量 PDB ID 列表，按「同一 PDB 含 ≥2 个
+ * v1.30/v1.31 组分结构分组检索：对每个组分拉全量 PDB ID 列表，按「同一 PDB 含 ≥2 个
  * 复合物组分」判定共有结构（组装先例，报告重点展示）；其余为单独结构（次要参考，
- * 报告默认折叠）。共有/单独分别取代表详情，representativePdbs 保留综合最优 ≤3。
+ * 报告默认折叠）。
+ *
+ * v1.31 全量列表改造（用户反馈「多余可折叠但不要不显示」）：
+ *  - 共有结构：拉取 ≤120 条详情（方法/分辨率/标题/日期/期刊/PubMed），报告前 12 条
+ *    直出 + 其余折叠；每条同时标注该 PDB 中复合物组分之外的其他蛋白组分（如 SCF
+ *    骨架结构中的 FBXO22/SKP2 — UniProt accession → 基因名映射）
+ *  - 单独结构：每组分拉取 ≤80 条详情（总预算 300/复合物），报告按组分分组折叠展示
  */
 async function classifyComponentStructures(
   nonTarget: InteractionComponent[],
+  targetAcc: string,
   signal?: AbortSignal,
-): Promise<{ sharedPdbs: InteractionSharedPdb[]; sharedPdbTotal: number }> {
+): Promise<{ sharedPdbs: InteractionSharedPdb[]; sharedPdbTotal: number; sharedPdbOmitted: number }> {
   // 每组分的 PDB ID 列表（200 上限 — 组分结构普遍 <100）
   const idsByAcc = new Map<string, string[]>()
   for (const c of nonTarget) {
@@ -146,56 +173,89 @@ async function classifyComponentStructures(
   const sharedIds = [...ownersByPdb.entries()].filter(([, accs]) => accs.length >= 2).map(([id]) => id)
   const sharedSet = new Set(sharedIds)
 
-  // 共有结构详情（按覆盖组分数降序 → 分辨率升序；拉前 12 条详情用于排序）
-  let sharedEntries: PdbEntry[] = []
-  if (sharedIds.length) {
-    try {
-      const res = await fetchPdbEntries(sharedIds.slice(0, MAX_SHARED_SHOW + 2), MAX_SHARED_SHOW + 2, undefined, signal)
-      sharedEntries = [...res.entries]
-    } catch { /* 详情失败 → 仅计数，不列详情 */ }
+  // ── 详情拉取计划（shared 优先 → solo 按组分均分剩余预算）──
+  const sharedFetch = sharedIds.slice(0, MAX_SHARED_META)
+  const remainingBudget = Math.max(0, TOTAL_META_BUDGET - sharedFetch.length)
+  const perCompCap = nonTarget.length
+    ? Math.min(SOLO_META_PER_COMPONENT, Math.floor(remainingBudget / nonTarget.length))
+    : 0
+  const soloFetchByAcc = new Map<string, string[]>()
+  for (const c of nonTarget) {
+    const soloIds = (idsByAcc.get(c.accession) ?? []).filter(id => !sharedSet.has(id))
+    soloFetchByAcc.set(c.accession, soloIds.slice(0, perCompCap))
   }
-  const sharedPdbs: InteractionSharedPdb[] = sharedEntries
-    .map(e => {
-      const accs = ownersByPdb.get(e.pdbId) ?? []
+  const allFetchIds = [...sharedFetch, ...nonTarget.flatMap(c => soloFetchByAcc.get(c.accession) ?? [])]
+  const metaMap = allFetchIds.length ? await fetchEntriesMetaBatch(allFetchIds, signal) : new Map()
+
+  // ── 共有结构列表（覆盖组分数降序 → 分辨率升序）+ 额外组分基因名 ──
+  const complexAccs = new Set<string>([targetAcc, ...nonTarget.map(c => c.accession)])
+  const extraAccSet = new Set<string>()
+  const sharedAccsById = new Map<string, string[]>()
+  for (const id of sharedFetch) {
+    const meta = metaMap.get(id)
+    if (!meta) continue
+    const extras = meta.uniprotAccs.filter(a => !complexAccs.has(a))
+    sharedAccsById.set(id, extras)
+    for (const a of extras) extraAccSet.add(a)
+  }
+  const geneByAcc = extraAccSet.size ? await fetchGeneNames([...extraAccSet]) : new Map<string, string>()
+
+  const sharedPdbs: InteractionSharedPdb[] = [...sharedAccsById.keys()]
+    .map(id => {
+      const meta = metaMap.get(id)!
+      const accs = ownersByPdb.get(id) ?? []
       const names = accs.map(acc => nonTarget.find(c => c.accession === acc)?.name ?? acc)
+      const extras = sharedAccsById.get(id) ?? []
       return {
-        pdbId: e.pdbId,
+        pdbId: id,
         componentNames: names,
         componentCount: accs.length,
-        method: e.method,
-        isXray: e.isXray,
-        isCryoem: e.isCryoem,
-        isNmr: e.isNmr,
-        resolution: e.resolution,
-        title: e.title,
+        method: meta.method,
+        isXray: meta.isXray,
+        isCryoem: meta.isCryoem,
+        isNmr: meta.isNmr,
+        resolution: meta.resolution,
+        title: meta.title,
+        releaseDate: meta.releaseDate,
+        journal: meta.journal,
+        pubmedId: meta.pubmedId,
+        extraComponents: extras.map(a => geneByAcc.get(a) ?? a).slice(0, 8),
+        extraAccessions: extras.slice(0, 8),
       }
     })
     .sort((a, b) => b.componentCount - a.componentCount || (a.resolution ?? 99) - (b.resolution ?? 99))
-    .slice(0, MAX_SHARED_SHOW)
 
-  // 各组分：共有归属 + 单独结构代表
+  // ── 各组分：共有归属 + 单独结构全量列表（分辨率升序） ──
   for (const c of nonTarget) {
     const ids = idsByAcc.get(c.accession) ?? []
     c.sharedPdbIds = ids.filter(id => sharedSet.has(id))
     const soloIds = ids.filter(id => !sharedSet.has(id))
     c.soloPdbCount = soloIds.length
-    c.soloRepresentativePdbs = []
-    if (soloIds.length) {
-      try {
-        const res = await fetchPdbEntries(soloIds.slice(0, SOLO_FETCH_PER_COMPONENT), SOLO_FETCH_PER_COMPONENT, undefined, signal)
-        c.soloRepresentativePdbs = [...res.entries]
-          .sort((a, b) => (a.resolution ?? 99) - (b.resolution ?? 99))
-          .slice(0, SOLO_REPR_PER_COMPONENT)
-      } catch { /* 单独结构详情失败 → 仅计数 */ }
-    }
+    const fetchSolo = soloFetchByAcc.get(c.accession) ?? []
+    const soloEntries = fetchSolo
+      .map(id => metaMap.get(id))
+      .filter((m): m is NonNullable<typeof m> => Boolean(m))
+      .map(entryMetaToPdbEntry)
+      .sort((a, b) => (a.resolution ?? 99) - (b.resolution ?? 99))
+    c.soloPdbs = soloEntries
+    c.soloPdbOmitted = soloIds.length - soloEntries.length
+    c.soloRepresentativePdbs = soloEntries.slice(0, SOLO_REPR_PER_COMPONENT)
     // representativePdbs：共有 + 单独综合最优 ≤3（兼容既有消费方）
-    const sharedForComp = sharedEntries.filter(e => c.sharedPdbIds!.includes(e.pdbId))
-    c.representativePdbs = [...sharedForComp, ...(c.soloRepresentativePdbs ?? [])]
+    const sharedForComp = sharedPdbs.filter(s => c.sharedPdbIds!.includes(s.pdbId)).map(s => entryMetaToPdbEntry({
+      pdbId: s.pdbId, method: s.method, resolution: s.resolution, title: s.title,
+      releaseDate: s.releaseDate ?? '', journal: s.journal ?? '', doi: '', pubmedId: s.pubmedId ?? '',
+      isXray: s.isXray, isCryoem: s.isCryoem, isNmr: s.isNmr, uniprotAccs: [],
+    }))
+    c.representativePdbs = [...sharedForComp, ...soloEntries]
       .sort((a, b) => (a.resolution ?? 99) - (b.resolution ?? 99))
       .slice(0, 3)
   }
 
-  return { sharedPdbs, sharedPdbTotal: sharedIds.length }
+  return {
+    sharedPdbs,
+    sharedPdbTotal: sharedIds.length,
+    sharedPdbOmitted: sharedIds.length - sharedPdbs.length,
+  }
 }
 
 export interface InteractionInput {
@@ -265,17 +325,19 @@ export async function analyzeInteractionEvidence(input: InteractionInput): Promi
       c.kda = c.lengthAa != null ? Math.round(c.lengthAa * AA_KDA * 10) / 10 : null
     }
 
-    // 组分结构（v1.30：共有/单独分类检索；靶点自身跳过 — 无直接结构是本分析的前提）
+    // 组分结构（v1.30/v1.31：共有/单独全量列表；靶点自身跳过 — 无直接结构是本分析的前提）
     for (const c of nonTarget) {
       c.pdbCount = 0
       c.representativePdbs = []
       c.sharedPdbIds = []
       c.soloPdbCount = 0
       c.soloRepresentativePdbs = []
+      c.soloPdbs = []
+      c.soloPdbOmitted = 0
     }
-    const { sharedPdbs, sharedPdbTotal } = nonTarget.length
-      ? await classifyComponentStructures(nonTarget, signal)
-      : { sharedPdbs: [] as InteractionSharedPdb[], sharedPdbTotal: 0 }
+    const { sharedPdbs, sharedPdbTotal, sharedPdbOmitted } = nonTarget.length
+      ? await classifyComponentStructures(nonTarget, targetAcc, signal)
+      : { sharedPdbs: [] as InteractionSharedPdb[], sharedPdbTotal: 0, sharedPdbOmitted: 0 }
 
     const componentsWithStructure = nonTarget.filter(c => c.pdbCount > 0).length
     const totalPdb = nonTarget.reduce((s, c) => s + c.pdbCount, 0)
@@ -296,6 +358,7 @@ export async function analyzeInteractionEvidence(input: InteractionInput): Promi
       assemblyKda,
       sharedPdbs,
       sharedPdbTotal,
+      sharedPdbOmitted,
       soloPdbTotal,
     })
     onProgress?.(`复合物 ${raw.complexAc ?? cpx}（${raw.name ?? ''}）：${components.length} 组分，${componentsWithStructure} 个有结构${sharedPdbTotal ? `（共有结构 ${sharedPdbTotal} 个）` : ''}`)

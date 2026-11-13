@@ -362,6 +362,10 @@ export interface InteractionComponent {
   soloPdbCount?: number
   /** 单独结构代表（按分辨率 ≤3 个） */
   soloRepresentativePdbs?: PdbEntry[]
+  /** v1.31 单独结构全量列表（按分辨率升序，折叠展开可见） */
+  soloPdbs?: PdbEntry[]
+  /** v1.31 soloPdbs 之外未拉取详情的单独结构数 */
+  soloPdbOmitted?: number
 }
 
 /** 共有结构（同一 PDB 含 ≥2 个复合物组分 — 组装先例，最直接的结构证据） */
@@ -375,6 +379,16 @@ export interface InteractionSharedPdb {
   isNmr: boolean
   resolution: number | null
   title: string
+  /** v1.31 释放日期 */
+  releaseDate?: string
+  /** v1.31 主引文期刊缩写 */
+  journal?: string
+  /** v1.31 主引文 PubMed ID（空串表示无） */
+  pubmedId?: string
+  /** v1.31 该 PDB 中复合物组分之外的其他蛋白组分基因名（如 FBXO22） */
+  extraComponents?: string[]
+  /** v1.31 extraComponents 对应 UniProt accession（悬停提示） */
+  extraAccessions?: string[]
 }
 
 /** Complex Portal curated 复合物 */
@@ -389,6 +403,8 @@ export interface InteractionComplexInfo {
   assemblyKda: number | null
   sharedPdbs?: InteractionSharedPdb[]
   sharedPdbTotal?: number
+  /** v1.31 sharedPdbs 之外未拉取详情的共有结构数 */
+  sharedPdbOmitted?: number
   soloPdbTotal?: number
 }
 
@@ -623,6 +639,8 @@ export interface BlastHit {
   queryTo?: number
   method: string
   resolution: number | null
+  /** v1.31 主引文 PubMed ID（报告「文献」列直跳） */
+  pubmedId?: string
 }
 
 export interface LiteratureItem {
@@ -662,6 +680,8 @@ export interface JobDetail {
   assets: AssetItem[] | null
   /** LLM 评估报告 markdown（v1.7+，结果页内联展示） */
   reportMarkdown?: string | null
+  /** v1.31 单靶点 HTML 报告是否已生成（web 端内嵌与下载同一份 HTML，保证样式一致） */
+  reportAvailable?: boolean
   error: string | null
 }
 

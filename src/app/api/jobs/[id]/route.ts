@@ -92,6 +92,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     assets,
     /** LLM 评估报告 markdown（v1.7+ 作业；结果页内联展示） */
     reportMarkdown: job.reportMarkdown ?? null,
+    /** v1.31 单靶点 HTML 报告已生成（结果页内嵌同一份 HTML — 与下载样式完全一致） */
+    reportAvailable: Boolean(job.reportPath) && status === 'done',
     error: job.error,
   })
 }

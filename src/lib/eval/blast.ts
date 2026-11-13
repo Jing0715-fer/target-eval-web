@@ -431,9 +431,10 @@ export async function runBlastWithRetry(
   throw new Error(`同源检索 ${attempts} 轮重试均失败 — ${errors.join('；').slice(0, 300)}`)
 }
 
-/** 用 RCSB GraphQL 批量接口补齐 BLAST 命中的方法/分辨率/结构标题（每批 25 条）。
+/** 用 RCSB GraphQL 批量接口补齐 BLAST 命中的方法/分辨率/结构标题/主引文（每批 25 条）。
  *  注：REST core/entry 不支持逗号分隔多 ID（404）— v1.9 修复 v1.7 起的静默失效：
- *  旧实现的批量 REST 请求从未成功过（BLAST 命中长期缺方法/分辨率），GraphQL 才是正确批量通道。 */
+ *  旧实现的批量 REST 请求从未成功过（BLAST 命中长期缺方法/分辨率），GraphQL 才是正确批量通道。
+ *  v1.31：补齐主引文 PubMed ID — 报告 BLAST 表新增「文献」列可直跳 PubMed。 */
 export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<string>): Promise<BlastHit[]> {
   const need = hits.filter(h => h.pdbId && !excludePdbIds.has(h.pdbId))
   const enriched = new Map<string, BlastHit>()
@@ -443,6 +444,7 @@ export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<strin
       struct { title }
       exptl { method }
       rcsb_entry_info { resolution_combined }
+      citation { id rcsb_is_primary pdbx_database_id_PubMed }
     }
   }`
   for (let i = 0; i < need.length; i += 25) {
@@ -462,6 +464,7 @@ export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<strin
             struct?: { title?: unknown }
             exptl?: Array<{ method?: unknown }>
             rcsb_entry_info?: { resolution_combined?: unknown }
+            citation?: Array<{ id?: unknown; rcsb_is_primary?: unknown; pdbx_database_id_PubMed?: unknown }>
           }>
         }
       }
@@ -473,16 +476,20 @@ export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<strin
         // 结构标题：RCSB 序列检索兜底的命中无 pdbaa 描述（description 为空），
         // 用 PDB entry 标题补齐，保证前端表格与 LLM 摘要可读
         const title = typeof d.struct?.title === 'string' ? d.struct.title.trim() : ''
+        const primary = (d.citation ?? []).find(c => c.rcsb_is_primary === 'Y' || c.id === 'primary') ?? (d.citation ?? [])[0]
+        const pmidRaw = primary?.pdbx_database_id_PubMed
+        const pubmedId = pmidRaw != null && pmidRaw !== '' ? String(pmidRaw) : ''
         enriched.set(id, {
           method,
           resolution: typeof resArr[0] === 'number' ? resArr[0] : null,
           description: title.slice(0, 160),
+          pubmedId,
         } as Partial<BlastHit> as BlastHit)
       }
     } catch { /* 批次失败忽略 */ }
   }
   return need.map(h => {
     const e = enriched.get(h.pdbId)
-    return e ? { ...h, method: e.method, resolution: e.resolution, description: h.description || e.description } : h
+    return e ? { ...h, method: e.method, resolution: e.resolution, description: h.description || e.description, pubmedId: e.pubmedId || h.pubmedId } : h
   })
 }

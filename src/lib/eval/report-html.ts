@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { BlastHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats } from './types'
 import { describeBlastStatus } from './types'
-import type { InteractionAnalysis, InteractionComplexInfo } from './types'
+import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb } from './types'
 import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 
@@ -185,45 +185,121 @@ function sharedMethodBadge(s: { isXray: boolean; isCryoem: boolean; isNmr: boole
   return `<span class="mth mth-${cls}">${esc(label)}</span>`
 }
 
+/** v1.31 PubMed 链接（结构主引文 — 共有/单独/BLAST 列表的「文献」列；紧凑号位直显 PMID 号） */
+function pmidLink(pubmedId: string | null | undefined): string {
+  if (!pubmedId) return '<span class="t-pmid-none">—</span>'
+  return `<a class="t-pmid" href="https://pubmed.ncbi.nlm.nih.gov/${esc(pubmedId)}/" target="_blank" rel="noopener" title="跳转 PubMed 文献 PMID ${esc(pubmedId)}">${esc(pubmedId)}</a>`
+}
+
+/** 共有/单独结构表 colgroup（与直接结构表同款列宽策略；紧凑字号 — 9 列在报告页面内免横向滚动） */
+const CX_SHARED_COLGROUP = `<colgroup>
+  <col style="width:66px"><col style="width:58px"><col style="width:50px"><col style="width:120px"><col style="width:84px">
+  <col><col style="width:68px"><col style="width:72px"><col style="width:82px">
+</colgroup>`
+const CX_SHARED_THEAD = `<thead><tr><th>PDB ID</th><th>方法</th><th class="num" title="分辨率（Å）">分辨率</th><th>覆盖组分</th><th>其他组分</th><th>标题</th><th class="num">释放日期</th><th>期刊</th><th>文献</th></tr></thead>`
+const CX_SOLO_COLGROUP = `<colgroup>
+  <col style="width:66px"><col style="width:58px"><col style="width:50px"><col>
+  <col style="width:68px"><col style="width:72px"><col style="width:82px">
+</colgroup>`
+const CX_SOLO_THEAD = `<thead><tr><th>PDB ID</th><th>方法</th><th class="num" title="分辨率（Å）">分辨率</th><th>标题</th><th class="num">释放日期</th><th>期刊</th><th>文献</th></tr></thead>`
+
+/** 共有结构行：覆盖组分（绿 chip）+ 其他组分（琥珀 chip，如 FBXO22）+ 文献直跳 */
+function sharedRowHtml(s: InteractionSharedPdb): string {
+  const extras = s.extraComponents ?? []
+  const extraShow = extras.slice(0, 3)
+  const extraMore = extras.length - extraShow.length
+  const accs = s.extraAccessions ?? []
+  return `
+    <tr>
+      <td class="td-id"><a href="https://www.rcsb.org/structure/${esc(s.pdbId)}" target="_blank" rel="noopener">${esc(s.pdbId)}</a></td>
+      <td>${sharedMethodBadge(s)}</td>
+      <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
+      <td><span class="csi-comps" title="${esc(s.componentNames.join(' + '))}（覆盖 ${s.componentCount} 个复合物组分）">${esc(s.componentNames.join('+'))}<i>×${s.componentCount}</i></span></td>
+      <td class="t-extras">${extraShow.length
+        ? extraShow.map((n, i) => `<span class="csi-extra" title="${esc(accs[i] ?? '')}">+ ${esc(n)}</span>`).join('') + (extraMore > 0 ? `<span class="csi-extra-more">等${extraMore}</span>` : '')
+        : '<span class="t-pmid-none">—</span>'}</td>
+      <td class="t-title">${esc(s.title)}</td>
+      <td class="num">${esc(s.releaseDate || '—')}</td>
+      <td class="t-journal">${esc(s.journal || '—')}</td>
+      <td class="td-id">${pmidLink(s.pubmedId)}</td>
+    </tr>`
+}
+
+/** 单独结构行（组分独立解析 — 次要参考） */
+function soloRowHtml(p: PdbEntry): string {
+  return `
+    <tr>
+      <td class="td-id"><a href="https://www.rcsb.org/structure/${esc(p.pdbId)}" target="_blank" rel="noopener">${esc(p.pdbId)}</a></td>
+      <td>${sharedMethodBadge(p)}</td>
+      <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
+      <td class="t-title">${esc(p.title)}</td>
+      <td class="num">${esc(p.releaseDate || '—')}</td>
+      <td class="t-journal">${esc(p.journal || '—')}</td>
+      <td class="td-id">${pmidLink(p.pubmedId)}</td>
+    </tr>`
+}
+
+/** 共有/单独结构表壳（共有/单独复用 — 折叠区内外同款表头） */
+function cxTableHtml(rows: string, colgroup: string, thead: string): string {
+  return `<div class="tbl-wrap"><table class="tbl-data tbl-cx-pdb">${colgroup}${thead}<tbody>${rows}</tbody></table></div>`
+}
+
+/** 共有结构直出条数（其余折叠 — 折叠区展开后仍全量可见） */
+const CX_SHARED_PREVIEW = 12
+/** 单组分单独结构直出条数（其余折叠） */
+const CX_SOLO_PREVIEW = 6
+
 /**
- * v1.30 单个 curated 复合物卡片：
+ * v1.30/v1.31 单个 curated 复合物卡片：
  *  - 头部：CPX 编号 + 名称 + 装配/分子量/组分结构 chips
  *  - 组分构成表（靶点行高亮；共有/单独结构数分列）
- *  - 共有结构列表（同一 PDB 含 ≥2 组分 — 组装先例，绿色面板突出，默认展开）
- *  - 单独结构代表（各组分独立解析 — 次要参考，默认折叠）
+ *  - 共有结构全量表（同一 PDB 含 ≥2 组分 — 组装先例，绿色面板突出；前 12 条直出、
+ *    其余折叠展开可见；含其他组分标注（如 FBXO22）与 PubMed 文献直跳）
+ *  - 单独结构全量表（各组分独立解析 — 次要参考，默认折叠；按组分分组，每组前 6 条
+ *    直出、其余折叠展开可见）
  */
 function complexCardHtml(c: InteractionComplexInfo): string {
   const others = c.components.filter(x => !x.isTarget)
   const shared = c.sharedPdbs ?? []
   const sharedTotal = c.sharedPdbTotal ?? 0
+  const sharedOmitted = c.sharedPdbOmitted ?? Math.max(0, sharedTotal - shared.length)
   const soloTotal = c.soloPdbTotal ?? others.reduce((s, x) => s + (x.soloPdbCount ?? 0), 0)
-  const sharedShowMore = sharedTotal - shared.length
 
+  const sharedHeadRows = shared.slice(0, CX_SHARED_PREVIEW)
+  const sharedRest = shared.slice(CX_SHARED_PREVIEW)
   const sharedListHtml = shared.length ? `
     <div class="cx-shared">
-      <div class="cx-shared-head"><span class="cx-shared-ico" aria-hidden="true">◈</span>共有结构 <b>${sharedTotal}</b> 个<span class="cx-shared-sub">同一 PDB 条目含 ≥2 个复合物组分 — 共组装先例，复合物路线最直接的结构证据</span></div>
-      <ul class="cx-shared-list">
-        ${shared.map(s => `
-        <li class="cx-shared-item">
-          <div class="csi-main">
-            <a class="csi-id" href="https://www.rcsb.org/structure/${esc(s.pdbId)}" target="_blank" rel="noopener">${esc(s.pdbId)}</a>
-            ${sharedMethodBadge(s)}
-            <span class="csi-res">${s.resolution != null ? s.resolution.toFixed(2) + 'Å' : '—'}</span>
-            <span class="csi-comps">${esc(s.componentNames.join(' + '))}<i>${s.componentCount} 组分</i></span>
-          </div>
-          ${s.title ? `<div class="csi-title">${esc(s.title)}</div>` : ''}
-        </li>`).join('')}
-      </ul>
-      ${sharedShowMore > 0 ? `<p class="note">另有 ${sharedShowMore} 个共有结构未列出（按覆盖组分数与分辨率取前 ${shared.length} 个）。</p>` : ''}
+      <div class="cx-shared-head"><span class="cx-shared-ico" aria-hidden="true">◈</span>共有结构 <b>${sharedTotal}</b> 个<span class="cx-shared-sub">同一 PDB 条目含 ≥2 个复合物组分 — 共组装先例，复合物路线最直接的结构证据；「其他组分」列为该 PDB 中复合物组分之外的蛋白（如 F-box 家族底物受体），提示更大装配语境</span></div>
+      ${cxTableHtml(sharedHeadRows.map(sharedRowHtml).join(''), CX_SHARED_COLGROUP, CX_SHARED_THEAD)}
+      ${sharedRest.length ? `
+      <details class="fold">
+        <summary>展开其余 ${sharedRest.length} 个共有结构（共 ${sharedTotal} 个，打印时自动展开）</summary>
+        ${cxTableHtml(sharedRest.map(sharedRowHtml).join(''), CX_SHARED_COLGROUP, CX_SHARED_THEAD)}
+      </details>` : ''}
+      ${sharedOmitted > 0 ? `<p class="note">另有 ${sharedOmitted} 个共有结构超出详情拉取上限未列出（总数已计入）。</p>` : ''}
     </div>` : ''
 
-  const soloItems = others.filter(x => (x.soloPdbCount ?? 0) > 0 || (x.soloRepresentativePdbs ?? []).length)
-  const soloFoldHtml = soloItems.length ? `
+  const soloComps = others
+    .map(x => ({ comp: x, list: x.soloPdbs ?? x.soloRepresentativePdbs ?? [], omitted: x.soloPdbOmitted ?? Math.max(0, (x.soloPdbCount ?? 0) - (x.soloPdbs ?? x.soloRepresentativePdbs ?? []).length) }))
+    .filter(g => g.list.length > 0 || (g.comp.soloPdbCount ?? 0) > 0)
+  const soloFoldHtml = soloComps.length ? `
     <details class="fold cx-solo-fold">
       <summary>单独结构（各组分独立解析，共 ${soloTotal} 个 — 次要参考：边界借鉴/构象对照，默认折叠）</summary>
-      <ul class="mw-list">
-        ${soloItems.map(x => `<li><b>${esc(x.name)}</b> <span class="mono">${esc(x.accession)}</span> — ${x.soloPdbCount ?? 0} 个单独结构${(x.soloRepresentativePdbs ?? []).length ? `；代表：${(x.soloRepresentativePdbs ?? []).map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : methodLabel(p).slice(0, 7)}</span>`).join(' ')}` : ''}</li>`).join('')}
-      </ul>
+      ${soloComps.map(({ comp, list, omitted }) => {
+        const head = list.slice(0, CX_SOLO_PREVIEW)
+        const rest = list.slice(CX_SOLO_PREVIEW)
+        return `
+      <div class="cx-solo-comp">
+        <div class="cx-solo-head"><b>${esc(comp.name)}</b> <span class="mono">${esc(comp.accession)}</span> — ${comp.soloPdbCount ?? list.length} 个单独结构<span class="cx-solo-sub">（不含复合物其他组分）</span></div>
+        ${list.length ? cxTableHtml(head.map(soloRowHtml).join(''), CX_SOLO_COLGROUP, CX_SOLO_THEAD) : ''}
+        ${rest.length ? `
+        <details class="fold">
+          <summary>展开 ${esc(comp.name)} 其余 ${rest.length} 个单独结构（打印时自动展开）</summary>
+          ${cxTableHtml(rest.map(soloRowHtml).join(''), CX_SOLO_COLGROUP, CX_SOLO_THEAD)}
+        </details>` : ''}
+        ${omitted > 0 ? `<p class="note">另有 ${omitted} 个单独结构超出详情拉取上限未列出（总数已计入）。</p>` : ''}
+      </div>`
+      }).join('')}
       <p class="note">单独结构仅含单一组分（不含复合物其他组分）— 可用于组分域边界设计与构象状态对照，但不能证明复合物组装形式。</p>
     </details>` : ''
 
@@ -285,6 +361,7 @@ function blastRowsHtml(hits: BlastHit[]): string {
       <td class="num">${esc(range)}</td>
       <td class="t-nowrap">${esc(h.method || '—')}</td>
       <td class="num">${h.resolution != null ? h.resolution.toFixed(2) : '—'}</td>
+      <td class="td-id">${pmidLink(h.pubmedId)}</td>
     </tr>`
   }).join('')
 }
@@ -799,7 +876,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   table { width:100%; border-collapse:collapse; font-size:12.5px; font-family:var(--serif); }
   /* 数据表（PDB/BLAST）：固定列宽防长串挤压重叠；窄屏由 .tbl-wrap 横向滚动 */
   table.tbl-data { table-layout:fixed; min-width:856px; }
-  table.tbl-blast { min-width:640px; }
+  table.tbl-blast { min-width:740px; }
   th { background:#f7f7f5; text-align:left; font-size:10px; letter-spacing:1px; text-transform:uppercase; color:var(--sub); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   th.num { text-align:right; }
   th, td { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:6px 8px; vertical-align:top; }
@@ -889,7 +966,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .mw-caution { background:#fffbeb; color:#b45309; border:1px solid #fde68a; }
   .mw-conflict { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
 
-  /* ── v1.30 互作复合物结构清单（共有结构突出 / 单独结构折叠）── */
+  /* ── v1.30/v1.31 互作复合物结构清单（共有结构突出 / 单独结构折叠，全量表列）── */
   .itx-h3 { margin:22px 0 6px !important; display:flex; align-items:baseline; gap:10px; }
   .itx-h3-sub { font-family:var(--mono); font-size:10.5px; font-weight:500; letter-spacing:1px; color:var(--faint); }
   .cx-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:16px 20px; margin:14px 0; }
@@ -905,23 +982,33 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .tbl-cx tr.cx-target td { background:#ecfdf5; border-top:1px solid #d1e9dd; border-bottom:1px solid #d1e9dd; }
   .cx-desc { font-family:var(--serif); font-size:11px; color:var(--faint); }
   .cx-res { font-family:var(--mono); font-size:10.5px; color:var(--faint); margin-left:2px; }
-  /* 共有结构：绿色面板突出（组装先例） */
+  /* 共有结构：绿色面板突出（组装先例）— v1.31 全量表列 */
   .cx-shared { border:1px solid #b8e6d2; background:linear-gradient(180deg,#f5fcf8,#ffffff); border-radius:6px; padding:12px 18px 10px; margin:14px 0 8px; }
   .cx-shared-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 10px; font-size:13.5px; font-weight:700; color:#065f46; margin-bottom:4px; }
   .cx-shared-ico { color:var(--accent-2); font-size:14px; }
   .cx-shared-head b { font-family:var(--mono); font-size:15px; color:#047857; }
   .cx-shared-sub { flex-basis:100%; font-size:11px; font-weight:400; color:var(--sub); line-height:1.7; }
-  .cx-shared-list { list-style:none; }
-  .cx-shared-item { padding:9px 0 8px; border-bottom:1px solid var(--hairline); }
-  .cx-shared-item:last-child { border-bottom:none; }
-  .csi-main { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; }
-  .csi-id { font-family:var(--mono); font-size:13.5px; font-weight:700; color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
-  .csi-id:hover { border-bottom-color:var(--accent-2); }
-  .csi-res { font-family:var(--mono); font-size:11.5px; color:var(--sub); }
-  .csi-comps { font-size:12px; color:#065f46; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:3px; padding:0 8px; }
-  .csi-comps i { font-style:normal; font-family:var(--mono); font-size:10px; color:#047857; margin-left:5px; }
-  .csi-title { font-size:11.5px; color:var(--faint); margin-top:3px; line-height:1.6; }
+  .cx-shared .tbl-wrap, .cx-solo-comp .tbl-wrap { margin:6px 0 4px; }
+  /* v1.31 紧凑版式：9 列在报告页宽（.cx-card/.cx-shared 嵌套后 ~752px）内免横向滚动 */
+  table.tbl-cx-pdb { min-width:748px; font-size:11.5px; }
+  .tbl-cx-pdb th, .tbl-cx-pdb td { padding:5px 6px; }
+  .tbl-cx-pdb .t-title { font-size:11px; }
+  .tbl-cx-pdb .t-journal { font-size:10.5px; }
+  .tbl-cx-pdb td.num { font-size:10px; }
+  .tbl-cx-pdb .mth { padding:0 4px; font-size:9.5px; }
+  .csi-comps { font-size:11px; color:#065f46; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:3px; padding:0 6px; white-space:nowrap; display:inline-block; max-width:100%; }
+  .csi-comps i { font-style:normal; font-family:var(--mono); font-size:10px; color:#047857; margin-left:4px; }
+  .csi-extra { display:inline-block; font-size:10.5px; color:#92400e; background:#fffbeb; border:1px dashed #fde68a; border-radius:3px; padding:0 6px; margin:1px 3px 1px 0; white-space:nowrap; }
+  .csi-extra-more { font-family:var(--mono); font-size:10px; color:#b45309; white-space:nowrap; }
+  .t-extras { overflow-wrap:anywhere; }
+  .t-pmid { font-family:var(--mono); font-size:10.5px; white-space:nowrap; }
+  .t-pmid-none { color:var(--faint); }
+  /* 单独结构：按组分分组（默认折叠，展开全量表） */
   .cx-solo-fold { margin-top:10px; }
+  .cx-solo-comp { margin:10px 0 14px; padding:10px 14px 8px; border:1px solid var(--hairline); border-radius:6px; background:#fdfdfc; }
+  .cx-solo-head { font-size:12.5px; color:var(--ink); margin-bottom:2px; }
+  .cx-solo-head .mono { font-size:10.5px; color:var(--faint); }
+  .cx-solo-sub { font-size:11px; color:var(--faint); }
 
   /* ── 文献 ── */
   ol.lit-list { list-style:none; }
@@ -1041,9 +1128,9 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     ${ctx.blastHits.length ? `<p class="note">按 identity 降序排列（已排除直接结构重复项）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
-        <col style="width:74px"><col style="width:104px"><col style="width:74px">
+        <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
       </colgroup>
-      <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖范围</th><th>方法</th><th class="num">分辨率 (Å)</th></tr></thead>
+      <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖范围</th><th>方法</th><th class="num">分辨率 (Å)</th><th>文献</th></tr></thead>
       <tbody>${blastRowsHtml(ctx.blastHits)}</tbody>
     </table></div>`
     : ctx.blastStatus?.status === 'failed'

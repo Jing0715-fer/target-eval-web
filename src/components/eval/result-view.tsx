@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -225,6 +225,88 @@ function BlastStatusBox({ status, note, provider }: { status?: BlastStatusCode; 
   )
 }
 
+/* ---------------- v1.31 内嵌 HTML 报告（与下载同一份文件） ---------------- */
+
+/**
+ * 同源 iframe 内嵌完整 HTML 报告：web 展示与「下载 HTML」共用同一文件，样式 100% 一致。
+ * - 自动高度：注入内嵌适配样式（取消 .page 100vh 最小高 / 隐藏回顶部钮）后按内容同步；
+ *   ResizeObserver 监听 body（details 折叠展开 / 图片懒加载引起的高度变化）
+ * - 加载失败（报告文件丢失 404）→ onFail 降级为旧版 React 数据区块
+ */
+function ReportFrame({
+  jobId,
+  iframeRef,
+  onFail,
+}: {
+  jobId: string
+  iframeRef: React.RefObject<HTMLIFrameElement | null>
+  onFail: () => void
+}) {
+  const [height, setHeight] = useState(1600)
+  const [loaded, setLoaded] = useState(false)
+
+  const syncHeight = useCallback(() => {
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
+    try {
+      if (!doc.getElementById('embed-tweaks')) {
+        const st = doc.createElement('style')
+        st.id = 'embed-tweaks'
+        st.textContent = '.page{min-height:auto!important}.backtop{display:none!important}'
+        doc.head.appendChild(st)
+      }
+      const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight)
+      if (Number.isFinite(h) && h > 100) setHeight(h + 16)
+    } catch { /* 跨域异常不应发生（同源）；忽略 */ }
+  }, [iframeRef])
+
+  useEffect(() => {
+    if (!loaded) return
+    let ro: ResizeObserver | null = null
+    try {
+      const doc = iframeRef.current?.contentDocument
+      if (doc?.body) {
+        ro = new ResizeObserver(() => syncHeight())
+        ro.observe(doc.body)
+      }
+    } catch { /* ignore */ }
+    // rAF 延迟一帧再同步高度（避免 effect 内同步 setState 触发级联渲染）
+    const raf = requestAnimationFrame(() => syncHeight())
+    return () => {
+      cancelAnimationFrame(raf)
+      ro?.disconnect()
+    }
+  }, [loaded, syncHeight])
+
+  return (
+    <div className="relative overflow-hidden rounded-lg border border-stone-200 bg-white shadow-none dark:border-stone-800">
+      {!loaded && (
+        <div className="absolute inset-0 z-10 flex min-h-72 flex-col items-center justify-center gap-3 bg-white dark:bg-stone-950">
+          <Loader2 className="size-6 animate-spin text-emerald-700 dark:text-emerald-500" aria-hidden />
+          <p className="font-mono text-xs text-stone-400">正在加载完整 HTML 报告（与下载文件同一份）…</p>
+        </div>
+      )}
+      <iframe
+        ref={iframeRef}
+        src={`/api/jobs/${jobId}/report`}
+        title="评估报告（与下载 HTML 一致）"
+        aria-label="评估报告（与下载 HTML 一致）"
+        onLoad={() => {
+          setLoaded(true)
+          syncHeight()
+          // 报告丢失（404 JSON）→ 降级旧版数据区块
+          try {
+            const doc = iframeRef.current?.contentDocument
+            if (doc && !doc.querySelector('.rpt-head')) onFail()
+          } catch { /* ignore */ }
+        }}
+        style={{ height }}
+        className="block w-full bg-white transition-[height] duration-200 ease-out"
+      />
+    </div>
+  )
+}
+
 /* ---------------- 结果视图 ---------------- */
 
 export interface ResultViewProps {
@@ -237,7 +319,10 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewLoaded, setPreviewLoaded] = useState(false)
   const [previewSlow, setPreviewSlow] = useState(false)
+  /** v1.31：内嵌报告加载失败（文件丢失）→ 降级旧版 React 数据区块 */
+  const [embedFailed, setEmbedFailed] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const reportFrameRef = useRef<HTMLIFrameElement>(null)
 
   const openPreview = () => {
     setPreviewLoaded(false)
@@ -280,6 +365,9 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const reportMd = job.reportMarkdown?.trim() || null
   const reportLlmFailed = summary.reportLlmOk === false
   const reportDeferred = summary.reportDeferred === true
+  /** v1.31：web 端直接内嵌完整 HTML 报告（与「下载 HTML」同一份文件，样式 100% 一致）。
+   *  单靶点作业且报告已生成时启用；deferred（并入合并报告）或文件丢失时降级为下方 React 数据区块。 */
+  const embedReport = !reportDeferred && job.reportAvailable === true && !embedFailed
 
   const downloadReport = () => {
     window.open(`/api/jobs/${job.id}/report?download=1`, '_blank')
@@ -465,6 +553,72 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         />
       </motion.div>
 
+      {/* 3. 评估报告（v1.31：web 端内嵌与下载完全一致的 HTML — 单一数据源，杜绝样式分叉） */}
+      {embedReport && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.12, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+        >
+          <SectionHeader
+            no={scoreNo}
+            title="评估报告（完整版）"
+            en="Full Report"
+            count="与下载 HTML 同一文件 · 样式一致"
+          />
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-700/25 bg-emerald-50/60 px-4 py-3 dark:border-emerald-700/30 dark:bg-emerald-950/20">
+            <FileCheck2 className="size-4 shrink-0 text-emerald-800 dark:text-emerald-400" aria-hidden />
+            <p className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">
+              下方内嵌<b className="mx-1 text-emerald-800 dark:text-emerald-400">与「下载 HTML」完全相同</b>的报告文件
+              （评分 / 评估分析 / PDB 与互作复合物结构清单 / BLAST / 文献 / 实验数据全在其中），
+              点击结构 ID、PMID 可直跳 RCSB / PubMed；折叠区可展开查看全量结构列表。
+            </p>
+            <div className="flex shrink-0 flex-wrap gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={openPreview}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Eye className="size-3.5" />
+                全屏预览
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => reportFrameRef.current?.contentWindow?.print()}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Printer className="size-3.5" />
+                打印
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open(`/api/jobs/${job.id}/report`, '_blank')}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <ExternalLink className="size-3.5" />
+                新窗口
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={downloadReport}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Download className="size-3.5" />
+                下载 HTML
+              </Button>
+            </div>
+          </div>
+          <ReportFrame jobId={job.id} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} />
+        </motion.section>
+      )}
+
+      {/* 3-9 旧版 React 数据区块：仅 deferred（并入合并报告）或内嵌报告不可用时降级展示 */}
+      {!embedReport && <>
       {/* 3. 评分（v1.25：含聚集形式调整明细 — 寡聚态分析融入评分卡，不单独成章） */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
@@ -962,6 +1116,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <LiteratureList items={literature} pdbs={pdbs} />
         </motion.section>
       )}
+      </>}
 
       {/* 底部操作 */}
       <div className="flex justify-center border-t border-stone-200 pt-6 dark:border-stone-800">

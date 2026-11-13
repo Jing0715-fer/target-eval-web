@@ -148,6 +148,8 @@ export interface BlastHit {
   resolution: number | null
   /** 原始 evalue 字符串（科学计数法） */
   evalueRaw: string
+  /** v1.31：主引文 PubMed ID（RCSB GraphQL 批量补齐；无引文时缺失） */
+  pubmedId?: string
 }
 
 // ─── PubMed ───────────────────────────────────────────────────────────────────
@@ -230,6 +232,10 @@ export interface InteractionComponent {
   soloPdbCount?: number
   /** v1.30 单独结构代表（按分辨率 ≤3 个；无结构为空） */
   soloRepresentativePdbs?: PdbEntry[]
+  /** v1.31 单独结构全量列表（按分辨率升序，≤80 个 — 报告默认折叠展开可见；超出部分仅计数） */
+  soloPdbs?: PdbEntry[]
+  /** v1.31 soloPdbs 之外未拉取详情的单独结构数（soloPdbCount - soloPdbs.length） */
+  soloPdbOmitted?: number
 }
 
 /** v1.30 共有结构（同一 PDB 含 ≥2 个复合物组分 — 复合物组装先例，最直接的结构证据） */
@@ -245,6 +251,16 @@ export interface InteractionSharedPdb {
   isNmr: boolean
   resolution: number | null
   title: string
+  /** v1.31 释放日期（YYYY-MM-DD） */
+  releaseDate?: string
+  /** v1.31 主引文期刊缩写 */
+  journal?: string
+  /** v1.31 主引文 PubMed ID（空串表示无） */
+  pubmedId?: string
+  /** v1.31 除复合物组分外，该 PDB 还包含的其他蛋白组分基因名（如 [FBXO22, SKP2] — 展示更大装配语境） */
+  extraComponents?: string[]
+  /** v1.31 extraComponents 对应的 UniProt accession（与基因名同序，悬停提示用） */
+  extraAccessions?: string[]
 }
 
 /** Complex Portal curated 复合物（complex viewer 数据源 — 可靠装配证据） */
@@ -265,10 +281,12 @@ export interface InteractionComplexInfo {
   totalPdb: number
   /** 复合物总分子量估算（kDa；长度缺失组分按 0 计，null 表示无法估算） */
   assemblyKda: number | null
-  /** v1.30 共有结构列表（按覆盖组分数降序、分辨率升序；≤10 个） */
+  /** v1.30 共有结构列表（按覆盖组分数降序、分辨率升序；≤120 个 — 超出部分仅计入总数） */
   sharedPdbs?: InteractionSharedPdb[]
   /** v1.30 共有结构总数（去重） */
   sharedPdbTotal?: number
+  /** v1.31 sharedPdbs 之外未拉取详情的共有结构数（sharedPdbTotal - sharedPdbs.length） */
+  sharedPdbOmitted?: number
   /** v1.30 各组分单独结构总数（去重） */
   soloPdbTotal?: number
 }
