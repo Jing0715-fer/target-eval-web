@@ -868,7 +868,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     disabled={ligandChips.length >= MAX_LIGANDS}
                     placeholder={ligandChips.length >= MAX_LIGANDS
                       ? `已达上限 ${MAX_LIGANDS} 条`
-                      : '名称 / 分子式 / ID，回车或逗号添加（如 Resmetirom, ATP, C9H8O4）'}
+                      : '名称 / 分子式 / ID，逗号分隔'}
                     className="h-10 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-foreground outline-none ring-0 transition-colors placeholder:text-muted-foreground/70 focus-visible:ring-0"
                   />
                   <Button
@@ -914,10 +914,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                 支持中英文名、分子式、品牌药名与化学组分 ID，多个配体用逗号/顿号分隔；SDF / MOL / SMI / PDB 文件自动提取名称、分子式与残基名。非标准输入经
                 <span className="font-mono text-[10px] text-muted-foreground"> 别名表 · PDBe 检索 · PubChem · AI </span>
                 多策略归一到 RCSB 化学组分 ID（PubChem 详情兜底），并检索含该配体的 PDB 结构列表。
-                <button type="button" className="ml-1 font-mono text-[10px] text-primary hover:underline sm:hidden" onClick={() => setLigandHintOpen(v => !v)} aria-expanded={ligandHintOpen} aria-label={ligandHintOpen ? '收起配体说明' : '展开配体说明'}>
-                  {ligandHintOpen ? '－收起' : '…展开'}
-                </button>
               </p>
+              {/* v2.5 复验修复：展开链接置于 <p> 之外 —— line-clamp 会连带裁掉段落内元素 */}
+              <button type="button" className="mt-0.5 font-mono text-[10px] text-primary hover:underline sm:hidden" onClick={() => setLigandHintOpen(v => !v)} aria-expanded={ligandHintOpen} aria-label={ligandHintOpen ? '－ 收起说明' : '＋ 展开全部说明'}>
+                {ligandHintOpen ? '－ 收起说明' : '＋ 展开全部说明'}
+              </button>
             </StepSection>
 
             {/* ── 03 客户目标 ───────────────────────────────────────── */}
