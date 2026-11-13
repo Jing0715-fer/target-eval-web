@@ -100,6 +100,34 @@ export function invalidateLlmConfigCache(): void {
   g.__llmCfg = undefined
 }
 
+/**
+ * v2.4 无状态部署：请求级引擎配置覆写。
+ * 无状态（函数计算）环境下 SQLite 不跨请求保留，用户配置的引擎读不回来；
+ * 同步评估路由接受前端随请求内联携带的配置（仅本次请求期间生效）。
+ * 安全说明：Key 本就由该用户在配置面板输入，回到同一用户发起的请求中，无新增暴露面。
+ */
+export function setLlmConfigOverride(override: {
+  providerKey: string
+  baseUrl?: string
+  apiKey?: string
+  model: string
+} | null): ActiveLlmConfig | null {
+  if (!override) {
+    g.__llmCfg = undefined
+    return null
+  }
+  const meta = getProviderMeta(override.providerKey)
+  const config: ActiveLlmConfig = {
+    providerKey: (meta?.key ?? 'custom') as ProviderKey,
+    label: meta?.label ?? override.providerKey,
+    baseUrl: override.baseUrl || meta?.baseUrl || '',
+    apiKey: override.apiKey ?? '',
+    model: override.model,
+  }
+  g.__llmCfg = { config, loadedAt: Date.now() }
+  return config
+}
+
 /** 当前引擎摘要（报告元数据/页脚展示用） */
 export async function getEngineSummary(): Promise<string> {
   const cfg = await getActiveLlmConfig()

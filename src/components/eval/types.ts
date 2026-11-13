@@ -49,6 +49,21 @@ export interface EvaluateRequest {
   homologBlast?: BlastGroup
   /** v2.0：配体输入（名称/分子式/三位 ID / 上传文件提取线索，≤8 条） */
   ligands?: Array<{ raw: string; source?: 'text' | 'file' | 'eval-table'; fileName?: string }>
+  /** v2.4 无状态部署：评估表数据内联携带（全文/图片/要点；服务器磁盘不跨请求保留） */
+  evalTable?: {
+    fullText?: string
+    goalHints?: string[]
+    images?: Array<{
+      id: string
+      kind: AssetKind
+      caption: string
+      mime: string
+      sizeKB: number
+      vlmKind?: boolean
+      dataUri?: string
+    }>
+    insights?: FormInsights
+  }
   options: EvaluateOptions
 }
 
@@ -88,6 +103,8 @@ export interface DocxParsed {
   images: ParsedImage[]
   /** 无法提取的图片数（格式不支持/损坏/超限） */
   skippedImages?: number
+  /** 直传（无状态）模式下随响应返回的目标提示（供后续 LLM 解析内联携带） */
+  goalHints?: string[]
 }
 
 export interface UploadResponse {
@@ -717,6 +734,8 @@ export interface AssetItem {
   sizeKB: number
   /** 类型由 VLM 视觉识别判定（缺省 = 关键词分类） */
   vlmKind?: boolean
+  /** v2.4 无状态同步评估：图片 data URI 内联（优先于 /api/assets/{id}） */
+  dataUri?: string
 }
 
 export interface JobDetail {
@@ -738,6 +757,10 @@ export interface JobDetail {
   reportMarkdown?: string | null
   /** v1.31 单靶点 HTML 报告是否已生成（web 端内嵌与下载同一份 HTML，保证样式一致） */
   reportAvailable?: boolean
+  /** v2.4 无状态同步评估：HTML 报告内联返回（磁盘不跨请求保留，结果页 srcDoc 直接渲染/下载用 Blob） */
+  reportHtml?: string | null
+  /** v2.4：本作业由无状态同步评估产生（前端历史/下载走内联数据） */
+  stateless?: boolean
   error: string | null
 }
 

@@ -33,12 +33,22 @@ import { extractLigandsFromText, fetchLigandStructures, normalizeLigandRaw, reso
 import { alphafoldFigureFor } from './alphafold'
 import { isValidUniprotId, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
+/** v2.4 无状态（函数计算）部署：评估表数据由前端内联携带（服务器磁盘不跨请求保留） */
+export interface InlineEvalTable {
+  fullText?: string
+  goalHints?: string[]
+  images?: ParsedImage[]
+  insights?: FormInsights
+}
+
 export interface PipelineInput {
   jobId: string
   mode: InputMode
   uniprot?: string
   sequence?: string
   uploadId?: string
+  /** v2.4：内联评估表数据（无状态部署由前端随请求携带；磁盘 parsed.json/insights.json 缺失时回退使用） */
+  evalTable?: InlineEvalTable
   goal?: string
   /** 批次关系说明（非关联批量时注入报告，LLM 在执行摘要中说明独立/复合物定位） */
   batchNote?: string
@@ -49,10 +59,22 @@ export interface PipelineInput {
   options: EvaluationOptions
 }
 
+/** v2.4：评估完成时的最终数据（供同步评估路由直接返回，不依赖 DB 读回） */
+export interface PipelineResult {
+  summary: JobSummary
+  directPdbs: PdbEntry[]
+  blastHits: BlastHit[]
+  literature: LiteratureItem[]
+  reportPath: string | null
+  reportMarkdown: string | null
+}
+
 export interface PipelineCallbacks {
   signal: AbortSignal
   report: (stageKey: string, message: string, subPercent?: number) => void
   log: (msg: string, level?: 'info' | 'warn' | 'error') => void
+  /** v2.4 可选：评估成功完成时携带全部最终数据回调（同步评估模式使用） */
+  onComplete?: (result: PipelineResult) => void
 }
 
 /** 把 UniProt 交叉引用的残基范围（Chains，UniProt 编号）回填到 PDB 结构列表 */
@@ -145,10 +167,17 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       if (parsed.goalHints?.length) goalHints = parsed.goalHints
       images = parsed.images ?? []
       if (parsed.fullText) uploadFullText = parsed.fullText
+    } else if (input.evalTable) {
+      // v2.4 无状态部署：磁盘无 parsed.json（实例不保留状态）→ 使用前端内联携带的评估表数据
+      if (input.evalTable.goalHints?.length) goalHints = input.evalTable.goalHints
+      images = input.evalTable.images ?? []
+      if (input.evalTable.fullText) uploadFullText = input.evalTable.fullText
+      log('评估表数据以内联模式提供（无状态部署），实验图片与目标提示可用')
     } else {
       log('评估表解析数据缺失（上传目录可能已过期清理），胶图/SEC 图片与目标提示不可用，建议重新上传评估表', 'warn')
     }
     insights = await readUploadInsights(input.uploadId)
+    if (!insights && input.evalTable?.insights) insights = input.evalTable.insights
     // 用户未显式填目标时，自动采用 LLM 解析出的客户目标
     if (!goal && insights?.goals?.length) {
       goal = insights.goals.slice(0, 3).join('；')
@@ -158,6 +187,17 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
         where: { id: input.jobId },
         data: { goal: goal.slice(0, 2000) },
       }).catch(() => undefined)
+    }
+    if (insights?.goals?.length) goalHints = [...new Set([...insights.goals, ...goalHints])]
+  } else if (input.evalTable) {
+    // v2.4：无 uploadId 但携带了内联评估表数据（如无状态模式下未传 uploadId）
+    if (input.evalTable.goalHints?.length) goalHints = input.evalTable.goalHints
+    images = input.evalTable.images ?? []
+    if (input.evalTable.fullText) uploadFullText = input.evalTable.fullText
+    insights = input.evalTable.insights ?? null
+    if (!goal && insights?.goals?.length) {
+      goal = insights.goals.slice(0, 3).join('；')
+      log(`已自动采用评估表解析出的客户目标（${insights.goals.length} 条）`)
     }
     if (insights?.goals?.length) goalHints = [...new Set([...insights.goals, ...goalHints])]
   }
@@ -891,21 +931,35 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       : undefined,
   }
 
-  await db.evaluationJob.update({
-    where: { id: input.jobId },
-    data: {
-      status: 'done',
-      title: summary.uniprot.proteinName,
-      uniprotId: uniprotInfo?.uniprotId ?? null,
-      summary: JSON.stringify(summary),
-      pdbs: JSON.stringify(directPdbs),
-      blastHits: JSON.stringify(blastHits),
-      literature: JSON.stringify(literature),
-      reportPath,
-      reportMarkdown: !deferReport && generated.fullMarkdown?.trim() ? generated.fullMarkdown : null,
-      error: null,
-      updatedAt: new Date(),
-    },
+  // v2.4：终态持久化失败不视为评估失败（无状态部署磁盘/DB 可能不可写；
+  // 同步评估模式下结果由调用方直接从内存/响应返回）
+  try {
+    await db.evaluationJob.update({
+      where: { id: input.jobId },
+      data: {
+        status: 'done',
+        title: summary.uniprot.proteinName,
+        uniprotId: uniprotInfo?.uniprotId ?? null,
+        summary: JSON.stringify(summary),
+        pdbs: JSON.stringify(directPdbs),
+        blastHits: JSON.stringify(blastHits),
+        literature: JSON.stringify(literature),
+        reportPath,
+        reportMarkdown: !deferReport && generated.fullMarkdown?.trim() ? generated.fullMarkdown : null,
+        error: null,
+        updatedAt: new Date(),
+      },
+    })
+  } catch { /* 无状态部署：DB 不可用不阻塞（同步路由从内存快照返回结果） */ }
+
+  // v2.4：同步评估模式 — 直接把最终数据交给调用方（不依赖 DB 读回）
+  cb.onComplete?.({
+    summary,
+    directPdbs,
+    blastHits,
+    literature,
+    reportPath,
+    reportMarkdown: !deferReport && generated.fullMarkdown?.trim() ? generated.fullMarkdown : null,
   })
 
   // 图片资产登记（供 /api/assets 访问）

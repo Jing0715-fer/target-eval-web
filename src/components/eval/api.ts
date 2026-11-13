@@ -6,7 +6,9 @@ import type {
   BatchReportInfo,
   BatchReportListItem,
   DocxParsed,
+  EvaluateRequest,
   InsightsResponse,
+  JobDetail,
   JobListItem,
   LlmConfigResponse,
   LlmModelsResponse,
@@ -61,11 +63,71 @@ interface SessionStatusResponse {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+// ─── v2.4 无状态部署检测与记忆 ─────────────────────────────────────────────
+
+/**
+ * 无状态（函数计算）部署标记：分块上传会话跨请求不可见时置位并持久化到
+ * localStorage（key=te_stateless）。后续上传/评估直接走无状态通道，避免
+ * 每次都先撞一次「会话不存在」再回退。仅影响本浏览器；部署环境换回有状态
+ * （本地/容器）时不会读到该标记。
+ */
+const STATELESS_KEY = 'te_stateless'
+let statelessCached: boolean | null = null
+
+export function isStatelessEnv(): boolean {
+  if (statelessCached != null) return statelessCached
+  if (typeof window === 'undefined') return false
+  try {
+    statelessCached = window.localStorage.getItem(STATELESS_KEY) === '1'
+  } catch {
+    statelessCached = false
+  }
+  return statelessCached
+}
+
+export function markStatelessEnv(): void {
+  statelessCached = true
+  try {
+    window.localStorage.setItem(STATELESS_KEY, '1')
+  } catch { /* 隐私模式等场景静默降级（仅内存记忆） */ }
+}
+
+/** （调试/部署切换）清除无状态标记 */
+export function clearStatelessEnv(): void {
+  statelessCached = false
+  try {
+    window.localStorage.removeItem(STATELESS_KEY)
+  } catch { /* ignore */ }
+}
+
+// ─── v2.4 LLM 引擎配置内存暂存（无状态部署用） ────────────────────────────
+
+/**
+ * 无状态部署中 SQLite 不跨请求保留，用户保存的引擎配置读不回来。
+ * 配置面板保存时把原始配置（含 Key）暂存在内存（不落盘），
+ * 同步评估请求内联携带。仅本页面会话内有效。
+ */
+export interface LlmEngineOverride {
+  providerKey: string
+  baseUrl?: string
+  apiKey?: string
+  model: string
+}
+
+let llmOverride: LlmEngineOverride | null = null
+
+export function setLlmEngineOverride(cfg: LlmEngineOverride | null): void {
+  llmOverride = cfg
+}
+
+export function getLlmEngineOverride(): LlmEngineOverride | null {
+  return llmOverride
+}
+
 /** 会话丢失（无状态部署：分块会话落在了被回收的实例上）→ 触发直传回退 */
 function isSessionLost(msg: string): boolean {
   return msg.includes('上传会话不存在') || msg.includes('上传会话已过期') || msg.includes('无权访问该上传会话')
 }
-
 /**
  * v2.3 直传回退通道：单请求完成上传 + 解析 + 返回全部结果（fullText 内联）。
  * 用于无状态部署（函数计算快照等，服务器数据不跨请求保留）：分块会话在那种
@@ -102,6 +164,10 @@ export async function uploadEvaluateDocx(
   file: File,
   onProgress?: (p: UploadProgress) => void,
 ): Promise<UploadResponse> {
+  // v2.4：已确认无状态环境 → 直接走直传（不再先撞分块会话 404）
+  if (isStatelessEnv()) {
+    return uploadEvaluateDocxDirect(file, onProgress)
+  }
   // ── 1. init ──
   let uploadId = ''
   let chunkSize = CHUNK_SIZE
@@ -118,7 +184,6 @@ export async function uploadEvaluateDocx(
     uploadId = data.uploadId
     chunkSize = data.chunkSize && data.chunkSize > 0 ? data.chunkSize : CHUNK_SIZE
   }
-
   // ── 2. chunks（严格顺序；会话丢失 → 直传回退） ──
   for (let offset = 0; offset < file.size; offset += chunkSize) {
     const blob = file.slice(offset, Math.min(offset + chunkSize, file.size))
@@ -137,6 +202,7 @@ export async function uploadEvaluateDocx(
           const msg = data?.error ?? `分块上传失败（HTTP ${res.status}）`
           if (isSessionLost(msg)) {
             sessionLost = true // 环境不保留会话：换通道，重试无意义
+            markStatelessEnv() // v2.4：记住无状态环境，后续直接直传
             break
           }
           throw new Error(msg)
@@ -170,6 +236,7 @@ export async function uploadEvaluateDocx(
     if (!res.ok || !data?.ok) {
       const msg = data?.error ?? `完成上传失败（HTTP ${res.status}）`
       if (isSessionLost(msg)) {
+        markStatelessEnv()
         return uploadEvaluateDocxDirect(file, onProgress)
       }
       throw new Error(msg)
@@ -191,6 +258,7 @@ export async function uploadEvaluateDocx(
       if (!res.ok || !st?.ok) {
         const msg = (st as { error?: string } | null)?.error ?? `状态查询失败（HTTP ${res.status}）`
         if (isSessionLost(msg)) {
+          markStatelessEnv()
           return uploadEvaluateDocxDirect(file, onProgress)
         }
         throw new Error(msg)
@@ -253,6 +321,9 @@ export async function judgeTargetRelation(input: {
   uploadId?: string
   uniprots: string[]
   goal?: string
+  /** v2.4 无状态部署：评估表序列与目标提示内联携带（服务器磁盘读不到时回退） */
+  sequences?: Array<{ header: string; seq: string; length: number }>
+  goalHints?: string[]
 }): Promise<RelationJudgeResponse> {
   const res = await fetch('/api/evaluate/relation', {
     method: 'POST',
@@ -416,4 +487,92 @@ export async function testLlmConnection(input: {
   if (!data) throw new Error(`测试请求失败（HTTP ${res.status}）`)
   if (!data.ok) throw new Error(data.error ?? '测试失败')
   return data
+}
+
+// ─── v2.4 无状态同步流式评估 ─────────────────────────────────────────────────
+
+/** 同步评估请求体（EvaluateRequest 的无状态超集） */
+export type SyncEvaluateBody = EvaluateRequest & {
+  /** 引擎配置覆写（无状态部署 DB 不保留，前端内联携带） */
+  llm?: LlmEngineOverride
+}
+
+/** 同步评估最终结果（done 事件） */
+export interface SyncEvaluateResult {
+  job: JobDetail
+  reportHtml: string | null
+}
+
+/**
+ * POST /api/evaluate/sync — 无状态部署的同步流式评估。
+ * 读取 NDJSON 事件流：job 事件回调 onProgress；done/error 为终态。
+ * abort 信号触发时中止请求（服务器同步中止管线）。
+ */
+export async function evaluateSyncStream(
+  body: SyncEvaluateBody,
+  opts: {
+    onProgress?: (job: JobDetail) => void
+    signal?: AbortSignal
+  } = {},
+): Promise<SyncEvaluateResult> {
+  // 引擎配置覆写（内存暂存的原始配置随请求内联携带）
+  const payload: SyncEvaluateBody = { ...body }
+  const llm = getLlmEngineOverride()
+  if (llm && !payload.llm) payload.llm = llm
+
+  const res = await fetch('/api/evaluate/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: opts.signal,
+  })
+
+  if (!res.ok || !res.body) {
+    const err = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(err?.error ?? `同步评估启动失败（HTTP ${res.status}）`)
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: SyncEvaluateResult | null = null
+  let streamError: string | null = null
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // 按行解析 NDJSON 事件
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        try {
+          const ev = JSON.parse(line) as {
+            type: 'job' | 'ping' | 'done' | 'error'
+            job?: JobDetail
+            reportHtml?: string | null
+            error?: string
+          }
+          if (ev.type === 'job' && ev.job) {
+            opts.onProgress?.(ev.job)
+          } else if (ev.type === 'done' && ev.job) {
+            result = { job: ev.job, reportHtml: ev.reportHtml ?? null }
+          } else if (ev.type === 'error') {
+            streamError = ev.error ?? '评估失败'
+            if (ev.job) opts.onProgress?.(ev.job)
+          }
+          // ping 心跳：仅保活，无需处理
+        } catch { /* 半行/坏行丢弃，等下一块补齐 */ }
+      }
+      nl = buffer.indexOf('\n')
+    }
+    if (result || streamError) break
+  }
+
+  if (result) return result
+  if (streamError) throw new Error(streamError)
+  // 流中断且无终态（网关切断/超时）
+  throw new Error('评估流中断（网络或网关超时）。已完成的部分数据已丢失，请重试；若持续出现，请减少并发或稍后再试。')
 }

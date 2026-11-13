@@ -25,6 +25,7 @@ import {
   fetchLlmModels,
   resetLlmConfig,
   saveLlmConfig,
+  setLlmEngineOverride,
   testLlmConnection,
 } from './api'
 import type { LlmProviderLite } from './types'
@@ -171,6 +172,11 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
         model,
         keepKey: apiKey.trim() === '',
       })
+      // v2.4：无状态部署 DB 不保留配置 → 内存暂存原始配置（含 Key），同步评估请求内联携带
+      // （Key 为空且 keepKey 时无法取回原值 → 仅在用户本次输入了 Key 时暂存完整配置）
+      if (apiKey.trim() !== '') {
+        setLlmEngineOverride({ providerKey, baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), model: model.trim() })
+      }
       setSaveMsg({ ok: true, text: `已启用 ${r.engineSummary}` })
       setHasActive(Boolean(r.active))
       setActiveSummary(r.engineSummary)
@@ -194,6 +200,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     setSaveMsg(null)
     try {
       const r = await resetLlmConfig()
+      setLlmEngineOverride(null) // v2.4：同步清空内存暂存的引擎配置
       setProviderKey('builtin')
       setBaseUrl('')
       setModel('')

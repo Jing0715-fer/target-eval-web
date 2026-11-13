@@ -4,12 +4,12 @@ import { ShieldCheck } from 'lucide-react'
 export function AppFooter({ engineSummary }: { engineSummary?: string }) {
   return (
     <footer className="mt-auto border-t border-border bg-background">
-      <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-2.5 text-center sm:px-5 lg:px-6">
+      <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-2.5 text-center sm:px-5 lg:px-6 xl:max-w-[1440px] 2xl:max-w-[1720px]">
         <span className="flex items-center gap-1.5 text-[11px] font-semibold tracking-[-0.01em] text-muted-foreground">
           <span className="size-1.5 rounded-[2px] bg-primary" aria-hidden />
           TargetEval
           <span className="font-normal text-muted-foreground/50" aria-hidden>·</span>
-          <span className="font-mono text-[10px] font-normal text-muted-foreground/70">v1.11</span>
+          <span className="font-mono text-[10px] font-normal text-muted-foreground/70">v2.4</span>
         </span>
         <span className="hidden h-3 w-px bg-border sm:block" aria-hidden />
         <p className="text-[11px] leading-relaxed text-muted-foreground">

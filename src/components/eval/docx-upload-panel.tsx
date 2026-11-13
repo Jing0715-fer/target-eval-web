@@ -24,7 +24,6 @@ import { elideSequenceRuns } from '@/lib/eval/seq-elide'
 import { KindBadge } from './badges'
 import type { UploadProgress } from './api'
 import type { FormInsights, UploadResponse } from './types'
-
 export interface DocxUploadPanelProps {
   upload: UploadResponse | null
   uploading: boolean
@@ -168,6 +167,8 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
   const eSeqNotes = elideSequenceRuns(insights?.sequenceNotes)
   const eHomologs = elideSequenceRuns(insights?.homologs)
   const eConcerns = (insights?.keyConcerns ?? []).map(elideSequenceRuns)
+  // v2.4：AI 从评估表提取到的配体（提交评估时自动作为研究输入）
+  const eLigands = (insights?.ligands ?? []).map(x => x.trim()).filter(Boolean)
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/40 p-3.5">
       {/* 解析摘要 */}
@@ -309,6 +310,30 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                       {expExpanded ? '－ 收起' : '＋ 展开全部'}
                     </button>
                   )}
+                </div>
+              )}
+
+              {/* v2.4 评估表提取的配体（自动作为研究输入，报告含配体研究数据） */}
+              {eLigands.length > 0 && (
+                <div>
+                  <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                    <PillBottle className="size-3 text-primary" />
+                    从评估表提取的配体
+                    <span className="font-normal text-muted-foreground/70">
+                      （提交评估时自动归一为 PDB 化学组分 / PubChem 信息，无需手动输入）
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {eLigands.map((name, i) => (
+                      <span
+                        key={`${name}-${i}`}
+                        className="rounded-md border border-primary/25 bg-primary/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-foreground/90"
+                        title="评估表 AI 识别的配体 — 将随评估请求自动提交"
+                      >
+                        {name}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -472,7 +497,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               >
                 <div className="relative h-24 bg-muted">
                   <img
-                    src={`/api/assets/${img.id}`}
+                    src={img.dataUri ?? `/api/assets/${img.id}`}
                     alt={img.caption || '实验图片'}
                     loading="lazy"
                     className="size-full object-contain"

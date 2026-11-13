@@ -34,7 +34,7 @@ function isAnalysisStage(stage: string | null | undefined): boolean {
 function StudioHero() {
   return (
     <div className="shrink-0">
-      <div className="min-w-0 max-w-3xl">
+      <div className="min-w-0 max-w-3xl xl:max-w-4xl">
         <div className="flex items-center gap-2.5">
           <span className="lin-eyebrow text-primary">
             Evaluation Studio
@@ -47,11 +47,11 @@ function StudioHero() {
             结构解析可行性
           </span>
         </div>
-        <h1 className="mt-2 text-[24px] leading-[1.12] font-semibold tracking-[-0.02em] text-foreground sm:text-[27px]">
+        <h1 className="mt-2 text-[24px] leading-[1.12] font-semibold tracking-[-0.02em] text-foreground sm:text-[27px] xl:text-[30px]">
           开始一次
           <span className="text-primary">靶点评估</span>
         </h1>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+        <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground sm:text-[13.5px]">
           输入靶点与配体，自动汇集结构、文献与同源数据，生成
           <span className="font-medium text-foreground/80">
             {' '}X-ray · Cryo-EM · NMR{' '}
@@ -197,8 +197,8 @@ export default function Home() {
         isIdle={flow.phase === 'idle'}
       />
 
-      {/* 主列：工作区 + 页脚 */}
-      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-5">
+      {/* 主列：工作区 + 页脚（v2.4 宽屏：xl 起放开容器宽度，充分利用页面） */}
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-5 xl:max-w-[1440px] 2xl:max-w-[1720px]">
           {/* 非 idle 阶段：紧凑流程指示器（idle 阶段由 Hero + 右栏管线导引承载） */}
           {flow.phase !== 'idle' && !flow.loadingHistoryJob && (
             <Stepper step={step} className="mb-5" />
@@ -216,9 +216,10 @@ export default function Home() {
                   {/* 主视觉 */}
                   <StudioHero />
 
-                  {/* 工作台双栏：左 = 评估表单；右 = 管线导引 + 历史记录（v1.3：历史放在 workflow 下面） */}
-                  <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
-                    <div className="lg:col-span-8">
+                  {/* 工作台双栏：左 = 评估表单；右 = 管线导引 + 历史记录（v1.3：历史放在 workflow 下面）
+                      v2.4 宽屏：xl 起 7/5 比例（表单更饱满 + 最近评估列表更宽敞）；双栏铺满视口剩余高度 */}
+                  <div className="mt-4 grid flex-1 grid-cols-1 gap-4 lg:grid-cols-12 lg:items-stretch">
+                    <div className="lg:col-span-8 xl:col-span-7">
                       <InputPanel
                         submitting={flow.submitting}
                         submitError={flow.submitError}
@@ -227,12 +228,12 @@ export default function Home() {
                       />
                     </div>
                     <aside
-                      className="flex min-w-0 flex-col gap-4 lg:col-span-4"
+                      className="flex min-w-0 flex-col gap-4 lg:col-span-4 xl:col-span-5"
                       aria-label="评估管线与最近评估"
                     >
                       <WorkflowGuide />
-                      {/* 最近评估（常驻右栏，workflow 下方；内部滚动） */}
-                      <div className="flex max-h-[400px] min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgb(22_23_29/0.04)] dark:shadow-[0_1px_2px_rgb(0_0_0/0.4)]">
+                      {/* 最近评估（常驻右栏，workflow 下方；内部滚动；宽屏放开高度上限充分利用纵向空间） */}
+                      <div className="flex max-h-[400px] min-h-[220px] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgb(22_23_29/0.04)] xl:max-h-none xl:flex-1 dark:shadow-[0_1px_2px_rgb(0_0_0/0.4)]">
                         <RecentEvaluations
                           refreshKey={historyKey}
                           onOpenJob={openHistoryJob}

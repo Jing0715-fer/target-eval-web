@@ -17,7 +17,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
-import { deleteJobById, fetchBatchReportList, fetchJobList } from './api'
+import { deleteJobById, fetchBatchReportList, fetchJobList, isStatelessEnv } from './api'
+import { removeSessionJob, sessionJobToListItem, getSessionJobs } from './session-history'
 import { StatusBadge } from './badges'
 import { formatDateTime, formatPercent } from './format'
 import type { BatchReportListItem, JobListItem } from './types'
@@ -220,6 +221,12 @@ export function HistoryDialog({
     setLoading(true)
     setError(null)
     try {
+      // v2.4 无状态部署：服务器历史不可用 → 合并本会话的同步评估记录
+      if (isStatelessEnv()) {
+        setJobs(getSessionJobs().map(sessionJobToListItem))
+        setBatches([])
+        return
+      }
       const [jobList, batchList] = await Promise.all([
         fetchJobList(),
         fetchBatchReportList().catch(() => [] as BatchReportListItem[]),
@@ -242,8 +249,14 @@ export function HistoryDialog({
   const handleDelete = async (id: string) => {
     setDeletingId(id)
     try {
-      await deleteJobById(id)
-      setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
+      // v2.4：会话本地记录直接移除；服务器记录走 DELETE
+      if (isStatelessEnv() && getSessionJobs().some(j => j.job.id === id)) {
+        removeSessionJob(id)
+        setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
+      } else {
+        await deleteJobById(id)
+        setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
+      }
     } catch {
       setError('删除失败，请稍后重试')
     } finally {
@@ -371,6 +384,12 @@ export function RecentEvaluations({
 
   useEffect(() => {
     let cancelled = false
+    // v2.4 无状态部署：服务器历史不可用 → 展示本会话的同步评估记录
+    if (isStatelessEnv()) {
+      setJobs(getSessionJobs().map(sessionJobToListItem))
+      setBatches([])
+      return
+    }
     Promise.all([
       fetchJobList().catch(() => [] as JobListItem[]),
       fetchBatchReportList().catch(() => [] as BatchReportListItem[]),
@@ -388,8 +407,14 @@ export function RecentEvaluations({
   const handleDelete = async (id: string) => {
     setDeletingId(id)
     try {
-      await deleteJobById(id)
-      setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
+      // v2.4：会话本地记录直接移除；服务器记录走 DELETE
+      if (isStatelessEnv() && getSessionJobs().some(j => j.job.id === id)) {
+        removeSessionJob(id)
+        setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
+      } else {
+        await deleteJobById(id)
+        setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
+      }
     } catch {
       // 忽略删除失败
     } finally {

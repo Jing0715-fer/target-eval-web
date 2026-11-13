@@ -430,14 +430,24 @@ export async function embedImages(
   for (const meta of ordered) {
     let dataUri: string | null = null
     if (embeddedCount < EMBED_MAX_COUNT) {
-      try {
-        const buf = await fs.readFile(resolvePath(meta))
-        if (buf.length > 0 && total + buf.length <= EMBED_MAX_TOTAL) {
-          dataUri = `data:${meta.mime};base64,${buf.toString('base64')}`
-          total += buf.length
+      if (meta.dataUri) {
+        // v2.4 无状态模式：图片已随请求内联携带（data URI），直接嵌入（估算解码后大小计入预算）
+        const approxBytes = Math.floor((meta.dataUri.length * 3) / 4)
+        if (total + approxBytes <= EMBED_MAX_TOTAL) {
+          dataUri = meta.dataUri
+          total += approxBytes
           embeddedCount++
         }
-      } catch { /* 文件缺失 → 不嵌入 */ }
+      } else {
+        try {
+          const buf = await fs.readFile(resolvePath(meta))
+          if (buf.length > 0 && total + buf.length <= EMBED_MAX_TOTAL) {
+            dataUri = `data:${meta.mime};base64,${buf.toString('base64')}`
+            total += buf.length
+            embeddedCount++
+          }
+        } catch { /* 文件缺失 → 不嵌入 */ }
+      }
     }
     result.push({ meta, dataUri })
   }

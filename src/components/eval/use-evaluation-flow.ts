@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
-import { fetchBatchReport, generateBatchReport, judgeTargetRelation } from './api'
+import { evaluateSyncStream, fetchBatchReport, generateBatchReport, isStatelessEnv, judgeTargetRelation } from './api'
+import { addSessionJob, getSessionJob } from './session-history'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
 /** 主视图状态机：idle（输入）→ running（进度）→ done（结果）；error 单独处理 */
@@ -87,6 +88,30 @@ function fallbackIndependentJudgment(): RelationJudgment {
 
 /** v1.19 自动下载记录（模块级：同一页面会话内每个报告只自动下载一次；切靶点/重渲染不重复） */
 const autoDownloadedKeys = new Set<string>()
+
+/** v2.4 无状态模式：内联 HTML 报告 → Blob 自动下载（服务器不保留文件，第一时间落到本机） */
+function autoDownloadInlineReport(reportHtml: string, key: string, label: string) {
+  if (autoDownloadedKeys.has(key)) return
+  autoDownloadedKeys.add(key)
+  try {
+    const blob = new Blob([reportHtml], { type: 'text/html;charset=utf-8' })
+    const blobUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = `TargetEval_${label.replace(/[\\/:*?"<>|\s]+/g, '_')}_${new Date().toISOString().slice(0, 10)}.html`
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000)
+    toast({
+      title: 'HTML 报告已自动下载',
+      description: `${label} — 已保存到本机下载目录（无状态部署服务器不保留文件，请及时查看）。若浏览器未弹出下载，请点击结果页的「下载 HTML」按钮。`,
+    })
+  } catch {
+    autoDownloadedKeys.delete(key)
+  }
+}
 
 /**
  * 作业 / 合并报告完成后自动把 HTML 报告下载到用户本机（v1.19）。
@@ -285,6 +310,247 @@ export function useEvaluationFlow() {
       return { jobId: data.jobId }
     } catch (err) {
       return { error: err instanceof Error ? err.message : '创建评估作业失败，请稍后重试' }
+    }
+  }
+
+  /** 按 id 拉取作业详情并应用快照（批量完成后切换展示用）。
+   * v1.9：切换失败改为非破坏性 —— 保留当前结果视图 + toast 提示
+   * （旧实现直接退回输入态，用户会误以为“点击没有真正切换”）；成功后滚回页面顶部，
+   * 让刊头/靶点徽标的变化立即可见（同蛋白家族场景下避免看不出切换）。
+   * v2.4：会话本地记录优先（无状态部署：/api/jobs 在其他实例拿不到本会话数据） */
+  const loadJobById = async (id: string, opts?: { switchView?: boolean }) => {
+    try {
+      const sess = getSessionJob(id)
+      if (sess) {
+        jobIdRef.current = id
+        displayJobIdRef.current = id
+        applyJobSnapshot(sess.job)
+        if (opts?.switchView !== false && batchRef.current === null) {
+          setBatch(prev => (prev && prev.items.length > 1 ? { ...prev, view: 'job' } : prev))
+        }
+        if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
+        return
+      }
+      const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = (await res.json()) as JobDetail
+      jobIdRef.current = id
+      displayJobIdRef.current = id
+      applyJobSnapshot(data)
+      if (opts?.switchView !== false && batchRef.current === null) {
+        // 批量已完成：切换到该靶点的数据视图
+        setBatch(prev => (prev && prev.items.length > 1 ? { ...prev, view: 'job' } : prev))
+      }
+      if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
+    } catch {
+      toast({
+        title: '切换靶点失败',
+        description: '无法加载该靶点的评估结果（网络波动或服务暂不可用），当前结果未受影响，请稍后重试',
+        variant: 'destructive',
+      })
+    }
+  }
+
+  // ─── v2.4 无状态同步评估 ────────────────────────────────────────────────────
+
+  /** 同步评估的取消句柄（abort fetch → 服务器同步中止管线） */
+  const syncAbortRef = useRef<AbortController | null>(null)
+
+  /**
+   * 无状态模式单作业同步评估：单个流式请求内完成，进度事件直刷 UI。
+   * 返回 { ok, job }；取消/失败返回 { ok:false, error }（取消静默处理）。
+   */
+  const runSyncJob = async (
+    request: EvaluateRequest,
+    opts: { isDisplay: boolean },
+  ): Promise<{ ok: boolean; job?: JobDetail; reportHtml?: string | null; error?: string }> => {
+    const ctrl = new AbortController()
+    syncAbortRef.current = ctrl
+    try {
+      const { job, reportHtml } = await evaluateSyncStream(request, {
+        signal: ctrl.signal,
+        onProgress: (p) => {
+          if (opts.isDisplay) setJob(p)
+        },
+      })
+      const finalJob: JobDetail = { ...job, reportHtml: reportHtml ?? null, stateless: true }
+      addSessionJob(finalJob, reportHtml)
+      if (reportHtml) {
+        autoDownloadInlineReport(
+          reportHtml,
+          `job:${finalJob.id}`,
+          finalJob.uniprotId || finalJob.summary?.uniprot?.proteinName || '评估报告',
+        )
+      }
+      return { ok: true, job: finalJob, reportHtml }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      const aborted = ctrl.signal.aborted || /abort/i.test(msg)
+      if (aborted) return { ok: false, error: '__canceled__' }
+      return { ok: false, error: msg }
+    } finally {
+      if (syncAbortRef.current === ctrl) syncAbortRef.current = null
+    }
+  }
+
+  /** 无状态模式：单个请求 → 同步流式评估直至终态 */
+  const runSyncSingle = async (request: EvaluateRequest): Promise<void> => {
+    setJob(null)
+    setPhase('running')
+    startedAtRef.current = Date.now()
+    setElapsedSec(0)
+    setNetworkIssue(false)
+    startTick()
+    const r = await runSyncJob(request, { isDisplay: true })
+    if (r.ok && r.job) {
+      clearTimers()
+      jobIdRef.current = r.job.id
+      displayJobIdRef.current = r.job.id
+      applyJobSnapshot(r.job)
+    } else if (r.error === '__canceled__') {
+      clearTimers()
+      jobIdRef.current = null
+      setJob(null)
+      setPhase('idle')
+    } else {
+      clearTimers()
+      setSubmitError(r.error ?? '同步评估失败')
+      setPhase('error')
+    }
+  }
+
+  /** 无状态模式批量：关系判断（内联序列/目标提示）→ 逐靶点串行同步评估 → 各自独立报告 */
+  const runSyncBatch = async (requests: EvaluateRequest[], opts?: { docxSequences?: string[] }): Promise<void> => {
+    batchCancelRef.current = false
+    activeJobIdsRef.current = new Set()
+    const st: BatchState = {
+      total: requests.length,
+      currentIndex: 0,
+      items: [],
+      done: false,
+      relationJudging: true,
+      view: 'job',
+    }
+    const snapshot = (): BatchState => ({ ...st, items: st.items.map(x => ({ ...x })) })
+    batchRef.current = st
+    setBatch(snapshot())
+    setJob(null)
+    setPhase('running')
+    startedAtRef.current = Date.now()
+    setElapsedSec(0)
+    setNetworkIssue(false)
+    startTick()
+
+    // ── ① 靶点关系判断（v2.4：内联携带评估表序列与目标提示）──
+    const uploadId = (requests[0]?.docxJobId ?? requests[0]?.uploadId ?? '').trim() || undefined
+    const uniprots = requests.map(r => (r.uniprotFromDocx ?? r.uniprot ?? '').trim().toUpperCase()).filter(Boolean)
+    let judgment: RelationJudgment | null = null
+    if (new Set(uniprots).size >= 2) {
+      try {
+        const seqs = (opts?.docxSequences ?? [])
+          .map(s => ({ header: '', seq: s, length: s.replace(/[^A-Za-z]/g, '').length }))
+          .filter(s => s.length >= 30)
+          .slice(0, 8)
+        const rel = await judgeTargetRelation({
+          uploadId,
+          uniprots,
+          goal: requests[0]?.goal,
+          sequences: seqs,
+          goalHints: requests[0]?.evalTable?.goalHints,
+        })
+        judgment = rel.judgment
+      } catch (e) {
+        st.relationError = e instanceof Error ? e.message : '关系判断服务暂不可用'
+      }
+    } else {
+      st.relationError = '靶点信息不足（缺少 UniProt ID），未做关系判断'
+    }
+    if (batchCancelRef.current) {
+      clearTimers()
+      batchRef.current = null
+      setPhase('idle')
+      setJob(null)
+      return
+    }
+    st.relationJudging = false
+    st.relation = judgment
+    setBatch(snapshot())
+
+    // 无状态部署不支持合并报告（各靶点在不同实例完成，服务器无共享数据）→ 恒独立报告 + 批次说明
+    const batchNote = judgment ? buildBatchNote(judgment, requests.length) : undefined
+    const reqs: EvaluateRequest[] = requests.map(r => ({
+      ...r,
+      batchNote,
+      options: { ...r.options, reportMode: 'single' },
+    }))
+
+    // ── ② 逐靶点串行同步评估（流式请求一个接一个，避免单实例并发超限）──
+    for (let i = 0; i < reqs.length; i++) {
+      if (batchCancelRef.current) break
+      const label = requestLabel(reqs[i])
+      const item: BatchItem = { key: `${i}-${label}`, label, status: 'running' }
+      st.items = [...st.items, item]
+      st.currentIndex = i
+      setBatch(snapshot())
+
+      const r = await runSyncJob(reqs[i], { isDisplay: true })
+      if (batchCancelRef.current) {
+        item.status = 'canceled'
+        setBatch(snapshot())
+        break
+      }
+      if (r.ok && r.job) {
+        item.status = 'done'
+        item.jobId = r.job.id
+      } else if (r.error === '__canceled__') {
+        item.status = 'canceled'
+        setBatch(snapshot())
+        break
+      } else {
+        item.status = 'error'
+        item.error = r.error ?? '评估失败'
+      }
+      setBatch(snapshot())
+    }
+
+    clearTimers()
+    const finished = st.items
+    st.done = true
+    setBatch(snapshot())
+    batchRef.current = null
+    jobIdRef.current = null
+
+    if (batchCancelRef.current) {
+      setBatch({ ...snapshot(), done: true })
+      setPhase('idle')
+      setJob(null)
+      return
+    }
+
+    const okItems = finished.filter(x => x.status === 'done' && x.jobId)
+    if (judgment?.related === true && okItems.length >= 2) {
+      // 关联批次在无状态部署下无合并报告 — 明确提示（关系分析仍展示于批次条）
+      st.mergedError = '无状态部署暂不支持合并报告：各靶点已分别生成独立报告（关系分析见批次条）'
+      setBatch(snapshot())
+    }
+    if (okItems.length > 0) {
+      const first = okItems[0]
+      const sess = first.jobId ? getSessionJob(first.jobId) : undefined
+      if (sess) {
+        jobIdRef.current = sess.job.id
+        displayJobIdRef.current = sess.job.id
+        applyJobSnapshot(sess.job)
+      } else {
+        setBatch({ ...snapshot(), done: true })
+        setPhase('idle')
+        setJob(null)
+      }
+    } else {
+      const failedCount = finished.filter(x => x.status === 'error').length
+      setBatch({ ...snapshot(), done: true })
+      setPhase('idle')
+      setJob(null)
+      setSubmitError(`批量评估未能完成（${failedCount} 个作业执行失败），请检查网络后重试`)
     }
   }
 
@@ -527,7 +793,8 @@ export function useEvaluationFlow() {
     }
   }
 
-  /** 创建评估作业（单个 = 原有流程；多个 = v1.8 批量编排 + v1.10 同源归并） */
+  /** 创建评估作业（单个 = 原有流程；多个 = v1.8 批量编排 + v1.10 同源归并；
+   *  v2.4 无状态部署 → 同步流式评估（作业轮询在该环境不可用）） */
   const startEvaluation = async (
     requests: EvaluateRequest[],
     opts?: { docxSequences?: string[] },
@@ -541,6 +808,15 @@ export function useEvaluationFlow() {
     setBatch(null)
     batchCancelRef.current = false
     try {
+      // v2.4：无状态环境 → 同步流式评估（服务器不保留作业/磁盘状态）
+      if (isStatelessEnv()) {
+        if (list.length === 1) {
+          await runSyncSingle(list[0])
+        } else {
+          await runSyncBatch(list, opts)
+        }
+        return { ok: true }
+      }
       if (list.length === 1) {
         const created = await createJob(list[0])
         if (!created.jobId) throw new Error(created.error)
@@ -560,11 +836,22 @@ export function useEvaluationFlow() {
     }
   }
 
-  /** 取消运行中的作业（批量模式：中止全部活跃作业并不再提交后续） */
+  /** 取消运行中的作业（批量模式：中止全部活跃作业并不再提交后续；
+   *  v2.4 无状态模式：abort 同步评估流 → 服务器同步中止管线） */
   const cancelJob = useCallback(async () => {
     const ids = [...activeJobIdsRef.current]
     if (batchRef.current) batchCancelRef.current = true
     clearTimers()
+    // v2.4：同步评估中的取消 — abort 流（服务器监听断开并中止管线）
+    const syncCtrl = syncAbortRef.current
+    if (syncCtrl) {
+      setCanceling(true)
+      try {
+        syncCtrl.abort()
+      } finally {
+        setCanceling(false)
+      }
+    }
     jobIdRef.current = null
     setPhase('idle')
     setJob(null)
@@ -581,7 +868,7 @@ export function useEvaluationFlow() {
       }
     } else {
       const id = displayJobIdRef.current
-      if (id) {
+      if (id && !syncCtrl) {
         setCanceling(true)
         try {
           await fetch(`/api/jobs/${id}`, { method: 'DELETE' })
@@ -617,32 +904,6 @@ export function useEvaluationFlow() {
       reset()
     }
   }, [reset, startEvaluation])
-
-  /** 按 id 拉取作业详情并应用快照（批量完成后切换展示用）。
-   * v1.9：切换失败改为非破坏性 —— 保留当前结果视图 + toast 提示
-   * （旧实现直接退回输入态，用户会误以为“点击没有真正切换”）；成功后滚回页面顶部，
-   * 让刊头/靶点徽标的变化立即可见（同蛋白家族场景下避免看不出切换） */
-  const loadJobById = async (id: string, opts?: { switchView?: boolean }) => {
-    try {
-      const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = (await res.json()) as JobDetail
-      jobIdRef.current = id
-      displayJobIdRef.current = id
-      applyJobSnapshot(data)
-      if (opts?.switchView !== false && batchRef.current === null) {
-        // 批量已完成：切换到该靶点的数据视图
-        setBatch(prev => (prev && prev.items.length > 1 ? { ...prev, view: 'job' } : prev))
-      }
-      if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
-    } catch {
-      toast({
-        title: '切换靶点失败',
-        description: '无法加载该靶点的评估结果（网络波动或服务暂不可用），当前结果未受影响，请稍后重试',
-        variant: 'destructive',
-      })
-    }
-  }
 
   /** 切换到合并报告视图（关联批次结果页） */
   const showMergedReport = useCallback(() => {
@@ -704,12 +965,20 @@ export function useEvaluationFlow() {
     [applyJobSnapshot]
   )
 
-  /** 从历史记录加载作业：done → 结果视图；running/pending → 进度视图 */
+  /** 从历史记录加载作业：done → 结果视图；running/pending → 进度视图
+   *  v2.4：无状态部署优先读会话本地记录（服务器历史不可达） */
   const loadJob = useCallback(
     async (id: string) => {
       setLoadingHistoryJob(true)
       setSubmitError(null)
       try {
+        const sess = getSessionJob(id)
+        if (sess) {
+          jobIdRef.current = id
+          displayJobIdRef.current = id
+          applyJobSnapshot(sess.job)
+          return
+        }
         const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = (await res.json()) as JobDetail

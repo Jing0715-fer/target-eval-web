@@ -62,7 +62,7 @@ export function AssetGallery({ assets }: { assets: AssetItem[] }) {
                   >
                     <div className="relative h-36 w-full overflow-hidden bg-muted">
                       <img
-                        src={`/api/assets/${a.id}`}
+                        src={a.dataUri ?? `/api/assets/${a.id}`}
                         alt={a.caption || KIND_SECTION_TITLE[a.kind] || '实验图片'}
                         loading="lazy"
                         className="size-full object-contain transition-transform duration-300 group-hover:scale-105"
@@ -106,7 +106,7 @@ export function AssetGallery({ assets }: { assets: AssetItem[] }) {
           {active && (
             <>
               <img
-                src={`/api/assets/${active.id}`}
+                src={active.dataUri ?? `/api/assets/${active.id}`}
                 alt={active.caption || '实验图片'}
                 className="max-h-[65vh] w-full rounded-xl border border-border bg-muted object-contain"
               />

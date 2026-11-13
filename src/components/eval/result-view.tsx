@@ -25,6 +25,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { describeBlastStatus } from '@/lib/eval/types'
 import { RatingBadge } from './badges'
@@ -237,10 +238,13 @@ function ReportFrame({
   jobId,
   iframeRef,
   onFail,
+  reportHtml,
 }: {
   jobId: string
   iframeRef: React.RefObject<HTMLIFrameElement | null>
   onFail: () => void
+  /** v2.4 无状态同步评估：内联 HTML 报告（srcDoc 直接渲染，不经 /api/jobs/{id}/report） */
+  reportHtml?: string | null
 }) {
   const [height, setHeight] = useState(1600)
   const [loaded, setLoaded] = useState(false)
@@ -288,7 +292,8 @@ function ReportFrame({
       )}
       <iframe
         ref={iframeRef}
-        src={`/api/jobs/${jobId}/report`}
+        srcDoc={reportHtml ?? undefined}
+        src={reportHtml ? undefined : `/api/jobs/${jobId}/report`}
         title="评估报告（与下载 HTML 一致）"
         aria-label="评估报告（与下载 HTML 一致）"
         onLoad={() => {
@@ -366,11 +371,31 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const reportMd = job.reportMarkdown?.trim() || null
   const reportLlmFailed = summary.reportLlmOk === false
   const reportDeferred = summary.reportDeferred === true
+  /** v2.4：内联 HTML 报告（无状态同步评估）— srcDoc 渲染 + Blob 下载，不经 /api/jobs/{id}/report */
+  const inlineReportHtml = job.stateless ? (job.reportHtml ?? null) : null
   /** v1.31：web 端直接内嵌完整 HTML 报告（与「下载 HTML」同一份文件，样式 100% 一致）。
    *  单靶点作业且报告已生成时启用；deferred（并入合并报告）或文件丢失时降级为下方 React 数据区块。 */
-  const embedReport = !reportDeferred && job.reportAvailable === true && !embedFailed
+  const embedReport = !reportDeferred && (job.reportAvailable === true || Boolean(inlineReportHtml)) && !embedFailed
 
   const downloadReport = () => {
+    // v2.4 无状态：内联报告 → Blob 下载（服务器不保留文件）
+    if (inlineReportHtml) {
+      try {
+        const blob = new Blob([inlineReportHtml], { type: 'text/html;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `TargetEval_${(job.uniprotId || job.id).replace(/[^\w-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.html`
+        a.rel = 'noopener'
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      } catch {
+        toast({ title: '下载失败', description: '报告数据生成下载文件失败，请重试', variant: 'destructive' })
+      }
+      return
+    }
     window.open(`/api/jobs/${job.id}/report?download=1`, '_blank')
   }
 
@@ -615,7 +640,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               </Button>
             </div>
           </div>
-          <ReportFrame jobId={job.id} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} />
+          <ReportFrame jobId={job.id} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} reportHtml={inlineReportHtml} />
         </motion.section>
       )}
 

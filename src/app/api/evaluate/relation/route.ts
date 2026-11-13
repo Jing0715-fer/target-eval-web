@@ -26,6 +26,9 @@ interface RelationBody {
   uploadId?: string
   uniprots?: string[]
   goal?: string
+  /** v2.4 无状态部署：评估表序列与目标提示由前端内联携带（磁盘 parsed.json 读不到时回退） */
+  sequences?: ParsedSequence[]
+  goalHints?: string[]
 }
 
 export async function POST(req: Request) {
@@ -51,6 +54,7 @@ export async function POST(req: Request) {
   }
 
   // 读取解析结果 + LLM 要点（仅 docx 模式有 uploadId；缺失时容错）
+  // v2.4：无状态部署磁盘无数据 → 使用请求体内联携带的序列与目标提示
   const uploadDir = uploadId ? path.join(process.cwd(), 'db', 'reports', uploadId) : ''
   let sequences: ParsedSequence[] = []
   let goalHints: string[] = []
@@ -60,11 +64,18 @@ export async function POST(req: Request) {
       const parsed = JSON.parse(await fs.readFile(path.join(uploadDir, 'parsed.json'), 'utf-8')) as { sequences?: ParsedSequence[]; goalHints?: string[] }
       sequences = parsed.sequences ?? []
       goalHints = parsed.goalHints ?? []
-    } catch { /* 解析数据缺失时仅按 UniProt 判断 */ }
+    } catch {
+      // 磁盘缺失（无状态部署）→ 内联数据回退
+      sequences = Array.isArray(body.sequences) ? body.sequences.slice(0, 8) : []
+      goalHints = Array.isArray(body.goalHints) ? body.goalHints.slice(0, 12).map(x => String(x).slice(0, 200)) : []
+    }
     try {
       const data = JSON.parse(await fs.readFile(path.join(uploadDir, 'insights.json'), 'utf-8')) as FormInsights
       if (Array.isArray(data.goals)) insights = data
-    } catch { /* insights 可选 */ }
+    } catch { /* insights 可选（无状态部署由 goal/goalHints 承担） */ }
+  } else {
+    sequences = Array.isArray(body.sequences) ? body.sequences.slice(0, 8) : []
+    goalHints = Array.isArray(body.goalHints) ? body.goalHints.slice(0, 12).map(x => String(x).slice(0, 200)) : []
   }
 
   // 各靶点拉取 UniProt 简介（并行 + 8s 超时容错 — 失败的靶点仅用 ID 判断）

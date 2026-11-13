@@ -27,7 +27,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { countResidues, parseMultiUniprotIds, parseMultiFasta, type FastaEntry } from './format'
-import { fetchDocxInsights, uploadEvaluateDocx, type UploadProgress } from './api'
+import { fetchDocxInsights, isStatelessEnv, uploadEvaluateDocx, type UploadProgress } from './api'
 import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
 import type { EvaluateOptions, EvaluateRequest, FormInsights, InputMode, UploadResponse } from './types'
 import type { StartResult } from './use-evaluation-flow'
@@ -100,12 +100,12 @@ function StepSection({
   return (
     <section
       className={cn(
-        'px-5 py-4',
+        'px-4 py-4 sm:px-5',
         // 首段（01）无上边线；后续段以发丝线分隔（轨道连续穿行）
         no !== '01' && 'border-t border-border/70',
       )}
     >
-      <div className="flex gap-3.5">
+      <div className="flex gap-3 sm:gap-3.5">
         {/* 步骤轨道：连线（跨段连续，紧贴节点无断口）+ 编号节点 */}
         <div className="-mb-4 flex flex-col items-center" aria-hidden>
           {no !== '01' && <span className="-mt-4 h-4 w-px bg-border" />}
@@ -223,13 +223,14 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     }
   }, [])
 
-  /** 上传成功后自动执行 LLM 智能解析（不阻塞选择评估对象） */
-  const runInsights = async (uploadId: string) => {
+  /** 上传成功后自动执行 LLM 智能解析（不阻塞选择评估对象）
+   *  v2.4：无状态模式内联携带全文（服务器磁盘读不到 parsed 数据） */
+  const runInsights = async (uploadId: string, inline?: { text: string; goalHints?: string[] }) => {
     setInsightsLoading(true)
     setInsightsError(null)
     setInsights(null)
     try {
-      const res = await fetchDocxInsights(uploadId)
+      const res = await fetchDocxInsights(uploadId, false, inline)
       const data = res.insights
       if (!data) throw new Error('解析结果为空')
       setInsights(data)
@@ -270,8 +271,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         setSelectedUniprots([])
         setSelectedSequenceIndex(null)
       }
-      // 后台执行 LLM 智能解析
-      void runInsights(res.uploadId)
+      // 后台执行 LLM 智能解析（v2.4：直传模式响应带 fullText → 内联携带，不依赖磁盘）
+      const inline = res.stateless && res.fullText
+        ? { text: res.fullText, goalHints: res.parsed.goalHints }
+        : undefined
+      void runInsights(res.uploadId, inline)
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : '上传解析失败，请稍后重试')
     } finally {
@@ -355,10 +359,34 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       forceBlast: blastEnabled && forceBlast,
       maxPdb,
     }
-    const ligands = ligandChips.length
-      ? ligandChips.map(c => ({ raw: c.raw, source: c.source, fileName: c.fileName }))
-      : undefined
+    // v2.4 配体输入组装：手动芯片 + 评估表 AI 提取的配体（合并去重，≤8 条）。
+    // 评估表配体直接随请求发送 — 不再依赖服务器从磁盘 insights.json 回读
+    // （无状态部署磁盘读不到；本地部署也有「insights 未完成即提交」的竞态）。
+    const manualLigands = ligandChips.map(c => ({ raw: c.raw, source: c.source as 'text' | 'file', fileName: c.fileName }))
+    const tableLigands = (insights?.ligands ?? [])
+      .map(name => name.trim())
+      .filter(Boolean)
+      .map(name => ({ raw: name, source: 'eval-table' as const }))
+    const seenLig = new Set<string>()
+    const ligands = [...manualLigands, ...tableLigands]
+      .filter(l => {
+        const k = l.raw.toLowerCase().replace(/[\s-]/g, '')
+        if (!k || seenLig.has(k)) return false
+        seenLig.add(k)
+        return true
+      })
+      .slice(0, MAX_LIGANDS)
     const trimmedGoal = goal.trim() || undefined
+
+    // v2.4 无状态部署：评估表数据随请求内联携带（磁盘不跨请求保留）
+    const evalTable = upload && (upload.stateless || isStatelessEnv())
+      ? {
+          fullText: upload.fullText,
+          goalHints: upload.parsed.goalHints,
+          images: upload.parsed.images.filter(im => im.dataUri).slice(0, 8),
+          insights: insights ?? undefined,
+        }
+      : undefined
     let requests: EvaluateRequest[]
     if (mode === 'uniprot') {
       // v1.22：支持多 UniProt ID — 每个 ID 一份独立作业（批量编排 + 关系判断 + 共有结构）。
@@ -408,6 +436,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         sequenceFromDocx: selectedSeq,
         goal: trimmedGoal,
         ligands,
+        evalTable,
         options,
       }))
       const docxSequences = upload.parsed.sequences.map(s => s.seq ?? '')
@@ -463,19 +492,19 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgb(22_23_29/0.04)] dark:shadow-[0_1px_2px_rgb(0_0_0/0.4)]">
       <Tabs value={mode} onValueChange={(v) => setMode(v as TabMode)} className="flex min-h-0 flex-1 flex-col gap-0">
-        {/* 卡头工具条：输入方式切换（Linear 分段控件 — 选中 = 表面抬升） */}
-        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-secondary/50 px-5 py-2.5">
-          <span className="lin-eyebrow text-muted-foreground/80">Input · 输入方式</span>
-          <TabsList className="ml-auto h-8 w-auto justify-start gap-0.5 rounded-lg border border-border bg-muted p-0.5">
+        {/* 卡头工具条：输入方式切换（Linear 分段控件 — 选中 = 表面抬升；移动端占满整行） */}
+        <div className="flex shrink-0 items-center gap-x-3 gap-y-2 border-b border-border bg-secondary/50 px-4 py-2.5 sm:px-5">
+          <span className="lin-eyebrow hidden text-muted-foreground/80 sm:inline">Input · 输入方式</span>
+          <TabsList className="h-8 w-full justify-between gap-0.5 rounded-lg border border-border bg-muted p-0.5 sm:ml-auto sm:w-auto sm:justify-start">
             {([
-              { value: 'uniprot', label: 'UniProt ID', icon: Dna },
+              { value: 'uniprot', label: 'UniProt', icon: Dna },
               { value: 'sequence', label: '序列', icon: FileText },
               { value: 'docx', label: '评估表', icon: Paperclip },
             ] as const).map(({ value, label, icon: Icon }) => (
               <TabsTrigger
                 key={value}
                 value={value}
-                className="h-7 gap-1.5 rounded-[6px] px-2.5 text-[11.5px] font-medium text-muted-foreground shadow-none transition-all data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_3px_rgb(22_23_29/0.10)] sm:px-3 dark:data-[state=active]:bg-[#191a1b] [&_svg]:size-3"
+                className="h-7 flex-1 gap-1.5 rounded-[6px] px-2 text-[11.5px] font-medium text-muted-foreground shadow-none transition-all data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_3px_rgb(22_23_29/0.10)] sm:flex-none sm:px-3 dark:data-[state=active]:bg-[#191a1b] [&_svg]:size-3"
               >
                 <Icon aria-hidden />
                 {label}
@@ -751,7 +780,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     onClearUpload={clearUpload}
                     onToggleUniprot={toggleUniprot}
                     onSelectSequence={setSelectedSequenceIndex}
-                    onRetryInsights={() => upload && void runInsights(upload.uploadId)}
+                    onRetryInsights={() => upload && void runInsights(
+                      upload.uploadId,
+                      upload.stateless && upload.fullText
+                        ? { text: upload.fullText, goalHints: upload.parsed.goalHints }
+                        : undefined,
+                    )}
                     onApplyGoal={applyGoal}
                   />
                 </div>
@@ -840,10 +874,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     size="sm"
                     onClick={commitLigandDraft}
                     disabled={!ligandDraft.trim() || ligandChips.length >= MAX_LIGANDS}
-                    className="h-9 gap-1 rounded-lg px-2.5 text-[11.5px] font-medium"
+                    className="h-9 shrink-0 gap-1 rounded-lg px-2.5 text-[11.5px] font-medium sm:px-2.5"
+                    title="添加配体"
                   >
                     <Plus className="size-3.5" aria-hidden />
-                    添加
+                    <span className="hidden sm:inline">添加</span>
                   </Button>
                   <Button
                     type="button"
@@ -851,10 +886,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     size="sm"
                     onClick={() => ligandFileInputRef.current?.click()}
                     disabled={ligandChips.length >= MAX_LIGANDS}
-                    className="h-9 gap-1 rounded-lg px-2.5 text-[11.5px] font-medium"
+                    className="h-9 shrink-0 gap-1 rounded-lg px-2.5 text-[11.5px] font-medium"
+                    title="上传配体文件（SDF / MOL / SMI / PDB）"
                   >
                     <Paperclip className="size-3.5" aria-hidden />
-                    配体文件
+                    <span className="hidden sm:inline">配体文件</span>
                   </Button>
                   <input
                     ref={ligandFileInputRef}
@@ -916,10 +952,10 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             {/* ── 高级选项（卡片内静默折叠）──────────────────────────── */}
             <Collapsible open={advOpen} onOpenChange={setAdvOpen}>
               <div className="border-t border-border/70">
-                <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 px-5 text-[12.5px] font-medium text-muted-foreground outline-none transition-colors hover:bg-accent">
-                  <Settings2 className="size-3.5 text-muted-foreground/60" />
+                <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 px-4 text-[12.5px] font-medium text-muted-foreground outline-none transition-colors hover:bg-accent sm:px-5">
+                  <Settings2 className="size-3.5 shrink-0 text-muted-foreground/60" />
                   高级选项
-                  <span className="ml-auto font-mono text-[10.5px] font-normal text-muted-foreground/70">
+                  <span className="ml-auto truncate font-mono text-[10.5px] font-normal text-muted-foreground/70">
                     BLAST {blastEnabled ? (forceBlast ? '强制' : '自动') : '关闭'} · PDB ≤ {maxPdb}
                   </span>
                   <ChevronDown
@@ -930,7 +966,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   />
                 </CollapsibleTrigger>
                 <CollapsibleContent className="data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-1">
-                  <div className="grid gap-4 border-t border-border/70 px-5 py-3.5 sm:grid-cols-2">
+                  <div className="grid gap-4 border-t border-border/70 px-4 py-3.5 sm:grid-cols-2 sm:px-5">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-[13px] font-medium text-foreground">
@@ -996,7 +1032,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         </div>
 
         {/* ── 提交条（卡底固定）────────────────────────────────── */}
-        <div className="shrink-0 border-t border-border bg-secondary/40 px-5 py-3">
+        <div className="shrink-0 border-t border-border bg-secondary/40 px-4 py-3 sm:px-5">
           {submitError && (
             <Alert variant="destructive" className="mb-2.5 rounded-lg py-2.5">
               <CircleAlert />
