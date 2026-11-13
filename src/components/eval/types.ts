@@ -331,6 +331,8 @@ export interface Scores {
   oligomerAdjust?: OligomerAdjustInfo
   /** v1.26：分子量增重调整明细（小分子量靶点） */
   mwAugmentAdjust?: MwAugmentAdjustInfo
+  /** v1.30：互作复合物证据调整明细（无直接结构时） */
+  interactionAdjust?: InteractionAdjustInfo
 }
 
 export interface MethodStats {
@@ -338,6 +340,88 @@ export interface MethodStats {
   cryoemCount: number
   nmrCount: number
   bestResolution: number | null
+}
+
+// ─── 互作复合物证据（v1.30，无直接结构时）──────────────────────────────────
+
+/** 互作复合物（Complex Portal curated）中的一个组分 */
+export interface InteractionComponent {
+  accession: string
+  name: string
+  description: string
+  stoichiometryText: string
+  stochMax: number | null
+  isTarget: boolean
+  lengthAa?: number | null
+  kda?: number | null
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+  /** 该组分参与的共有结构 PDB IDs（同一 PDB 含 ≥2 个复合物组分） */
+  sharedPdbIds?: string[]
+  /** 该组分的单独结构数（PDB 仅含本组分） */
+  soloPdbCount?: number
+  /** 单独结构代表（按分辨率 ≤3 个） */
+  soloRepresentativePdbs?: PdbEntry[]
+}
+
+/** 共有结构（同一 PDB 含 ≥2 个复合物组分 — 组装先例，最直接的结构证据） */
+export interface InteractionSharedPdb {
+  pdbId: string
+  componentNames: string[]
+  componentCount: number
+  method: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  resolution: number | null
+  title: string
+}
+
+/** Complex Portal curated 复合物 */
+export interface InteractionComplexInfo {
+  complexAc: string
+  name: string
+  systematicName?: string
+  assembly: string | null
+  components: InteractionComponent[]
+  componentsWithStructure: number
+  totalPdb: number
+  assemblyKda: number | null
+  sharedPdbs?: InteractionSharedPdb[]
+  sharedPdbTotal?: number
+  soloPdbTotal?: number
+}
+
+/** binary 互作伙伴的结构证据（IntAct） */
+export interface InteractionBinaryInfo {
+  accession: string
+  geneName?: string
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+}
+
+/** 互作复合物证据分析（无直接结构时作为评估依据） */
+export interface InteractionAnalysis {
+  applicable: boolean
+  hasEvidence: boolean
+  subunitNote?: string
+  complexes: InteractionComplexInfo[]
+  binaryPartners: InteractionBinaryInfo[]
+  summary: string
+  notes: string[]
+}
+
+/** 互作复合物证据对三方法的调整明细 */
+export interface InteractionAdjustInfo {
+  complexAc: string
+  complexName: string
+  componentsWithStructure: number
+  assemblyKda: number | null
+  level: 'curated' | 'binary'
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
 }
 
 // ─── 聚集形式（寡聚态）分析（v1.24）────────────────────────────────────
@@ -473,6 +557,8 @@ export interface JobSummary {
   oligomer?: OligomerAnalysis
   /** 分子量增重策略分析（v1.26+；历史作业缺省；后端存档含 applicable=false） */
   mwAugment?: MwAugmentAnalysis | null
+  /** 互作复合物证据分析（v1.30+；无直接结构时有证据时展示） */
+  interaction?: InteractionAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   reportLlmOk?: boolean
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */

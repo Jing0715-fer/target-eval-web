@@ -33,6 +33,7 @@ import { PdbTable } from './pdb-table'
 import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { AssetGallery } from './asset-gallery'
+import { InteractionStructures } from './interaction-structures'
 import type { BlastStatusCode, JobDetail, ScoreItem } from './types'
 
 /* ---------------- 通用小组件 ---------------- */
@@ -341,6 +342,11 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
         : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
   const sizedPartners = mw?.partners.filter(p => p.kda != null) ?? []
+
+  /** v1.30：互作复合物证据（无直接结构时）— 融入评分卡，不单独成章 */
+  const itx = summary.interaction?.applicable && summary.interaction.hasEvidence ? summary.interaction : null
+  const itxAdj = summary.scores?.interactionAdjust ?? null
+  const itxBest = itx?.complexes[0]
 
   return (
     <div className="flex flex-col gap-8">
@@ -699,6 +705,54 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 )}
               </div>
             )}
+            {itx && (
+              <div className="flex flex-col gap-3 border-t border-dashed border-stone-200 pt-4 dark:border-stone-800">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span
+                    className={cn(
+                      'inline-flex min-h-7 items-center rounded-md border px-2.5 text-xs font-semibold',
+                      itxAdj?.level === 'curated'
+                        ? 'border-teal-300 bg-teal-50 text-teal-800 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-400'
+                        : 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400',
+                    )}
+                  >
+                    {itxAdj?.level === 'curated' ? 'Complex Portal' : 'IntAct 互作'}
+                  </span>
+                  <span className="text-xs text-stone-500 dark:text-stone-400">
+                    互作证据
+                    <b className="mx-1 font-semibold text-stone-800 dark:text-stone-200">
+                      {itxBest ? `${itxBest.complexAc}${itxBest.assembly ? ` · ${itxBest.assembly}` : ''}` : 'binary 伙伴'}
+                    </b>
+                  </span>
+                  {itxAdj && (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-[10px] tracking-wider text-stone-400 dark:text-stone-500">调整</span>
+                      <AdjChip label="X-ray" v={itxAdj.xray} />
+                      <AdjChip label="Cryo-EM" v={itxAdj.cryoem} />
+                      <AdjChip label="NMR" v={itxAdj.nmr} />
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">
+                  {itx.summary}
+                  {itxAdj && '（上述调整已计入对应方法分数与综合评分；curated 复合物接管 Cryo-EM 分子量分量时，分子量增重与聚集形式维度的 Cryo-EM 分量不再重复计分）'}
+                  {itx.complexes.length > 0 && ' — 组分结构清单（共有结构/单独结构分类）见下方「PDB 结构清单」章节。'}
+                </p>
+                {itx.notes.length > 0 && (
+                  <details className="group overflow-hidden rounded-lg border border-stone-200 dark:border-stone-800">
+                    <summary className="flex cursor-pointer select-none items-center gap-1.5 border-b border-stone-200 bg-stone-50 px-3.5 py-2 text-[11px] font-medium text-emerald-800 list-none transition-colors hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/80 dark:text-emerald-500 dark:hover:bg-stone-800/60 [&::-webkit-details-marker]:hidden">
+                      <ChevronDown className="size-3.5 shrink-0 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+                      互作证据要点与策略影响 · {itx.notes.length} 条
+                    </summary>
+                    <ul className="divide-y divide-stone-100 dark:divide-stone-800/60">
+                      {itx.notes.map((n, i) => (
+                        <li key={`itx-note-${i}`} className="px-3.5 py-2.5 text-xs leading-relaxed text-stone-600 dark:text-stone-300">{n}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       </motion.section>
@@ -831,14 +885,36 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </motion.section>
       )}
 
-      {/* 7. PDB 结构表 */}
+      {/* 7. PDB 结构表（v1.30：无直接结构且有互作证据时，展示互作复合物组分结构清单 — 与 HTML 报告一致） */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.26, ease: 'easeOut' }}
         className="flex flex-col gap-3"
       >
-        <SectionHeader no={pdbNo} title="PDB 结构清单" en="Structures" count={`${pdbs.length} 个`} />
+        <SectionHeader
+          no={pdbNo}
+          title="PDB 结构清单"
+          en="Structures"
+          count={
+            pdbs.length > 0
+              ? `${pdbs.length} 个`
+              : itx
+                ? `直接结构 0 · 互作组分证据${itxBest?.sharedPdbTotal ? `（共有 ${itxBest.sharedPdbTotal}）` : ''}`
+                : '0 个'
+          }
+        />
+        {itx && pdbs.length === 0 && (
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/70 px-4 py-3.5 text-xs leading-relaxed text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <span>
+              <b>暂无直接关联的 PDB 结构 — 全新结构靶点。</b>
+              该靶点在 RCSB 无直接关联结构条目，但存在互作复合物证据 — 下方列出其复合物其他组分的结构清单
+              （共有结构突出显示、单独结构默认折叠），作为组装路线与构建边界设计的评估依据。
+            </span>
+          </div>
+        )}
+        {itx && pdbs.length === 0 && <InteractionStructures itx={itx} />}
         <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} />
       </motion.section>
 

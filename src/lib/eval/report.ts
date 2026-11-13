@@ -232,15 +232,21 @@ function buildDigest(ctx: ReportContext): string {
       for (const c of itx.complexes) {
         lines.push(`curated 复合物 ${c.complexAc}（${c.name}${c.assembly ? ` · ${c.assembly}` : ''}${c.assemblyKda != null ? ` · 装配 ~${c.assemblyKda} kDa` : ''}）:`)
         lines.push(c.components.map(x =>
-          `  · ${x.isTarget ? `【靶点】${x.name}` : x.name}（${x.accession}${x.kda != null ? `，~${x.kda} kDa` : ''}${x.stoichiometryText ? `，${x.stoichiometryText.replace(/minValue: |maxValue: /g, '').replace(/, /g, '–')}` : ''}）${x.isTarget ? '' : x.pdbCount > 0 ? ` — ${x.pdbCount} 个结构（代表：${x.representativePdbs.slice(0, 2).map(p => `${p.pdbId} ${p.resolution != null ? p.resolution + 'Å' : p.method.slice(0, 8)}`).join('、')}）` : ' — 无结构'}`,
+          `  · ${x.isTarget ? `【靶点】${x.name}` : x.name}（${x.accession}${x.kda != null ? `，~${x.kda} kDa` : ''}${x.stoichiometryText ? `，${x.stoichiometryText.replace(/minValue: |maxValue: /g, '').replace(/, /g, '–')}` : ''}）${x.isTarget ? '' : x.pdbCount > 0 ? ` — ${x.pdbCount} 个结构（共有 ${x.sharedPdbIds?.length ?? 0} · 单独 ${x.soloPdbCount ?? 0}；代表：${x.representativePdbs.slice(0, 2).map(p => `${p.pdbId} ${p.resolution != null ? p.resolution + 'Å' : p.method.slice(0, 8)}`).join('、')}）` : ' — 无结构'}`,
         ).join('\n'))
+        if (c.sharedPdbs?.length) {
+          lines.push(`  共有结构（同一 PDB 条目含 ≥2 个复合物组分 — 组分共组装的直接先例，共 ${c.sharedPdbTotal} 个，按覆盖组分数与分辨率取优）:`)
+          lines.push(c.sharedPdbs.slice(0, 6).map(s =>
+            `    ◈ ${s.pdbId}（${s.componentNames.join('+')}${s.componentCount > 2 ? ` 共${s.componentCount}组分` : ''} · ${s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : s.method.slice(0, 10)}${s.resolution != null ? ` ${s.resolution}Å` : ''}）${s.title ? ` — ${s.title.slice(0, 60)}` : ''}`,
+          ).join('\n'))
+        }
       }
       if (itx.binaryPartners.length) {
         lines.push(`binary 互作伙伴（IntAct 实验证据，复合物之外）: ${itx.binaryPartners.map(b => `${b.geneName ?? b.accession}（${b.accession}，${b.pdbCount} 个结构）`).join('、')}`)
       }
       lines.push('系统要点（报告中需展开呼应）:')
       lines.push(itx.notes.map(n => `  - ${n}`).join('\n'))
-      lines.push('（互作复合物是本靶点无直接/同源结构时的核心评估依据：Complex Portal 复合物为人工审核的装配证据，化学计量可靠 — 请融入「结构解析可行性评估」与「实验方案建议」：推荐技术路线中给出复合物组装路线（共表达/体外组装）与单体路线的优先级比对，组分结构用作构建边界参考与组装验证对照；并说明该路线与客户目的是否契合（若客户需要靶点单独结构，复合物路线为间接路径）。禁止将本分析另列为独立章节）')
+      lines.push('（互作复合物是本靶点无直接/同源结构时的核心评估依据：Complex Portal 复合物为人工审核的装配证据，化学计量可靠 — 请融入「结构解析可行性评估」与「实验方案建议」：推荐技术路线中给出复合物组装路线（共表达/体外组装）与单体路线的优先级比对，组分结构用作构建边界参考与组装验证对照；存在共有结构（同一 PDB 含 ≥2 组分）时重点说明其作为共组装先例的价值与可借鉴的组装形式；并说明该路线与客户目的是否契合（若客户需要靶点单独结构，复合物路线为间接路径）。禁止将本分析另列为独立章节）')
     } else {
       lines.push('（互作通道已检索：无 curated 复合物、binary 伙伴无结构 — 如实说明，不要虚构互作证据）')
     }
@@ -333,7 +339,7 @@ function partAInstruction(ctx: ReportContext): string {
     ? `，并一句话点明分子量结论（单体 ~${ctx.mwAugment.monomerKda} kDa${ctx.mwAugment.assemblyKda != null ? `，装配后 ~${ctx.mwAugment.assemblyKda} kDa${ctx.mwAugment.assemblyPath === 'homolog-complex' ? '（同源复合物推断）' : ''}` : '，无生物装配增重路径'} — 对方法选择的影响）`
     : ''
   const itxLine = ctx.interaction?.applicable && ctx.interaction.hasEvidence
-    ? `；无直接/同源结构时点明互作复合物证据（${ctx.interaction.complexes[0] ? `${ctx.interaction.complexes[0].complexAc} curated 复合物${ctx.interaction.complexes[0].componentsWithStructure > 0 ? '，其他组分有结构' : ''}` : 'binary 互作伙伴有结构'} — 是本评估的结构证据基础）`
+    ? `；无直接/同源结构时点明互作复合物证据（${ctx.interaction.complexes[0] ? `${ctx.interaction.complexes[0].complexAc} curated 复合物${ctx.interaction.complexes[0].componentsWithStructure > 0 ? '，其他组分有结构' : ''}${ctx.interaction.complexes[0].sharedPdbTotal ? `（含 ${ctx.interaction.complexes[0].sharedPdbTotal} 个共有结构 — 组分共组装先例）` : ''}` : 'binary 互作伙伴有结构'} — 是本评估的结构证据基础）`
     : ''
   return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
 

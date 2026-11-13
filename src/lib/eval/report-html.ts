@@ -172,15 +172,61 @@ function methodLabel(p: PdbEntry): string {
   return p.method.slice(0, 12) || '—'
 }
 
-// ─── v1.29 互作复合物证据（Complex Portal / IntAct，无直接结构时）──────────
+// ─── v1.29/v1.30 互作复合物证据（Complex Portal / IntAct，无直接结构时）──────────
 
 function stochShort(text: string): string {
   return text.replace(/minValue:\s*/g, '').replace(/maxValue:\s*/g, '').replace(/,\s*/g, '–').trim()
 }
 
-/** 单个 curated 复合物的组分结构表（靶点行高亮；代表结构带分辨率） */
+/** 共有结构徽标方法标签（X-ray/Cryo-EM/NMR 配色与 PDB 表一致） */
+function sharedMethodBadge(s: { isXray: boolean; isCryoem: boolean; isNmr: boolean; method: string }): string {
+  const cls = s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'
+  const label = s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : s.method.slice(0, 10)
+  return `<span class="mth mth-${cls}">${esc(label)}</span>`
+}
+
+/**
+ * v1.30 单个 curated 复合物卡片：
+ *  - 头部：CPX 编号 + 名称 + 装配/分子量/组分结构 chips
+ *  - 组分构成表（靶点行高亮；共有/单独结构数分列）
+ *  - 共有结构列表（同一 PDB 含 ≥2 组分 — 组装先例，绿色面板突出，默认展开）
+ *  - 单独结构代表（各组分独立解析 — 次要参考，默认折叠）
+ */
 function complexCardHtml(c: InteractionComplexInfo): string {
   const others = c.components.filter(x => !x.isTarget)
+  const shared = c.sharedPdbs ?? []
+  const sharedTotal = c.sharedPdbTotal ?? 0
+  const soloTotal = c.soloPdbTotal ?? others.reduce((s, x) => s + (x.soloPdbCount ?? 0), 0)
+  const sharedShowMore = sharedTotal - shared.length
+
+  const sharedListHtml = shared.length ? `
+    <div class="cx-shared">
+      <div class="cx-shared-head"><span class="cx-shared-ico" aria-hidden="true">◈</span>共有结构 <b>${sharedTotal}</b> 个<span class="cx-shared-sub">同一 PDB 条目含 ≥2 个复合物组分 — 共组装先例，复合物路线最直接的结构证据</span></div>
+      <ul class="cx-shared-list">
+        ${shared.map(s => `
+        <li class="cx-shared-item">
+          <div class="csi-main">
+            <a class="csi-id" href="https://www.rcsb.org/structure/${esc(s.pdbId)}" target="_blank" rel="noopener">${esc(s.pdbId)}</a>
+            ${sharedMethodBadge(s)}
+            <span class="csi-res">${s.resolution != null ? s.resolution.toFixed(2) + 'Å' : '—'}</span>
+            <span class="csi-comps">${esc(s.componentNames.join(' + '))}<i>${s.componentCount} 组分</i></span>
+          </div>
+          ${s.title ? `<div class="csi-title">${esc(s.title)}</div>` : ''}
+        </li>`).join('')}
+      </ul>
+      ${sharedShowMore > 0 ? `<p class="note">另有 ${sharedShowMore} 个共有结构未列出（按覆盖组分数与分辨率取前 ${shared.length} 个）。</p>` : ''}
+    </div>` : ''
+
+  const soloItems = others.filter(x => (x.soloPdbCount ?? 0) > 0 || (x.soloRepresentativePdbs ?? []).length)
+  const soloFoldHtml = soloItems.length ? `
+    <details class="fold cx-solo-fold">
+      <summary>单独结构（各组分独立解析，共 ${soloTotal} 个 — 次要参考：边界借鉴/构象对照，默认折叠）</summary>
+      <ul class="mw-list">
+        ${soloItems.map(x => `<li><b>${esc(x.name)}</b> <span class="mono">${esc(x.accession)}</span> — ${x.soloPdbCount ?? 0} 个单独结构${(x.soloRepresentativePdbs ?? []).length ? `；代表：${(x.soloRepresentativePdbs ?? []).map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : methodLabel(p).slice(0, 7)}</span>`).join(' ')}` : ''}</li>`).join('')}
+      </ul>
+      <p class="note">单独结构仅含单一组分（不含复合物其他组分）— 可用于组分域边界设计与构象状态对照，但不能证明复合物组装形式。</p>
+    </details>` : ''
+
   return `
   <div class="cx-card">
     <div class="cx-head">
@@ -189,32 +235,40 @@ function complexCardHtml(c: InteractionComplexInfo): string {
       ${c.assembly ? `<span class="cx-chip">${esc(c.assembly)}</span>` : ''}
       ${c.assemblyKda != null ? `<span class="cx-chip">装配 ~${c.assemblyKda} kDa</span>` : ''}
       <span class="cx-chip ${c.componentsWithStructure > 0 ? 'cx-ok' : ''}">${c.componentsWithStructure}/${others.length} 其他组分有结构</span>
+      ${sharedTotal ? `<span class="cx-chip cx-chip-shared">共有结构 ${sharedTotal}</span>` : ''}
     </div>
     <div class="tbl-wrap"><table class="tbl-data tbl-cx">
-      <thead><tr><th>组分</th><th style="width:88px">UniProt</th><th style="width:56px">计量</th><th style="width:82px" class="num">分子量</th><th style="width:64px" class="num">结构数</th><th style="width:230px">代表结构</th></tr></thead>
+      <thead><tr><th>组分</th><th style="width:88px">UniProt</th><th style="width:56px">计量</th><th style="width:82px" class="num">分子量</th><th style="width:60px" class="num">共有</th><th style="width:60px" class="num">单独</th></tr></thead>
       <tbody>${c.components.map(x => `
         <tr${x.isTarget ? ' class="cx-target"' : ''}>
           <td class="t-title">${x.isTarget ? '<b>【靶点】</b>' : ''}${esc(x.name)}${x.description ? `<span class="cx-desc"> · ${esc(x.description.slice(0, 44))}</span>` : ''}</td>
           <td class="td-id"><a href="https://www.uniprot.org/uniprotkb/${esc(x.accession)}" target="_blank" rel="noopener">${esc(x.accession)}</a></td>
           <td class="num">${esc(stochShort(x.stoichiometryText) || '—')}</td>
           <td class="num">${x.kda != null ? `~${x.kda}` : '—'}</td>
-          <td class="num">${x.isTarget ? '—' : String(x.pdbCount)}</td>
-          <td class="t-title">${x.isTarget ? '（无直接结构 — 本评估的对象）' : x.representativePdbs.map(p =>
-            `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : methodLabel(p).slice(0, 7)}</span>`,
-          ).join(' ') || '无结构'}</td>
+          <td class="num">${x.isTarget ? '—' : String(x.sharedPdbIds?.length ?? 0)}</td>
+          <td class="num" ${x.isTarget ? 'title="评估对象 — 无直接结构（本分析前提）"' : ''}>${x.isTarget ? '—' : String(x.soloPdbCount ?? 0)}</td>
         </tr>`).join('')}</tbody>
     </table></div>
+    ${sharedListHtml}
+    ${soloFoldHtml}
   </div>`
 }
 
-/** 互作复合物证据全景（PDB 章节 / 评分卡折叠区共用）：curated 复合物表 + binary 伙伴列表 */
-export function interactionEvidenceHtml(itx: InteractionAnalysis): string {
-  if (!itx.applicable || !itx.hasEvidence) return ''
+/** 互作复合物证据全景（v1.30 接入 PDB 章节）：curated 复合物卡片（共有突出/单独折叠）+ binary 伙伴 */
+export function interactionEvidenceHtml(itx: InteractionAnalysis | null | undefined): string {
+  if (!itx || !itx.applicable || !itx.hasEvidence) return ''
   const complexes = itx.complexes.map(complexCardHtml).join('')
   const binaries = itx.binaryPartners.length ? `
-  <p class="note"><b>IntAct binary 互作伙伴（复合物之外）</b>— 有结构者；互作界面建模与 pull-down/SPR 验证设计可参考，非 curated 复合物，化学计量需实验确认</p>
-  <ul class="mw-list">${itx.binaryPartners.map(b => `<li><b>${esc(b.geneName ?? b.accession)}</b> <span class="mono">${esc(b.accession)}</span> — ${b.pdbCount} 个结构${b.representativePdbs.length ? `（${b.representativePdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}）` : ''}</li>`).join('')}</ul>` : ''
-  return complexes + binaries
+  <details class="fold">
+    <summary>IntAct binary 互作伙伴（复合物之外，${itx.binaryPartners.length} 个有结构 — 互作界面参考，默认折叠）</summary>
+    <ul class="mw-list">${itx.binaryPartners.map(b => `<li><b>${esc(b.geneName ?? b.accession)}</b> <span class="mono">${esc(b.accession)}</span> — ${b.pdbCount} 个结构${b.representativePdbs.length ? `（${b.representativePdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}）` : ''}</li>`).join('')}</ul>
+    <p class="note">binary 互作（IntAct 实验证据）伙伴有结构 — 互作界面建模与 pull-down/SPR 验证设计可参考，非 curated 复合物，化学计量需实验确认。</p>
+  </details>` : ''
+  return `
+  <h3 class="itx-h3">互作复合物组分结构 <span class="itx-h3-sub">Complex Portal curated · ${itx.complexes.length} 个复合物</span></h3>
+  <p class="note">靶点无直接结构 — 以下为其所在复合物其他组分的结构清单，按「共有 / 单独」分类：<b>共有结构</b>（同一 PDB 含 ≥2 个组分）是复合物共组装的直接先例，重点展示；<b>单独结构</b>（组分独立解析）为次要参考，默认折叠。</p>
+  ${complexes}
+  ${binaries}`
 }
 
 function blastRowsHtml(hits: BlastHit[]): string {
@@ -483,7 +537,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
         <span class="oligo-strip-label">互作证据<b>${esc(itxBest ? `${itxBest.complexAc}${itxBest.assembly ? ` · ${itxBest.assembly}` : ''}` : 'binary 伙伴')}</b></span>
         ${itxAdj ? `<span class="oligo-chips">${adjChip('X-ray', itxAdj.xray)}${adjChip('Cryo-EM', itxAdj.cryoem)}${adjChip('NMR', itxAdj.nmr)}</span>` : ''}
       </div>
-      <p class="oligo-strip-note">${esc(itxA.summary)}${itxAdj ? '（上述调整已计入对应方法分数与综合评分；curated 复合物接管 Cryo-EM 分子量分量时，分子量增重与聚集形式维度的 Cryo-EM 分量不再重复计分）' : ''}</p>
+      <p class="oligo-strip-note">${esc(itxA.summary)}${itxAdj ? '（上述调整已计入对应方法分数与综合评分；curated 复合物接管 Cryo-EM 分子量分量时，分子量增重与聚集形式维度的 Cryo-EM 分量不再重复计分）' : ''}${itxA.complexes.length ? ' — 组分结构清单（共有结构/单独结构分类）见「PDB 结构清单」章节。' : ''}</p>
       ${itxA.notes.length ? `<details class="fold"><summary>互作证据要点与策略影响（${itxA.notes.length} 条）</summary><ul class="mw-list">${itxA.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul></details>` : ''}
     </div>` : ''
 
@@ -561,7 +615,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
         const best = ctx.interaction!.complexes[0]
         const val = best ? best.complexAc : 'binary 伙伴'
         const sub = best
-          ? `${best.componentsWithStructure}/${best.components.length - 1} 组分有结构${best.assemblyKda != null ? ` · 装配 ~${best.assemblyKda} kDa` : ''}`
+          ? `${best.componentsWithStructure}/${best.components.length - 1} 组分有结构${best.sharedPdbTotal ? ` · 共有 ${best.sharedPdbTotal}` : ''}${best.assemblyKda != null ? ` · 装配 ~${best.assemblyKda} kDa` : ''}`
           : `${ctx.interaction!.binaryPartners.length} 个伙伴有结构`
         return `<div class="glance-tile"><div class="gt-label">互作复合物</div><div class="gt-value">${esc(val)}</div><div class="gt-sub">${esc(sub)} · ${best ? 'Complex Portal' : 'IntAct'}</div></div>`
       })()
@@ -720,11 +774,18 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .sec h3 { font-size:15.5px; margin:20px 0 8px; color:#064e3b; font-weight:700; }
   .sec h4 { font-size:14px; margin:16px 0 6px; font-weight:700; border-left:3px solid #a7f3d0; padding-left:10px; }
   .sec h5, .sec h6 { font-size:13.5px; margin:12px 0 5px; font-weight:700; }
-  /* v1.28：LLM 子章节自动编号（1.1 / 1.2 …）+ 阅读节奏 */
+  /* v1.30：LLM 章节层次强化 — 子章节编号徽章 + 分隔线 + 摘要导语 + 强调色 */
   #llm { counter-reset: llmch; }
-  #llm h3 { counter-increment: llmch; display:flex; align-items:baseline; gap:10px; margin-top:26px; }
-  #llm h3::before { content:"1." counter(llmch); flex:none; font-family:var(--mono); font-size:11.5px; font-weight:700; color:var(--accent-2); letter-spacing:.8px; }
-  #llm h3:first-child { margin-top:4px; }
+  #llm h3 { counter-increment: llmch; display:flex; align-items:center; gap:11px; margin:34px 0 12px; padding-bottom:9px; border-bottom:1px solid var(--line); }
+  #llm h3::before { content:"1." counter(llmch); flex:none; font-family:var(--mono); font-size:11px; font-weight:700; color:#fff; background:var(--accent-2); border-radius:4px; padding:2px 9px; letter-spacing:.5px; line-height:1.5; }
+  #llm h3:first-child { margin-top:6px; }
+  /* 执行摘要首段 = 全报告导语 — 大字号 + 主色竖线，突出总体结论 */
+  #llm h3:first-of-type + p { font-size:15.5px; line-height:2.05; color:var(--ink); border-left:3px solid var(--accent-2); padding:2px 0 2px 15px; margin:12px 0 14px; }
+  #llm p { margin:9px 0; }
+  #llm ul li::marker, #llm ol li::marker { color:var(--accent-2); font-family:var(--mono); font-weight:600; }
+  #llm strong { color:#064e3b; }
+  #llm blockquote { border-left:3px solid #a7f3d0; background:#f7fdfb; }
+  #llm .tbl-wrap { margin:16px 0 12px; }
   p { margin:8px 0; text-align:justify; }
   ul { margin:8px 0 8px 22px; }
   li { margin:4px 0; }
@@ -827,6 +888,40 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .mw-aligned { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
   .mw-caution { background:#fffbeb; color:#b45309; border:1px solid #fde68a; }
   .mw-conflict { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
+
+  /* ── v1.30 互作复合物结构清单（共有结构突出 / 单独结构折叠）── */
+  .itx-h3 { margin:22px 0 6px !important; display:flex; align-items:baseline; gap:10px; }
+  .itx-h3-sub { font-family:var(--mono); font-size:10.5px; font-weight:500; letter-spacing:1px; color:var(--faint); }
+  .cx-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:16px 20px; margin:14px 0; }
+  .cx-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; margin-bottom:12px; }
+  .cx-badge { flex:none; font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:1px; color:#fff; background:#0f766e; border-radius:3px; padding:2px 10px; }
+  .cx-name { font-size:14.5px; min-width:0; overflow-wrap:anywhere; }
+  .cx-name a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
+  .cx-name a:hover { border-bottom-color:var(--accent-2); }
+  .cx-chip { font-family:var(--mono); font-size:11px; color:var(--sub); background:#f5f5f4; border:1px solid var(--line); border-radius:3px; padding:1px 9px; white-space:nowrap; }
+  .cx-chip.cx-ok { background:#ecfdf5; color:#047857; border-color:#a7f3d0; }
+  .cx-chip.cx-chip-shared { background:#065f46; color:#fff; border-color:#065f46; font-weight:700; }
+  table.tbl-cx { min-width:660px; }
+  .tbl-cx tr.cx-target td { background:#ecfdf5; border-top:1px solid #d1e9dd; border-bottom:1px solid #d1e9dd; }
+  .cx-desc { font-family:var(--serif); font-size:11px; color:var(--faint); }
+  .cx-res { font-family:var(--mono); font-size:10.5px; color:var(--faint); margin-left:2px; }
+  /* 共有结构：绿色面板突出（组装先例） */
+  .cx-shared { border:1px solid #b8e6d2; background:linear-gradient(180deg,#f5fcf8,#ffffff); border-radius:6px; padding:12px 18px 10px; margin:14px 0 8px; }
+  .cx-shared-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 10px; font-size:13.5px; font-weight:700; color:#065f46; margin-bottom:4px; }
+  .cx-shared-ico { color:var(--accent-2); font-size:14px; }
+  .cx-shared-head b { font-family:var(--mono); font-size:15px; color:#047857; }
+  .cx-shared-sub { flex-basis:100%; font-size:11px; font-weight:400; color:var(--sub); line-height:1.7; }
+  .cx-shared-list { list-style:none; }
+  .cx-shared-item { padding:9px 0 8px; border-bottom:1px solid var(--hairline); }
+  .cx-shared-item:last-child { border-bottom:none; }
+  .csi-main { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; }
+  .csi-id { font-family:var(--mono); font-size:13.5px; font-weight:700; color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
+  .csi-id:hover { border-bottom-color:var(--accent-2); }
+  .csi-res { font-family:var(--mono); font-size:11.5px; color:var(--sub); }
+  .csi-comps { font-size:12px; color:#065f46; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:3px; padding:0 8px; }
+  .csi-comps i { font-style:normal; font-family:var(--mono); font-size:10px; color:#047857; margin-left:5px; }
+  .csi-title { font-size:11.5px; color:var(--faint); margin-top:3px; line-height:1.6; }
+  .cx-solo-fold { margin-top:10px; }
 
   /* ── 文献 ── */
   ol.lit-list { list-style:none; }
@@ -933,11 +1028,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   </section>
 
   <section class="sec" id="pdbs">
-    <h2>${secHead(pdbsNo, 'PDB 结构清单', `Structures · ${ctx.directPdbs.length}`)}</h2>
+    <h2>${secHead(pdbsNo, 'PDB 结构清单', ctx.directPdbs.length ? `Structures · ${ctx.directPdbs.length}` : (ctx.interaction?.hasEvidence ? 'Structures · 互作组分证据' : 'Structures · 0'))}</h2>
     ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid)}` +
       (input.totalPdbFound > 150 ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示前 150 个（按分辨率排序）。</p>`
       : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : ''))
-    : `<div class="callout callout-amber"><b>暂无直接关联的 PDB 结构 — 全新结构靶点</b>该靶点（或该 UniProt）在 RCSB 无直接关联结构条目，结构可行性判断主要依据同源结构先例（见 BLAST 章节）与文献证据；构建边界与实验策略需从零设计，风险与周期相应增加。</div>`}
+    : `<div class="callout callout-amber"><b>暂无直接关联的 PDB 结构 — 全新结构靶点</b>该靶点（或该 UniProt）在 RCSB 无直接关联结构条目${ctx.interaction?.hasEvidence ? '，但存在互作复合物证据 — 下方列出其复合物其他组分的结构清单（共有结构突出显示、单独结构默认折叠），作为组装路线与构建边界设计的评估依据' : '，结构可行性判断主要依据同源结构先例（见 BLAST 章节）与文献证据'}；构建边界与实验策略需从零设计，风险与周期相应增加。</div>${interactionEvidenceHtml(ctx.interaction)}`}
   </section>
 
   ${showBlastSec ? `

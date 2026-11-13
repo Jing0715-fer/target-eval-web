@@ -224,6 +224,27 @@ export interface InteractionComponent {
   pdbCount: number
   /** 代表结构（按分辨率取优，≤3 个；无结构为空） */
   representativePdbs: PdbEntry[]
+  /** v1.30 该组分参与的共有结构 PDB IDs（同一 PDB 含 ≥2 个复合物组分） */
+  sharedPdbIds?: string[]
+  /** v1.30 该组分的单独结构数（PDB 仅含本组分、不含其他复合物组分） */
+  soloPdbCount?: number
+  /** v1.30 单独结构代表（按分辨率 ≤3 个；无结构为空） */
+  soloRepresentativePdbs?: PdbEntry[]
+}
+
+/** v1.30 共有结构（同一 PDB 含 ≥2 个复合物组分 — 复合物组装先例，最直接的结构证据） */
+export interface InteractionSharedPdb {
+  pdbId: string
+  /** 该 PDB 覆盖的组分基因名列表（如 [SKP1, CUL1]） */
+  componentNames: string[]
+  /** 覆盖组分数 */
+  componentCount: number
+  method: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  resolution: number | null
+  title: string
 }
 
 /** Complex Portal curated 复合物（complex viewer 数据源 — 可靠装配证据） */
@@ -244,6 +265,12 @@ export interface InteractionComplexInfo {
   totalPdb: number
   /** 复合物总分子量估算（kDa；长度缺失组分按 0 计，null 表示无法估算） */
   assemblyKda: number | null
+  /** v1.30 共有结构列表（按覆盖组分数降序、分辨率升序；≤10 个） */
+  sharedPdbs?: InteractionSharedPdb[]
+  /** v1.30 共有结构总数（去重） */
+  sharedPdbTotal?: number
+  /** v1.30 各组分单独结构总数（去重） */
+  soloPdbTotal?: number
 }
 
 /** binary 互作伙伴的结构证据（IntAct，非 curated 复合物路径） */
