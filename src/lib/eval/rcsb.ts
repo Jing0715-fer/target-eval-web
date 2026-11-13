@@ -141,6 +141,137 @@ export async function fetchPdbLigandsBatch(pdbIds: string[], signal?: AbortSigna
 }
 
 /**
+ * v1.31 GraphQL 批量条目元数据（50/批）：
+ *  - 方法/分辨率/标题/释放日期 + 主引文（期刊 · DOI · PubMed）+ 全部 UniProt 组分
+ *  - 用于互作复合物共有/单独结构全量列表（含文献跳转）与「额外组分」标注
+ *    （同一 PDB 中复合物组分之外的其他蛋白，如 SCF 骨架结构中的 FBXO22/SKP2）
+ */
+export interface EntryMeta {
+  pdbId: string
+  method: string
+  resolution: number | null
+  title: string
+  releaseDate: string
+  journal: string
+  doi: string
+  pubmedId: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  /** 该 PDB 条目全部蛋白实体的 UniProt accession（去重大写） */
+  uniprotAccs: string[]
+}
+
+interface GqlEntryNode {
+  rcsb_id?: string
+  exptl?: Array<{ method?: unknown }>
+  rcsb_entry_info?: { resolution_combined?: unknown }
+  struct?: { title?: unknown }
+  rcsb_accession_info?: { initial_release_date?: unknown }
+  citation?: Array<{
+    id?: unknown
+    rcsb_is_primary?: unknown
+    pdbx_database_id_PubMed?: unknown
+    pdbx_database_id_DOI?: unknown
+    rcsb_journal_abbrev?: unknown
+  }>
+  polymer_entities?: Array<{
+    rcsb_polymer_entity_container_identifiers?: { uniprot_ids?: unknown }
+  }>
+}
+
+/** EntryMeta → 精简 PdbEntry（配体为空 — 批量通道不拉配体，报告侧该列显示 —） */
+export function entryMetaToPdbEntry(m: EntryMeta): PdbEntry {
+  return {
+    pdbId: m.pdbId,
+    method: m.method,
+    resolution: m.resolution,
+    title: m.title,
+    releaseDate: m.releaseDate,
+    ligands: [],
+    journal: m.journal,
+    doi: m.doi,
+    pubmedId: m.pubmedId,
+    organisms: [],
+    isXray: m.isXray,
+    isCryoem: m.isCryoem,
+    isNmr: m.isNmr,
+  }
+}
+
+export async function fetchEntriesMetaBatch(pdbIds: string[], signal?: AbortSignal): Promise<Map<string, EntryMeta>> {
+  const out = new Map<string, EntryMeta>()
+  const ids = [...new Set(pdbIds.filter(i => /^[0-9A-Z]{4}$/.test(i)))]
+  const CHUNK = 50
+  const query = `query($ids:[String!]!){
+    entries(entry_ids:$ids){
+      rcsb_id
+      exptl { method }
+      rcsb_entry_info { resolution_combined }
+      struct { title }
+      rcsb_accession_info { initial_release_date }
+      citation { id rcsb_is_primary pdbx_database_id_PubMed pdbx_database_id_DOI rcsb_journal_abbrev }
+      polymer_entities { rcsb_polymer_entity_container_identifiers { uniprot_ids } }
+    }
+  }`
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    if (signal?.aborted) return out
+    const chunk = ids.slice(i, i + CHUNK)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 20_000)
+    const onAbort = () => controller.abort()
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const res = await fetch(GRAPHQL_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables: { ids: chunk } }),
+        signal: controller.signal,
+      })
+      if (!res.ok) continue
+      const data = (await res.json()) as { data?: { entries?: GqlEntryNode[] } }
+      for (const e of data.data?.entries ?? []) {
+        const id = String(e.rcsb_id ?? '').toUpperCase()
+        if (!id || out.has(id)) continue
+        const method = typeof e.exptl?.[0]?.method === 'string' ? e.exptl[0].method : ''
+        const resArr = Array.isArray(e.rcsb_entry_info?.resolution_combined) ? e.rcsb_entry_info.resolution_combined : []
+        const primary = (e.citation ?? []).find(c => c.rcsb_is_primary === 'Y' || c.id === 'primary')
+          ?? (e.citation ?? [])[0]
+        const pmid = primary?.pdbx_database_id_PubMed
+        const uniprots = new Set<string>()
+        for (const pe of e.polymer_entities ?? []) {
+          const arr = pe.rcsb_polymer_entity_container_identifiers?.uniprot_ids
+          if (Array.isArray(arr)) {
+            for (const a of arr) {
+              if (typeof a === 'string' && /^[A-Z0-9]{6,10}$/.test(a)) uniprots.add(a.toUpperCase())
+            }
+          }
+        }
+        out.set(id, {
+          pdbId: id,
+          method,
+          resolution: typeof resArr[0] === 'number' ? resArr[0] : null,
+          title: typeof e.struct?.title === 'string' ? e.struct.title : '',
+          releaseDate: typeof e.rcsb_accession_info?.initial_release_date === 'string'
+            ? e.rcsb_accession_info.initial_release_date.slice(0, 10) : '',
+          journal: typeof primary?.rcsb_journal_abbrev === 'string' ? primary.rcsb_journal_abbrev : '',
+          doi: typeof primary?.pdbx_database_id_DOI === 'string' ? primary.pdbx_database_id_DOI : '',
+          pubmedId: pmid != null && pmid !== '' ? String(pmid) : '',
+          isXray: /x-ray/i.test(method),
+          isCryoem: /electron microscopy|cryo/i.test(method),
+          isNmr: /nmr|nuclear magnetic/i.test(method),
+          uniprotAccs: [...uniprots],
+        })
+      }
+    } catch { /* 本批失败 → 跳过（调用方仅丢失该批详情，计数不受影响） */ } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+  }
+  return out
+}
+
+/**
  * 拉取 PDB 条目详情（含配体回填）。
  * @param ids 全量 PDB ID
  * @param maxDetail 拉取详情的上限（默认 150）

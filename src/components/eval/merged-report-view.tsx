@@ -464,6 +464,20 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                       <span className="ml-auto font-mono text-[10.5px] text-stone-400 dark:text-stone-500">置信度 {confZh}</span>
                     </div>
                     <p className="text-[13px] leading-6 text-stone-600 dark:text-stone-300">{o.summary}</p>
+                    {t.mwAugment?.applicable && (
+                      <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">
+                        <span className="eval-eyebrow mr-1.5 text-emerald-700 dark:text-emerald-500">分子量增重</span>
+                        单体 ~{t.mwAugment.monomerKda} kDa
+                        {t.mwAugment.assemblyKda != null
+                          ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa（${t.mwAugment.assemblyPath === 'complex' ? '已有复合物结构' : t.mwAugment.assemblyPath === 'oligomer' ? '自身寡聚' : t.mwAugment.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : '互作伙伴推断'}）`
+                          : '（无生物装配增重路径 — 需技术增重策略）'}
+                        {(t.mwAugment.homologComplexes ?? []).length > 0
+                          ? `；同源复合物 ${(t.mwAugment.homologComplexes ?? []).map(h => `${h.pdbId}（identity ${Math.round(h.identity)}%，靶点换算 ~${h.estimatedKda} kDa）`).join('、')}`
+                          : t.mwAugment.homologSearchNote
+                            ? `；${t.mwAugment.homologSearchNote}`
+                            : ''}
+                      </p>
+                    )}
                     {o.evidence.length > 0 && (
                       <ul className="grid gap-1.5 sm:grid-cols-2">
                         {o.evidence.map((e, i) => (

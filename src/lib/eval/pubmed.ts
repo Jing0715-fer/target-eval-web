@@ -116,9 +116,12 @@ export function buildLiteratureQuery(geneNames: string[], proteinName: string, o
   const gene = primary.replace(/[^\w-]/g, '')
   // 种属限定（人/小鼠等常见模式生物直接映射，否则不限定）
   const orgTag = /Homo sapiens|human/i.test(organism) ? ' AND (human[Title/Abstract] OR "Homo sapiens"[Organism])' : ''
+  // v1.30：裸 inhibitor 关键词会误命中蛋白名（如 EID1 = "EP300-interacting
+  // inhibitor of differentiation 1"）— 收紧为结构语境短语（复合物/结合态结构文献）
   return `(${gene}[Title/Abstract] OR ${gene} protein[All Fields])${orgTag} AND `
     + `(("protein structure"[Title/Abstract] OR "crystal structure"[Title/Abstract] OR "cryo-EM"[Title/Abstract] `
     + `OR "cryo-electron microscopy"[Title/Abstract] OR "X-ray crystallography"[Title/Abstract] `
     + `OR "NMR structure"[Title/Abstract] OR "structural basis"[Title/Abstract] `
-    + `OR inhibitor[Title/Abstract] OR "structure-based design"[Title/Abstract]))`
+    + `OR "inhibitor complex"[Title/Abstract] OR "inhibitor-bound"[Title/Abstract] `
+    + `OR "inhibitor binding"[Title/Abstract] OR "structure-based design"[Title/Abstract]))`
 }

@@ -21,11 +21,17 @@ interface UniprotRaw {
     commentType?: string
     texts?: Array<{ value?: string }>
     subcellularLocations?: Array<{ location?: { value?: string } }>
-    /** INTERACTION comment（binary 互作） */
+    /**
+     * INTERACTION comment（binary 互作）— 兼容两种格式：
+     * 旧版：{ id1, id2, gene2: { geneName: { value } } }
+     * 新版（2024+ UniProt REST）：{ interactantOne: { uniProtKBAccession }, interactantTwo: { uniProtKBAccession, geneName: string } }
+     */
     interactions?: Array<{
       id1?: string
       id2?: string
       gene2?: { geneName?: { value?: string } }
+      interactantOne?: { uniProtKBAccession?: string; intActId?: string }
+      interactantTwo?: { uniProtKBAccession?: string; geneName?: string; intActId?: string }
       [k: string]: unknown
     }>
     [k: string]: unknown
@@ -106,13 +112,20 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
       subunitText = (c.texts ?? []).map(t => t.value ?? '').join(' ').slice(0, 1200)
     }
     // v1.24：INTERACTION binary 互作 — 自相互作用（id1 === id2）为同源寡聚证据
+    // v1.26：兼容新版 REST 格式（interactantOne/Two），旧版（id1/id2/gene2）一并保留
     if (c.commentType === 'INTERACTION') {
       for (const it of c.interactions ?? []) {
-        const id1 = (it.id1 ?? '').trim()
-        const id2 = (it.id2 ?? '').trim()
+        // 旧版：id1 / id2 / gene2.geneName.value
+        const id1Old = (it.id1 ?? '').trim()
+        const id2Old = (it.id2 ?? '').trim()
+        // 新版：interactantOne/Two.uniProtKBAccession；geneName 为字符串
+        const id1New = (it.interactantOne?.uniProtKBAccession ?? '').trim()
+        const id2New = (it.interactantTwo?.uniProtKBAccession ?? '').trim()
+        const id1 = id1Old || id1New
+        const id2 = id2Old || id2New
         if (!id1 || !id2) continue
-        const selfInteraction = id1 === id2 || (raw.primaryAccession === id1 && raw.primaryAccession === id2)
-        const geneName = it.gene2?.geneName?.value
+        const geneName = it.gene2?.geneName?.value || it.interactantTwo?.geneName || undefined
+        const selfInteraction = id1 === id2
         // 同一伙伴去重；自相互作用优先保留；伙伴总数限 25（防超长蛋白撑爆存储）
         if (!selfInteraction && interactions.some(x => x.accession === id2 && !x.selfInteraction)) continue
         interactions.push({ accession: id2, geneName: geneName || undefined, selfInteraction })
@@ -126,6 +139,9 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
   // PDB 交叉引用 → UniProt 残基编号范围（Chains 属性，如 "A=695-1022"、"A/B=25-646"）。
   // 供 PDB 结构表展示「该结构覆盖靶点序列的哪一段」。
   const pdbChainRanges: Record<string, string> = {}
+  // v1.29：ComplexPortal 交叉引用（CPX-xxxx，complex viewer 数据源）— 无直接结构时的
+  // 互作复合物证据入口（用户反馈：Complex viewer 复合物可靠，组分结构可作评估依据）
+  const complexPortalIds: string[] = []
   for (const x of raw.uniProtKBCrossReferences ?? []) {
     if (x.database !== 'PDB') continue
     const pdbId = (x.id ?? '').toUpperCase()
@@ -133,6 +149,12 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
     const chains = (x.properties ?? []).find(p => p.key === 'Chains')?.value?.trim()
     if (chains) pdbChainRanges[pdbId] = chains
     if (Object.keys(pdbChainRanges).length >= 500) break // 防御上限
+  }
+  for (const x of raw.uniProtKBCrossReferences ?? []) {
+    if (x.database !== 'ComplexPortal') continue
+    const cpx = (x.id ?? '').trim().toUpperCase()
+    if (/^CPX-\d+$/.test(cpx) && !complexPortalIds.includes(cpx)) complexPortalIds.push(cpx)
+    if (complexPortalIds.length >= 6) break
   }
 
   return {
@@ -147,6 +169,7 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
     subcellularLocations,
     subunitText: subunitText || undefined,
     interactions: interactions.length ? interactions : undefined,
+    complexPortalIds: complexPortalIds.length ? complexPortalIds : undefined,
     features,
     keywords,
     pdbChainRanges,

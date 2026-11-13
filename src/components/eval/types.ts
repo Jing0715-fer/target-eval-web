@@ -174,6 +174,8 @@ export interface MergedTargetLite {
   literature: LiteratureItem[]
   /** v1.24：聚集形式（寡聚态）分析；历史作业缺省 */
   oligomer?: OligomerAnalysis
+  /** v1.26：分子量增重策略分析（仅 applicable 时有意义）；历史作业缺省 */
+  mwAugment?: MwAugmentAnalysis | null
 }
 
 /** 合并评估报告（关联靶点批量生成） */
@@ -329,6 +331,10 @@ export interface Scores {
   overall: ScoreItem
   /** v1.25：聚集形式调整明细 */
   oligomerAdjust?: OligomerAdjustInfo
+  /** v1.26：分子量增重调整明细（小分子量靶点） */
+  mwAugmentAdjust?: MwAugmentAdjustInfo
+  /** v1.30：互作复合物证据调整明细（无直接结构时） */
+  interactionAdjust?: InteractionAdjustInfo
 }
 
 export interface MethodStats {
@@ -336,6 +342,104 @@ export interface MethodStats {
   cryoemCount: number
   nmrCount: number
   bestResolution: number | null
+}
+
+// ─── 互作复合物证据（v1.30，无直接结构时）──────────────────────────────────
+
+/** 互作复合物（Complex Portal curated）中的一个组分 */
+export interface InteractionComponent {
+  accession: string
+  name: string
+  description: string
+  stoichiometryText: string
+  stochMax: number | null
+  isTarget: boolean
+  lengthAa?: number | null
+  kda?: number | null
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+  /** 该组分参与的共有结构 PDB IDs（同一 PDB 含 ≥2 个复合物组分） */
+  sharedPdbIds?: string[]
+  /** 该组分的单独结构数（PDB 仅含本组分） */
+  soloPdbCount?: number
+  /** 单独结构代表（按分辨率 ≤3 个） */
+  soloRepresentativePdbs?: PdbEntry[]
+  /** v1.31 单独结构全量列表（按分辨率升序，折叠展开可见） */
+  soloPdbs?: PdbEntry[]
+  /** v1.31 soloPdbs 之外未拉取详情的单独结构数 */
+  soloPdbOmitted?: number
+}
+
+/** 共有结构（同一 PDB 含 ≥2 个复合物组分 — 组装先例，最直接的结构证据） */
+export interface InteractionSharedPdb {
+  pdbId: string
+  componentNames: string[]
+  componentCount: number
+  method: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  resolution: number | null
+  title: string
+  /** v1.31 释放日期 */
+  releaseDate?: string
+  /** v1.31 主引文期刊缩写 */
+  journal?: string
+  /** v1.31 主引文 PubMed ID（空串表示无） */
+  pubmedId?: string
+  /** v1.31 该 PDB 中复合物组分之外的其他蛋白组分基因名（如 FBXO22） */
+  extraComponents?: string[]
+  /** v1.31 extraComponents 对应 UniProt accession（悬停提示） */
+  extraAccessions?: string[]
+}
+
+/** Complex Portal curated 复合物 */
+export interface InteractionComplexInfo {
+  complexAc: string
+  name: string
+  systematicName?: string
+  assembly: string | null
+  components: InteractionComponent[]
+  componentsWithStructure: number
+  totalPdb: number
+  assemblyKda: number | null
+  sharedPdbs?: InteractionSharedPdb[]
+  sharedPdbTotal?: number
+  /** v1.31 sharedPdbs 之外未拉取详情的共有结构数 */
+  sharedPdbOmitted?: number
+  soloPdbTotal?: number
+}
+
+/** binary 互作伙伴的结构证据（IntAct） */
+export interface InteractionBinaryInfo {
+  accession: string
+  geneName?: string
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+}
+
+/** 互作复合物证据分析（无直接结构时作为评估依据） */
+export interface InteractionAnalysis {
+  applicable: boolean
+  hasEvidence: boolean
+  subunitNote?: string
+  complexes: InteractionComplexInfo[]
+  binaryPartners: InteractionBinaryInfo[]
+  summary: string
+  notes: string[]
+}
+
+/** 互作复合物证据对三方法的调整明细 */
+export interface InteractionAdjustInfo {
+  complexAc: string
+  complexName: string
+  componentsWithStructure: number
+  assemblyKda: number | null
+  level: 'curated' | 'binary'
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
 }
 
 // ─── 聚集形式（寡聚态）分析（v1.24）────────────────────────────────────
@@ -359,6 +463,88 @@ export interface OligomerAnalysis {
   confidence: 'high' | 'medium' | 'low'
   evidence: OligomerEvidence[]
   notes: string[]
+}
+
+// ─── 分子量增重策略分析（v1.26，小分子量靶点）────────────────────
+
+export interface MwComponent {
+  name: string
+  uniprotId?: string
+  lengthAa: number
+  kda: number
+  isTarget: boolean
+}
+
+export interface MwComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  components: MwComponent[]
+  totalKda: number
+  basis: 'assembly' | 'entity'
+  note: string
+}
+
+export interface MwAugmentOption {
+  name: string
+  addKda: string
+  note: string
+}
+
+export interface MwConflictNote {
+  level: 'aligned' | 'caution' | 'conflict'
+  text: string
+}
+
+/** v1.27：同源结构形成的大复合物（BLAST 扩展检索） */
+export interface MwHomologComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  /** BLAST 同源 identity（%） */
+  identity: number
+  /** 同源复合物自身装配总分子量（kDa） */
+  totalKda: number
+  /** 按靶点单体换算的估计装配分子量（kDa） */
+  estimatedKda: number
+  basis: 'assembly' | 'entity'
+  /** 组分摘要 */
+  componentSummary: string
+  /** 推断说明 */
+  note: string
+}
+
+/** 分子量增重策略分析结果（与后端 lib/eval/types.ts 契约一致） */
+export interface MwAugmentAnalysis {
+  applicable: boolean
+  monomerKda: number
+  zoneNote: string
+  assemblyKda: number | null
+  assemblyBasis: string
+  assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  complexes: MwComplex[]
+  /** v1.27：同源结构形成的大复合物（历史作业缺省） */
+  homologComplexes?: MwHomologComplex[]
+  /** v1.27：同源扩展检索说明（历史作业缺省） */
+  homologSearchNote?: string
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  options: MwAugmentOption[]
+  conflicts: MwConflictNote[]
+  notes: string[]
+}
+
+/** v1.26：分子量增重调整明细（评分卡展示） */
+export interface MwAugmentAdjustInfo {
+  monomerKda: number
+  assemblyKda: number | null
+  /** v1.27：装配路径（历史作业缺省） */
+  assemblyPath?: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
 }
 
 /** 合并评估（UniProt+序列同靶点）时的构建信息 */
@@ -387,6 +573,10 @@ export interface JobSummary {
   blast?: BlastStatusInfo
   /** 聚集形式（寡聚态）分析（v1.24+；历史作业缺省） */
   oligomer?: OligomerAnalysis
+  /** 分子量增重策略分析（v1.26+；历史作业缺省；后端存档含 applicable=false） */
+  mwAugment?: MwAugmentAnalysis | null
+  /** 互作复合物证据分析（v1.30+；无直接结构时有证据时展示） */
+  interaction?: InteractionAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   /** v2.0：配体归一与研究数据（输入/评估表识别 → 三位 ID + 含该配体结构） */
   ligands?: LigandResolution[]
@@ -495,6 +685,8 @@ export interface BlastHit {
   queryTo?: number
   method: string
   resolution: number | null
+  /** v1.31 主引文 PubMed ID（报告「文献」列直跳） */
+  pubmedId?: string
 }
 
 export interface LiteratureItem {
@@ -534,6 +726,8 @@ export interface JobDetail {
   assets: AssetItem[] | null
   /** LLM 评估报告 markdown（v1.7+，结果页内联展示） */
   reportMarkdown?: string | null
+  /** v1.31 单靶点 HTML 报告是否已生成（web 端内嵌与下载同一份 HTML，保证样式一致） */
+  reportAvailable?: boolean
   error: string | null
 }
 

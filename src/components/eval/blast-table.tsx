@@ -31,7 +31,8 @@ export function BlastTable({ hits }: { hits: BlastHit[] }) {
                 覆盖范围
               </TableHead>
               <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">方法</TableHead>
-              <TableHead className="eval-eyebrow h-9 pr-4 text-stone-500 dark:text-stone-400">分辨率</TableHead>
+              <TableHead className="eval-eyebrow h-9 text-stone-500 dark:text-stone-400">分辨率</TableHead>
+              <TableHead className="eval-eyebrow h-9 pr-4 text-stone-500 dark:text-stone-400">文献</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -74,6 +75,21 @@ export function BlastTable({ hits }: { hits: BlastHit[] }) {
                 </TableCell>
                 <TableCell className="pr-4 font-mono text-xs tabular-nums text-stone-600 dark:text-stone-400">
                   {formatResolution(h.resolution)}
+                </TableCell>
+                <TableCell className="pr-4">
+                  {h.pubmedId ? (
+                    <a
+                      href={`https://pubmed.ncbi.nlm.nih.gov/${h.pubmedId}/`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`跳转 PubMed 文献 ${h.pubmedId}`}
+                      className="font-mono text-[11px] font-semibold text-emerald-800 underline-offset-2 hover:underline dark:text-emerald-400"
+                    >
+                      PMID {h.pubmedId}
+                    </a>
+                  ) : (
+                    <span className="text-stone-300 dark:text-stone-600">—</span>
+                  )}
                 </TableCell>
               </TableRow>
             ))}

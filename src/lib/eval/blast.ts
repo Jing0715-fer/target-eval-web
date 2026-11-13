@@ -148,7 +148,13 @@ export interface BlastRescuePolicy {
   /** 持续 SEARCHING（计算超长）触发兜底的时长，默认 240s */
   searchingMs?: number
   maxRows?: number
+  /** v1.28 硬性墙钟上限（超过即放弃并拋错，用于 last-resort 重试场景）；
+   *  缺省时沿用 30 分钟僵尸保险（「仍在运行不判失败」语义） */
+  maxWallMs?: number
 }
+
+/** v1.28：RCSB 兜底的最大尝试次数（单次失败不再永久标不可用 — 网络抖动/限流常为瞬时） */
+const MAX_RESCUE_ATTEMPTS = 3
 
 /**
  * 收集 BLAST 结果（含 RCSB 兜底，v1.9）。
@@ -170,30 +176,41 @@ export async function collectBlastPdbWithRescue(
 ): Promise<BlastCollectOutcome> {
   const waitingMs = policy.waitingMs ?? 90_000
   const searchingMs = policy.searchingMs ?? 240_000
+  /** v1.28：last-resort 重试场景传入硬性墙钟；常规路径维持 30 分钟僵尸保险 */
+  const wallMs = policy.maxWallMs ?? MAX_POLL_WALL_MS
   const startedAt = Date.now()
   let attempts = 0
   let netFails = 0
   /** 状态连续时长跟踪（WAITING↔SEARCHING 转换时重置） */
   let waitingSince = Date.now()
   let searchingSince: number | null = null
-  /** RCSB 兜底已确认不可用（失败一次后不再每轮重试） */
-  let rescueBroken = false
+  /** v1.28：RCSB 兜底多次重试 — 失败后按退避节奏重试，最多 MAX_RESCUE_ATTEMPTS 次 */
+  let rescueFails = 0
+  let rescueNextAt = 0
 
+  const rescueExhausted = () => rescueFails >= MAX_RESCUE_ATTEMPTS
   const secSince = (t: number) => Math.round((Date.now() - t) / 1000)
 
-  /** 尝试 RCSB 兜底：成功返回结果；不可用返回 null（调用方继续按 v1.8 语义等 NCBI） */
+  /** 尝试 RCSB 兜底（v1.28：冷却节拍内直接跳过；连续失败达上限才判不可用）：
+   *  成功返回结果；当前不可重试返回 null（调用方继续按 v1.8 语义等 NCBI） */
   const tryRescue = async (reason: string): Promise<BlastCollectOutcome | null> => {
-    if (rescueBroken) return null
+    if (rescueExhausted() || Date.now() < rescueNextAt) return null
     if (!sequence || sequence.length < 20) return null // 无可兜底序列（兼容封装路径）
-    onProgress?.(`${reason} — 切换 RCSB 序列搜索获得同源结构…`)
+    onProgress?.(`${reason} — 切换 RCSB 序列搜索获得同源结构…（兜底第 ${rescueFails + 1}/${MAX_RESCUE_ATTEMPTS} 次）`)
     try {
       const hits = await searchRcsbHomologs(sequence, { maxRows: policy.maxRows ?? 60, signal })
       onProgress?.(`RCSB 序列检索完成（${hits.length} 个同源命中 — 与 BLAST 同源结构等效）`)
       return { hits, provider: 'rcsb', rescueNote: reason }
     } catch (e) {
       if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
-      rescueBroken = true
-      onProgress?.(`RCSB 兜底暂不可用（${e instanceof Error ? e.message : String(e)}），继续等待 NCBI…`)
+      rescueFails++
+      if (rescueExhausted()) {
+        onProgress?.(`RCSB 兜底连续 ${rescueFails} 次失败 — 不再重试兜底，继续等待 NCBI…`)
+      } else {
+        const wait = 15_000 * rescueFails // 15s / 30s 退避
+        rescueNextAt = Date.now() + wait
+        onProgress?.(`RCSB 兜底失败（第 ${rescueFails}/${MAX_RESCUE_ATTEMPTS} 次，${e instanceof Error ? e.message : String(e)}），${Math.round(wait / 1000)}s 后自动重试…`)
+      }
       return null
     }
   }
@@ -215,7 +232,11 @@ export async function collectBlastPdbWithRescue(
       if (netFails >= MAX_CONSECUTIVE_NET_FAILS) {
         const rescued = await tryRescue(`NCBI 持续 ${Math.round(elapsed / 60)} 分钟网络不可达`)
         if (rescued) return rescued
-        throw new Error(`BLAST 轮询网络不可达（连续 ${netFails} 次失败，已等 ${Math.round(elapsed / 60)} 分钟；RCSB 兜底亦不可用）`)
+        if (rescueExhausted()) {
+          throw new Error(`BLAST 轮询网络不可达（连续 ${netFails} 次失败，已等 ${Math.round(elapsed / 60)} 分钟；RCSB 兜底重试 ${MAX_RESCUE_ATTEMPTS} 次均失败）`)
+        }
+        onProgress?.(`NCBI 网络不可达，等待 RCSB 兜底重试节拍（${rescueFails}/${MAX_RESCUE_ATTEMPTS}）…`)
+        continue
       }
       onProgress?.(`网络抖动，继续轮询（已等 ${elapsed}s）`)
       continue
@@ -233,7 +254,12 @@ export async function collectBlastPdbWithRescue(
       const reason = xml.includes('Status=FAILED') ? 'NCBI 侧执行失败' : `RID ${rid} 已过期`
       const rescued = await tryRescue(reason)
       if (rescued) return rescued
-      throw new Error(xml.includes('Status=FAILED') ? 'BLAST 任务在 NCBI 侧失败' : `BLAST RID ${rid} 已过期`)
+      // v1.28：兜底重试冷却中 → 不立即拋错，按退避节奏再试几次（NCBI 已终态，此处仅为等待兜底重试）
+      if (rescueExhausted()) {
+        throw new Error(xml.includes('Status=FAILED') ? 'BLAST 任务在 NCBI 侧失败' : `BLAST RID ${rid} 已过期`)
+      }
+      onProgress?.(`NCBI ${reason}；RCSB 兜底重试中（${rescueFails}/${MAX_RESCUE_ATTEMPTS}）…`)
+      continue
     }
 
     // ── 软兜底：仍在运行不判失败，但持续过久说明 NCBI 队列拥堵 → 主动 RCSB 兜底，
@@ -260,11 +286,16 @@ export async function collectBlastPdbWithRescue(
       }
     }
 
-    // 僵尸保险（绝对上限；兜底不可用且 NCBI 仍无结果才触发）
-    if (Date.now() - startedAt > MAX_POLL_WALL_MS) {
-      const rescued = await tryRescue(`NCBI 队列异常：BLAST 已提交 ${Math.round(MAX_POLL_WALL_MS / 60000)} 分钟仍无结果`)
+    // 僵尸保险 / 硬性墙钟（v1.28：last-resort 场景可收紧上限；兜底不可用且仍无结果才拋错）
+    if (Date.now() - startedAt > wallMs) {
+      const reason = policy.maxWallMs != null
+        ? `本轮限时 ${Math.round(wallMs / 60000)} 分钟已到`
+        : `NCBI 队列异常：BLAST 已提交 ${Math.round(wallMs / 60000)} 分钟仍无结果`
+      const rescued = await tryRescue(reason)
       if (rescued) return rescued
-      throw new Error(`NCBI 队列异常：BLAST 已提交 ${Math.round(MAX_POLL_WALL_MS / 60000)} 分钟仍无结果（RID=${rid}；RCSB 兜底亦不可用）`)
+      if (rescueExhausted() || policy.maxWallMs != null) {
+        throw new Error(`${reason}（RID=${rid}；RCSB 兜底${rescueExhausted() ? `重试 ${MAX_RESCUE_ATTEMPTS} 次均失败` : '不可用'}）`)
+      }
     }
     onProgress?.(
       isSearching
@@ -310,9 +341,100 @@ export async function runBlastPdb(
   return outcome.hits
 }
 
-/** 用 RCSB GraphQL 批量接口补齐 BLAST 命中的方法/分辨率/结构标题（每批 25 条）。
+// ─── v1.28 last-resort 整周期重试 ─────────────────────────────────────────
+
+export interface BlastRetryRunResult {
+  hits: BlastHit[]
+  provider: BlastProvider
+  /** 成功通道说明（哪一轮、哪条通道） */
+  note: string
+}
+
+export interface BlastRetryOptions {
+  /** 完整重试轮数（每轮 = RCSB 直连 + NCBI 提交收集），默认 2 */
+  attempts?: number
+  /** 每轮 NCBI 通道的硬性墙钟，默认 4 分钟 */
+  attemptWallMs?: number
+  /** 轮间退避，默认 30s */
+  backoffMs?: number
+}
+
+/**
+ * v1.28 整周期 BLAST 重试（用户反馈「无结构且 BLAST 失败时不要贸然生成报告」）。
+ *
+ * 触发场景：pipeline 结构证据守门 — 无直接结构且常规 BLAST（含单次兜底）失败时，
+ * 作为最后一道检索通道再给结构证据一次机会：
+ *  - 每轮先试 RCSB 序列检索（单请求秒级、无队列 — 常规阶段刚失败的场景下往往已恢复）；
+ *    ⚠️ 返回空数组 = 「检索成功且确无同源结构」，是有效结论（调用方据此生成报告），
+ *    仅抛异常才视为通道失败
+ *  - RCSB 异常 → NCBI 完整周期（提交自带 3 次退避重试 + 收集带多次兜底 + 硬性墙钟）
+ *  - 全部轮次失败 → 抛错（调用方中止报告生成并提示用户手动重试）
+ */
+export async function runBlastWithRetry(
+  sequence: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+  opts: BlastRetryOptions = {},
+): Promise<BlastRetryRunResult> {
+  const attempts = Math.max(1, Math.min(3, opts.attempts ?? 2))
+  const attemptWallMs = opts.attemptWallMs ?? 4 * 60_000
+  const backoffMs = opts.backoffMs ?? 30_000
+  if (!sequence || sequence.length < 20) throw new Error('序列过短（<20 aa），无可用的同源检索通道')
+
+  const errors: string[] = []
+  for (let i = 1; i <= attempts; i++) {
+    if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+    // 通道 A：RCSB 直连（秒级 — 优先尝试，空命中亦是有效结论）
+    try {
+      onProgress?.(`重试第 ${i}/${attempts} 轮 — 先尝试 RCSB 序列检索（单请求秒级、无队列）…`)
+      const hits = await searchRcsbHomologs(sequence, { maxRows: 60, signal })
+      onProgress?.(hits.length
+        ? `RCSB 序列检索成功（${hits.length} 个同源命中）`
+        : 'RCSB 序列检索成功 — 确无显著同源结构（有效结论，非失败）')
+      return {
+        hits,
+        provider: 'rcsb',
+        note: `第 ${i}/${attempts} 轮经 RCSB 序列检索成功${hits.length ? `（${hits.length} 个命中）` : '（确无同源命中）'}`,
+      }
+    } catch (e) {
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      errors.push(`第 ${i} 轮 RCSB：${e instanceof Error ? e.message : String(e)}`)
+      onProgress?.(`RCSB 序列检索失败（第 ${i}/${attempts} 轮）：${e instanceof Error ? e.message : String(e)}`)
+    }
+    // 通道 B：NCBI 完整周期（提交 3 次退避重试 + 收集多次兜底 + 本轮硬性墙钟）
+    try {
+      onProgress?.(`改走 NCBI BLASTp 完整周期（本轮限时 ${Math.round(attemptWallMs / 60000)} 分钟）…`)
+      const { rid, rtoe } = await submitBlastPdb(sequence, onProgress, signal)
+      const outcome = await collectBlastPdbWithRescue(rid, rtoe, sequence, onProgress, signal, {
+        waitingMs: 45_000,
+        searchingMs: 90_000,
+        maxWallMs: attemptWallMs,
+      })
+      onProgress?.(outcome.provider === 'rcsb'
+        ? `本轮经 RCSB 兜底完成（${outcome.hits.length} 个命中）`
+        : `NCBI BLASTp 完成（${outcome.hits.length} 个命中）`)
+      return {
+        hits: outcome.hits,
+        provider: outcome.provider,
+        note: `第 ${i}/${attempts} 轮成功（${outcome.provider === 'ncbi' ? 'NCBI BLASTp' : `RCSB 兜底 — ${outcome.rescueNote ?? ''}`.trim()}）`,
+      }
+    } catch (e) {
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      errors.push(`第 ${i} 轮 NCBI：${e instanceof Error ? e.message : String(e)}`)
+      onProgress?.(`NCBI 通道失败（第 ${i}/${attempts} 轮）：${e instanceof Error ? e.message : String(e)}`)
+    }
+    if (i < attempts) {
+      onProgress?.(`第 ${i} 轮全部通道失败，${Math.round(backoffMs / 1000)}s 后进行第 ${i + 1} 轮…`)
+      await sleep(backoffMs, signal)
+    }
+  }
+  throw new Error(`同源检索 ${attempts} 轮重试均失败 — ${errors.join('；').slice(0, 300)}`)
+}
+
+/** 用 RCSB GraphQL 批量接口补齐 BLAST 命中的方法/分辨率/结构标题/主引文（每批 25 条）。
  *  注：REST core/entry 不支持逗号分隔多 ID（404）— v1.9 修复 v1.7 起的静默失效：
- *  旧实现的批量 REST 请求从未成功过（BLAST 命中长期缺方法/分辨率），GraphQL 才是正确批量通道。 */
+ *  旧实现的批量 REST 请求从未成功过（BLAST 命中长期缺方法/分辨率），GraphQL 才是正确批量通道。
+ *  v1.31：补齐主引文 PubMed ID — 报告 BLAST 表新增「文献」列可直跳 PubMed。 */
 export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<string>): Promise<BlastHit[]> {
   const need = hits.filter(h => h.pdbId && !excludePdbIds.has(h.pdbId))
   const enriched = new Map<string, BlastHit>()
@@ -322,6 +444,7 @@ export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<strin
       struct { title }
       exptl { method }
       rcsb_entry_info { resolution_combined }
+      citation { id rcsb_is_primary pdbx_database_id_PubMed }
     }
   }`
   for (let i = 0; i < need.length; i += 25) {
@@ -341,6 +464,7 @@ export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<strin
             struct?: { title?: unknown }
             exptl?: Array<{ method?: unknown }>
             rcsb_entry_info?: { resolution_combined?: unknown }
+            citation?: Array<{ id?: unknown; rcsb_is_primary?: unknown; pdbx_database_id_PubMed?: unknown }>
           }>
         }
       }
@@ -352,16 +476,20 @@ export async function enrichBlastHits(hits: BlastHit[], excludePdbIds: Set<strin
         // 结构标题：RCSB 序列检索兜底的命中无 pdbaa 描述（description 为空），
         // 用 PDB entry 标题补齐，保证前端表格与 LLM 摘要可读
         const title = typeof d.struct?.title === 'string' ? d.struct.title.trim() : ''
+        const primary = (d.citation ?? []).find(c => c.rcsb_is_primary === 'Y' || c.id === 'primary') ?? (d.citation ?? [])[0]
+        const pmidRaw = primary?.pdbx_database_id_PubMed
+        const pubmedId = pmidRaw != null && pmidRaw !== '' ? String(pmidRaw) : ''
         enriched.set(id, {
           method,
           resolution: typeof resArr[0] === 'number' ? resArr[0] : null,
           description: title.slice(0, 160),
+          pubmedId,
         } as Partial<BlastHit> as BlastHit)
       }
     } catch { /* 批次失败忽略 */ }
   }
   return need.map(h => {
     const e = enriched.get(h.pdbId)
-    return e ? { ...h, method: e.method, resolution: e.resolution, description: h.description || e.description } : h
+    return e ? { ...h, method: e.method, resolution: e.resolution, description: h.description || e.description, pubmedId: e.pubmedId || h.pubmedId } : h
   })
 }

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -33,6 +33,7 @@ import { PdbTable } from './pdb-table'
 import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { AssetGallery } from './asset-gallery'
+import { InteractionStructures } from './interaction-structures'
 import type { BlastStatusCode, JobDetail, ScoreItem } from './types'
 
 /* ---------------- 通用小组件 ---------------- */
@@ -224,6 +225,88 @@ function BlastStatusBox({ status, note, provider }: { status?: BlastStatusCode; 
   )
 }
 
+/* ---------------- v1.31 内嵌 HTML 报告（与下载同一份文件） ---------------- */
+
+/**
+ * 同源 iframe 内嵌完整 HTML 报告：web 展示与「下载 HTML」共用同一文件，样式 100% 一致。
+ * - 自动高度：注入内嵌适配样式（取消 .page 100vh 最小高 / 隐藏回顶部钮）后按内容同步；
+ *   ResizeObserver 监听 body（details 折叠展开 / 图片懒加载引起的高度变化）
+ * - 加载失败（报告文件丢失 404）→ onFail 降级为旧版 React 数据区块
+ */
+function ReportFrame({
+  jobId,
+  iframeRef,
+  onFail,
+}: {
+  jobId: string
+  iframeRef: React.RefObject<HTMLIFrameElement | null>
+  onFail: () => void
+}) {
+  const [height, setHeight] = useState(1600)
+  const [loaded, setLoaded] = useState(false)
+
+  const syncHeight = useCallback(() => {
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
+    try {
+      if (!doc.getElementById('embed-tweaks')) {
+        const st = doc.createElement('style')
+        st.id = 'embed-tweaks'
+        st.textContent = '.page{min-height:auto!important}.backtop{display:none!important}'
+        doc.head.appendChild(st)
+      }
+      const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight)
+      if (Number.isFinite(h) && h > 100) setHeight(h + 16)
+    } catch { /* 跨域异常不应发生（同源）；忽略 */ }
+  }, [iframeRef])
+
+  useEffect(() => {
+    if (!loaded) return
+    let ro: ResizeObserver | null = null
+    try {
+      const doc = iframeRef.current?.contentDocument
+      if (doc?.body) {
+        ro = new ResizeObserver(() => syncHeight())
+        ro.observe(doc.body)
+      }
+    } catch { /* ignore */ }
+    // rAF 延迟一帧再同步高度（避免 effect 内同步 setState 触发级联渲染）
+    const raf = requestAnimationFrame(() => syncHeight())
+    return () => {
+      cancelAnimationFrame(raf)
+      ro?.disconnect()
+    }
+  }, [loaded, syncHeight])
+
+  return (
+    <div className="relative overflow-hidden rounded-lg border border-stone-200 bg-white shadow-none dark:border-stone-800">
+      {!loaded && (
+        <div className="absolute inset-0 z-10 flex min-h-72 flex-col items-center justify-center gap-3 bg-white dark:bg-stone-950">
+          <Loader2 className="size-6 animate-spin text-emerald-700 dark:text-emerald-500" aria-hidden />
+          <p className="font-mono text-xs text-stone-400">正在加载完整 HTML 报告（与下载文件同一份）…</p>
+        </div>
+      )}
+      <iframe
+        ref={iframeRef}
+        src={`/api/jobs/${jobId}/report`}
+        title="评估报告（与下载 HTML 一致）"
+        aria-label="评估报告（与下载 HTML 一致）"
+        onLoad={() => {
+          setLoaded(true)
+          syncHeight()
+          // 报告丢失（404 JSON）→ 降级旧版数据区块
+          try {
+            const doc = iframeRef.current?.contentDocument
+            if (doc && !doc.querySelector('.rpt-head')) onFail()
+          } catch { /* ignore */ }
+        }}
+        style={{ height }}
+        className="block w-full bg-white transition-[height] duration-200 ease-out"
+      />
+    </div>
+  )
+}
+
 /* ---------------- 结果视图 ---------------- */
 
 export interface ResultViewProps {
@@ -236,7 +319,10 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewLoaded, setPreviewLoaded] = useState(false)
   const [previewSlow, setPreviewSlow] = useState(false)
+  /** v1.31：内嵌报告加载失败（文件丢失）→ 降级旧版 React 数据区块 */
+  const [embedFailed, setEmbedFailed] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const reportFrameRef = useRef<HTMLIFrameElement>(null)
 
   const openPreview = () => {
     setPreviewLoaded(false)
@@ -280,6 +366,9 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const reportMd = job.reportMarkdown?.trim() || null
   const reportLlmFailed = summary.reportLlmOk === false
   const reportDeferred = summary.reportDeferred === true
+  /** v1.31：web 端直接内嵌完整 HTML 报告（与「下载 HTML」同一份文件，样式 100% 一致）。
+   *  单靶点作业且报告已生成时启用；deferred（并入合并报告）或文件丢失时降级为下方 React 数据区块。 */
+  const embedReport = !reportDeferred && job.reportAvailable === true && !embedFailed
 
   const downloadReport = () => {
     window.open(`/api/jobs/${job.id}/report?download=1`, '_blank')
@@ -326,6 +415,28 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
     : oligo?.category === 'hetero-complex'
       ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
       : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+
+  /** v1.26/v1.27：分子量增重策略（小分子量靶点）— 融入评分卡（不单独成章） */
+  const mw = summary.mwAugment?.applicable ? summary.mwAugment : null
+  const mwAdj = summary.scores?.mwAugmentAdjust ?? null
+  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mw?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwHomologs = mw?.homologComplexes ?? []
+  const mwIsHomologPath = mw?.assemblyPath === 'homolog-complex'
+  const mwBadgeCls = mwIsHomologPath
+    ? (mw?.assemblyKda != null && mw.assemblyKda >= 100
+        ? 'border-teal-300 bg-teal-50 text-teal-800 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-400'
+        : 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400')
+    : mw?.assemblyKda != null && mw.assemblyKda >= 100
+      ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+      : mw?.assemblyKda != null && mw.assemblyKda >= 50
+        ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+        : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+  const sizedPartners = mw?.partners.filter(p => p.kda != null) ?? []
+
+  /** v1.30：互作复合物证据（无直接结构时）— 融入评分卡，不单独成章 */
+  const itx = summary.interaction?.applicable && summary.interaction.hasEvidence ? summary.interaction : null
+  const itxAdj = summary.scores?.interactionAdjust ?? null
+  const itxBest = itx?.complexes[0]
 
   return (
     <div className="flex flex-col gap-8">
@@ -444,6 +555,72 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         />
       </motion.div>
 
+      {/* 3. 评估报告（v1.31：web 端内嵌与下载完全一致的 HTML — 单一数据源，杜绝样式分叉） */}
+      {embedReport && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.12, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+        >
+          <SectionHeader
+            no={scoreNo}
+            title="评估报告（完整版）"
+            en="Full Report"
+            count="与下载 HTML 同一文件 · 样式一致"
+          />
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-700/25 bg-emerald-50/60 px-4 py-3 dark:border-emerald-700/30 dark:bg-emerald-950/20">
+            <FileCheck2 className="size-4 shrink-0 text-emerald-800 dark:text-emerald-400" aria-hidden />
+            <p className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">
+              下方内嵌<b className="mx-1 text-emerald-800 dark:text-emerald-400">与「下载 HTML」完全相同</b>的报告文件
+              （评分 / 评估分析 / PDB 与互作复合物结构清单 / BLAST / 文献 / 实验数据全在其中），
+              点击结构 ID、PMID 可直跳 RCSB / PubMed；折叠区可展开查看全量结构列表。
+            </p>
+            <div className="flex shrink-0 flex-wrap gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={openPreview}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Eye className="size-3.5" />
+                全屏预览
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => reportFrameRef.current?.contentWindow?.print()}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Printer className="size-3.5" />
+                打印
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open(`/api/jobs/${job.id}/report`, '_blank')}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <ExternalLink className="size-3.5" />
+                新窗口
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={downloadReport}
+                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+              >
+                <Download className="size-3.5" />
+                下载 HTML
+              </Button>
+            </div>
+          </div>
+          <ReportFrame jobId={job.id} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} />
+        </motion.section>
+      )}
+
+      {/* 3-9 旧版 React 数据区块：仅 deferred（并入合并报告）或内嵌报告不可用时降级展示 */}
+      {!embedReport && <>
       {/* 3. 评分（v1.25：含聚集形式调整明细 — 寡聚态分析融入评分卡，不单独成章） */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
@@ -519,6 +696,213 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                           <span className="w-24 shrink-0 font-mono text-[11px] text-stone-500 dark:text-stone-400">{e.ref}</span>
                           <span className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">{e.text}</span>
                         </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
+            {mw && (
+              <div className="flex flex-col gap-3 border-t border-dashed border-stone-200 pt-4 dark:border-stone-800">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className={cn('inline-flex min-h-7 items-center rounded-md border px-2.5 text-xs font-semibold', mwBadgeCls)}>
+                    小分子量靶点
+                  </span>
+                  <span className="text-xs text-stone-500 dark:text-stone-400">
+                    分子量
+                    <b className="mx-1 font-semibold text-stone-800 dark:text-stone-200">
+                      单体 ~{mw.monomerKda} kDa{mw.assemblyKda != null ? ` → 装配 ~${mw.assemblyKda} kDa${mwIsHomologPath ? '（同源推断）' : ''}` : ''}
+                    </b>
+                  </span>
+                  <span className="rounded-md border border-stone-200 bg-stone-50 px-2.5 py-1 font-mono text-[11px] text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300">
+                    {mwPathZh}
+                  </span>
+                  {mwAdj && (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-[10px] tracking-wider text-stone-400 dark:text-stone-500">调整</span>
+                      <AdjChip label="X-ray" v={mwAdj.xray} />
+                      <AdjChip label="Cryo-EM" v={mwAdj.cryoem} />
+                      <AdjChip label="NMR" v={mwAdj.nmr} />
+                    </span>
+                  )}
+                </div>
+                {mwAdj ? (
+                  <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">
+                    {mwAdj.note}（分子量调整已计入 Cryo-EM 分数与综合评分；X-ray/NMR 不受增重影响{mw.assemblyKda != null ? '；装配分子量已知时，聚集形式的 Cryo-EM 分量并入本维度计分（避免双重加分）' : ''}）
+                  </p>
+                ) : (
+                  <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">{mw.zoneNote}</p>
+                )}
+                {mw.homologSearchNote && (
+                  <p className="rounded-md border border-teal-200/70 bg-teal-50/60 px-3 py-2 text-xs leading-6 text-teal-800 dark:border-teal-900 dark:bg-teal-950/30 dark:text-teal-300">
+                    {mw.homologSearchNote}
+                  </p>
+                )}
+                {(mw.complexes.length > 0 || mwHomologs.length > 0 || sizedPartners.length > 0 || mw.conflicts.length > 0) && (
+                  <details className="group overflow-hidden rounded-lg border border-stone-200 dark:border-stone-800">
+                    <summary className="flex cursor-pointer select-none items-center gap-1.5 border-b border-stone-200 bg-stone-50 px-3.5 py-2 text-[11px] font-medium text-emerald-800 list-none transition-colors hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/80 dark:text-emerald-500 dark:hover:bg-stone-800/60 [&::-webkit-details-marker]:hidden">
+                      <ChevronDown className="size-3.5 shrink-0 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+                      增重路径明细 · 复合物结构 {mw.complexes.length} · 同源复合物 {mwHomologs.length} · 互作伙伴 {sizedPartners.length} · 目的比对 {mw.conflicts.length} 条
+                    </summary>
+                    <div className="flex flex-col gap-4 px-3.5 py-3.5">
+                      {mw.complexes.length > 0 && (
+                        <div className="flex flex-col gap-2">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">已有复合物结构 — 组分总分子量统计</p>
+                          <ul className="divide-y divide-stone-100 dark:divide-stone-800/60">
+                            {mw.complexes.map(c => (
+                              <li key={c.pdbId} className="flex flex-col gap-1 py-2.5 sm:flex-row sm:items-baseline sm:gap-3">
+                                <a
+                                  href={`https://www.rcsb.org/structure/${c.pdbId}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="w-20 shrink-0 font-mono text-[11px] font-semibold text-emerald-800 hover:underline dark:text-emerald-500"
+                                >
+                                  {c.pdbId}
+                                </a>
+                                <span className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">
+                                  {c.components.map(x => (
+                                    <span
+                                      key={`${c.pdbId}-${x.name}-${x.kda}`}
+                                      className={cn(
+                                        'mr-1.5 inline-block rounded-sm border px-1.5 py-0.5 text-[11px]',
+                                        x.isTarget
+                                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                          : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-500',
+                                      )}
+                                    >
+                                      {x.isTarget ? '靶点' : x.name.slice(0, 36)} ~{x.kda} kDa
+                                    </span>
+                                  ))}
+                                  <b className="ml-1 text-stone-800 dark:text-stone-200">= 装配 ~{c.totalKda} kDa</b>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-stone-400 dark:text-stone-500">{c.note}</span>
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {mwHomologs.length > 0 && (
+                        <div className="flex flex-col gap-2">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">
+                            同源结构形成的大复合物（BLAST 扩展检索）— 直接装配路径不足 50 kDa 时检索；同源亚基按靶点单体换算
+                          </p>
+                          <ul className="divide-y divide-stone-100 dark:divide-stone-800/60">
+                            {mwHomologs.map(h => (
+                              <li key={h.pdbId} className="flex flex-col gap-1 py-2.5 sm:flex-row sm:items-baseline sm:gap-3">
+                                <a
+                                  href={`https://www.rcsb.org/structure/${h.pdbId}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="w-20 shrink-0 font-mono text-[11px] font-semibold text-teal-700 hover:underline dark:text-teal-400"
+                                >
+                                  {h.pdbId}
+                                </a>
+                                <span className="w-14 shrink-0 font-mono text-[11px] font-bold text-teal-700 dark:text-teal-400">
+                                  {Math.round(h.identity)}%
+                                </span>
+                                <span className="min-w-0 flex-1 text-xs leading-relaxed text-stone-600 dark:text-stone-300">
+                                  {h.componentSummary}
+                                  <b className="ml-1 text-stone-800 dark:text-stone-200">
+                                    = 同源装配 ~{h.totalKda} kDa → 靶点换算 ~{h.estimatedKda} kDa
+                                  </b>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-stone-400 dark:text-stone-500">{h.note}</span>
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {sizedPartners.length > 0 && (
+                        <div className="flex flex-col gap-1.5">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">UniProt 互作伙伴（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
+                          <p className="text-xs leading-6 text-stone-600 dark:text-stone-300">
+                            {sizedPartners.slice(0, 6).map(p => `${p.geneName ?? p.proteinName ?? p.accession}（${p.accession}，${p.lengthAa} aa ~${p.kda} kDa）`).join('、')}
+                          </p>
+                        </div>
+                      )}
+                      <div className="flex flex-col gap-1.5">
+                        <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">技术增重工具箱</p>
+                        <ul className="flex flex-col gap-1.5">
+                          {mw.options.map(o => (
+                            <li key={o.name} className="text-xs leading-6 text-stone-600 dark:text-stone-300">
+                              <b className="text-stone-800 dark:text-stone-200">{o.name}</b>
+                              <span className="mx-1.5 font-mono text-[10.5px] text-emerald-700 dark:text-emerald-500">{o.addKda}</span>
+                              — {o.note}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      {mw.conflicts.length > 0 && (
+                        <div className="flex flex-col gap-1.5">
+                          <p className="text-[11px] font-semibold text-stone-700 dark:text-stone-300">与客户目的的比对（加入的蛋白是否与目的冲突）</p>
+                          <ul className="flex flex-col gap-1.5">
+                            {mw.conflicts.map((c, i) => (
+                              <li key={`conflict-${i}`} className="flex items-baseline gap-2 text-xs leading-6 text-stone-600 dark:text-stone-300">
+                                <span
+                                  className={cn(
+                                    'inline-flex shrink-0 items-center rounded-sm border px-1.5 py-0.5 font-mono text-[10px] font-bold',
+                                    c.level === 'aligned'
+                                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                      : c.level === 'caution'
+                                        ? 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-500'
+                                        : 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400',
+                                  )}
+                                >
+                                  {c.level === 'aligned' ? '契合' : c.level === 'caution' ? '需注意' : '冲突'}
+                                </span>
+                                <span className="min-w-0 flex-1">{c.text}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
+            {itx && (
+              <div className="flex flex-col gap-3 border-t border-dashed border-stone-200 pt-4 dark:border-stone-800">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span
+                    className={cn(
+                      'inline-flex min-h-7 items-center rounded-md border px-2.5 text-xs font-semibold',
+                      itxAdj?.level === 'curated'
+                        ? 'border-teal-300 bg-teal-50 text-teal-800 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-400'
+                        : 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400',
+                    )}
+                  >
+                    {itxAdj?.level === 'curated' ? 'Complex Portal' : 'IntAct 互作'}
+                  </span>
+                  <span className="text-xs text-stone-500 dark:text-stone-400">
+                    互作证据
+                    <b className="mx-1 font-semibold text-stone-800 dark:text-stone-200">
+                      {itxBest ? `${itxBest.complexAc}${itxBest.assembly ? ` · ${itxBest.assembly}` : ''}` : 'binary 伙伴'}
+                    </b>
+                  </span>
+                  {itxAdj && (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-[10px] tracking-wider text-stone-400 dark:text-stone-500">调整</span>
+                      <AdjChip label="X-ray" v={itxAdj.xray} />
+                      <AdjChip label="Cryo-EM" v={itxAdj.cryoem} />
+                      <AdjChip label="NMR" v={itxAdj.nmr} />
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">
+                  {itx.summary}
+                  {itxAdj && '（上述调整已计入对应方法分数与综合评分；curated 复合物接管 Cryo-EM 分子量分量时，分子量增重与聚集形式维度的 Cryo-EM 分量不再重复计分）'}
+                  {itx.complexes.length > 0 && ' — 组分结构清单（共有结构/单独结构分类）见下方「PDB 结构清单」章节。'}
+                </p>
+                {itx.notes.length > 0 && (
+                  <details className="group overflow-hidden rounded-lg border border-stone-200 dark:border-stone-800">
+                    <summary className="flex cursor-pointer select-none items-center gap-1.5 border-b border-stone-200 bg-stone-50 px-3.5 py-2 text-[11px] font-medium text-emerald-800 list-none transition-colors hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/80 dark:text-emerald-500 dark:hover:bg-stone-800/60 [&::-webkit-details-marker]:hidden">
+                      <ChevronDown className="size-3.5 shrink-0 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+                      互作证据要点与策略影响 · {itx.notes.length} 条
+                    </summary>
+                    <ul className="divide-y divide-stone-100 dark:divide-stone-800/60">
+                      {itx.notes.map((n, i) => (
+                        <li key={`itx-note-${i}`} className="px-3.5 py-2.5 text-xs leading-relaxed text-stone-600 dark:text-stone-300">{n}</li>
                       ))}
                     </ul>
                   </details>
@@ -657,14 +1041,36 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </motion.section>
       )}
 
-      {/* 7. PDB 结构表 */}
+      {/* 7. PDB 结构表（v1.30：无直接结构且有互作证据时，展示互作复合物组分结构清单 — 与 HTML 报告一致） */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.26, ease: 'easeOut' }}
         className="flex flex-col gap-3"
       >
-        <SectionHeader no={pdbNo} title="PDB 结构清单" en="Structures" count={`${pdbs.length} 个`} />
+        <SectionHeader
+          no={pdbNo}
+          title="PDB 结构清单"
+          en="Structures"
+          count={
+            pdbs.length > 0
+              ? `${pdbs.length} 个`
+              : itx
+                ? `直接结构 0 · 互作组分证据${itxBest?.sharedPdbTotal ? `（共有 ${itxBest.sharedPdbTotal}）` : ''}`
+                : '0 个'
+          }
+        />
+        {itx && pdbs.length === 0 && (
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/70 px-4 py-3.5 text-xs leading-relaxed text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <span>
+              <b>暂无直接关联的 PDB 结构 — 全新结构靶点。</b>
+              该靶点在 RCSB 无直接关联结构条目，但存在互作复合物证据 — 下方列出其复合物其他组分的结构清单
+              （共有结构突出显示、单独结构默认折叠），作为组装路线与构建边界设计的评估依据。
+            </span>
+          </div>
+        )}
+        {itx && pdbs.length === 0 && <InteractionStructures itx={itx} />}
         <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} />
       </motion.section>
 
@@ -785,6 +1191,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <LiteratureList items={literature} pdbs={pdbs} />
         </motion.section>
       )}
+      </>}
 
       {/* 底部操作 */}
       <div className="flex justify-center border-t border-stone-200 pt-6 dark:border-stone-800">

@@ -46,6 +46,8 @@ export interface UniprotInfo {
   subunitText?: string
   /** binary 相互作用（INTERACTION comments，v1.24；selfInteraction = 自相互作用→同源寡聚证据） */
   interactions?: Array<{ accession: string; geneName?: string; selfInteraction: boolean }>
+  /** v1.29：Complex Portal 复合物交叉引用（CPX-xxxx，complex viewer 数据源） */
+  complexPortalIds?: string[]
   /** 关键特征：结构域/跨膜/信号肽/活性位点 */
   features: UniprotFeature[]
   keywords?: string[]
@@ -148,6 +150,8 @@ export interface BlastHit {
   resolution: number | null
   /** 原始 evalue 字符串（科学计数法） */
   evalueRaw: string
+  /** v1.31：主引文 PubMed ID（RCSB GraphQL 批量补齐；无引文时缺失） */
+  pubmedId?: string
 }
 
 // ─── PubMed ───────────────────────────────────────────────────────────────────
@@ -179,6 +183,10 @@ export interface Scores {
   overall: ScoreItem
   /** v1.25：聚集形式（寡聚态）对三方法的调整明细（整数；无分析时缺省 — 历史作业） */
   oligomerAdjust?: OligomerAdjustInfo
+  /** v1.26：分子量增重策略（小分子量靶点）调整明细（整数；无分析/不适用时缺省） */
+  mwAugmentAdjust?: MwAugmentAdjustInfo
+  /** v1.29：互作复合物证据调整明细（无直接结构时；无证据时缺省） */
+  interactionAdjust?: InteractionAdjustInfo
 }
 
 /** v1.25：聚集形式调整明细（score.ts computeOligomerAdjust 产出；评分卡展示） */
@@ -196,6 +204,138 @@ export interface OligomerAdjustInfo {
   note: string
 }
 
+// ─── 互作复合物证据（v1.29，无直接结构时）────────────────────────────
+
+/** 互作复合物（Complex Portal curated）中的一个组分 */
+export interface InteractionComponent {
+  /** UniProt accession（靶点自身或伙伴） */
+  accession: string
+  /** 基因名（如 SKP1） */
+  name: string
+  /** 蛋白名（如 S-phase kinase-associated protein 1） */
+  description: string
+  /** 化学计量原始文本（如 "minValue: 1, maxValue: 1"） */
+  stoichiometryText: string
+  /** 化学计量上限（解析失败为 null — MW 估算按 1 计） */
+  stochMax: number | null
+  /** 是否靶点自身 */
+  isTarget: boolean
+  /** 残基长度（UniProt；查询失败为 null） */
+  lengthAa?: number | null
+  /** 组分分子量估计（kDa；长度未知为 null） */
+  kda?: number | null
+  /** 该组分在 RCSB 的结构总数 */
+  pdbCount: number
+  /** 代表结构（按分辨率取优，≤3 个；无结构为空） */
+  representativePdbs: PdbEntry[]
+  /** v1.30 该组分参与的共有结构 PDB IDs（同一 PDB 含 ≥2 个复合物组分） */
+  sharedPdbIds?: string[]
+  /** v1.30 该组分的单独结构数（PDB 仅含本组分、不含其他复合物组分） */
+  soloPdbCount?: number
+  /** v1.30 单独结构代表（按分辨率 ≤3 个；无结构为空） */
+  soloRepresentativePdbs?: PdbEntry[]
+  /** v1.31 单独结构全量列表（按分辨率升序，≤80 个 — 报告默认折叠展开可见；超出部分仅计数） */
+  soloPdbs?: PdbEntry[]
+  /** v1.31 soloPdbs 之外未拉取详情的单独结构数（soloPdbCount - soloPdbs.length） */
+  soloPdbOmitted?: number
+}
+
+/** v1.30 共有结构（同一 PDB 含 ≥2 个复合物组分 — 复合物组装先例，最直接的结构证据） */
+export interface InteractionSharedPdb {
+  pdbId: string
+  /** 该 PDB 覆盖的组分基因名列表（如 [SKP1, CUL1]） */
+  componentNames: string[]
+  /** 覆盖组分数 */
+  componentCount: number
+  method: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  resolution: number | null
+  title: string
+  /** v1.31 释放日期（YYYY-MM-DD） */
+  releaseDate?: string
+  /** v1.31 主引文期刊缩写 */
+  journal?: string
+  /** v1.31 主引文 PubMed ID（空串表示无） */
+  pubmedId?: string
+  /** v1.31 除复合物组分外，该 PDB 还包含的其他蛋白组分基因名（如 [FBXO22, SKP2] — 展示更大装配语境） */
+  extraComponents?: string[]
+  /** v1.31 extraComponents 对应的 UniProt accession（与基因名同序，悬停提示用） */
+  extraAccessions?: string[]
+}
+
+/** Complex Portal curated 复合物（complex viewer 数据源 — 可靠装配证据） */
+export interface InteractionComplexInfo {
+  /** CPX 编号（如 CPX-7930） */
+  complexAc: string
+  /** 复合物名（如 "SCF E3 ubiquitin ligase complex, FBXO21 variant"） */
+  name: string
+  /** 系统名（如 "CUL1:FBXO21:RBX1:SKP1"） */
+  systematicName?: string
+  /** 装配描述（如 "Heterotetramer"） */
+  assembly: string | null
+  /** 全部组分（含靶点，isTarget 标记） */
+  components: InteractionComponent[]
+  /** 除靶点外有结构的组分数 */
+  componentsWithStructure: number
+  /** 组分（除靶点）结构总数 */
+  totalPdb: number
+  /** 复合物总分子量估算（kDa；长度缺失组分按 0 计，null 表示无法估算） */
+  assemblyKda: number | null
+  /** v1.30 共有结构列表（按覆盖组分数降序、分辨率升序；≤120 个 — 超出部分仅计入总数） */
+  sharedPdbs?: InteractionSharedPdb[]
+  /** v1.30 共有结构总数（去重） */
+  sharedPdbTotal?: number
+  /** v1.31 sharedPdbs 之外未拉取详情的共有结构数（sharedPdbTotal - sharedPdbs.length） */
+  sharedPdbOmitted?: number
+  /** v1.30 各组分单独结构总数（去重） */
+  soloPdbTotal?: number
+}
+
+/** binary 互作伙伴的结构证据（IntAct，非 curated 复合物路径） */
+export interface InteractionBinaryInfo {
+  accession: string
+  geneName?: string
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+}
+
+/** v1.29 互作复合物证据分析（interaction.ts 产出；无直接结构时作为评估依据） */
+export interface InteractionAnalysis {
+  /** 结构证据场景（directPdbs = 0）才运行 */
+  applicable: boolean
+  /** 有可用证据：curated 复合物存在 或 任何伙伴/组分有结构 */
+  hasEvidence: boolean
+  /** UniProt SUBUNIT 注释摘要（如 "Directly interacts with SKP1 and CUL1"） */
+  subunitNote?: string
+  /** curated 复合物列表（按组分结构数降序，≤3 个） */
+  complexes: InteractionComplexInfo[]
+  /** 未被复合物覆盖的 binary 伙伴中 有结构者（≤4 个） */
+  binaryPartners: InteractionBinaryInfo[]
+  /** 一句话汇总（评分卡/报告展示） */
+  summary: string
+  /** 对结构解析策略的影响要点（LLM digest 与报告展开） */
+  notes: string[]
+}
+
+/** v1.29：互作复合物证据对三方法的调整明细（score.ts 产出；评分卡展示） */
+export interface InteractionAdjustInfo {
+  /** 最佳复合物（组分结构最多的） */
+  complexAc: string
+  complexName: string
+  /** 有结构组分数 */
+  componentsWithStructure: number
+  /** 复合物总分子量（无长度数据为 null） */
+  assemblyKda: number | null
+  /** 证据强度：curated（复合物+组分结构）> binary（仅伙伴结构） */
+  level: 'curated' | 'binary'
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
+}
+
 export interface MethodStats {
   xrayCount: number
   cryoemCount: number
@@ -203,7 +343,7 @@ export interface MethodStats {
   bestResolution: number | null
 }
 
-// ─── 聚集形式（寡聚态）分析（v1.24）──────────────────────────────────────
+// ─── 聚集形式（寡聚态）分析（v1.24）──────────────────────────────────
 
 export type OligomerCategory = 'monomer' | 'homo-oligomer' | 'hetero-complex' | 'unknown'
 
@@ -231,6 +371,121 @@ export interface OligomerAnalysis {
   evidence: OligomerEvidence[]
   /** 对结构解析策略的影响要点 */
   notes: string[]
+}
+
+// ─── 分子量增重策略分析（v1.26，小分子量靶点）──────────────────────────
+
+/** 复合物/装配中的一个蛋白组分 */
+export interface MwComponent {
+  /** 组分名（蛋白名/PDB entity 描述/基因名） */
+  name: string
+  /** 组分 UniProt（靶点自身或互作伙伴） */
+  uniprotId?: string
+  /** 残基数（结构装配取链长估计，全长取 UniProt 长度） */
+  lengthAa: number
+  /** 组分分子量估计（kDa，≈ 残基数 × 0.11） */
+  kda: number
+  /** 是否靶点自身 */
+  isTarget: boolean
+}
+
+/** 已有复合物结构（含组分明细与总分子量） */
+export interface MwComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  /** 组分列表（含靶点自身，isTarget 标记） */
+  components: MwComponent[]
+  /** 装配总分子量（kDa） */
+  totalKda: number
+  /** 估计口径：assembly = RCSB 生物装配；entity = 去重实体（装配信息缺失时的近似） */
+  basis: 'assembly' | 'entity'
+  /** 口径说明（展示用） */
+  note: string
+}
+
+/** 通用增重策略选项（技术手段，非生理组分） */
+export interface MwAugmentOption {
+  /** 策略名 */
+  name: string
+  /** 增重幅度（kDa，文本：可含 "×24" 等） */
+  addKda: string
+  /** 适用性说明（利弊） */
+  note: string
+}
+
+/** 与用户目的的冲突分析条目 */
+export interface MwConflictNote {
+  /** aligned = 与目的契合；caution = 需注意；conflict = 存在冲突 */
+  level: 'aligned' | 'caution' | 'conflict'
+  text: string
+}
+
+/** v1.27：同源结构形成的大复合物（BLAST 扩展检索 — 直接路径装配不足 50 kDa 时触发） */
+export interface MwHomologComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  /** BLAST 同源 identity（%） */
+  identity: number
+  /** 同源复合物自身装配总分子量（kDa，RCSB 口径） */
+  totalKda: number
+  /** 按靶点单体换算的估计装配分子量（kDa — 同源亚基尺寸替换为靶点单体尺寸） */
+  estimatedKda: number
+  /** 估计口径：assembly = RCSB 生物装配；entity = 去重实体（装配信息缺失时的近似） */
+  basis: 'assembly' | 'entity'
+  /** 组分摘要（如 "4 × 同源亚基（~27 kDa/链）" / "同源亚基 + 伙伴名（~65 kDa）"） */
+  componentSummary: string
+  /** 推断说明（同源保守性/验证建议） */
+  note: string
+}
+
+/** 分子量增重策略分析结果（mw-augment.ts 产出，评分/报告/前端消费） */
+export interface MwAugmentAnalysis {
+  /** 是否为小分子量靶点场景（单体 < 50 kDa / < 450 aa） */
+  applicable: boolean
+  /** 单体分子量（kDa，≈ 残基 × 0.11） */
+  monomerKda: number
+  /** 单体分子量区间结论（展示用一句话） */
+  zoneNote: string
+  /** 生物装配有效分子量（kDa）：寡聚体/已有复合物/同源复合物，无路径时为 null */
+  assemblyKda: number | null
+  /** 装配分子量计算依据（展示用） */
+  assemblyBasis: string
+  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（无结构） */
+  assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  /** 已有复合物结构（组分明细 + 总分子量；按分辨率排序） */
+  complexes: MwComplex[]
+  /** v1.27：同源结构形成的大复合物（直接路径不足 50 kDa 时 BLAST 扩展检索；历史作业缺省） */
+  homologComplexes?: MwHomologComplex[]
+  /** v1.27：同源扩展检索说明（检索范围/未触发原因；未触发时为空串，历史作业缺省） */
+  homologSearchNote?: string
+  /** UniProt 互作伙伴（非自身；长度已知时含 lengthAa/kda） */
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  /** 通用增重策略（小靶点场景的技术工具箱） */
+  options: MwAugmentOption[]
+  /** 与用户目的的冲突分析（无目的信息时给 caution 默认条目） */
+  conflicts: MwConflictNote[]
+  /** 综合要点（评分依据 + LLM 提示 + 报告展示） */
+  notes: string[]
+}
+
+/** v1.26：分子量增重策略对评分的调整明细（score.ts 产出；评分卡展示） */
+export interface MwAugmentAdjustInfo {
+  /** 单体分子量（kDa） */
+  monomerKda: number
+  /** 装配有效分子量（kDa，可为 null） */
+  assemblyKda: number | null
+  /** v1.27：装配路径（评分卡/报告展示；历史作业缺省） */
+  assemblyPath?: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  /** 三方法调整值（整数；当前仅 cryoem 有非零值 — 分子量维度主要影响 Cryo-EM） */
+  xray: number
+  cryoem: number
+  nmr: number
+  /** 一句话调整依据 */
+  note: string
 }
 
 // ─── 作业汇总（前端 JobSummary）──────────────────────────────────────────────
@@ -311,6 +566,10 @@ export interface JobSummary {
   gapText?: string
   /** 聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
+  /** v1.29：互作复合物证据分析（无直接结构时；有证据时报告/评分消费） */
+  interaction?: InteractionAnalysis
+  /** 分子量增重策略分析（v1.26+ 作业存在；历史作业缺省；applicable=false 时也存档） */
+  mwAugment?: MwAugmentAnalysis
   /** LLM 报告生成是否至少部分成功（v1.7+） */
   /** v2.0：配体归一与研究数据（用户输入/上传文件/评估表识别 → RCSB 三位 ID + 含该配体结构列表） */
   ligands?: LigandResolution[]
