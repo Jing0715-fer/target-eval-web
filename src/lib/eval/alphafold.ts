@@ -3,6 +3,8 @@
  *  - fetchAlphafoldPrediction: AFDB REST（/api/prediction/{uniprot}）→ 模型地址与 pLDDT 指标
  *  - alphafoldFigure: 下载模型 PDB → 3Dmol.js（本地缓存 bundle）+ Playwright 无头截图
  *    → pLDDT 着色卡通图（官方四段配色：≥90 蓝 / 70-90 青 / 50-70 黄 / <50 橙）
+ *    → sharp 后处理：白底压平 + trim 去白边 + 均匀小边距（v2.2：结构占满画布，
+ *      报告头图不再大面积空白；sharp 不可用时优雅降级为原图）
  *
  * 图片落盘缓存 db/cache/alphafold/{uniprot}.png（TTL 无限 — 模型版本升级才失效，
  * 命中时直接复用）。渲染失败静默降级（报告无图但不阻塞生成）。
@@ -205,7 +207,7 @@ export function buildRenderPage(bundleJs: string, pdbText: string, width: number
 </body></html>`
 }
 
-// ─── Playwright 单例 ──────────────────────────────────────────────────────────
+// ─── Playwright 单例 ──────────────────────────────────────────────────────
 
 const pwGlobal = globalThis as unknown as { __afBrowser?: Promise<unknown> }
 
@@ -262,6 +264,48 @@ async function screenshotModel(pdbText: string): Promise<Buffer | null> {
   }
 }
 
+// ─── 截图后处理（sharp：白底压平 + trim 去白边 + 小边距）─────────────────────
+
+type SharpModule = typeof import('sharp')
+let sharpMod: SharpModule | null = null
+async function getSharp(): Promise<SharpModule | null> {
+  if (sharpMod) return sharpMod
+  try {
+    sharpMod = (await import('sharp')).default as SharpModule
+    return sharpMod
+  } catch {
+    return null // sharp 不可用 → 优雅降级，原样返回
+  }
+}
+
+/**
+ * 去白边（v2.2）：3Dmol zoomTo 留白常达 50-160px，报告头图 300px 宽度下显得大片空白。
+ * trim 白色边缘后均匀留 ~3% 边距（结构不贴边）；异常时返回原图。
+ */
+async function trimFigurePng(png: Buffer): Promise<Buffer> {
+  const sharp = await getSharp()
+  if (!sharp) return png
+  try {
+    const img = sharp(png, { limitInputPixels: 4_000_000 })
+    const meta = await img.metadata()
+    if (!meta.width || !meta.height) return png
+    const pad = Math.max(10, Math.round(Math.min(meta.width, meta.height) * 0.03))
+    const out = await img
+      .flatten({ background: '#ffffff' })
+      .trim({ threshold: 12 })
+      .extend({ top: pad, bottom: pad, left: pad, right: pad, background: '#ffffff' })
+      .png({ compressionLevel: 9 })
+      .toBuffer()
+    if (out.length < 5_000) return png
+    const m2 = await sharp(out).metadata()
+    // trim 异常（内容被裁得过小）→ 放弃后处理
+    if ((m2.width ?? 0) < 160 || (m2.height ?? 0) < 120) return png
+    return out
+  } catch {
+    return png
+  }
+}
+
 // ─── 对外编排（磁盘缓存）─────────────────────────────────────────────────────
 
 export interface AlphafoldFigure {
@@ -284,9 +328,9 @@ export async function alphafoldFigureFor(uniprotId: string): Promise<AlphafoldFi
   const pdbText = await downloadModelPdb(meta.pdbUrl)
   if (!pdbText) console.error('[af] model pdb download failed:', meta.pdbUrl)
   if (!pdbText) return null
-  if (!pdbText) return null
-  const png = await screenshotModel(pdbText)
-  if (!png || png.length < 5_000) return null
+  const pngRaw = await screenshotModel(pdbText)
+  if (!pngRaw || pngRaw.length < 5_000) return null
+  const png = await trimFigurePng(pngRaw)
   try {
     await fs.mkdir(cacheDir, { recursive: true })
     await fs.writeFile(file, png)

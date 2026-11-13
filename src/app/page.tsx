@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { LoaderCircle } from 'lucide-react'
-import { AppSidebar, MobileHeader } from '@/components/eval/app-shell'
+import { AppHeader } from '@/components/eval/app-shell'
 import { AppFooter } from '@/components/eval/app-footer'
 import { Stepper } from '@/components/eval/stepper'
 import { InputPanel } from '@/components/eval/input-panel'
@@ -135,9 +135,6 @@ export default function Home() {
     isBuiltin: true,
   })
 
-  /** idle 首屏：一屏工作台布局（lg+ 锁定视口高度，内部滚动）；其余阶段正常文档流 */
-  const isIdleStudio = flow.phase === 'idle' && !flow.loadingHistoryJob
-
   // 首次加载读取 LLM 引擎状态（失败静默保持内置）
   useEffect(() => {
     let alive = true
@@ -189,40 +186,19 @@ export default function Home() {
   }
 
   return (
-    <div
-      className={cn(
-        'flex min-h-dvh bg-background text-foreground',
-        isIdleStudio && 'lg:h-dvh lg:min-h-0 lg:overflow-hidden',
-      )}
-    >
-      {/* 桌面侧边导航（含最近评估） */}
-      <AppSidebar
+    <div className="flex min-h-dvh flex-col bg-background text-foreground">
+      {/* 顶部应用栏（v1.3：恢复原顶栏布局 — 功能在顶部，历史记录在 workflow 下方） */}
+      <AppHeader
         onOpenHistory={() => setHistoryOpen(true)}
         onHome={handleNewEvaluation}
         canGoHome={flow.phase !== 'idle' && !flow.loadingHistoryJob}
         onOpenLlmConfig={() => setLlmConfigOpen(true)}
         engineIsBuiltin={engine.isBuiltin}
         isIdle={flow.phase === 'idle'}
-      >
-        <RecentEvaluations
-          refreshKey={historyKey}
-          onOpenJob={openHistoryJob}
-          onOpenBatchReport={openBatchReport}
-          onOpenHistory={() => setHistoryOpen(true)}
-        />
-      </AppSidebar>
+      />
 
-      {/* 主列：移动顶栏 + 工作区 + 页脚 */}
-      <div className="flex min-h-dvh min-w-0 flex-1 flex-col lg:h-dvh lg:min-h-0">
-        <MobileHeader
-          onOpenHistory={() => setHistoryOpen(true)}
-          onHome={handleNewEvaluation}
-          canGoHome={flow.phase !== 'idle' && !flow.loadingHistoryJob}
-          onOpenLlmConfig={() => setLlmConfigOpen(true)}
-          engineIsBuiltin={engine.isBuiltin}
-        />
-
-        <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 lg:min-h-0 lg:px-8 lg:py-5">
+      {/* 主列：工作区 + 页脚 */}
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-5">
           {/* 非 idle 阶段：紧凑流程指示器（idle 阶段由 Hero + 右栏管线导引承载） */}
           {flow.phase !== 'idle' && !flow.loadingHistoryJob && (
             <Stepper step={step} className="mb-5" />
@@ -236,13 +212,13 @@ export default function Home() {
           ) : (
             <AnimatePresence mode="wait">
               {flow.phase === 'idle' && (
-                <motion.div key="idle" {...viewMotion} className="flex min-h-0 flex-1 flex-col">
+                <motion.div key="idle" {...viewMotion} className="flex flex-1 flex-col">
                   {/* 主视觉 */}
                   <StudioHero />
 
-                  {/* 工作台双栏：左 = 评估表单；右 = 管线导引 */}
-                  <div className="mt-4 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-12 lg:grid-rows-[minmax(0,1fr)]">
-                    <div className="min-h-0 lg:col-span-8">
+                  {/* 工作台双栏：左 = 评估表单；右 = 管线导引 + 历史记录（v1.3：历史放在 workflow 下面） */}
+                  <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
+                    <div className="lg:col-span-8">
                       <InputPanel
                         submitting={flow.submitting}
                         submitError={flow.submitError}
@@ -251,12 +227,12 @@ export default function Home() {
                       />
                     </div>
                     <aside
-                      className="flex min-h-0 flex-col gap-4 lg:col-span-4"
+                      className="flex min-w-0 flex-col gap-4 lg:col-span-4"
                       aria-label="评估管线与最近评估"
                     >
                       <WorkflowGuide />
-                      {/* 移动端最近评估（桌面端在左侧导航栏常驻展示） */}
-                      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card lg:hidden">
+                      {/* 最近评估（常驻右栏，workflow 下方；内部滚动） */}
+                      <div className="flex max-h-[400px] min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgb(22_23_29/0.04)] dark:shadow-[0_1px_2px_rgb(0_0_0/0.4)]">
                         <RecentEvaluations
                           refreshKey={historyKey}
                           onOpenJob={openHistoryJob}
@@ -325,8 +301,7 @@ export default function Home() {
           )}
         </main>
 
-        <AppFooter engineSummary={engine.summary} />
-      </div>
+      <AppFooter engineSummary={engine.summary} />
 
       <HistoryDialog
         open={historyOpen}

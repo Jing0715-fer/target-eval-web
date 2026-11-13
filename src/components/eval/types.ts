@@ -628,13 +628,15 @@ export interface LigandResolution {
   name: string
   formula: string
   weight: number | null
-  /** 归一策略（direct-id / alias / pdb-search / llm / llm+pdb-search） */
+  /** 归一策略（direct-id / alias / pdb-search / pubchem / llm / llm+pdb-search / llm+pubchem） */
   strategy: string
   error?: string
   /** 含该配体的结构总数 */
   totalStructures: number
   /** 展示用结构列表（≤12，按分辨率升序） */
   structures: LigandStructureLite[]
+  /** v2.2：PubChem 识别详情（无 PDB 对应组分时仍能给出分子式/MW/名称/CID） */
+  pubchem?: { cid: number; iupacName?: string; smiles?: string }
 }
 
 export interface AlphafoldSummaryInfo {

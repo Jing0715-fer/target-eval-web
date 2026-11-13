@@ -388,7 +388,7 @@ export async function runPipeline(input: PipelineInput, cb: PipelineCallbacks): 
       ligandResults = resolved
       const okList = resolved.filter(r => r.ok)
       if (resolved.length) {
-        log(`配体归一完成：${okList.length}/${resolved.length} 项识别${okList.length ? `（${okList.map(r => `${r.raw} → ${r.compId}·${r.strategy}·${r.totalStructures} 结构`).join('；').slice(0, 400)}）` : ''}`)
+        log(`配体归一完成：${okList.length}/${resolved.length} 项识别${okList.length ? `（${okList.map(r => `${r.raw} → ${r.compId || `PubChem CID ${r.pubchem?.cid ?? '?'}`}·${r.strategy}·${r.totalStructures} 结构`).join('；').slice(0, 400)}）` : ''}`)
         for (const r of resolved.filter(x => !x.ok)) {
           log(`配体未识别：「${r.raw}」— ${r.error ?? '未知原因'}`, 'warn')
         }

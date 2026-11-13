@@ -1091,7 +1091,51 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             />
           </div>
           <div className="grid gap-3.5 md:grid-cols-2">
-            {ligands.map(l => l.ok ? (
+            {ligands.map(l => !l.ok ? (
+              <Card key={`${l.raw}-fail`} className="gap-0 rounded-xl border-dashed border-amber-500/40 bg-amber-500/[0.04] shadow-none">
+                <CardContent className="flex flex-col gap-1.5 px-4.5 py-4">
+                  <div className="text-sm font-semibold text-foreground">{l.raw.length > 44 ? l.raw.slice(0, 43) + '…' : l.raw}</div>
+                  <p className="text-xs text-amber-600 dark:text-amber-400">未能归一 — {l.error ?? '未知原因'}</p>
+                </CardContent>
+              </Card>
+            ) : !l.compId ? (
+              /* v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡 */
+              <Card key={`${l.raw}-pc`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
+                <CardContent className="flex flex-col gap-3 px-4.5 py-4">
+                  <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+                    {l.pubchem ? (
+                      <a
+                        href={`https://pubchem.ncbi.nlm.nih.gov/compound/${l.pubchem.cid}`}
+                        target="_blank"
+                        rel="noopener"
+                        title="在 PubChem 查看化合物详情"
+                        className="inline-flex min-h-7 items-center rounded-md border border-violet-500/30 bg-violet-500/[0.08] px-2.5 font-mono text-sm font-bold tracking-wide text-violet-600 transition-colors hover:bg-violet-500/[0.16] dark:text-violet-400"
+                      >
+                        CID {l.pubchem.cid}
+                      </a>
+                    ) : (
+                      <span className="inline-flex min-h-7 items-center rounded-md border border-violet-500/30 bg-violet-500/[0.08] px-2.5 font-mono text-sm font-bold tracking-wide text-violet-600 dark:text-violet-400">已识别</span>
+                    )}
+                    <span className="min-w-0 flex-1 text-sm font-semibold text-foreground">{l.name || l.raw}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>分子式 <b className="font-mono text-foreground/80">{l.formula || '—'}</b></span>
+                    {l.weight != null && <span>MW <b className="font-mono text-foreground/80">{l.weight.toFixed(1)}</b></span>}
+                  </div>
+                  {l.pubchem?.iupacName && (
+                    <p className="text-[11px] leading-relaxed break-all text-muted-foreground/70">
+                      IUPAC 名 <span className="font-mono">{l.pubchem.iupacName}</span>
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground/70">
+                    PDB 化学组分库无对应条目 — 已通过 PubChem 识别{ l.pubchem && <>，点击 <span className="font-mono">CID {l.pubchem.cid}</span> 查看化合物详情</> }
+                  </p>
+                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
+                    输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
               <Card key={`${l.raw}-ok`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
                 <CardContent className="flex flex-col gap-3 px-4.5 py-4">
                   <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
@@ -1133,13 +1177,6 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
                     输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}
                   </p>
-                </CardContent>
-              </Card>
-            ) : (
-              <Card key={`${l.raw}-fail`} className="gap-0 rounded-xl border-dashed border-amber-500/40 bg-amber-500/[0.04] shadow-none">
-                <CardContent className="flex flex-col gap-1.5 px-4.5 py-4">
-                  <div className="text-sm font-semibold text-foreground">{l.raw.length > 44 ? l.raw.slice(0, 43) + '…' : l.raw}</div>
-                  <p className="text-xs text-amber-600 dark:text-amber-400">未能归一到 PDB 化学组分 — {l.error ?? '未知原因'}</p>
                 </CardContent>
               </Card>
             ))}

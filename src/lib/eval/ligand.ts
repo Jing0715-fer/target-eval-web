@@ -1,24 +1,30 @@
 /**
  * 配体归一与研究数据查询（仅服务端）。
  *
- * 「非标准输入 → RCSB 三位配体 ID」多策略解析链（v2.1 配体功能）：
- *  1. direct-id   输入即 1-3 位化学组分 ID（如 ATP / STU）→ RCSB chemcomp API 校验
+ * 「非标准输入 → RCSB 化学组分 ID」多策略解析链（v2.2 配体功能）：
+ *  1. direct-id   输入即 1-5 位化学组分 ID（如 ATP / STU / A1H2J）→ RCSB chemcomp API 校验
  *  2. alias       别名表命中（中英文名，均经 RCSB 官方 chemcomp 名称核实）
  *  3. pdb-search  PDBe Solr 全文检索（英文）→ 命中条目 bound_compound_id 反推
  *                 候选 ID，必须通过 chemcomp 名称词面验证（防共结晶噪声如
  *                 "glucose"→ZN）
- *  4. llm         AI 兜底（中文俗名/分子式/描述性输入）：给出候选 ID、标准英文名
+ *  4. pubchem     PubChem 名称检索（含品牌药名/同义词）→ 分子式/MW/IUPAC/SMILES；
+ *                 再用 SMILES 经 RCSB 化学检索（graph-exact / fingerprint）映射回
+ *                 PDB 组分 ID（分子式硬校验）— 无 PDB 对应时仍以 PubChem 详情成卡
+ *  5. llm         AI 兜底（中文俗名/分子式/描述性输入）：给出候选 ID、标准英文名
  *                 与分子式 → 候选经 chemcomp 分子式硬校验（防幻觉错配，如
- *                 阿司匹林→ASP 冬氨酸、C9H8O4→ASA 门冬醛）；绝不直接采信
+ *                 阿司匹林→ASP 冬氨酸、C9H8O4→ASA 门冬醛）；英文名回灌 PubChem 复核；
+ *                 绝不直接采信
  *
  * 结构列表：PDBe Solr 字段化检索 bound_compound_id:"XXX"（含该配体的 PDB 条目）。
  * 数据通道均已实测可用（2026-11 探测）：
  *  - RCSB  https://data.rcsb.org/rest/v1/core/chemcomp/{id}
  *  - PDBe  https://www.ebi.ac.uk/pdbe/search/pdb/select?q=...
+ *  - PubChem PUG REST（pubchem.ts）+ RCSB chemical search（graph-exact 实测 1.0 分）
  */
 import { llmChat } from './llm'
 import { apiCache } from './cache'
 import { LIGAND_JUNK_IDS } from './ligand-parse'
+import { pubchemLookupName, rcsbChemicalCandidates, type PubChemCompound } from './pubchem'
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -50,13 +56,15 @@ export interface LigandResolution {
   name: string
   formula: string
   weight: number | null
-  /** 归一策略（direct-id / alias / pdb-search / llm / llm+pdb-search） */
+  /** 归一策略（direct-id / alias / pdb-search / pubchem / llm / llm+pdb-search / llm+pubchem） */
   strategy: string
   error?: string
   /** 含此配体的结构总数（Solr 命中数） */
   totalStructures: number
   /** 展示用结构列表（按分辨率升序，cap 12） */
   structures: LigandStructureLite[]
+  /** v2.2：PubChem 识别详情（无 PDB 对应时仍能给出分子式/MW/名称/CID） */
+  pubchem?: { cid: number; iupacName?: string; smiles?: string }
 }
 
 // ─── 别名表（id 与名称均经 RCSB chemcomp 官方核实，2026-11）────────────────
@@ -337,10 +345,38 @@ async function llmResolveLigand(raw: string, isFormula: boolean, signal?: AbortS
 
 // ─── 解析主链 ─────────────────────────────────────────────────────────────────
 
-const ID_RE = /^[A-Za-z0-9]{1,3}$/
+const ID_RE = /^[A-Za-z0-9]{1,5}$/ // PDB 组分 ID：历史 1-3 位 + 新式 4-5 位（如 A1H2J）
+
+// ─── PubChem → PDB 组分映射（v2.2）──────────────────────────────────────────
 
 /**
- * 单条配体输入 → 三位 ID（多策略，全失败时 ok=false）。
+ * PubChem 化合物（SMILES）→ PDB 化学组分：
+ *  a) graph-exact（score 1.0 = 原子/键级/立体全等）+ 分子式硬校验；
+ *  b) fingerprint 相似 ≥0.9 且分子式一致（同分异构同物兜底）。
+ * 均不满足返回 null（调用方按「PubChem 已识别但 PDB 无对应」成卡）。
+ */
+async function mapPubChemToPdbComp(
+  pc: PubChemCompound,
+  signal?: AbortSignal,
+): Promise<{ info: ChemCompInfo; strategy: string } | null> {
+  if (!pc.smiles) return null
+  const exact = await rcsbChemicalCandidates(pc.smiles, 'exact', signal)
+  for (const c of exact) {
+    if (c.score < 0.999) continue
+    const info = await fetchChemComp(c.compId)
+    if (info && formulaMatches(pc.formula, info.formula)) return { info, strategy: 'pubchem' }
+  }
+  const sim = await rcsbChemicalCandidates(pc.smiles, 'similar', signal)
+  for (const c of sim) {
+    if (c.score < 0.9) continue
+    const info = await fetchChemComp(c.compId)
+    if (info && formulaMatches(pc.formula, info.formula)) return { info, strategy: 'pubchem+similar' }
+  }
+  return null
+}
+
+/**
+ * 单条配体输入 → 化学组分 ID（多策略，全失败时 ok=false）。
  * 结果整体进 LRU 缓存（同批次多靶点共享，不重复外呼）。
  */
 export async function resolveLigandInput(input: LigandInput, signal?: AbortSignal): Promise<LigandResolution> {
@@ -362,8 +398,8 @@ export async function resolveLigandInput(input: LigandInput, signal?: AbortSigna
 
   const norm = normalizeLigandRaw(raw)
 
-  // 1) 直接 ID
-  if (ID_RE.test(norm) && /[a-z0-9]/i.test(norm) && norm.length <= 3) {
+  // 1) 直接 ID（1-5 位，历史三位 + 新式更长 ID）
+  if (ID_RE.test(norm) && /[a-z0-9]/i.test(norm) && norm.length <= 5) {
     const upper = norm.toUpperCase()
     if (!LIGAND_JUNK_IDS.has(upper)) {
       const info = await fetchChemComp(upper)
@@ -410,7 +446,27 @@ export async function resolveLigandInput(input: LigandInput, signal?: AbortSigna
     }
   }
 
-  // 4) LLM 兜底（中文俗名 / 分子式 / 品牌名 / 文件线索）
+  // 4) PubChem 名称检索（v2.2：品牌药名/同义词 → 分子式/MW/IUPAC/SMILES；SMILES 回映射 PDB 组分）
+  if (!isFormula && !hasCJK && queryText.length >= 3) {
+    const pc = await pubchemLookupName(raw, signal)
+    if (pc) {
+      const mapped = await mapPubChemToPdbComp(pc, signal)
+      if (mapped) {
+        return {
+          ...base, ok: true, compId: mapped.info.id, name: mapped.info.name || pc.title,
+          formula: mapped.info.formula, weight: mapped.info.weight, strategy: mapped.strategy,
+          pubchem: { cid: pc.cid, iupacName: pc.iupacName, smiles: pc.smiles },
+        }
+      }
+      // PDB 无对应组分：PubChem 自身即为识别结果（分子式/MW/IUPAC 供研究参考）
+      return {
+        ...base, ok: true, compId: '', name: pc.title, formula: pc.formula, weight: pc.weight,
+        strategy: 'pubchem', pubchem: { cid: pc.cid, iupacName: pc.iupacName, smiles: pc.smiles },
+      }
+    }
+  }
+
+  // 5) LLM 兜底（中文俗名 / 分子式 / 品牌名 / 文件线索）
   const verdict = await llmResolveLigand(raw, isFormula, signal)
   if (verdict) {
     // 候选池：LLM ID（黑名单过滤）→ Solr(LLM 英文名) → Solr(原英文输入)
@@ -445,9 +501,27 @@ export async function resolveLigandInput(input: LigandInput, signal?: AbortSigna
         strategy: verdict.id === info.id.toUpperCase() ? 'llm' : 'llm+pdb-search',
       }
     }
+    // v2.2：LLM 英文名回灌 PubChem（中文俗名/品牌名翻译后的确定性复核）
+    if (verdict.name) {
+      const pc = await pubchemLookupName(verdict.name, signal)
+      if (pc) {
+        const mapped = await mapPubChemToPdbComp(pc, signal)
+        if (mapped) {
+          return {
+            ...base, ok: true, compId: mapped.info.id, name: mapped.info.name || pc.title,
+            formula: mapped.info.formula, weight: mapped.info.weight, strategy: 'llm+pubchem',
+            pubchem: { cid: pc.cid, iupacName: pc.iupacName, smiles: pc.smiles },
+          }
+        }
+        return {
+          ...base, ok: true, compId: '', name: pc.title, formula: pc.formula, weight: pc.weight,
+          strategy: 'llm+pubchem', pubchem: { cid: pc.cid, iupacName: pc.iupacName, smiles: pc.smiles },
+        }
+      }
+    }
   }
 
-  return { ...base, error: isFormula ? '分子式未能映射到已知 PDB 化学组分' : '未能在 PDB 化学组分字典中定位该输入' }
+  return { ...base, error: isFormula ? '分子式未能映射到已知化合物（PDB / PubChem）' : '未能在 PDB 化学组分字典与 PubChem 中定位该输入' }
 }
 
 /** 含某配体的结构列表（Solr 字段化检索，去重排序） */

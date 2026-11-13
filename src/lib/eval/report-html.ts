@@ -120,8 +120,11 @@ function strategyZh(s: string): string {
     case 'direct-id': return '直接ID'
     case 'alias': return '别名表'
     case 'pdb-search': return 'PDBe检索'
+    case 'pubchem': return 'PubChem'
+    case 'pubchem+similar': return 'PubChem+相似'
     case 'llm': return 'AI'
     case 'llm+pdb-search': return 'AI+检索'
+    case 'llm+pubchem': return 'AI+PubChem'
     default: return s || '—'
   }
 }
@@ -530,7 +533,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const ligandSecHtml = (ctx.ligands?.length ?? 0) > 0 ? `
   <section class="sec" id="ligands">
     <h2><span class="sec-no">${ligNo}</span><span class="sec-title">配体研究数据</span><span class="sec-en">Ligands · ${ctx.ligands!.filter(l => l.ok).length}/${ctx.ligands!.length}</span></h2>
-    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / AI 兜底）映射为 RCSB 三位化学组分 ID；结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为本靶点直接结构的条目。</p>
+    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / PubChem / AI 兜底）映射为 RCSB 化学组分 ID；PDB 无对应组分时以 PubChem 详情（CID / 分子式 / MW / IUPAC 名）成卡。结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为本靶点直接结构的条目。</p>
     <div class="lig-grid">
     ${ctx.ligands!.map(l => {
       if (!l.ok) return `
@@ -538,6 +541,26 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
         <div class="lig-head"><span class="lig-id lig-id-fail">?</span><span class="lig-name">${esc(l.raw.length > 40 ? l.raw.slice(0, 39) + '…' : l.raw)}</span></div>
         <div class="lig-meta"><span>未能归一 — ${esc(l.error ?? '未知原因')}</span></div>
       </div>`
+      // v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡
+      if (!l.compId) {
+        const pc = l.pubchem
+        return `
+      <div class="lig-card">
+        <div class="lig-head">
+          ${pc
+            ? `<a class="lig-id lig-id-pc" href="https://pubchem.ncbi.nlm.nih.gov/compound/${pc.cid}" target="_blank" rel="noopener" title="在 PubChem 查看化合物详情">CID ${pc.cid}</a>`
+            : `<span class="lig-id lig-id-pc">已识别</span>`}
+          <span class="lig-name">${esc(l.name || l.raw)}</span>
+          <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(strategyZh(l.strategy))}${l.source === 'eval-table' ? ' · 评估表' : l.source === 'file' ? ' · 文件' : ''}</span>
+        </div>
+        <div class="lig-meta">
+          <span>分子式 <b>${esc(l.formula || '—')}</b></span>
+          ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
+        </div>
+        ${pc?.iupacName ? `<div class="lig-iupac">IUPAC 名 ${esc(pc.iupacName)}</div>` : ''}
+        <div class="lig-pdbs lig-none">PDB 化学组分库无对应条目 — 已通过 PubChem 识别，点击 CID 查看化合物详情</div>
+      </div>`
+      }
       const best = l.structures.find(s => s.resolution != null)?.resolution
       const chips = l.structures.slice(0, 12).map(s =>
         `<a class="${s.alsoTarget ? 'lig-also' : ''}" href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener" title="${esc(s.title)}${s.resolution != null ? ` · ${s.resolution}Å` : ''}${s.method ? ` · ${s.method}` : ''}${s.alsoTarget ? ' · 本靶点直接结构' : ''}">${s.pdbId}${s.resolution != null ? ` <i>${s.resolution.toFixed(1)}</i>` : ''}</a>`,
@@ -1104,15 +1127,15 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .fig-group { margin:18px 0 4px !important; font-size:14.5px !important; color:#064e3b; display:flex; align-items:baseline; gap:8px; }
   .fig-group-count { font-family:var(--mono); font-size:10.5px; font-weight:500; color:var(--faint); letter-spacing:1px; }
 
-  /* ── 报告头图与元信息并排（v2.0 AlphaFold）── */
-  .rpt-headflex { display:flex; gap:28px; align-items:flex-start; }
+  /* ── 报告头图与元信息并排（v2.0 AlphaFold；v2.2 截图去白边后上提 + 放大）── */
+  .rpt-headflex { display:flex; gap:26px; align-items:flex-start; }
   .rpt-headflex .meta-grid { flex:1 1 auto; }
-  .af-fig { flex:0 0 300px; margin:0; text-align:center; align-self:flex-start; }
-  .af-fig img { display:block; width:300px; max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; padding:6px; box-shadow:0 1px 3px rgba(28,25,23,.06); }
-  .af-fig figcaption { margin-top:9px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
+  .af-fig { flex:0 0 320px; margin:0; text-align:center; align-self:flex-start; }
+  .af-fig img { display:block; width:320px; max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; padding:4px; box-shadow:0 1px 3px rgba(28,25,23,.06); }
+  .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
   .af-fig figcaption b { color:var(--ink); font-weight:600; }
   .af-fig figcaption a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
-  @media (max-width:720px){ .rpt-headflex{flex-direction:column} .af-fig{flex-basis:auto; width:100%; max-width:380px; margin:4px auto 0} }
+  @media (max-width:720px){ .rpt-headflex{flex-direction:column} .af-fig{flex-basis:auto; width:100%; max-width:400px; margin:0 auto} }
 
   /* ── 配体卡（v2.0）── */
   .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:14px; margin-top:8px; }
@@ -1121,6 +1144,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .lig-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
   .lig-id { font-family:var(--mono); font-size:14.5px; font-weight:700; color:#065f46; background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; }
   .lig-id-fail { color:#92400e; background:#fffbeb; border-color:#fde68a; }
+  .lig-id-pc { color:#4c5fd7; background:#eef0fd; border-color:#c6cdf6; }
+  .lig-iupac { margin-top:7px; font-size:10.5px; line-height:1.65; color:var(--faint); overflow-wrap:anywhere; }
   .lig-name { font-size:13px; font-weight:600; color:var(--ink); overflow-wrap:anywhere; min-width:120px; }
   .lig-src { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--faint); letter-spacing:.4px; }
   .lig-meta { display:flex; flex-wrap:wrap; gap:4px 16px; margin-top:9px; font-size:11.5px; color:var(--sub); }

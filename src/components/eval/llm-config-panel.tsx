@@ -233,9 +233,9 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="eval-scroll max-h-[88vh] max-w-2xl overflow-y-auto rounded-xl border-border p-0 sm:max-w-2xl">
-        {/* 刊头 */}
+        {/* 刊头（右侧留出关闭按钮空间，避免与「当前引擎」徽标重叠） */}
         <DialogHeader className="border-b border-border px-6 pt-6 pb-4">
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start justify-between gap-4 pr-10 sm:pr-12">
             <div>
               <p className="lin-eyebrow text-primary">LLM Engine · 分析引擎</p>
               <DialogTitle className="mt-1.5 text-xl font-semibold tracking-[-0.02em] text-foreground">
