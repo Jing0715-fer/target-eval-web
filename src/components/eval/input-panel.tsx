@@ -77,7 +77,8 @@ function ligandRawFromParsed(p: LigandFileParsed, fileName: string): string {
 
 // ─── 步骤轨道区段 ─────────────────────────────────────────────────────────────
 
-/** 表单步骤区段：左侧编号节点 + 连续竖轨（完成后节点点亮为翡翠实心），引导逐项填写 */
+/** 表单步骤区段：左侧编号节点 + 连续竖轨（完成后节点点亮为翡翠实心），引导逐项填写。
+ *  竖轨跨段连续：轨道列 -mb-4 便尾巴伸入下内边距，次段接头 -mt-4 h-4 跨过上内边距，与上段尾巴在段边界（发丝线）无缝相接 */
 function StepSection({
   no,
   title,
@@ -100,36 +101,36 @@ function StepSection({
   return (
     <section
       className={cn(
-        'px-4 py-3',
+        'px-4 py-4',
         // 首段（01）无上边线；后续段以发丝线分隔（轨道连续穿行）
         no !== '01' && 'border-t border-stone-100/90 dark:border-stone-800/60',
       )}
     >
       <div className="flex gap-3">
-        {/* 步骤轨道：连线（贯穿上下段）+ 编号节点 */}
-        <div className="flex flex-col items-center" aria-hidden>
-          {no !== '01' && <span className="-mt-3 h-3 w-px bg-stone-200 dark:bg-stone-800" />}
+        {/* 步骤轨道：连线（跨段连续，紧贴节点无断口）+ 编号节点 */}
+        <div className="-mb-4 flex flex-col items-center" aria-hidden>
+          {no !== '01' && <span className="-mt-4 h-4 w-px bg-stone-300 dark:bg-stone-600" />}
           <span
             className={cn(
               'flex size-5 shrink-0 items-center justify-center rounded-[5px] border font-mono text-[9.5px] font-semibold tabular-nums transition-colors duration-300',
               tone === 'done'
                 ? 'border-emerald-700 bg-emerald-700 text-white shadow-[0_0_0_3px_rgba(4,120,87,0.14)] dark:border-emerald-500 dark:bg-emerald-500 dark:text-stone-950 dark:shadow-[0_0_0_3px_rgba(16,185,129,0.18)]'
                 : tone === 'optional'
-                  ? 'border-dashed border-stone-300 bg-white text-stone-400 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-500'
-                  : 'border-stone-300 bg-white text-stone-500 dark:border-stone-600 dark:bg-stone-900 dark:text-stone-400',
+                  ? 'border-dashed border-stone-300 bg-white text-stone-400 dark:border-stone-600 dark:bg-stone-800/60 dark:text-stone-400'
+                  : 'border-stone-300 bg-white text-stone-500 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-300',
             )}
           >
             {no}
           </span>
           {last ? (
-            <span className="w-px flex-1 bg-gradient-to-b from-stone-200 to-transparent dark:from-stone-800" />
+            <span className="w-px flex-1 bg-gradient-to-b from-stone-300 to-transparent dark:from-stone-600" />
           ) : (
-            <span className="mt-1.5 w-px flex-1 bg-stone-200 dark:bg-stone-800" />
+            <span className="w-px flex-1 bg-stone-300 dark:bg-stone-600" />
           )}
         </div>
 
         {/* 字段内容：标题行 + 输入区 */}
-        <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <div className="flex min-w-0 flex-1 flex-col gap-2.5">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <h3 className="text-[13px] font-semibold tracking-tight text-stone-800 dark:text-stone-100">
               {title}
@@ -426,7 +427,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   })
 
   const inputBase =
-    'w-full rounded-md border border-stone-200 bg-white text-stone-900 shadow-none outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-stone-400 focus-visible:border-emerald-500 focus-visible:ring-[3px] focus-visible:ring-emerald-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus-visible:border-emerald-600 dark:focus-visible:ring-emerald-500/15'
+    'w-full rounded-md border border-stone-200 bg-white text-stone-900 shadow-[inset_0_1px_2px_rgba(28,25,23,0.05)] outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-stone-400 focus-visible:border-emerald-500 focus-visible:shadow-[inset_0_1px_2px_rgba(28,25,23,0.03)] focus-visible:ring-[3px] focus-visible:ring-emerald-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-600 dark:shadow-[inset_0_1px_3px_rgba(0,0,0,0.35)] dark:focus-visible:border-emerald-600 dark:focus-visible:ring-emerald-500/15'
 
   const hintText = 'flex items-center gap-1 text-[11px]'
 
@@ -456,10 +457,10 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           : '开始评估'
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-stone-200/80 bg-white ring-1 ring-stone-950/[0.03] shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-20px_rgba(28,25,23,0.16)] dark:border-stone-800 dark:bg-stone-900 dark:ring-white/[0.04] dark:shadow-[0_1px_2px_rgba(0,0,0,0.4),0_16px_40px_-24px_rgba(0,0,0,0.6)]">
+    <div className="studio-card flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-stone-200/80 ring-1 ring-stone-950/[0.03] shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-20px_rgba(28,25,23,0.16)] dark:border-stone-800 dark:ring-white/[0.04] dark:shadow-[0_1px_2px_rgba(0,0,0,0.4),0_16px_40px_-24px_rgba(0,0,0,0.6)]">
       <Tabs value={mode} onValueChange={(v) => setMode(v as TabMode)} className="flex min-h-0 flex-1 flex-col gap-0">
         {/* 卡头工具条：输入方式切换（分段控件） */}
-        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-100 bg-stone-50/60 px-4 py-2 dark:border-stone-800/70 dark:bg-stone-950/40">
+        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-100 bg-stone-50/70 px-4 py-2.5 dark:border-stone-800/70 dark:bg-stone-950/40">
           <span className="eval-eyebrow text-stone-400 dark:text-stone-500">Input · 输入方式</span>
           <TabsList className="ml-auto h-8 w-auto justify-start gap-0.5 rounded-lg bg-stone-200/50 p-0.5 dark:bg-stone-800/70">
             {([
@@ -497,7 +498,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     value={uniprot}
                     onChange={(e) => setUniprot(e.target.value)}
                     placeholder={'支持多个 UniProt ID，逗号 / 空格 / 换行分隔（最多 ' + MAX_BATCH_UNIPROT + ' 个），如 P00533、P04637'}
-                    className={cn(inputBase, 'min-h-[64px] resize-y px-3 py-2 font-mono text-[13px] leading-[22px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[12px] placeholder:leading-[20px]')}
+                    className={cn(inputBase, 'min-h-[92px] resize-y px-3.5 py-2.5 font-mono text-[13px] leading-[22px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[12px] placeholder:leading-[20px]')}
                     spellCheck={false}
                   />
                   {uniprot.trim() !== '' && uniprotParsed.invalid.length > 0 && (
@@ -690,7 +691,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       value={sequenceText}
                       onChange={(e) => setSequenceText(e.target.value)}
                       placeholder={'支持多条 FASTA 序列（每个 > 标题段一条，最多 ' + MAX_BATCH_UNIPROT + ' 条），如：\n>EGFR kinase domain\nMVPKPVA...\n>p53 DNA-binding domain\nSSSVPSQ...'}
-                      className={cn(inputBase, 'min-h-[120px] resize-y px-3 py-2 font-mono text-[12.5px] leading-[21px]')}
+                      className={cn(inputBase, 'min-h-[168px] resize-y px-3.5 py-2.5 font-mono text-[12.5px] leading-[21px]')}
                       spellCheck={false}
                     />
                     {seqInfo.count > 0 && (
@@ -769,7 +770,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             >
               <div
                 className={cn(
-                  'flex flex-col gap-2 rounded-md border border-stone-200 bg-stone-50/60 p-2 transition-colors focus-within:border-emerald-400 focus-within:bg-white dark:border-stone-700 dark:bg-stone-800/40 dark:focus-within:border-emerald-600 dark:focus-within:bg-stone-900',
+                  'flex flex-col gap-2 rounded-lg border border-stone-200 bg-stone-50/70 p-2.5 shadow-[inset_0_1px_2px_rgba(28,25,23,0.04)] transition-colors focus-within:border-emerald-400 focus-within:bg-white focus-within:shadow-none dark:border-stone-700 dark:bg-stone-800/40 dark:shadow-[inset_0_1px_3px_rgba(0,0,0,0.25)] dark:focus-within:border-emerald-600 dark:focus-within:bg-stone-900 dark:focus-within:shadow-none',
                 )}
               >
                 {ligandChips.length > 0 && (
@@ -827,7 +828,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     placeholder={ligandChips.length >= MAX_LIGANDS
                       ? `已达上限 ${MAX_LIGANDS} 条`
                       : '名称 / 分子式 / 三位 ID，回车添加 — 如 伊马替尼 · C9H8O4 · ATP · STU'}
-                    className="h-9 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-stone-900 outline-none ring-0 transition-colors placeholder:text-stone-400 focus-visible:ring-0 dark:text-stone-100 dark:placeholder:text-stone-600"
+                    className="h-10 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-stone-900 outline-none ring-0 transition-colors placeholder:text-stone-400 focus-visible:ring-0 dark:text-stone-100 dark:placeholder:text-stone-600"
                   />
                   <Button
                     type="button"
@@ -835,7 +836,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     size="sm"
                     onClick={commitLigandDraft}
                     disabled={!ligandDraft.trim() || ligandChips.length >= MAX_LIGANDS}
-                    className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
+                    className="h-9 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
                   >
                     <Plus className="size-3.5" aria-hidden />
                     添加
@@ -846,7 +847,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     size="sm"
                     onClick={() => ligandFileInputRef.current?.click()}
                     disabled={ligandChips.length >= MAX_LIGANDS}
-                    className="h-8 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
+                    className="h-9 gap-1 rounded-md border-stone-200 px-2.5 text-[11.5px] font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
                   >
                     <Paperclip className="size-3.5" aria-hidden />
                     配体文件
@@ -901,7 +902,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   setGoalAutoFilled(false)
                 }}
                 placeholder="例如：解析 EGFR 激酶域与抑制剂复合物的冷冻电镜结构，评估 CRO 可行性（上传评估表后 AI 将自动提取并填入）"
-                className={cn(inputBase, 'min-h-[52px] resize-y px-3 py-2 text-[13px] leading-[22px]')}
+                className={cn(inputBase, 'min-h-[80px] resize-y px-3.5 py-2.5 text-[13px] leading-[22px]')}
               />
               <p className="text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">
                 明确的客户目标将直接用于 LLM 报告中的可行性结论与实验策略推荐（可选）
@@ -911,7 +912,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             {/* ── 高级选项（卡片内静默折叠）──────────────────────────── */}
             <Collapsible open={advOpen} onOpenChange={setAdvOpen}>
               <div className="border-t border-stone-100 dark:border-stone-800/70">
-                <CollapsibleTrigger className="flex min-h-10 w-full items-center gap-2 px-4 text-[12.5px] font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-300 dark:hover:bg-stone-900/60">
+                <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 px-4 text-[12.5px] font-medium text-stone-600 outline-none transition-colors hover:bg-stone-50 dark:text-stone-300 dark:hover:bg-stone-900/60">
                   <Settings2 className="size-3.5 text-stone-400" />
                   高级选项
                   <span className="ml-auto font-mono text-[10.5px] font-normal text-stone-400 dark:text-stone-500">
@@ -991,7 +992,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         </div>
 
         {/* ── 提交条（卡底固定）────────────────────────────────── */}
-        <div className="shrink-0 border-t border-stone-100 bg-gradient-to-b from-white to-stone-50/70 px-4 py-2.5 dark:border-stone-800/70 dark:from-stone-900 dark:to-stone-950/60">
+        <div className="shrink-0 border-t border-stone-100 bg-gradient-to-b from-white to-stone-50/70 px-4 py-3 dark:border-stone-800/70 dark:from-stone-900 dark:to-stone-950/60">
           {submitError && (
             <Alert variant="destructive" className="mb-2.5 rounded-md border-red-300 py-2.5 dark:border-red-900">
               <CircleAlert />

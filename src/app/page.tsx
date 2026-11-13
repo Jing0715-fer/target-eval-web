@@ -30,10 +30,10 @@ function isAnalysisStage(stage: string | null | undefined): boolean {
   return /score|rating|llm|report|generat|summary/i.test(stage ?? '')
 }
 
-/** 首屏主视觉（紧凑单行）：眉题 + 衬线标题 + 一句话导引 + 二级结构线稿 */
+/** 首屏主视觉（紧凑单行）：眉题 + 衬线标题 + 一句话导引 */
 function StudioHero() {
   return (
-    <div className="flex shrink-0 flex-wrap items-end justify-between gap-x-8 gap-y-3">
+    <div className="shrink-0">
       <div className="min-w-0 max-w-3xl">
         <div className="flex items-center gap-2.5">
           <span className="eval-eyebrow text-emerald-700 dark:text-emerald-500">
@@ -61,57 +61,11 @@ function StudioHero() {
           三方法可行性报告与实验策略建议。
         </p>
       </div>
-
-      {/* 蛋白二级结构线稿（α-螺旋 · β-折叠箭头 · 卷曲）：装饰性科学示意 */}
-      <svg
-        viewBox="0 0 168 48"
-        fill="none"
-        aria-hidden
-        className="hidden h-12 w-42 shrink-0 lg:block"
-      >
-        {/* α-螺旋波浪 */}
-        <path
-          d="M2 32 Q9 15 16 32 T30 32 T44 32"
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          className="text-stone-300 dark:text-stone-700"
-        />
-        {/* 连接环 */}
-        <path
-          d="M44 32 C52 32 50 19 60 19"
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          className="text-stone-300 dark:text-stone-700"
-        />
-        {/* β-折叠箭头（翡翠强调） */}
-        <path
-          d="M60 19 L79 12.5 L74.5 21.5 L93 15"
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          className="text-emerald-600/90 dark:text-emerald-500/90"
-        />
-        {/* 无规卷曲 */}
-        <path
-          d="M93 15 C103 12 101 26 113 24 C123 22 121 34 133 32"
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          className="text-stone-300 dark:text-stone-700"
-        />
-        {/* 原子标记 */}
-        <circle cx="79" cy="12.5" r="2.6" className="fill-emerald-600/90 dark:fill-emerald-500/90" />
-        <circle cx="133" cy="32" r="2.4" className="fill-stone-400/80 dark:fill-stone-600" />
-        <circle cx="16" cy="32" r="2" className="fill-stone-400/80 dark:fill-stone-600" />
-      </svg>
     </div>
   )
 }
 
-/** 右栏 · 评估管线导引（墨色面板）：提交后自动执行的四个阶段 + 数据源 */
+/** 右栏 · 评估管线导引：浅色主题 = 暖纸底 + 翡翠辉光；深色 = 石墨墨色。提交后自动执行的四个阶段 + 数据源 */
 function WorkflowGuide() {
   const steps = [
     { no: '01', title: '输入', desc: 'UniProt · 序列 · 评估表' },
@@ -126,27 +80,27 @@ function WorkflowGuide() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, delay: 0.08, ease: 'easeOut' }}
       aria-label="评估工作流"
-      className="studio-ink relative shrink-0 overflow-hidden rounded-2xl text-stone-100 shadow-[0_2px_8px_rgba(28,25,23,0.18),0_24px_48px_-28px_rgba(28,25,23,0.5)] ring-1 ring-stone-900/10 dark:ring-black/50"
+      className="studio-flow relative shrink-0 overflow-hidden rounded-2xl border border-stone-200/80 ring-1 ring-stone-950/[0.03] shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_32px_-20px_rgba(28,25,23,0.16)] dark:border-stone-800 dark:ring-white/[0.04] dark:shadow-[0_1px_2px_rgba(0,0,0,0.4),0_16px_40px_-24px_rgba(0,0,0,0.6)]"
     >
       {/* 顶部翡翠发丝线 */}
       <div
         aria-hidden
-        className="h-px bg-gradient-to-r from-emerald-400/80 via-emerald-400/25 to-transparent"
+        className="h-px bg-gradient-to-r from-emerald-500/70 via-emerald-500/20 to-transparent dark:from-emerald-400/80 dark:via-emerald-400/25"
       />
       <header className="flex items-baseline gap-2 px-4 pt-3 pb-2">
-        <span className="eval-eyebrow text-emerald-400">Workflow</span>
-        <h2 className="text-[13px] font-semibold tracking-tight text-stone-50">评估管线</h2>
-        <span className="ml-auto font-mono text-[10px] text-stone-400">提交后自动执行</span>
+        <span className="eval-eyebrow text-emerald-700 dark:text-emerald-400">Workflow</span>
+        <h2 className="text-[13px] font-semibold tracking-tight text-stone-800 dark:text-stone-50">评估管线</h2>
+        <span className="ml-auto font-mono text-[10px] text-stone-400 dark:text-stone-500">提交后自动执行</span>
       </header>
       <ol className="flex flex-col px-4 pb-3">
         {steps.map((s, i) => (
           <li key={s.no} className="flex gap-3">
             <div className="flex flex-col items-center" aria-hidden>
-              <span className="font-display text-[15px] leading-[1.15] font-bold text-emerald-400/90 tabular-nums">
+              <span className="font-display text-[15px] leading-[1.15] font-bold text-emerald-700 tabular-nums dark:text-emerald-400/90">
                 {s.no}
               </span>
               {i < steps.length - 1 && (
-                <span className="my-1.5 w-px flex-1 bg-emerald-500/25" />
+                <span className="my-1.5 w-px flex-1 bg-emerald-700/25 dark:bg-emerald-500/25" />
               )}
             </div>
             <div
@@ -155,19 +109,19 @@ function WorkflowGuide() {
                 i < steps.length - 1 && 'pb-3',
               )}
             >
-              <span className="text-[12.5px] font-medium text-stone-100">{s.title}</span>
-              <span className="truncate text-[10.5px] text-stone-400">{s.desc}</span>
+              <span className="text-[12.5px] font-medium text-stone-800 dark:text-stone-100">{s.title}</span>
+              <span className="truncate text-[10.5px] text-stone-400 dark:text-stone-400">{s.desc}</span>
             </div>
           </li>
         ))}
       </ol>
-      <div className="border-t border-white/[0.08] px-4 pt-2.5 pb-3.5">
-        <div className="eval-eyebrow mb-1.5 text-stone-500">数据源</div>
+      <div className="border-t border-stone-100 px-4 pt-2.5 pb-3.5 dark:border-stone-800/70">
+        <div className="eval-eyebrow mb-1.5 text-stone-400 dark:text-stone-500">数据源</div>
         <div className="flex flex-wrap gap-1">
           {sources.map((s) => (
             <span
               key={s}
-              className="rounded-[4px] border border-white/[0.08] bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] text-stone-400"
+              className="rounded-[4px] border border-stone-200/80 bg-stone-50 px-1.5 py-0.5 font-mono text-[10px] text-stone-500 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-stone-400"
             >
               {s}
             </span>
