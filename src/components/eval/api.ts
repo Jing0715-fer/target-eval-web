@@ -61,12 +61,41 @@ interface SessionStatusResponse {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+/** 会话丢失（无状态部署：分块会话落在了被回收的实例上）→ 触发直传回退 */
+function isSessionLost(msg: string): boolean {
+  return msg.includes('上传会话不存在') || msg.includes('上传会话已过期') || msg.includes('无权访问该上传会话')
+}
+
+/**
+ * v2.3 直传回退通道：单请求完成上传 + 解析 + 返回全部结果（fullText 内联）。
+ * 用于无状态部署（函数计算快照等，服务器数据不跨请求保留）：分块会话在那种
+ * 环境下必然 404 —— 检测到后自动改走此通道，跳过 VLM（关键词分类兜底）以
+ * 保证网关短超时内可完成。
+ */
+async function uploadEvaluateDocxDirect(file: File, onProgress?: (p: UploadProgress) => void): Promise<UploadResponse> {
+  onProgress?.({ phase: 'uploading', loaded: 0, total: file.size })
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/evaluate/upload?stateless=1&noVlm=1', {
+    method: 'POST',
+    body: form,
+  })
+  const data = (await res.json().catch(() => null)) as (UploadResponse & { error?: string }) | null
+  if (!res.ok || !data?.ok || !data.parsed) {
+    throw new Error(data?.error ?? `上传解析失败（HTTP ${res.status}）`)
+  }
+  onProgress?.({ phase: 'parsing', loaded: file.size, total: file.size })
+  return data
+}
+
 /**
  * 上传 Word 评估表 —— 分块 + 后台解析（公网网关 ~30s 超时对策）：
  *  1. init 创建会话（毫秒级）
  *  2. 2MB 分块 PUT（每块独立短请求，失败逐块重试）
  *  3. complete 触发后台解析（毫秒级返回）
  *  4. 轮询 status 直至 done/error
+ * v2.3：会话在任意阶段丢失（无状态部署）→ 立即自动回退单请求直传
+ * （不再重试分块 — 该环境下重试必然同样失败，直接换通道最快）。
  * 返回与旧直传接口同构的结果，调用方渲染逻辑不变。
  */
 export async function uploadEvaluateDocx(
@@ -90,10 +119,11 @@ export async function uploadEvaluateDocx(
     chunkSize = data.chunkSize && data.chunkSize > 0 ? data.chunkSize : CHUNK_SIZE
   }
 
-  // ── 2. chunks（严格顺序，失败重试） ──
+  // ── 2. chunks（严格顺序；会话丢失 → 直传回退） ──
   for (let offset = 0; offset < file.size; offset += chunkSize) {
     const blob = file.slice(offset, Math.min(offset + chunkSize, file.size))
     let lastErr: Error | null = null
+    let sessionLost = false
     for (let attempt = 1; attempt <= CHUNK_RETRIES; attempt++) {
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), CHUNK_TIMEOUT_MS)
@@ -104,7 +134,12 @@ export async function uploadEvaluateDocx(
         )
         const data = (await res.json().catch(() => null)) as { ok?: boolean; received?: number; error?: string } | null
         if (!res.ok || !data?.ok) {
-          throw new Error(data?.error ?? `分块上传失败（HTTP ${res.status}）`)
+          const msg = data?.error ?? `分块上传失败（HTTP ${res.status}）`
+          if (isSessionLost(msg)) {
+            sessionLost = true // 环境不保留会话：换通道，重试无意义
+            break
+          }
+          throw new Error(msg)
         }
         lastErr = null
         break
@@ -114,6 +149,9 @@ export async function uploadEvaluateDocx(
       } finally {
         clearTimeout(timer)
       }
+    }
+    if (sessionLost) {
+      return uploadEvaluateDocxDirect(file, onProgress)
     }
     if (lastErr) {
       throw new Error(`分块上传失败（已重试 ${CHUNK_RETRIES} 次）：${lastErr.message}。请检查网络后重试`)
@@ -130,12 +168,16 @@ export async function uploadEvaluateDocx(
     })
     const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null
     if (!res.ok || !data?.ok) {
-      throw new Error(data?.error ?? `完成上传失败（HTTP ${res.status}）`)
+      const msg = data?.error ?? `完成上传失败（HTTP ${res.status}）`
+      if (isSessionLost(msg)) {
+        return uploadEvaluateDocxDirect(file, onProgress)
+      }
+      throw new Error(msg)
     }
   }
   onProgress?.({ phase: 'parsing', loaded: file.size, total: file.size })
 
-  // ── 4. poll status ──
+  // ── 4. poll status（会话丢失 → 直传回退） ──
   const deadline = Date.now() + POLL_BUDGET_MS
   for (;;) {
     if (Date.now() > deadline) {
@@ -147,7 +189,11 @@ export async function uploadEvaluateDocx(
       const res = await fetch(`/api/evaluate/upload/status?uploadId=${encodeURIComponent(uploadId)}`, { cache: 'no-store' })
       st = (await res.json()) as SessionStatusResponse
       if (!res.ok || !st?.ok) {
-        throw new Error((st as { error?: string } | null)?.error ?? `状态查询失败（HTTP ${res.status}）`)
+        const msg = (st as { error?: string } | null)?.error ?? `状态查询失败（HTTP ${res.status}）`
+        if (isSessionLost(msg)) {
+          return uploadEvaluateDocxDirect(file, onProgress)
+        }
+        throw new Error(msg)
       }
     } catch (e) {
       // 单次轮询失败（网络抖动）不致命，继续
@@ -164,12 +210,23 @@ export async function uploadEvaluateDocx(
   }
 }
 
-/** POST /api/evaluate/insights — 对已上传评估表执行 LLM 智能解析 */
-export async function fetchDocxInsights(uploadId: string, force = false): Promise<InsightsResponse> {
+/**
+ * POST /api/evaluate/insights — 对已上传评估表执行 LLM 智能解析。
+ * v2.3：无状态模式（直传回退产物）由前端内联携带全文（text + goalHints），
+ * 不依赖服务器磁盘；有状态部署仍走 uploadId 磁盘缓存路径。
+ */
+export async function fetchDocxInsights(
+  uploadId: string,
+  force = false,
+  inline?: { text: string; goalHints?: string[] },
+): Promise<InsightsResponse> {
+  const body: Record<string, unknown> = inline
+    ? { text: inline.text, goalHints: inline.goalHints ?? [], force }
+    : { uploadId, force }
   const res = await fetch('/api/evaluate/insights', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uploadId, force }),
+    body: JSON.stringify(body),
   })
   let data: InsightsResponse | null = null
   try {

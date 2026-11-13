@@ -696,6 +696,8 @@ export interface ParsedImage {
   sizeKB: number
   /** 类型由 VLM 视觉识别判定（false/缺省 = 关键词分类） */
   vlmKind?: boolean
+  /** v2.3 直传（无状态）模式：图片以 data URI 内联随响应返回（有状态部署走 /api/assets/{id}） */
+  dataUri?: string
 }
 
 export interface DocxParsed {

@@ -76,6 +76,8 @@ export interface ParsedImage {
   sizeKB: number
   /** 类型由 VLM 视觉识别判定（缺省 = 关键词分类） */
   vlmKind?: boolean
+  /** 直传（无状态兼容）模式下内联返回的图片数据（data URI）；优先于 /api/assets/{id} */
+  dataUri?: string
 }
 
 export interface DocxParsed {
@@ -93,6 +95,10 @@ export interface UploadResponse {
   uploadId: string
   parsed: DocxParsed
   error?: string
+  /** v2.3：直传（无状态回退）模式 — 服务器不保留会话，后续 insights 需内联携带全文 */
+  stateless?: boolean
+  /** v2.3：直传模式随响应返回全文（≤14KB，供 LLM 智能解析内联使用） */
+  fullText?: string
 }
 
 // ─── 靶点关系判断（v1.8 批量评估）───────────────────────────
@@ -224,6 +230,8 @@ export interface FormInsights {
   sequenceNotes?: string
   homologs?: string
   keyConcerns?: string[]
+  /** v2.3：文档中提及的配体/化合物（LLM 提取，最多 8 条 — 自动填入配体输入） */
+  ligands?: string[]
   source: 'llm' | 'regex'
 }
 
