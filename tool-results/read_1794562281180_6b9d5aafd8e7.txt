@@ -1,0 +1,663 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useRef, useState } from 'react'
+     4→import { motion } from 'framer-motion'
+     5→import ReactMarkdown from 'react-markdown'
+     6→import remarkGfm from 'remark-gfm'
+     7→import {
+     8→  AlertTriangle,
+     9→  ArrowLeft,
+    10→  BookOpenText,
+    11→  Dna,
+    12→  Download,
+    13→  ExternalLink,
+    14→  Eye,
+    15→  Layers,
+    16→  Link2,
+    17→  Loader2,
+    18→  ChevronDown,
+    19→  Printer,
+    20→  SearchX,
+    21→  ShieldCheck,
+    22→} from 'lucide-react'
+    23→import { Button } from '@/components/ui/button'
+    24→import { Card, CardContent } from '@/components/ui/card'
+    25→import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+    26→import { cn } from '@/lib/utils'
+    27→import { describeRelationType } from './types'
+    28→import { mdComponents } from './result-view'
+    29→import { BlastTable } from './blast-table'
+    30→import { LiteratureList } from './literature-list'
+    31→import { PdbTable } from './pdb-table'
+    32→import { SharedPdbTable, SharedStructuresHeader } from './shared-pdb-table'
+    33→import type { BatchReportInfo, MergedTargetLite } from './types'
+    34→
+    35→export interface MergedReportViewProps {
+    36→  report: BatchReportInfo
+    37→  /** 参与批次的靶点展示标签（chips 用） */
+    38→  targetLabels: string[]
+    39→  onNewEvaluation: () => void
+    40→}
+    41→
+    42→/** 关系类型 → 视觉色调（关联=紫罗兰系；同源家族=青色系；独立批次的合并报告不会走到此视图） */
+    43→function relationTone(type: BatchReportInfo['relation']['relationType']): { chip: string; icon: string; border: string } {
+    44→  switch (type) {
+    45→    case 'antibody-antigen':
+    46→      return {
+    47→        chip: 'border-violet-300 bg-violet-100 text-violet-800 dark:border-violet-800 dark:bg-violet-950/60 dark:text-violet-300',
+    48→        icon: 'text-violet-600 dark:text-violet-400',
+    49→        border: 'border-violet-200 bg-violet-50/60 dark:border-violet-900/60 dark:bg-violet-950/20',
+    50→      }
+    51→    case 'complex':
+    52→      return {
+    53→        chip: 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300',
+    54→        icon: 'text-emerald-600 dark:text-emerald-400',
+    55→        border: 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-800/60 dark:bg-emerald-950/20',
+    56→      }
+    57→    case 'homologous':
+    58→      return {
+    59→        chip: 'border-teal-300 bg-teal-100 text-teal-800 dark:border-teal-800 dark:bg-teal-950/60 dark:text-teal-300',
+    60→        icon: 'text-teal-600 dark:text-teal-400',
+    61→        border: 'border-teal-200 bg-teal-50/60 dark:border-teal-900/60 dark:bg-teal-950/20',
+    62→      }
+    63→    default:
+    64→      return {
+    65→        chip: 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300',
+    66→        icon: 'text-stone-500 dark:text-stone-400',
+    67→        border: 'border-stone-200 bg-stone-50/60 dark:border-stone-800 dark:bg-stone-900/40',
+    68→      }
+    69→  }
+    70→}
+    71→
+    72→/** 靶点分组头（每个数据列表块的归属标识 — 用户要求「能看到属于哪个 UniProt ID」） */
+    73→function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }) {
+    74→  return (
+    75→    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+    76→      <span className="rounded-sm border border-teal-300 bg-teal-50 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-teal-800 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300">
+    77→        {t.uniprotId ?? '—'}
+    78→      </span>
+    79→      <span className="text-sm font-semibold text-stone-800 dark:text-stone-100">{t.proteinName}</span>
+    80→      <span className="truncate font-mono text-[11px] text-stone-400 dark:text-stone-500" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
+    81→        {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'}
+    82→      </span>
+    83→      {right && <span className="ml-auto font-mono text-[11px] tabular-nums text-stone-400 dark:text-stone-500">{right}</span>}
+    84→    </div>
+    85→  )
+    86→}
+    87→
+    88→/** 同源结构状态备注（共享自家族代表 / 跳过说明 — 不虚构数据） */
+    89→function BlastNote({ t }: { t: MergedTargetLite }) {
+    90→  const st = t.blastStatus
+    91→  if (!st) return null
+    92→  const shared = st.status === 'ok' && (st.note ?? '').includes('共享自家族代表')
+    93→  if (st.status === 'ok' && !shared) return null
+    94→  return (
+    95→    <div className={cn(
+    96→      'flex items-start gap-2 rounded-md border px-3 py-2 text-xs leading-relaxed',
+    97→      shared
+    98→        ? 'border-teal-200 bg-teal-50/70 text-teal-800 dark:border-teal-900/70 dark:bg-teal-950/30 dark:text-teal-300'
+    99→        : 'border-stone-200 bg-stone-50/70 text-stone-500 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-400',
+   100→    )}>
+   101→      {shared ? <Dna className="mt-0.5 size-3.5 shrink-0" aria-hidden /> : <SearchX className="mt-0.5 size-3.5 shrink-0" aria-hidden />}
+   102→      <span>{st.note ?? '未执行同源检索'}</span>
+   103→    </div>
+   104→  )
+   105→}
+   106→
+   107→/**
+   108→ * 合并评估报告视图（v1.8 关联靶点批量）：
+   109→ * 返回栏 → 刊头（关系判定卡）→ 报告操作条（下载 HTML）→ LLM 合并分析全文
+   110→ * v1.11：新增各靶点 PDB / 同源结构 / 文献三组数据列表（带 UniProt 归属分组头）
+   111→ */
+   112→export function MergedReportView({ report, targetLabels, onNewEvaluation }: MergedReportViewProps) {
+   113→  const rel = report.relation
+   114→  const tone = relationTone(rel.relationType)
+   115→  const md = report.markdown?.trim() || ''
+   116→  const llmOk = report.llmOk !== false && md.length > 0
+   117→  const homologPairs = (rel.homologPairs ?? []).filter(p => p.identity > 0)
+   118→  const attribution = report.sequenceAttribution ?? []
+   119→  const sharedStructures = report.sharedStructures ?? []
+   120→  const targets = report.targets ?? []
+   121→  const pdbTargets = targets.filter(t => t.directPdbs.length > 0)
+   122→  const blastTargets = targets.filter(t => t.blastHits.length > 0 || t.blastStatus)
+   123→  const litTargets = targets.filter(t => t.literature.length > 0)
+   124→  // v1.24：聚集形式（寡聚态）分析（历史作业无此数据时不显示）
+   125→  const oligoTargets = targets.filter(t => t.oligomer)
+   126→  // v1.14：LLM 生成的描述性标题（fallback 通用标题）
+   127→  const reportTitle = report.title?.trim() || '多靶点合并可行性评估'
+   128→  // 剥离 markdown 首行 # 标题（已用作刊头 h1，避免重复渲染）
+   129→  const bodyMd = md ? md.replace(/^#\s+.+\r?\n?/, '') : md
+   130→
+   131→  const [previewOpen, setPreviewOpen] = useState(false)
+   132→  const [previewLoaded, setPreviewLoaded] = useState(false)
+   133→  const [previewSlow, setPreviewSlow] = useState(false)
+   134→  const iframeRef = useRef<HTMLIFrameElement>(null)
+   135→
+   136→  const openPreview = () => {
+   137→    setPreviewLoaded(false)
+   138→    setPreviewSlow(false)
+   139→    setPreviewOpen(true)
+   140→  }
+   141→
+   142→  // 预览加载超过 12s 提供降级提示
+   143→  useEffect(() => {
+   144→    if (!previewOpen || previewLoaded) return
+   145→    const t = setTimeout(() => setPreviewSlow(true), 12_000)
+   146→    return () => clearTimeout(t)
+   147→  }, [previewOpen, previewLoaded])
+   148→
+   149→  const downloadReport = () => {
+   150→    window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&download=1`, '_blank')
+   151→  }
+   152→
+   153→  const inlineUrl = `/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&inline=1`
+   154→
+   155→  const confidenceText = rel.confidence === 'high' ? '高' : rel.confidence === 'medium' ? '中' : '低'
+   156→
+   157→  return (
+   158→    <div className="flex flex-col gap-8">
+   159→      {/* 0. 返回导航条 */}
+   160→      <div className="flex items-center gap-3">
+   161→        <Button
+   162→          variant="outline"
+   163→          onClick={onNewEvaluation}
+   164→          className="h-9 gap-1.5 rounded-md border-stone-300 px-3 text-xs font-medium text-stone-600 hover:border-emerald-400 hover:text-emerald-800 dark:border-stone-700 dark:text-stone-300 dark:hover:border-emerald-700 dark:hover:text-emerald-400"
+   165→        >
+   166→          <ArrowLeft className="size-3.5" />
+   167→          新建评估
+   168→        </Button>
+   169→        <span className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
+   170→          合并报告 {report.id.slice(0, 8)} · {targetLabels.length} 个关联靶点
+   171→        </span>
+   172→      </div>
+   173→
+   174→      {/* 1. 刊头 */}
+   175→      <motion.header
+   176→        initial={{ opacity: 0, y: 12 }}
+   177→        animate={{ opacity: 1, y: 0 }}
+   178→        transition={{ duration: 0.35, ease: 'easeOut' }}
+   179→        className="flex flex-col gap-3"
+   180→      >
+   181→        <p className="eval-eyebrow text-violet-700 dark:text-violet-400">
+   182→          Merged Evaluation Report · 合并评估报告
+   183→        </p>
+   184→        <h1 className="font-display text-2xl leading-snug font-bold text-stone-900 sm:text-3xl dark:text-stone-50">
+   185→          {reportTitle}
+   186→        </h1>
+   187→
+   188→        {/* 关系判定卡 */}
+   189→        <div className={cn('flex flex-col gap-2.5 rounded-lg border px-4 py-3.5 sm:px-5', tone.border)}>
+   190→          <div className="flex flex-wrap items-center gap-2">
+   191→            <Link2 className={cn('size-4 shrink-0', tone.icon)} aria-hidden />
+   192→            <span className="text-sm font-semibold text-stone-800 dark:text-stone-100">
+   193→              靶点关系：{describeRelationType(rel.relationType)}
+   194→            </span>
+   195→            <span className={cn('rounded-sm border px-1.5 py-0.5 font-mono text-[10px] font-medium', tone.chip)}>
+   196→              置信度 {confidenceText}
+   197→            </span>
+   198→            {rel.error && (
+   199→              <span className="rounded-sm border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-400">
+   200→                判断服务异常，已降级
+   201→              </span>
+   202→            )}
+   203→          </div>
+   204→          <p className="text-sm leading-relaxed text-stone-600 dark:text-stone-300">{rel.rationale}</p>
+   205→          {rel.strategy && (
+   206→            <p className="flex items-start gap-2 text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+   207→              <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-emerald-600 dark:text-emerald-500" aria-hidden />
+   208→              <span><span className="eval-eyebrow mr-1.5 text-emerald-700 dark:text-emerald-500">策略要点</span>{rel.strategy}</span>
+   209→            </p>
+   210→          )}
+   211→          {/* v1.10 同源证据：系统比对一致性徽标行 */}
+   212→          {homologPairs.length > 0 && (
+   213→            <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-stone-500 dark:text-stone-400">
+   214→              <span className="eval-eyebrow text-stone-400">序列一致性（系统比对）</span>
+   215→              {homologPairs.map(p => (
+   216→                <span
+   217→                  key={`${p.a}-${p.b}`}
+   218→                  className={cn(
+   219→                    'rounded-sm border px-1.5 py-0.5',
+   220→                    p.identity >= 40
+   221→                      ? 'border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300'
+   222→                      : 'border-stone-200 bg-stone-50 text-stone-500 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400',
+   223→                  )}
+   224→                  title={`${p.a} 与 ${p.b} 全长序列比对一致性 ${p.identity}%（${p.identity >= 40 ? '家族级同源' : p.identity >= 30 ? '弱同源信号' : '非同源'}）`}
+   225→                >
+   226→                  {p.a}↔{p.b} {p.identity}%
+   227→                </span>
+   228→              ))}
+   229→            </div>
+   230→          )}
+   231→        </div>
+   232→
+   233→        {/* 参与靶点 chips */}
+   234→        <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-stone-500 dark:text-stone-400">
+   235→          <span className="eval-eyebrow text-stone-400">批次靶点</span>
+   236→          {targetLabels.map(l => (
+   237→            <span key={l} className="rounded-sm border border-stone-200 px-1.5 py-0.5 dark:border-stone-700">
+   238→              {l}
+   239→            </span>
+   240→          ))}
+   241→        </div>
+   242→      </motion.header>
+   243→
+   244→      {/* 2. 报告操作条 */}
+   245→      <motion.section
+   246→        initial={{ opacity: 0, y: 12 }}
+   247→        animate={{ opacity: 1, y: 0 }}
+   248→        transition={{ duration: 0.35, delay: 0.14, ease: 'easeOut' }}
+   249→        className={cn(
+   250→          'flex flex-col gap-4 rounded-lg border px-5 py-4 sm:flex-row sm:items-center',
+   251→          llmOk
+   252→            ? 'border-violet-300 bg-violet-50/60 dark:border-violet-800 dark:bg-violet-950/20'
+   253→            : 'border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/20'
+   254→        )}
+   255→      >
+   256→        <div className="flex items-center gap-3">
+   257→          <div className={cn(
+   258→            'flex size-9 shrink-0 items-center justify-center rounded-md text-white',
+   259→            llmOk ? 'bg-violet-700 dark:bg-violet-800' : 'bg-amber-600 dark:bg-amber-700'
+   260→          )}>
+   261→            {llmOk ? <Layers className="size-4.5" /> : <AlertTriangle className="size-4.5" />}
+   262→          </div>
+   263→          <div>
+   264→            <div className="text-sm font-semibold text-stone-900 dark:text-stone-100">
+   265→              {llmOk ? '合并评估报告已生成' : '合并报告（LLM 部分失败）'}
+   266→            </div>
+   267→            <div className="font-mono text-[11px] text-stone-500 dark:text-stone-400">
+   268→              HTML · {md.length > 0 ? `${md.length.toLocaleString()} 字分析` : '分析缺失'} · 可独立下载分享
+   269→            </div>
+   270→          </div>
+   271→        </div>
+   272→        <div className="flex flex-wrap gap-2 sm:ml-auto">
+   273→          <Button
+   274→            onClick={openPreview}
+   275→            className="h-10 gap-2 rounded-md bg-violet-700 px-4 font-medium text-white hover:bg-violet-600 dark:bg-violet-800 dark:hover:bg-violet-700"
+   276→          >
+   277→            <Eye className="size-4" />
+   278→            在线预览报告
+   279→          </Button>
+   280→          <Button
+   281→            onClick={downloadReport}
+   282→            variant="outline"
+   283→            className="h-10 gap-2 rounded-md border-violet-300 px-4 font-medium text-violet-700 hover:bg-violet-50 dark:border-violet-800 dark:text-violet-300 dark:hover:bg-violet-950/40"
+   284→          >
+   285→            <Download className="size-4" />
+   286→            下载 HTML
+   287→          </Button>
+   288→        </div>
+   289→      </motion.section>
+   290→
+   291→      {/* 2.5 评估表序列归属（v1.10 — 每条序列的去向，不再静默丢弃） */}
+   292→      {attribution.length > 0 && (
+   293→        <motion.section
+   294→          initial={{ opacity: 0, y: 12 }}
+   295→          animate={{ opacity: 1, y: 0 }}
+   296→          transition={{ duration: 0.35, delay: 0.18, ease: 'easeOut' }}
+   297→          className="flex flex-col gap-2.5"
+   298→          aria-labelledby="sec-attribution"
+   299→        >
+   300→          <div id="sec-attribution" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+   301→            Sequence Attribution · 评估表序列归属（系统比对）
+   302→          </div>
+   303→          <div className="overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900">
+   304→            <div className="overflow-x-auto">
+   305→              <table className="w-full text-left text-xs">
+   306→                <thead>
+   307→                  <tr className="border-b border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60">
+   308→                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">#</th>
+   309→                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">序列</th>
+   310→                    <th className="px-3 py-2 text-right font-medium text-stone-500 dark:text-stone-400">长度</th>
+   311→                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">最佳匹配</th>
+   312→                    <th className="px-3 py-2 text-right font-medium text-stone-500 dark:text-stone-400">一致性</th>
+   313→                    <th className="px-3 py-2 text-left font-medium text-stone-500 dark:text-stone-400">归属</th>
+   314→                  </tr>
+   315→                </thead>
+   316→                <tbody>
+   317→                  {attribution.map((a, i) => {
+   318→                    const kindMeta = {
+   319→                      construct: { text: '客户构建 · 已并入评估', cls: 'border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300' },
+   320→                      homolog: { text: '同源家族成员', cls: 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300' },
+   321→                      antibody: { text: '抗体 · 背景证据', cls: 'border-violet-300 bg-violet-50 text-violet-700 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300' },
+   322→                      unmatched: { text: '未匹配', cls: 'border-stone-300 bg-stone-50 text-stone-500 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400' },
+   323→                    }[a.kind]
+   324→                    return (
+   325→                      <tr key={a.index} className="border-b border-stone-100 last:border-0 dark:border-stone-800/60" title={a.note}>
+   326→                        <td className="px-3 py-2 font-mono text-stone-400">{i + 1}</td>
+   327→                        <td className="max-w-56 truncate px-3 py-2 text-stone-600 dark:text-stone-300" title={a.header}>
+   328→                          {a.header || '（未命名序列）'}
+   329→                        </td>
+   330→                        <td className="px-3 py-2 text-right font-mono text-stone-600 dark:text-stone-300">{a.length} aa</td>
+   331→                        <td className="px-3 py-2 font-mono text-stone-600 dark:text-stone-300">{a.uniprotId ?? '—'}</td>
+   332→                        <td className="px-3 py-2 text-right font-mono text-stone-600 dark:text-stone-300">{a.identity != null ? `${a.identity}%` : '—'}</td>
+   333→                        <td className="px-3 py-2">
+   334→                          <span className={cn('inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[11px] font-medium', kindMeta.cls)}>
+   335→                            {kindMeta.text}
+   336→                            {a.kind === 'construct' && a.start != null && a.end != null && (
+   337→                              <span className="ml-1 font-mono opacity-75">{a.start}-{a.end}</span>
+   338→                            )}
+   339→                          </span>
+   340→                        </td>
+   341→                      </tr>
+   342→                    )
+   343→                  })}
+   344→                </tbody>
+   345→              </table>
+   346→            </div>
+   347→          </div>
+   348→        </motion.section>
+   349→      )}
+   350→
+   351→      {/* 3. 合并分析全文 */}
+   352→      <motion.section
+   353→        initial={{ opacity: 0, y: 12 }}
+   354→        animate={{ opacity: 1, y: 0 }}
+   355→        transition={{ duration: 0.35, delay: 0.2, ease: 'easeOut' }}
+   356→        className="flex flex-col gap-3"
+   357→        aria-labelledby="sec-merged-report"
+   358→      >
+   359→        <div id="sec-merged-report" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+   360→          Merged Analysis · 合并分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）
+   361→        </div>
+   362→        {!llmOk && (() => {
+   363→          const errs = report.errors ?? []
+   364→          return (
+   365→            <div className="flex items-start gap-2.5 rounded-md border border-amber-200 bg-amber-50/70 px-3.5 py-2.5 text-xs leading-relaxed text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-300">
+   366→              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+   367→              合并报告 LLM 分析生成失败或部分失败{errs.length > 0 && `（${errs.join('；')}）`}；
+   368→              可在批次完成后重新发起评估重试。各靶点的结构化数据（评分 / PDB / BLAST / 文献）经切换栏查看。
+   369→            </div>
+   370→          )
+   371→        })()}
+   372→        <Card className="rounded-lg border-stone-200 bg-white shadow-none dark:border-stone-800 dark:bg-stone-900">
+   373→          <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
+   374→            <div className="mb-4 flex items-center gap-2 text-stone-400 dark:text-stone-500">
+   375→              <BookOpenText className="size-3.5" aria-hidden />
+   376→              <span className="eval-eyebrow">Analysis · 由大语言模型基于批次结构化数据生成，结论供参考</span>
+   377→            </div>
+   378→            {md ? (
+   379→              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+   380→                {bodyMd}
+   381→              </ReactMarkdown>
+   382→            ) : (
+   383→              <p className="py-6 text-center text-sm text-stone-500 dark:text-stone-400">
+   384→                合并分析生成失败 — 各靶点数据经上方切换栏查看
+   385→              </p>
+   386→            )}
+   387→          </CardContent>
+   388→        </Card>
+   389→      </motion.section>
+   390→
+   391→      {/* 3.5 共有结构（v1.22 — 同一 PDB 覆盖多个输入 UniProt） */}
+   392→      {sharedStructures.length > 0 && (
+   393→        <motion.section
+   394→          initial={{ opacity: 0, y: 12 }}
+   395→          animate={{ opacity: 1, y: 0 }}
+   396→          transition={{ duration: 0.35, delay: 0.22, ease: 'easeOut' }}
+   397→          className="flex flex-col gap-3"
+   398→          aria-labelledby="sec-merged-shared"
+   399→        >
+   400→          <SharedStructuresHeader count={sharedStructures.length} total={targets.length} />
+   401→          <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+   402→            同一 PDB 条目同时覆盖多个输入 UniProt 的结构（复合物亚基共结晶 / 抗体-抗原复合物 / 融合构建等）。
+   403→            「覆盖靶点」列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号）。
+   404→            按覆盖靶点数降序、分辨率升序排列。
+   405→          </p>
+   406→          <SharedPdbTable shared={sharedStructures} />
+   407→        </motion.section>
+   408→      )}
+   409→
+   410→      {/* 3.5 聚集形式（v1.25：融入为折叠块，不再单独成章 — 判定已计入各靶点评分，分析见合并分析全文） */}
+   411→      {oligoTargets.length > 0 && (
+   412→        <motion.section
+   413→          initial={{ opacity: 0, y: 12 }}
+   414→          animate={{ opacity: 1, y: 0 }}
+   415→          transition={{ duration: 0.35, delay: 0.22, ease: 'easeOut' }}
+   416→          aria-labelledby="sec-merged-oligomer"
+   417→        >
+   418→          <details className="group overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900">
+   419→            <summary className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1.5 px-5 py-3.5 list-none [&::-webkit-details-marker]:hidden">
+   420→              <ChevronDown className="size-3.5 shrink-0 text-stone-400 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+   421→              <span id="sec-merged-oligomer" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+   422→                Oligomeric State · 聚集形式判定（{oligoTargets.length} 个靶点 · 已计入各靶点评分）
+   423→              </span>
+   424→              <span className="ml-auto flex flex-wrap justify-end gap-1.5">
+   425→                {oligoTargets.map(t => {
+   426→                  const o = t.oligomer!
+   427→                  const catZh = o.category === 'monomer' ? '单体' : o.category === 'homo-oligomer' ? '同源寡聚体' : o.category === 'hetero-complex' ? '异源复合物' : '未知'
+   428→                  const badgeCls = o.category === 'monomer'
+   429→                    ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+   430→                    : o.category === 'hetero-complex'
+   431→                      ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+   432→                      : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+   433→                  return (
+   434→                    <span key={`chip-${t.jobId}`} className={cn('inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold', badgeCls)}>
+   435→                      {t.uniprotId ?? t.proteinName} {catZh}
+   436→                    </span>
+   437→                  )
+   438→                })}
+   439→              </span>
+   440→            </summary>
+   441→            <div className="flex flex-col gap-4 border-t border-stone-200 px-5 py-4 dark:border-stone-800">
+   442→              {oligoTargets.map(t => {
+   443→                const o = t.oligomer!
+   444→                const catZh = o.category === 'monomer' ? '单体' : o.category === 'homo-oligomer' ? '同源寡聚体' : o.category === 'hetero-complex' ? '异源复合物' : '未知'
+   445→                const confZh = o.confidence === 'high' ? '高' : o.confidence === 'medium' ? '中' : '低'
+   446→                const badgeCls = o.category === 'monomer'
+   447→                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+   448→                  : o.category === 'hetero-complex'
+   449→                    ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-400'
+   450→                    : 'border-stone-300 bg-stone-100 text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300'
+   451→                return (
+   452→                  <div key={t.jobId} className="flex flex-col gap-2.5 rounded-lg border border-stone-200 bg-white px-5 py-4 dark:border-stone-800 dark:bg-stone-900">
+   453→                    <div className="flex flex-wrap items-center gap-2.5">
+   454→                      <span className="text-sm font-semibold text-stone-900 dark:text-stone-50">
+   455→                        {t.proteinName}
+   456→                        {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-stone-400">{t.uniprotId}</span>}
+   457→                      </span>
+   458→                      <span className={cn('inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-semibold', badgeCls)}>{catZh}</span>
+   459→                      {o.stoichiometry && (
+   460→                        <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 font-mono text-[10.5px] text-stone-700 dark:border-stone-700 dark:bg-stone-800/60 dark:text-stone-300">
+   461→                          {o.stoichiometry}
+   462→                        </span>
+   463→                      )}
+   464→                      <span className="ml-auto font-mono text-[10.5px] text-stone-400 dark:text-stone-500">置信度 {confZh}</span>
+   465→                    </div>
+   466→                    <p className="text-[13px] leading-6 text-stone-600 dark:text-stone-300">{o.summary}</p>
+   467→                    {t.mwAugment?.applicable && (
+   468→                      <p className="text-xs leading-6 text-stone-500 dark:text-stone-400">
+   469→                        <span className="eval-eyebrow mr-1.5 text-emerald-700 dark:text-emerald-500">分子量增重</span>
+   470→                        单体 ~{t.mwAugment.monomerKda} kDa
+   471→                        {t.mwAugment.assemblyKda != null
+   472→                          ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa（${t.mwAugment.assemblyPath === 'complex' ? '已有复合物结构' : t.mwAugment.assemblyPath === 'oligomer' ? '自身寡聚' : t.mwAugment.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : '互作伙伴推断'}）`
+   473→                          : '（无生物装配增重路径 — 需技术增重策略）'}
+   474→                        {(t.mwAugment.homologComplexes ?? []).length > 0
+   475→                          ? `；同源复合物 ${(t.mwAugment.homologComplexes ?? []).map(h => `${h.pdbId}（identity ${Math.round(h.identity)}%，靶点换算 ~${h.estimatedKda} kDa）`).join('、')}`
+   476→                          : t.mwAugment.homologSearchNote
+   477→                            ? `；${t.mwAugment.homologSearchNote}`
+   478→                            : ''}
+   479→                      </p>
+   480→                    )}
+   481→                    {o.evidence.length > 0 && (
+   482→                      <ul className="grid gap-1.5 sm:grid-cols-2">
+   483→                        {o.evidence.map((e, i) => (
+   484→                          <li key={`${t.jobId}-${e.ref}-${i}`} className="flex items-baseline gap-2 rounded-md border border-stone-100 bg-stone-50/60 px-2.5 py-1.5 text-[11px] leading-relaxed text-stone-600 dark:border-stone-800/60 dark:bg-stone-800/30 dark:text-stone-400">
+   485→                            <span className="shrink-0 font-mono text-[10px] font-semibold text-emerald-700 dark:text-emerald-500">{e.ref}</span>
+   486→                            <span className="min-w-0 flex-1">{e.text}</span>
+   487→                          </li>
+   488→                        ))}
+   489→                      </ul>
+   490→                    )}
+   491→                  </div>
+   492→                )
+   493→              })}
+   494→              <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+   495→                聚集形式由系统按证据优先级判定（已有结构 → 同源结构 → UniProt interaction → 文献）；判定与调整已计入各靶点评分，分析已融入上方合并分析全文，完整明细见下载的 HTML 报告。
+   496→              </p>
+   497→            </div>
+   498→          </details>
+   499→        </motion.section>
+   500→      )}
+   501→
+   502→      {/* 4. 各靶点 PDB 结构（v1.11 — 带 UniProt 归属，与单靶点结果页同等粒度） */}
+   503→      {pdbTargets.length > 0 && (
+   504→        <motion.section
+   505→          initial={{ opacity: 0, y: 12 }}
+   506→          animate={{ opacity: 1, y: 0 }}
+   507→          transition={{ duration: 0.35, delay: 0.24, ease: 'easeOut' }}
+   508→          className="flex flex-col gap-3"
+   509→          aria-labelledby="sec-merged-pdb"
+   510→        >
+   511→          <div id="sec-merged-pdb" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+   512→            Structures by Target · 各靶点 PDB 结构（{pdbTargets.reduce((s, t) => s + t.directPdbCount, 0)} 个）
+   513→          </div>
+   514→          <div className="flex flex-col gap-5">
+   515→            {pdbTargets.map(t => (
+   516→              <div key={t.jobId} className="flex flex-col gap-2">
+   517→                <TargetGroupHeader t={t} right={`${t.directPdbCount} PDB · 覆盖率 ${t.coveragePercent}%`} />
+   518→                <PdbTable pdbs={t.directPdbs} literature={t.literature} />
+   519→              </div>
+   520→            ))}
+   521→          </div>
+   522→        </motion.section>
+   523→      )}
+   524→
+   525→      {/* 5. 同源结构（BLAST/序列检索 — 含共享自家族代表的标注） */}
+   526→      {blastTargets.length > 0 && (
+   527→        <motion.section
+   528→          initial={{ opacity: 0, y: 12 }}
+   529→          animate={{ opacity: 1, y: 0 }}
+   530→          transition={{ duration: 0.35, delay: 0.28, ease: 'easeOut' }}
+   531→          className="flex flex-col gap-3"
+   532→          aria-labelledby="sec-merged-blast"
+   533→        >
+   534→          <div id="sec-merged-blast" className="flex flex-wrap items-center gap-x-2">
+   535→            <span className="eval-eyebrow text-stone-500 dark:text-stone-400">
+   536→              Homologous Structures · 同源结构（BLAST / 序列检索）
+   537→            </span>
+   538→            {(rel.blastGroups ?? []).length > 0 && (
+   539→              <span className="rounded-sm border border-teal-200 bg-teal-50 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 dark:border-teal-900 dark:bg-teal-950/40 dark:text-teal-300">
+   540→                ≥90% 家族成员共享一次检索
+   541→              </span>
+   542→            )}
+   543→          </div>
+   544→          <div className="flex flex-col gap-5">
+   545→            {blastTargets.map(t => (
+   546→              <div key={t.jobId} className="flex flex-col gap-2">
+   547→                <TargetGroupHeader t={t} right={t.blastHits.length > 0 ? `${t.blastHitCount} 个同源结构` : '无命中'} />
+   548→                {t.blastHits.length > 0 && <BlastTable hits={t.blastHits} />}
+   549→                <BlastNote t={t} />
+   550→              </div>
+   551→            ))}
+   552→          </div>
+   553→        </motion.section>
+   554→      )}
+   555→
+   556→      {/* 6. 各靶点文献（v1.11 — 归属 UniProt，含结构解析文献标记） */}
+   557→      {litTargets.length > 0 && (
+   558→        <motion.section
+   559→          initial={{ opacity: 0, y: 12 }}
+   560→          animate={{ opacity: 1, y: 0 }}
+   561→          transition={{ duration: 0.35, delay: 0.32, ease: 'easeOut' }}
+   562→          className="flex flex-col gap-3"
+   563→          aria-labelledby="sec-merged-lit"
+   564→        >
+   565→          <div id="sec-merged-lit" className="eval-eyebrow text-stone-500 dark:text-stone-400">
+   566→            Literature by Target · 各靶点文献（{litTargets.reduce((s, t) => s + t.literature.length, 0)} 篇）
+   567→          </div>
+   568→          <div className="flex flex-col gap-5">
+   569→            {litTargets.map(t => (
+   570→              <div key={t.jobId} className="flex flex-col gap-2">
+   571→                <TargetGroupHeader t={t} right={`${t.literature.length} 篇`} />
+   572→                <LiteratureList items={t.literature} pdbs={t.directPdbs} />
+   573→              </div>
+   574→            ))}
+   575→          </div>
+   576→        </motion.section>
+   577→      )}
+   578→
+   579→      {/* 报告在线预览（大窗口 iframe + 加载态 + 新窗口/打印） */}
+   580→      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+   581→        <DialogContent
+   582→          showCloseButton
+   583→          className="flex h-[88vh] w-full max-w-6xl flex-col gap-0 overflow-hidden rounded-lg p-0 sm:max-w-6xl"
+   584→        >
+   585→          <DialogHeader className="flex-row items-center justify-between gap-4 border-b border-stone-200 px-5 py-3 pr-14 text-left dark:border-stone-800">
+   586→            <div className="flex flex-col gap-0.5">
+   587→              <DialogTitle className="flex items-center gap-2 font-display text-base">
+   588→                合并评估报告 · {report.id.slice(0, 8)}
+   589→              </DialogTitle>
+   590→              <DialogDescription className="font-mono text-[11px] text-stone-400 dark:text-stone-500">
+   591→                完整 HTML 报告 · 可直接打印
+   592→              </DialogDescription>
+   593→            </div>
+   594→            <div className="flex shrink-0 items-center gap-1.5">
+   595→              <Button
+   596→                variant="outline"
+   597→                size="sm"
+   598→                onClick={() => iframeRef.current?.contentWindow?.print()}
+   599→                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-violet-400 hover:text-violet-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+   600→              >
+   601→                <Printer className="size-3.5" />
+   602→                打印
+   603→              </Button>
+   604→              <Button
+   605→                variant="outline"
+   606→                size="sm"
+   607→                onClick={() => window.open(inlineUrl, '_blank')}
+   608→                className="h-8 gap-1.5 rounded-md border-stone-300 bg-white px-2.5 font-mono text-[11px] text-stone-600 hover:border-violet-400 hover:text-violet-800 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+   609→              >
+   610→                <ExternalLink className="size-3.5" />
+   611→                新窗口
+   612→              </Button>
+   613→            </div>
+   614→          </DialogHeader>
+   615→          <div className="relative min-h-0 flex-1">
+   616→            {!previewLoaded && (
+   617→              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-white dark:bg-stone-950">
+   618→                <Loader2 className="size-6 animate-spin text-violet-700 dark:text-violet-500" />
+   619→                {previewSlow ? (
+   620→                  <div className="flex max-w-xs flex-col items-center gap-3 px-4 text-center">
+   621→                    <p className="text-xs text-stone-500 dark:text-stone-400">
+   622→                      报告加载较慢（含内嵌图片时体积较大），也可选择其他方式查看：
+   623→                    </p>
+   624→                    <div className="flex gap-2">
+   625→                      <Button
+   626→                        size="sm"
+   627→                        variant="outline"
+   628→                        onClick={() => window.open(inlineUrl, '_blank')}
+   629→                        className="h-8 gap-1.5 rounded-md"
+   630→                      >
+   631→                        <ExternalLink className="size-3.5" />
+   632→                        新窗口打开
+   633→                      </Button>
+   634→                      <Button
+   635→                        size="sm"
+   636→                        variant="outline"
+   637→                        onClick={downloadReport}
+   638→                        className="h-8 gap-1.5 rounded-md"
+   639→                      >
+   640→                        <Download className="size-3.5" />
+   641→                        下载
+   642→                      </Button>
+   643→                    </div>
+   644→                  </div>
+   645→                ) : (
+   646→                  <p className="font-mono text-xs text-stone-400">报告加载中…</p>
+   647→                )}
+   648→              </div>
+   649→            )}
+   650→            <iframe
+   651→              ref={iframeRef}
+   652→              src={inlineUrl}
+   653→              title="合并评估报告预览"
+   654→              onLoad={() => setPreviewLoaded(true)}
+   655→              className="h-full w-full bg-white dark:bg-stone-950"
+   656→            />
+   657→          </div>
+   658→        </DialogContent>
+   659→      </Dialog>
+   660→    </div>
+   661→  )
+   662→}
+   663→

@@ -1,0 +1,87 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 靶点评估作业
+model EvaluationJob {
+  id          String        @id @default(cuid())
+  status      String // pending | running | done | error | canceled
+  mode        String // uniprot | sequence | docx
+  title       String? // 展示标题（蛋白名/序列标识/文件名）
+  uniprotId   String?
+  goal        String? // 客户目标/科学问题
+  options     String? // JSON
+  summary     String? // JSON 摘要（评分/计数等，小体积）
+  pdbs        String? // JSON PDB 列表（去重后精简字段）
+  blastHits   String? // JSON BLAST 命中列表
+  literature  String? // JSON 文献列表
+  reportPath  String? // 磁盘上的 HTML 报告路径
+  reportMarkdown String? // LLM 评估报告 markdown（结果页内联展示；HTML 丢失时可恢复）
+  logs        String? // JSON：终态时的日志快照（≤60 条）
+  error       String?
+  ownerKey    String? // 创建者归属键（来源 IP 的 SHA-256 前 24 位；null=升级前历史记录）
+  ownerMask   String? // 创建者来源 IP 掩码（如 203.0.113.*，仅排障展示）
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  assets      ReportAsset[]
+
+  @@index([createdAt])
+  @@index([ownerKey, createdAt])
+}
+
+// 评估表图片资产（胶图/SEC 等）— 文件存磁盘，DB 只存元数据
+model ReportAsset {
+  id      String         @id @default(cuid())
+  jobId   String
+  job     EvaluationJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  kind    String // gel | sec | other
+  caption String?
+  mime    String
+  size    Int // bytes
+  path    String // 磁盘路径
+  order   Int @default(0)
+  vlm     Boolean @default(false) // 类型由 VLM 视觉识别判定
+
+  @@index([jobId])
+}
+
+// LLM 分析引擎配置（单行激活制：无激活行 = 使用内置 z-ai 引擎）
+model LlmConfig {
+  id          String   @id @default(cuid())
+  providerKey String // openai | anthropic | google | deepseek | qwen | zhipu | moonshot | minimax | doubao | xai | openrouter | ollama | custom
+  label       String // 展示名（如 "OpenAI · gpt-4o"）
+  baseUrl     String
+  apiKey      String? // 本地 SQLite 存储（沙箱内网应用；README 已提示风险）
+  model       String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// 多靶点合并评估报告（v1.8：关联靶点批量评估后合并生成）
+model BatchReport {
+  id        String   @id @default(cuid())
+  jobIds    String // JSON: string[]（参与的评估作业）
+  uploadId  String? // 来源上传（评估表）
+  relation  String // JSON: RelationJudgment（关系判定，v1.10 起含 homologPairs 同源证据）
+  sequenceAttribution String? // JSON: SequenceAttribution[]（评估表序列归属，v1.10）
+  sharedStructures String? // JSON: SharedStructure[]（共有结构，v1.22 多靶点交集）
+  title     String? // LLM 生成的描述性标题（v1.14，历史记录展示用）
+  markdown  String? // 合并报告 LLM markdown（网页内联展示）
+  htmlPath  String? // 磁盘 HTML 报告路径
+  engine    String? // 生成引擎摘要
+  status    String   @default("running") // running / done / error（异步生成状态）
+  error     String? // 生成失败原因（status=error 时）
+  ownerKey  String? // 创建者归属键（与 EvaluationJob 一致）
+  ownerMask String? // 创建者来源 IP 掩码
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([ownerKey, createdAt])
+}

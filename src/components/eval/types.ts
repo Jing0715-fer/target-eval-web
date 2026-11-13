@@ -1,0 +1,745 @@
+/**
+ * 与后端 API 契约对应的 TypeScript 类型定义
+ * 契约来源：worklog.md「API 契约（前后端共同遵守）」
+ * 注意：后端并行开发中，字段可能缺失，所有可缺失字段均按可空处理。
+ */
+
+import type { BlastStatusInfo } from '@/lib/eval/types'
+
+export type { BlastStatusInfo, BlastStatusCode } from '@/lib/eval/types'
+
+export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'canceled'
+
+export type InputMode = 'uniprot' | 'sequence' | 'docx'
+
+export type AssetKind = 'gel' | 'sec' | 'other'
+
+export type StageState = 'done' | 'active' | 'pending'
+
+/** POST /api/evaluate 请求体 */
+export interface EvaluateOptions {
+  skipBlast: boolean
+  forceBlast: boolean
+  maxPdb: number
+  /** 报告模式：single = 独立报告（默认）；deferred = 数据并入合并报告（关联靶点批量） */
+  reportMode?: 'single' | 'deferred'
+  /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）；PDB/BLAST 命中过滤为与该区间重叠的结构 */
+  range?: [number, number]
+}
+
+export interface EvaluateRequest {
+  mode: InputMode
+  /** mode=uniprot 必填 */
+  uniprot?: string
+  /** mode=sequence 必填（FASTA 或裸序列）；mode=uniprot 时为可选伴随序列（合并评估）；mode=docx 选择序列时也放在此字段 */
+  sequence?: string
+  /** mode=docx：上传解析返回的 uploadId（契约字段名） */
+  docxJobId?: string
+  /** docxJobId 的兼容别名（后端并行开发可能采用此命名），与 docxJobId 同值 */
+  uploadId?: string
+  /** mode=docx：从评估表解析出的 UniProt */
+  uniprotFromDocx?: string
+  /** mode=docx：从评估表选择的序列（兼容别名），与 sequence 同值 */
+  sequenceFromDocx?: string
+  /** 客户目标/科学问题（可选） */
+  goal?: string
+  /** 批次关系说明（非关联批量：注入报告说明独立/复合物定位） */
+  batchNote?: string
+  /** ≥90% 高一致同源组委托（v1.11）：组内首个提交 BLAST 的作业为代表，其余共享结果 */
+  homologBlast?: BlastGroup
+  /** v2.0：配体输入（名称/分子式/三位 ID / 上传文件提取线索，≤8 条） */
+  ligands?: Array<{ raw: string; source?: 'text' | 'file' | 'eval-table'; fileName?: string }>
+  options: EvaluateOptions
+}
+
+/** POST /api/evaluate 响应 */
+export interface EvaluateResponse {
+  ok: boolean
+  jobId: string
+  error?: string
+}
+
+/** POST /api/evaluate/upload 响应中的解析结果 */
+export interface ParsedSequence {
+  header: string
+  seq: string
+  length: number
+  /** 序列角色：antibody = 检测为抗体序列（自动跳过 BLAST） */
+  role?: 'antibody' | 'antigen'
+}
+
+export interface ParsedImage {
+  id: string
+  kind: AssetKind
+  caption: string
+  mime: string
+  sizeKB: number
+  /** 类型由 VLM 视觉识别判定（缺省 = 关键词分类） */
+  vlmKind?: boolean
+}
+
+export interface DocxParsed {
+  uniprotIds: string[]
+  sequences: ParsedSequence[]
+  genes: string[]
+  docTextSummary: string
+  images: ParsedImage[]
+  /** 无法提取的图片数（格式不支持/损坏/超限） */
+  skippedImages?: number
+}
+
+export interface UploadResponse {
+  ok: boolean
+  uploadId: string
+  parsed: DocxParsed
+  error?: string
+}
+
+// ─── 靶点关系判断（v1.8 批量评估）───────────────────────────
+
+export type TargetRelationType = 'complex' | 'antibody-antigen' | 'fusion' | 'homologous' | 'pathway' | 'independent' | 'other'
+
+/** 家族序列一致性证据（v1.10 服务端比对，随 judgment 返回） */
+export interface HomologPair {
+  a: string
+  b: string
+  identity: number
+  method: string
+}
+
+/** ≥90% 高一致同源组（v1.11 BLAST 委托）：组内仅家族代表执行一次检索，其余共享结果 */
+export interface BlastGroup {
+  groupKey: string
+  members: string[]
+  minIdentity: number
+}
+
+/** 评估表序列归属（v1.10） */
+export interface SequenceAttribution {
+  index: number
+  header: string
+  length: number
+  kind: 'construct' | 'homolog' | 'antibody' | 'unmatched'
+  uniprotId?: string
+  identity?: number
+  start?: number | null
+  end?: number | null
+  note: string
+}
+
+export interface RelationJudgment {
+  /** 是否建议合并为一份报告 */
+  related: boolean
+  relationType: TargetRelationType
+  confidence: 'high' | 'medium' | 'low'
+  /** 判断依据（≤300 字） */
+  rationale: string
+  /** 对结构解析策略的建议 */
+  strategy: string
+  /** 判断失败时的降级说明 */
+  error?: string
+  /** 家族序列一致性证据（v1.10） */
+  homologPairs?: HomologPair[]
+  /** ≥90% 高一致组（v1.11）：组内仅家族代表执行一次 BLAST，其余成员委托共享结果 */
+  blastGroups?: BlastGroup[]
+}
+
+/** 关系类型 → 中文描述 + 图标语义（前端展示用） */
+export function describeRelationType(t: TargetRelationType): string {
+  switch (t) {
+    case 'complex': return '复合物亚基（物理相互作用）'
+    case 'antibody-antigen': return '抗体-抗原配对'
+    case 'fusion': return '融合构建（多结构域串联）'
+    case 'homologous': return '同源蛋白家族（直系/旁系同源）'
+    case 'pathway': return '同通路/功能相关'
+    case 'independent': return '相互独立'
+    case 'other': return '其他关联'
+  }
+}
+
+/** 合并报告各靶点结构化数据（v1.11 — PDB/同源结构/文献列表带 UniProt 归属） */
+export interface MergedTargetLite {
+  jobId: string
+  uniprotId?: string
+  proteinName: string
+  geneNames: string[]
+  organism: string
+  sequenceLength: number
+  coveragePercent: number
+  directPdbCount: number
+  blastHitCount: number
+  blastStatus?: BlastStatusInfo
+  directPdbs: PdbEntry[]
+  blastHits: BlastHit[]
+  literature: LiteratureItem[]
+  /** v1.24：聚集形式（寡聚态）分析；历史作业缺省 */
+  oligomer?: OligomerAnalysis
+  /** v1.26：分子量增重策略分析（仅 applicable 时有意义）；历史作业缺省 */
+  mwAugment?: MwAugmentAnalysis | null
+}
+
+/** 合并评估报告（关联靶点批量生成） */
+export interface BatchReportInfo {
+  id: string
+  jobIds: string[]
+  relation: RelationJudgment
+  /** 评估表序列归属（v1.10，历史报告可能缺失） */
+  sequenceAttribution?: SequenceAttribution[] | null
+  /** 共有结构（v1.22：同一 PDB 覆盖多个输入 UniProt；历史报告可能缺失） */
+  sharedStructures?: SharedStructure[] | null
+  /** v1.14：LLM 生成的描述性标题 */
+  title?: string
+  markdown: string
+  llmOk?: boolean
+  errors?: string[]
+  createdAt?: string
+  /** 各靶点结构化数据（v1.11；历史报告/作业被清理时为空） */
+  targets?: MergedTargetLite[]
+  /** 异步生成状态（v1.12：running = 后台生成中，前端轮询直到终态） */
+  status?: 'running' | 'done' | 'error'
+  /** 生成失败原因（status = error 时） */
+  error?: string | null
+}
+
+/** 合并报告历史列表项（v1.13：批量评估历史记录） */
+export interface BatchReportListItem {
+  id: string
+  jobIds: string[]
+  title: string
+  status: 'running' | 'done' | 'error'
+  hasContent: boolean
+  createdAt: string
+}
+
+// ─── 评估表 LLM 智能解析 ──────────────────────────────────────
+
+/** LLM 从评估表内容中提取的结构化要点 */
+export interface FormInsights {
+  proteinName?: string
+  geneNames?: string[]
+  organism?: string
+  goals: string[]
+  scientificQuestions: string[]
+  experimentalSummary?: string
+  sequenceNotes?: string
+  homologs?: string
+  keyConcerns?: string[]
+  source: 'llm' | 'regex'
+}
+
+export interface InsightsResponse {
+  ok: boolean
+  insights?: FormInsights
+  cached?: boolean
+  /** 超时回退提示（规则提取结果，可重试获取 LLM 结果） */
+  note?: string
+  error?: string
+}
+
+// ─── LLM 引擎配置 ────────────────────────────────────────────
+
+export interface LlmProviderLite {
+  key: string
+  label: string
+  hint: string
+  baseUrl: string
+  needsKey: boolean
+  defaultModel: string
+  supportsModels: boolean
+  modelsNote: string
+}
+
+export interface LlmConfigState {
+  providerKey: string
+  label: string
+  baseUrl: string
+  apiKeyMasked: string
+  hasKey: boolean
+  model: string
+}
+
+export interface LlmConfigResponse {
+  ok: boolean
+  active: LlmConfigState | null
+  engineSummary: string
+  providers: LlmProviderLite[]
+}
+
+export interface LlmModelInfo {
+  id: string
+  label?: string
+}
+
+export interface LlmModelsResponse {
+  ok: boolean
+  models?: LlmModelInfo[]
+  error?: string
+}
+
+export interface LlmTestResponse {
+  ok: boolean
+  latencyMs?: number
+  reply?: string
+  error?: string
+}
+
+/** GET /api/jobs/[id] 作业详情 */
+export interface StageInfo {
+  key: string
+  label: string
+  state: StageState
+  percent: number
+}
+
+export interface JobProgress {
+  stage: string
+  percent: number
+  message: string
+  stages: StageInfo[]
+}
+
+export interface UniprotInfo {
+  uniprotId: string
+  entryName: string
+  proteinName: string
+  geneNames: string[]
+  organism: string
+  sequenceLength: number
+}
+
+export interface ScoreItem {
+  score: number
+  maxScore: number
+  rating: string
+}
+
+/** v1.25：聚集形式对三方法的调整明细（评分卡展示；历史作业缺省） */
+export interface OligomerAdjustInfo {
+  label: string
+  stoichiometry: string
+  confidence: 'high' | 'medium' | 'low'
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
+}
+
+export interface Scores {
+  xray: ScoreItem
+  cryoem: ScoreItem
+  nmr: ScoreItem
+  overall: ScoreItem
+  /** v1.25：聚集形式调整明细 */
+  oligomerAdjust?: OligomerAdjustInfo
+  /** v1.26：分子量增重调整明细（小分子量靶点） */
+  mwAugmentAdjust?: MwAugmentAdjustInfo
+  /** v1.30：互作复合物证据调整明细（无直接结构时） */
+  interactionAdjust?: InteractionAdjustInfo
+}
+
+export interface MethodStats {
+  xrayCount: number
+  cryoemCount: number
+  nmrCount: number
+  bestResolution: number | null
+}
+
+// ─── 互作复合物证据（v1.30，无直接结构时）──────────────────────────────────
+
+/** 互作复合物（Complex Portal curated）中的一个组分 */
+export interface InteractionComponent {
+  accession: string
+  name: string
+  description: string
+  stoichiometryText: string
+  stochMax: number | null
+  isTarget: boolean
+  lengthAa?: number | null
+  kda?: number | null
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+  /** 该组分参与的共有结构 PDB IDs（同一 PDB 含 ≥2 个复合物组分） */
+  sharedPdbIds?: string[]
+  /** 该组分的单独结构数（PDB 仅含本组分） */
+  soloPdbCount?: number
+  /** 单独结构代表（按分辨率 ≤3 个） */
+  soloRepresentativePdbs?: PdbEntry[]
+  /** v1.31 单独结构全量列表（按分辨率升序，折叠展开可见） */
+  soloPdbs?: PdbEntry[]
+  /** v1.31 soloPdbs 之外未拉取详情的单独结构数 */
+  soloPdbOmitted?: number
+}
+
+/** 共有结构（同一 PDB 含 ≥2 个复合物组分 — 组装先例，最直接的结构证据） */
+export interface InteractionSharedPdb {
+  pdbId: string
+  componentNames: string[]
+  componentCount: number
+  method: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  resolution: number | null
+  title: string
+  /** v1.31 释放日期 */
+  releaseDate?: string
+  /** v1.31 主引文期刊缩写 */
+  journal?: string
+  /** v1.31 主引文 PubMed ID（空串表示无） */
+  pubmedId?: string
+  /** v1.31 该 PDB 中复合物组分之外的其他蛋白组分基因名（如 FBXO22） */
+  extraComponents?: string[]
+  /** v1.31 extraComponents 对应 UniProt accession（悬停提示） */
+  extraAccessions?: string[]
+}
+
+/** Complex Portal curated 复合物 */
+export interface InteractionComplexInfo {
+  complexAc: string
+  name: string
+  systematicName?: string
+  assembly: string | null
+  components: InteractionComponent[]
+  componentsWithStructure: number
+  totalPdb: number
+  assemblyKda: number | null
+  sharedPdbs?: InteractionSharedPdb[]
+  sharedPdbTotal?: number
+  /** v1.31 sharedPdbs 之外未拉取详情的共有结构数 */
+  sharedPdbOmitted?: number
+  soloPdbTotal?: number
+}
+
+/** binary 互作伙伴的结构证据（IntAct） */
+export interface InteractionBinaryInfo {
+  accession: string
+  geneName?: string
+  pdbCount: number
+  representativePdbs: PdbEntry[]
+}
+
+/** 互作复合物证据分析（无直接结构时作为评估依据） */
+export interface InteractionAnalysis {
+  applicable: boolean
+  hasEvidence: boolean
+  subunitNote?: string
+  complexes: InteractionComplexInfo[]
+  binaryPartners: InteractionBinaryInfo[]
+  summary: string
+  notes: string[]
+}
+
+/** 互作复合物证据对三方法的调整明细 */
+export interface InteractionAdjustInfo {
+  complexAc: string
+  complexName: string
+  componentsWithStructure: number
+  assemblyKda: number | null
+  level: 'curated' | 'binary'
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
+}
+
+// ─── 聚集形式（寡聚态）分析（v1.24）────────────────────────────────────
+
+export type OligomerCategory = 'monomer' | 'homo-oligomer' | 'hetero-complex' | 'unknown'
+
+export interface OligomerEvidence {
+  source: 'pdb-title' | 'pdb-stoichiometry' | 'blast-title' | 'uniprot-subunit' | 'uniprot-interaction' | 'literature'
+  ref: string
+  text: string
+  state: { category: OligomerCategory; copies: number | null; term: string }
+}
+
+/** 蛋白聚集形式（寡聚态）分析结果（与后端 lib/eval/types.ts 契约一致） */
+export interface OligomerAnalysis {
+  /** v1.25：判定标签（如 "同源四聚体（homotetramer）"；历史作业缺省） */
+  label?: string
+  summary: string
+  category: OligomerCategory
+  stoichiometry: string
+  confidence: 'high' | 'medium' | 'low'
+  evidence: OligomerEvidence[]
+  notes: string[]
+}
+
+// ─── 分子量增重策略分析（v1.26，小分子量靶点）────────────────────
+
+export interface MwComponent {
+  name: string
+  uniprotId?: string
+  lengthAa: number
+  kda: number
+  isTarget: boolean
+}
+
+export interface MwComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  components: MwComponent[]
+  totalKda: number
+  basis: 'assembly' | 'entity'
+  note: string
+}
+
+export interface MwAugmentOption {
+  name: string
+  addKda: string
+  note: string
+}
+
+export interface MwConflictNote {
+  level: 'aligned' | 'caution' | 'conflict'
+  text: string
+}
+
+/** v1.27：同源结构形成的大复合物（BLAST 扩展检索） */
+export interface MwHomologComplex {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  /** BLAST 同源 identity（%） */
+  identity: number
+  /** 同源复合物自身装配总分子量（kDa） */
+  totalKda: number
+  /** 按靶点单体换算的估计装配分子量（kDa） */
+  estimatedKda: number
+  basis: 'assembly' | 'entity'
+  /** 组分摘要 */
+  componentSummary: string
+  /** 推断说明 */
+  note: string
+}
+
+/** 分子量增重策略分析结果（与后端 lib/eval/types.ts 契约一致） */
+export interface MwAugmentAnalysis {
+  applicable: boolean
+  monomerKda: number
+  zoneNote: string
+  assemblyKda: number | null
+  assemblyBasis: string
+  assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  complexes: MwComplex[]
+  /** v1.27：同源结构形成的大复合物（历史作业缺省） */
+  homologComplexes?: MwHomologComplex[]
+  /** v1.27：同源扩展检索说明（历史作业缺省） */
+  homologSearchNote?: string
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  options: MwAugmentOption[]
+  conflicts: MwConflictNote[]
+  notes: string[]
+}
+
+/** v1.26：分子量增重调整明细（评分卡展示） */
+export interface MwAugmentAdjustInfo {
+  monomerKda: number
+  assemblyKda: number | null
+  /** v1.27：装配路径（历史作业缺省） */
+  assemblyPath?: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  xray: number
+  cryoem: number
+  nmr: number
+  note: string
+}
+
+/** 合并评估（UniProt+序列同靶点）时的构建信息 */
+export interface ConstructInfo {
+  providedLength: number
+  fullLength: number
+  identity: number
+  sameTarget: boolean
+  start: number | null
+  end: number | null
+}
+
+export interface JobSummary {
+  uniprot: UniprotInfo
+  directPdbCount: number
+  blastHitCount: number
+  coverage: number
+  scores: Scores
+  methodStats: MethodStats
+  ligandCount: number
+  literatureCount: number
+  imageCount: number
+  durationMs: number
+  construct?: ConstructInfo
+  /** BLAST 执行状态（v1.7+） */
+  blast?: BlastStatusInfo
+  /** 聚集形式（寡聚态）分析（v1.24+；历史作业缺省） */
+  oligomer?: OligomerAnalysis
+  /** 分子量增重策略分析（v1.26+；历史作业缺省；后端存档含 applicable=false） */
+  mwAugment?: MwAugmentAnalysis | null
+  /** 互作复合物证据分析（v1.30+；无直接结构时有证据时展示） */
+  interaction?: InteractionAnalysis
+  /** LLM 报告生成是否至少部分成功（v1.7+） */
+  /** v2.0：配体归一与研究数据（输入/评估表识别 → 三位 ID + 含该配体结构） */
+  ligands?: LigandResolution[]
+  /** v2.0：AlphaFold 预测信息（报告头图元数据） */
+  alphafold?: AlphafoldSummaryInfo
+  reportLlmOk?: boolean
+  /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */
+  reportDeferred?: boolean
+  /** 批次关系说明（v1.8+ 非关联批量） */
+  batchNote?: string
+}
+
+export interface PdbEntry {
+  pdbId: string
+  method: string
+  resolution: number | null
+  title: string
+  releaseDate: string
+  ligands: string[]
+  journal: string
+  doi: string
+  pubmedId: string
+  organisms: string[]
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  /** 该结构覆盖的 UniProt 残基编号范围（如 "A=695-1022"；旧记录无此字段） */
+  chainRanges?: string
+}
+
+// ─── 配体研究数据（v2.0；与后端 lib/eval/ligand.ts 契约一致）──────────────────
+
+export interface LigandStructureLite {
+  pdbId: string
+  title: string
+  method: string
+  resolution: number | null
+  releaseDate: string
+  /** 同时是本靶点的直接结构（RCSB UniProt 检索交集） */
+  alsoTarget: boolean
+}
+
+export interface LigandResolution {
+  raw: string
+  source: 'text' | 'file' | 'eval-table'
+  fileName?: string
+  ok: boolean
+  compId: string
+  name: string
+  formula: string
+  weight: number | null
+  /** 归一策略（direct-id / alias / pdb-search / llm / llm+pdb-search） */
+  strategy: string
+  error?: string
+  /** 含该配体的结构总数 */
+  totalStructures: number
+  /** 展示用结构列表（≤12，按分辨率升序） */
+  structures: LigandStructureLite[]
+}
+
+export interface AlphafoldSummaryInfo {
+  available: boolean
+  modelId?: string
+  /** 平均 pLDDT（0-100） */
+  globalPlddt?: number | null
+  version?: number
+  fracVeryHigh?: number | null
+  note?: string
+}
+
+// ─── 共有结构（多靶点交集）──────────────────────────────────────────────────────
+
+/** 共有结构对单个靶点的覆盖信息 */
+export interface SharedStructureCoverage {
+  uniprotId: string
+  proteinName: string
+  /** 该 PDB 覆盖此 UniProt 的链范围（如 "A=695-1022"） */
+  chainRanges?: string
+}
+
+/** 共有结构 — 同一 PDB 条目覆盖 ≥2 个输入 UniProt 的结构（复合物/共结晶等） */
+export interface SharedStructure {
+  pdbId: string
+  method: string
+  resolution: number | null
+  title: string
+  releaseDate: string
+  ligands: string[]
+  journal: string
+  pubmedId: string
+  isXray: boolean
+  isCryoem: boolean
+  isNmr: boolean
+  coverage: SharedStructureCoverage[]
+  targetCount: number
+}
+
+export interface BlastHit {
+  pdbId: string
+  description: string
+  identity: number
+  evalue: number
+  queryCoverage: number
+  /** v1.23：BLAST 命中在查询序列上的起止残基位置（1-based，闭区间）；旧记录可能缺失 */
+  queryFrom?: number
+  queryTo?: number
+  method: string
+  resolution: number | null
+  /** v1.31 主引文 PubMed ID（报告「文献」列直跳） */
+  pubmedId?: string
+}
+
+export interface LiteratureItem {
+  pmid: string
+  title: string
+  journal: string
+  year: string
+  doi: string
+  /** 来源为 PDB 结构主引文（结构解析文献，与结构条目直接关联） */
+  fromPdb?: boolean
+}
+
+export interface AssetItem {
+  id: string
+  kind: AssetKind
+  caption: string
+  mime: string
+  sizeKB: number
+  /** 类型由 VLM 视觉识别判定（缺省 = 关键词分类） */
+  vlmKind?: boolean
+}
+
+export interface JobDetail {
+  id: string
+  status: JobStatus
+  mode: InputMode
+  uniprotId: string | null
+  goal: string | null
+  progress: JobProgress | null
+  logs: string[]
+  /** 排队中：前方待执行作业数（全局串行队列位置） */
+  queuePosition?: number
+  summary: JobSummary | null
+  pdbs: PdbEntry[] | null
+  blastHits: BlastHit[] | null
+  literature: LiteratureItem[] | null
+  assets: AssetItem[] | null
+  /** LLM 评估报告 markdown（v1.7+，结果页内联展示） */
+  reportMarkdown?: string | null
+  /** v1.31 单靶点 HTML 报告是否已生成（web 端内嵌与下载同一份 HTML，保证样式一致） */
+  reportAvailable?: boolean
+  error: string | null
+}
+
+/** GET /api/jobs 列表项 */
+export interface JobListItem {
+  id: string
+  status: JobStatus
+  title: string
+  uniprotId: string | null
+  proteinName: string | null
+  createdAt: string
+  coverage: number | null
+  pdbCount: number | null
+  overallScore: number | null
+}
