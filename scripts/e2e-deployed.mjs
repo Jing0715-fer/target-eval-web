@@ -1,7 +1,9 @@
 /**
- * v2.6.1 部署节点全链路 E2E（真实公网环境）：
- *  1. stateless 直传上传（真实评估表 docx，noVlm=1）
- *  2. 流式 insights（v2.6.1 修复目标：不再 HTTP 502；心跳保活下 LLM 真实提取）
+ * v2.6.2 部署节点全链路 E2E（真实公网环境）：
+ *  1. stateless 直传上传（真实评估表 docx，noVlm=1；本地磁盘可用时同步写盘 → uploadId 可用）
+ *  2. 流式 insights — v2.6.2 验证：① uploadId 磁盘模式（用户真实路径，上次 502 的确切请求形态）
+ *     ② 心跳 beat 形态断言（首个 beat ≥1KB 且 ≤2.5s 到达 — 复刻 sync 报文形态）
+ *     ③ quick 快速兑底（毫秒级返回规则提取）④ text 内联模式兼容覆盖
  *  3. 同步流式评估（v2.6 分段续跑 — O94952 + Resmetirom/ATP 配体 + BLAST 自动）
  *  4. 校验：done 终态、报告、配体归一、分段续跑日志
  * 用法：node scripts/e2e-deployed.mjs [BASE]
@@ -45,13 +47,13 @@ async function main() {
   if (!upJson.ok) throw new Error('上传失败: ' + JSON.stringify(upJson).slice(0, 200))
   log(`  HTTP ${up.status} · ${((Date.now()-t1)/1000).toFixed(1)}s · uploadId: ${upJson.uploadId} · uniprots: ${upJson.parsed.uniprotIds} · fullText: ${(upJson.fullText||'').length} chars · goalHints: ${(upJson.parsed.goalHints||[]).length}`)
 
-  // ── 2. 流式 insights（502 修复验证） ──
-  log('── [2] 流式 insights（v2.6.1 — 502 修复验证）──')
+  // ── 2. 流式 insights（v2.6.2 — 502 修复验证）──
+  log('── [2] 流式 insights（v2.6.2 — uploadId 用户真实路径 + 心跳形态）──')
   const t2 = Date.now()
   const ins = await jfetch('/api/evaluate/insights', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text: upJson.fullText, goalHints: upJson.parsed.goalHints || [] }),
+    body: JSON.stringify({ uploadId: upJson.uploadId, text: upJson.fullText, goalHints: upJson.parsed.goalHints || [] }),
   })
   log(`  HTTP ${ins.status} ${ins.headers.get('content-type') ?? ''}`)
   if (!ins.ok || !ins.body) {
@@ -61,7 +63,7 @@ async function main() {
   const insights = await (async () => {
     const reader = ins.body.getReader()
     const dec = new TextDecoder()
-    let buf = '', pings = 0, firstByteMs = null, doneEv = null
+    let buf = '', pings = 0, firstByteMs = null, firstBeatSize = null, doneEv = null
     const tStream = Date.now()
     for (;;) {
       const { done, value } = await reader.read()
@@ -74,14 +76,16 @@ async function main() {
         if (!line) continue
         try {
           const ev = JSON.parse(line)
-          if (ev.type === 'ping') pings++
+          if (ev.type === 'ping') { pings++; if (firstBeatSize == null) firstBeatSize = line.length }
           else if (ev.type === 'done') doneEv = ev
         } catch { /* 半行 */ }
       }
       if (doneEv) break
     }
-    log(`  首字节 ${firstByteMs}ms · 心跳 ×${pings} · 总耗时 ${((Date.now()-t2)/1000).toFixed(1)}s · source: ${doneEv?.insights?.source}`)
+    log(`  首字节 ${firstByteMs}ms · 心跳 ×${pings}（首个 beat ${firstBeatSize}B）· 总耗时 ${((Date.now()-t2)/1000).toFixed(1)}s · source: ${doneEv?.insights?.source}`)
     if (!doneEv) throw new Error('FAIL: insights 流中断无终态')
+    // v2.6.2 心跳形态断言：首 beat 与 sync 首事件同量级（≥1KB pad 防小帧被中间层缓冲吞没）
+    if (firstBeatSize != null && firstBeatSize < 1000) throw new Error(`FAIL: 心跳 beat 体积 ${firstBeatSize}B < 1KB（小帧将被部署链路缓冲吞没 → 502 复发）`)
     return doneEv
   })()
   if (!insights.ok || !insights.insights) {
@@ -94,6 +98,34 @@ async function main() {
   if (!goals.some(g => /三维结构/.test(g))) throw new Error('FAIL: 缺「预期目标一：整体三维结构」')
   if (!goals.some(g => /Resmetirom/.test(g))) throw new Error('FAIL: 缺「预期目标二：Resmetirom 结合模式」')
   if (!ligands.some(l => /resmetirom/i.test(l))) throw new Error('FAIL: ligands 未含 Resmetirom')
+
+  // ── 2b. quick 快速兑底验证（v2.6.2 三级降级末级 — 毫秒级返回规则提取）──
+  {
+    const tq = Date.now()
+    const q = await jfetch('/api/evaluate/insights', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ uploadId: upJson.uploadId, force: true, quick: true, text: upJson.fullText, goalHints: upJson.parsed.goalHints || [] }),
+    })
+    const qj = await q.json().catch(() => null)
+    if (q.status !== 200 || !qj?.ok) {
+      // 流式响应 — 逐行读 done
+      if (q.body) {
+        const reader = q.body.getReader(); const dec = new TextDecoder(); let b = ''
+        for (;;) {
+          const { done, value } = await reader.read(); if (done) break
+          b += dec.decode(value, { stream: true })
+        }
+        const lines = b.split('\n').filter(x => x.includes('"done"'))
+        const ev = lines.length ? JSON.parse(lines[lines.length - 1]) : null
+        if (!ev?.ok) throw new Error(`FAIL: quick 兑底失败: ${String(b).slice(0, 150)}`)
+        log(`  [2b] quick 兑底：${((Date.now()-tq)/1000).toFixed(1)}s · goals ${ev.insights?.goals?.length} 条 · source ${ev.insights?.source}`)
+      } else {
+        throw new Error(`FAIL: quick 兑底 HTTP ${q.status}`)
+      }
+    } else {
+      log(`  [2b] quick 兑底：${((Date.now()-tq)/1000).toFixed(1)}s · goals ${qj.insights?.goals?.length} 条`)
+    }
+  }
 
   // ── 3. 同步流式评估（分段续跑 — O94952 + BLAST 自动 + 配体） ──
   log('── [3] 同步流式评估（O94952 · BLAST 自动 · 分段续跑）──')

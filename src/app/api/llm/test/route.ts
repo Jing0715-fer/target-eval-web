@@ -16,7 +16,7 @@ interface TestBody {
   useActive?: boolean
 }
 
-const TEST_TIMEOUT_MS = 45_000
+const TEST_TIMEOUT_MS = 12_000
 
 export async function POST(req: Request) {
   let body: TestBody

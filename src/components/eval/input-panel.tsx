@@ -289,8 +289,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         setSelectedUniprots([])
         setSelectedSequenceIndex(null)
       }
-      // 后台执行 LLM 智能解析（v2.4：直传模式响应带 fullText → 内联携带，不依赖磁盘）
-      const inline = res.stateless && res.fullText
+      // 后台执行 LLM 智能解析（v2.4：直传模式响应带 fullText → 内联携带，不依赖磁盘；
+      // v2.6.2：凡响应带 fullText 均内联携带 — 多实例磁盘不共享时服务端自动降级用内联全文）
+      const inline = res.fullText
         ? { text: res.fullText, goalHints: res.parsed.goalHints }
         : undefined
       void runInsights(res.uploadId, inline)

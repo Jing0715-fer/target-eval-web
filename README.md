@@ -218,9 +218,10 @@ scripts/                         # BLAST 队列诊断 / 同源算法回归等运
    ```
    未接代理时直连请求同属 `direct` 归属组（本地调试用；公网必须接代理隔离用户）
 2. **网关超时（v2.6 可续跑分段评估）**：无状态网关 ~90s 切断长连接时，前端自动走分段续跑 — 每段 POST ≤55s 预算（`EVAL_SYNC_SEGMENT_MS` 可调），到点服务端交还 checkpoint 快照，前端立即携快照续跑直至终态（BLAST RID 跨段轮询 / PDB·配体·LLM 报告增量续跑）；分块上传 / 后台解析 / 异步报告本身均为短请求
-3. **数据与备份**：`db/custom.db` 与 `db/reports/` 含用户数据；终态记录 7 天自动清理
-4. **配额环境变量**：`EVAL_MAX_QUEUE`(8) · `EVAL_MAX_ACTIVE_PER_IP`(2) · `EVAL_MAX_JOBS_PER_DAY`(30) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_JOB_CONCURRENCY`(2) · `EVAL_JOB_TTL_DAYS`(7) · `EVAL_SYNC_SEGMENT_MS`(55000，分段评估单段预算)
-5. 外部 LLM API Key 明文存本地 SQLite，面向内网 / 单机沙箱设计；不可信人群公网开放前建议改用内置引擎或为配置面板加访问控制
+3. **智能解析流式心跳（v2.6.2）**：`/api/evaluate/insights` 为 NDJSON 流，心跳 beat 形态与 `/api/evaluate/sync` 一致（异步首事件 1.2s + ~1.4KB pad + 3s 周期）—— 小帧心跳在部分云网关/中间层会被缓冲至流结束才冲刷，撞上 ALB ~50s 接收超时即 502（实测 v2.6.1 的 16B ping 全程未穿透）；LLM 预算 40s（`EVAL_INSIGHTS_BUDGET_MS` 可调）落在安全窗内；前端三级降级（流式 → 流式重试 → quick 规则兜底）保证永不卡死。`/api/llm/test` 连通性探测同样收紧至 12s 快速失败
+4. **数据与备份**：`db/custom.db` 与 `db/reports/` 含用户数据；终态记录 7 天自动清理
+5. **配额环境变量**：`EVAL_MAX_QUEUE`(8) · `EVAL_MAX_ACTIVE_PER_IP`(2) · `EVAL_MAX_JOBS_PER_DAY`(30) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_JOB_CONCURRENCY`(2) · `EVAL_JOB_TTL_DAYS`(7) · `EVAL_SYNC_SEGMENT_MS`(55000，分段评估单段预算)
+6. 外部 LLM API Key 明文存本地 SQLite，面向内网 / 单机沙箱设计；不可信人群公网开放前建议改用内置引擎或为配置面板加访问控制
 
 ## 版本演进
 
@@ -233,6 +234,11 @@ scripts/                         # BLAST 队列诊断 / 同源算法回归等运
 | v1.10 | 同源靶点自动归并（种子-对角链 ≥40% 判定）· 序列归属全覆盖 |
 | v1.11 | ≥90% 家族组共享 BLAST · 合并报告详化（500-700 字/靶点 + 三数据章节）· 图片按作业独立登记 |
 | **v1.12** | **合并报告异步生成**（POST 立即返回 running + 前端轮询，修复 LLM 三段式分钟级生成触发网关 502） |
+| v2.0-v2.3 | 表格内联渲染 · 配体管线（PDB CCD/PDBe/PubChem 归一 + 结构检索）· 无状态（函数计算）部署全链路 |
+| v2.4-v2.5 | 评估表 AI 提取配体自动入表 · 规则提取结构化（标签行配对）· PDB 不限选项 · 直传回退 |
+| v2.6 | 可续跑分段评估：同步流接口每段 ≤55s 交还 checkpoint，前端携快照续跑（BLAST RID 跨段轮询 / LLM 报告增量），修复网关 ~91s 切断的「未知错误」 |
+| v2.6.1 | insights 智能解析流式化（NDJSON + 心跳），初次修复部署节点 502 |
+| **v2.6.2** | **insights 心跳形态复刻 sync（异步首事件 + 1.4KB pad + 3s 周期）**：小帧 ping 在部署链路被缓冲吞没、close 时撞 ALB ~50s 接收超时的 502 根除；LLM 预算 40s；前端三级降级（流式 → 流式重试 → quick 规则兜底）永不卡死；`/api/llm/test` 收紧至 12s 快速失败 |
 
 ## 说明
 

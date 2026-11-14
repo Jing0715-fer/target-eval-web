@@ -283,24 +283,32 @@ export async function uploadEvaluateDocx(
  * POST /api/evaluate/insights — 对已上传评估表执行 LLM 智能解析。
  * v2.3：无状态模式（直传回退产物）由前端内联携带全文（text + goalHints），
  * 不依赖服务器磁盘；有状态部署仍走 uploadId 磁盘缓存路径。
+ * v2.6.2 三级降级：流式（LLM）→ 流式重试 → quick 快速兜底（跳过 LLM 规则提取），
+ * 保证部署网关切断（ALB 502）等异常下智能解析流程永不卡死。
  */
 export async function fetchDocxInsights(
   uploadId: string,
   force = false,
   inline?: { text: string; goalHints?: string[] },
 ): Promise<InsightsResponse> {
-  const body: Record<string, unknown> = inline
-    ? { text: inline.text, goalHints: inline.goalHints ?? [], force }
-    : { uploadId, force }
+  // v2.6.2：uploadId 与内联 text 同时携带 — 磁盘路径优先，多实例磁盘不共享时
+  // 服务端自动降级为内联全文（纯 text 无 uploadId 时为无状态直传回退通道）
+  const body: Record<string, unknown> = {
+    uploadId,
+    force,
+    ...(inline ? { text: inline.text, goalHints: inline.goalHints ?? [] } : {}),
+  }
   // v2.6 流式：NDJSON 心跳保活（修复部署网关 ~30s 空闲切断导致的 HTTP 502 —
   // 旧版一次性 JSON 在冷启动 + LLM 慢时撞线）。流中断自动重试一次（实例已热）。
+  // v2.6.2：第 3 次改走 quick 快速兜底（跳过 LLM 毫秒级返回规则提取）。
   for (let attempt = 0; ; attempt++) {
     try {
-      return await fetchInsightsStream(body)
+      return await fetchInsightsStream(attempt >= 2 ? { ...body, quick: true } : body)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      if (attempt === 0 && STREAM_BROKEN_RE.test(msg)) continue // 断流重试（一次）
-      throw err
+      if (attempt >= 2) throw err // quick 也失败（几乎不可能）— 彻底失败
+      if (attempt === 0 && !STREAM_BROKEN_RE.test(msg)) throw err // 语义错误（4xx 等）不重试
+      continue // 断流/5xx → 重试：0→1 流式，1→2 quick 兜底
     }
   }
 }

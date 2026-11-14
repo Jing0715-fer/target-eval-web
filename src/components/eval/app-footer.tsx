@@ -9,7 +9,7 @@ export function AppFooter({ engineSummary }: { engineSummary?: string }) {
           <span className="size-1.5 rounded-[2px] bg-primary" aria-hidden />
           TargetEval
           <span className="font-normal text-muted-foreground/50" aria-hidden>·</span>
-          <span className="font-mono text-[10px] font-normal text-muted-foreground/70">v2.6</span>
+          <span className="font-mono text-[10px] font-normal text-muted-foreground/70">v2.6.2</span>
         </span>
         <span className="hidden h-3 w-px bg-border sm:block" aria-hidden />
         <p className="text-[11px] leading-relaxed text-muted-foreground">
