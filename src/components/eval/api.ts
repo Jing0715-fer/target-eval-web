@@ -7,6 +7,7 @@ import type {
   BatchReportListItem,
   DocxParsed,
   EvaluateRequest,
+  FormInsights,
   InsightsResponse,
   JobDetail,
   JobListItem,
@@ -291,21 +292,61 @@ export async function fetchDocxInsights(
   const body: Record<string, unknown> = inline
     ? { text: inline.text, goalHints: inline.goalHints ?? [], force }
     : { uploadId, force }
+  // v2.6 流式：NDJSON 心跳保活（修复部署网关 ~30s 空闲切断导致的 HTTP 502 —
+  // 旧版一次性 JSON 在冷启动 + LLM 慢时撞线）。流中断自动重试一次（实例已热）。
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchInsightsStream(body)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (attempt === 0 && STREAM_BROKEN_RE.test(msg)) continue // 断流重试（一次）
+      throw err
+    }
+  }
+}
+
+/** 断流类错误识别（自动重试一次）；其余错误（4xx 语义错误等）直接抛出 */
+const STREAM_BROKEN_RE = /流中断|网络|Stream broken|HTTP 5\d\d/
+
+async function fetchInsightsStream(body: Record<string, unknown>): Promise<InsightsResponse> {
   const res = await fetch('/api/evaluate/insights', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  let data: InsightsResponse | null = null
-  try {
-    data = (await res.json()) as InsightsResponse
-  } catch {
-    data = null
+  // 快速失败（参数/权限校验 4xx）仍为普通 JSON 错误响应
+  if (!res.ok || !res.body) {
+    const err = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(err?.error ?? `智能解析失败（HTTP ${res.status}）`)
   }
-  if (!res.ok || !data || !data.ok || !data.insights) {
-    throw new Error(data?.error ?? `智能解析失败（HTTP ${res.status}）`)
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        let ev: { type?: string; ok?: boolean; insights?: FormInsights; cached?: boolean; note?: string; error?: string } | null = null
+        try {
+          ev = JSON.parse(line)
+        } catch { ev = null /* 半行/坏行丢弃，等下一块补齐 */ }
+        if (ev?.type === 'done') {
+          if (!ev.ok || !ev.insights) {
+            throw new Error(ev.error ?? '智能解析失败')
+          }
+          return { ok: true, insights: ev.insights, cached: ev.cached, note: ev.note }
+        }
+        // ping 心跳：仅保活
+      }
+      nl = buffer.indexOf('\n')
+    }
   }
-  return data
+  throw new Error('智能解析流中断（网络波动），正在自动重试…')
 }
 
 // ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────

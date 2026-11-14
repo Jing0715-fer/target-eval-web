@@ -49,14 +49,37 @@ async function main() {
     throw new Error('FAIL: v2.5 goalHints 仍含空标签行')
   if (!gh.some(g => /Resmetirom/.test(g))) throw new Error('FAIL: v2.5 goalHints 未含 Resmetirom 目标行')
 
-  // ── 2. insights 内联解析 ──
-  log('── [2] insights 内联解析 ──')
+  // ── 2. insights 内联解析（v2.6 流式 NDJSON — ping 心跳 + done 终态） ──
+  log('── [2] insights 内联解析（流式）──')
   const ins = await jfetch('/api/evaluate/insights', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ text: upJson.fullText, goalHints: upJson.parsed.goalHints || [] }),
   })
-  const insJson = await ins.json()
+  if (!ins.ok || !ins.body) throw new Error('insights 启动失败 HTTP ' + ins.status)
+  const insJson = await (async () => {
+    const reader = ins.body.getReader()
+    const dec = new TextDecoder()
+    let buf = '', pings = 0, doneEv = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      let nl
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+        if (!line) continue
+        try {
+          const ev = JSON.parse(line)
+          if (ev.type === 'ping') pings++
+          else if (ev.type === 'done') doneEv = ev
+        } catch { /* 半行 */ }
+      }
+      if (doneEv) break
+    }
+    if (pings) log(`  [insights 心跳 ×${pings}]`)
+    return doneEv ?? { ok: false, error: '流中断无终态' }
+  })()
   if (!insJson.ok) throw new Error('insights 失败: ' + JSON.stringify(insJson).slice(0, 200))
   const insights = insJson.insights
   log('  source:', insights.source, '· goals:', insights.goals?.length, '· ligands:', JSON.stringify(insights.ligands))
