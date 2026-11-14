@@ -149,12 +149,21 @@ async function main() {
     options: { skipBlast: false, maxPdb: 20 },
   }
   let events = 0, progressEvents = 0, final = null, streamErr = null, segments = 0, checkpoint = null, blastResume = 0
-  for (let round = 0; round < 100 && !final && !streamErr; round++) {
-    const res = await jfetch('/api/evaluate/sync', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(checkpoint ? { ...baseBody, checkpoint } : baseBody),
-    })
+  // v2.6.3：段流中断（网关抖动 → 读流抛错/无终态断流）自动携同快照重试同一段（≤3 次，
+  // 与前端 evaluateSyncStream 同款 — 段幂等可重入）
+  let brokenRetries = 0
+  for (let round = 0; round < 120 && !final && !streamErr; round++) {
+    let res
+    try {
+      res = await jfetch('/api/evaluate/sync', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(checkpoint ? { ...baseBody, checkpoint } : baseBody),
+      })
+    } catch (e) {
+      if (brokenRetries < 3) { brokenRetries++; round--; log(`  [连接重试 ${brokenRetries}/3] ${e.message}`); continue }
+      throw new Error('sync 连接失败（已重试）: ' + e.message)
+    }
     if (!res.ok || !res.body) {
       const err = await res.json().catch(() => null)
       throw new Error('sync 启动失败 HTTP ' + res.status + ': ' + JSON.stringify(err).slice(0, 200))
@@ -162,7 +171,8 @@ async function main() {
     segments++
     const reader = res.body.getReader()
     const dec = new TextDecoder()
-    let buf = '', nextCp = null
+    let buf = '', nextCp = null, readErr = null
+    try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
@@ -193,9 +203,17 @@ async function main() {
       }
       if (final || streamErr || nextCp) break
     }
+    } catch (e) { readErr = e }
     if (final || streamErr) break
-    if (nextCp) { checkpoint = nextCp; continue }
-    throw new Error('流中断：无终态事件（events=' + events + '）')
+    if (nextCp) { brokenRetries = 0; checkpoint = nextCp; continue }
+    // 断流无终态（读流抛错或 EOF 无 checkpoint）→ 携同快照重试同一段
+    if (brokenRetries < 3) {
+      brokenRetries++
+      log(`  [段 ${segments} 断流重试 ${brokenRetries}/3] ${readErr ? readErr.message : 'EOF 无终态'} — 携快照重发`)
+      round--
+      continue
+    }
+    throw new Error('流中断：无终态事件（events=' + events + '）：' + (readErr?.message ?? 'EOF'))
   }
   log(`  分段总数: ${segments} · BLAST 跨段续跑: ${blastResume} 次 · 耗时 ${((Date.now()-t3)/1000).toFixed(1)}s`)
 
