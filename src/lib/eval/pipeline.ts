@@ -34,13 +34,13 @@ import { computeScores } from './score'
 import { analyzeOligomericState } from './oligomer'
 import { analyzeInteractionEvidence } from './interaction'
 import { analyzeMwAugmentation } from './mw-augment'
-import { generateReportSections, type ReportPart } from './report'
+import { generateReportSections, REPORT_CHAPTERS, type ReportPart } from './report'
 import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
-import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, type LigandInput, type LigandResolution } from './ligand'
+import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
 import { alphafoldFigureFor } from './alphafold'
 import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
@@ -147,6 +147,9 @@ interface PipelineState {
   ligandResolved: LigandResolution[]
   ligandResolveDone: boolean
   ligandStructDone: boolean
+  /** v2.7：配体详情（PubChem 性质 + 2D 结构式）充实进度 */
+  ligandDetailDone: boolean
+  ligandDetailCursor: number
   /** v2.6：配体结构检索进度游标（跨段保留 — 防重入重复拉取/死循环） */
   ligandStructCursor: number
   // ── PDBe / PubMed ──
@@ -170,8 +173,8 @@ interface PipelineState {
   afSummary: AlphafoldSummaryInfo | null
   reportParts: ReportPart[]
   reportDone: boolean
-  /** v2.6.3：各报告段 LLM 失败累计（同键 ≥3 → 放弃重试接受规则兜底，防慢引擎无限段循环） */
-  reportPartFails: Partial<Record<'A' | 'B' | 'C', number>>
+  /** v2.6.3/v2.7：各报告章 LLM 失败累计（同键 ≥3 → 放弃重试接受缺章，防慢引擎无限段循环） */
+  reportPartFails: Partial<Record<string, number>>
   /** 渲染产物 */
   reportPath: string | null
   reportMarkdown: string | null
@@ -219,6 +222,8 @@ function freshState(): PipelineState {
     ligandResolved: [],
     ligandResolveDone: false,
     ligandStructDone: false,
+    ligandDetailDone: false,
+    ligandDetailCursor: 0,
     ligandStructCursor: 0,
     coverage: null,
     coverageText: '',
@@ -828,6 +833,29 @@ class SegmentRunner {
         }
         st.ligandStructDone = true
       }
+      // v2.7：配体详情充实（PubChem 计算性质 + 2D 结构式 — 报告配体卡展示）
+      // 已有 detail 的项幂等跳过；游标持久化防重入死循环
+      if (!st.ligandDetailDone) {
+        const detailTargets = st.ligandResolved.filter(r => r.ok)
+        let detailCursor = Math.min(st.ligandDetailCursor, detailTargets.length)
+        st.ligandDetailCursor = detailCursor
+        const detailWorker = async () => {
+          while (detailCursor < detailTargets.length) {
+            if (this.signal.aborted) return
+            if (budgetLeft(this.cb) <= 0) return
+            const r = detailTargets[detailCursor++]
+            st.ligandDetailCursor = detailCursor
+            try {
+              await enrichLigandDetail(r, this.signal)
+            } catch { /* 详情失败不影响主链路 */ }
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(3, detailTargets.length) }, () => detailWorker()))
+        if (st.ligandDetailCursor < detailTargets.length) {
+          return this.handoff() // 预算到点 — 剩余详情下一段继续
+        }
+        st.ligandDetailDone = true
+      }
       const resolved = st.ligandResolved
       const okList = resolved.filter(r => r.ok)
       if (resolved.length && st.phase !== 'ligands') {
@@ -1267,39 +1295,41 @@ class SegmentRunner {
     }
     if (!st.reportDone) {
       this.report('report', '整理数据上下文…', 0.05)
-      // v2.6 分段模式：单段 LLM 调用超时收紧到段预算内（慢引擎不至于超出网关
-      // 切断时长；超时段 llmOk=false 且不视为已完成 — 下一段自动重试）。
+      // v2.6 分段模式：单章 LLM 调用超时收紧到段预算内（慢引擎不至于超出网关
+      // 切断时长；超时章 llmOk=false 且不视为已完成 — 下一段自动重试）。
       // v2.6.3：a) 超时钳制随段预算（原 25-70s 钳制下限在 14s 段下超界）；
-      // b) 同键连续 3 次失败 → 放弃该段 LLM 重试（接受规则兜底内容）— 防慢引擎
+      // b) 同键连续 3 次失败 → 放弃该章 LLM 重试（接受缺章）— 防慢引擎
       // 无限段循环（每段都超时重试永远到不了终态）。
+      // v2.7：三段式拆为 10 章节级调用（200-800 字/章）— 单章时长可控地落在段预算内。
       const segMode = this.cb.deadline != null && this.cb.deadline > 0
       const partTimeoutMs = segMode ? Math.max(8_000, Math.min(70_000, budgetLeft(this.cb) - 1_000)) : undefined
-      const fails: Partial<Record<'A' | 'B' | 'C', number>> = { ...(st.reportPartFails ?? {}) }
-      const giveUpKeys = (['A', 'B', 'C'] as const).filter(k => (fails[k] ?? 0) >= 3)
+      const fails: Partial<Record<string, number>> = { ...(st.reportPartFails ?? {}) }
+      const giveUpKeys = Object.keys(fails).filter(k => (fails[k] ?? 0) >= 3)
+      const prevKeys = new Set(st.reportParts.map(p => p.key))
       const gen = await generateReportSections(this.reportContext(), this.signal, {
         deadline: this.cb.deadline,
         completedParts: st.reportParts.length ? st.reportParts : undefined,
         partTimeoutMs,
         giveUpKeys,
       })
-      // v2.6.3：逐段 LLM 失败累计（连续语义 — 成功即清零；同键 ≥3 → giveUp 接受规则兜底）
+      // v2.6.3：逐章 LLM 失败累计（连续语义 — 成功即清零；同键 ≥3 → giveUp 接受缺章）
       for (const p of gen.parts) {
         if (!p.llmOk) fails[p.key] = (fails[p.key] ?? 0) + 1
         else delete fails[p.key]
       }
       st.reportPartFails = fails
-      // v2.6：失败段下一段重试后可能同 key 重复 — 保留最新一条（成功覆盖失败）
+      // v2.7：按章节表顺序保留（失败章重试后同 key 覆盖 — 保留最新一条）
       const byKey = new Map<string, ReportPart>()
       for (const p of gen.parts) byKey.set(p.key, p)
-      st.reportParts = ['A', 'B', 'C'].map(k => byKey.get(k)).filter((p): p is ReportPart => Boolean(p))
-      const labels = ['摘要与背景', '结构研究全景', '可行性与策略']
-      for (let i = 0; i < gen.parts.length; i++) {
-        const p = gen.parts[i]
-        this.report('report', `LLM 第 ${i + 1}/3 段（${labels[i] ?? p.key}）${p.llmOk ? '完成' : '失败'}${p.llmOk ? `（${p.markdown.length} 字）` : `：${p.error}`}`, (i + 1) / 3)
-        this.log(`LLM 报告段 ${p.key} ${p.llmOk ? `完成（${p.markdown.length} 字）` : `失败：${p.error}`}`, p.llmOk ? 'info' : 'warn')
+      st.reportParts = REPORT_CHAPTERS.map(c => byKey.get(c.key)).filter((p): p is ReportPart => Boolean(p))
+      const doneCount = REPORT_CHAPTERS.filter(c => byKey.has(c.key)).length
+      for (const p of gen.parts) {
+        if (prevKeys.has(p.key) && p.llmOk) continue // 上段已成功的章不重复刷日志
+        this.report('report', `LLM 章节「${p.label}」${p.llmOk ? `完成（${p.markdown.length} 字）` : `失败：${p.error}`}`, Math.min(0.95, doneCount / REPORT_CHAPTERS.length))
+        this.log(`LLM 报告章节 ${p.key}「${p.label}」 ${p.llmOk ? `完成（${p.markdown.length} 字）` : `失败：${p.error}`}`, p.llmOk ? 'info' : 'warn')
       }
       if (gen.partial) {
-        // v2.6：预算到点 — 已完成段保留，交还续跑（下一段生成缺失段）
+        // v2.6：预算到点 — 已完成章保留，交还续跑（下一段生成缺失章）
         return this.handoff()
       }
       st.reportDone = true
@@ -1319,7 +1349,7 @@ class SegmentRunner {
       const parts = st.reportParts
       const generatedFullMarkdown = parts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n')
       const generatedOk = parts.some(p => p.llmOk)
-      const generatedErrors = parts.filter(p => !p.llmOk).map(p => `段${p.key}: ${p.error}`)
+      const generatedErrors = parts.filter(p => !p.llmOk).map(p => `${p.label}（${p.key}）: ${p.error}`)
       const html = await renderReportHtml({
         ctx: this.reportContext(),
         methodStats: st.scores!.methodStats,

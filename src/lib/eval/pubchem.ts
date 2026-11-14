@@ -72,6 +72,129 @@ export async function pubchemLookupName(name: string, signal?: AbortSignal): Pro
   return out
 }
 
+// ─── v2.7 配体详情（性质 + 2D 结构式）─────────────────────────────────────────
+
+/** PubChem 计算性质（报告配体卡扩展信息） */
+export interface PubChemDetail {
+  cid: number
+  title: string
+  formula: string
+  weight: number | null
+  iupacName?: string
+  /** 计算性质（无值字段缺省 — PUG REST 未提供时省略） */
+  xlogp?: number
+  tpsa?: number
+  hBondDonor?: number
+  hBondAcceptor?: number
+  rotatableBonds?: number
+  heavyAtoms?: number
+  exactMass?: number
+  charge?: number
+  inchiKey?: string
+  canonicalSmiles?: string
+}
+
+const PC_PROPS = 'MolecularFormula,MolecularWeight,IUPACName,Title,XLogP,TPSA,HBondDonorCount,HBondAcceptorCount,RotatableBondCount,HeavyAtomCount,ExactMass,Charge,InChIKey,ConnectivitySMILES'
+
+function parseDetail(p: Record<string, unknown> | undefined, fallbackTitle: string): PubChemDetail | null {
+  if (!p) return null
+  const cid = Number(p.CID)
+  const formula = typeof p.MolecularFormula === 'string' ? p.MolecularFormula.trim() : ''
+  if (!Number.isFinite(cid) || cid <= 0 || !formula) return null
+  const num = (v: unknown): number | undefined => {
+    const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
+    return Number.isFinite(n) ? Math.round(n * 100) / 100 : undefined
+  }
+  return {
+    cid,
+    title: typeof p.Title === 'string' && p.Title.trim() ? p.Title.trim().slice(0, 60) : fallbackTitle,
+    formula: formula.slice(0, 60),
+    weight: num(p.MolecularWeight) ?? null,
+    iupacName: typeof p.IUPACName === 'string' && p.IUPACName.trim() ? p.IUPACName.trim().slice(0, 200) : undefined,
+    xlogp: num(p.XLogP),
+    tpsa: num(p.TPSA),
+    hBondDonor: num(p.HBondDonorCount),
+    hBondAcceptor: num(p.HBondAcceptorCount),
+    rotatableBonds: num(p.RotatableBondCount),
+    heavyAtoms: num(p.HeavyAtomCount),
+    exactMass: num(p.ExactMass),
+    charge: num(p.Charge),
+    inchiKey: typeof p.InChIKey === 'string' && p.InChIKey.trim() ? p.InChIKey.trim().slice(0, 40) : undefined,
+    canonicalSmiles: typeof p.ConnectivitySMILES === 'string' && p.ConnectivitySMILES.trim() ? p.ConnectivitySMILES.trim().slice(0, 400) : undefined,
+  }
+}
+
+/** PubChem 计算性质（CID 或 InChIKey 输入命名空间共用；404/200 入缓存） */
+async function fetchPubChemDetail(
+  namespace: 'cid' | 'inchikey',
+  term: string | number,
+  signal?: AbortSignal,
+): Promise<PubChemDetail | null> {
+  const key = `pubchem:detail:${namespace}:${String(term).toLowerCase()}`
+  const hit = apiCache.get<PubChemDetail | null>(key)
+  if (hit !== undefined) return hit
+  let out: PubChemDetail | null = null
+  let definitive = false
+  try {
+    const res = await fetch(
+      `${PUG_BASE}/compound/${namespace}/${encodeURIComponent(String(term))}/property/${PC_PROPS}/JSON`,
+      { headers: { Accept: 'application/json' }, signal: signal ?? AbortSignal.timeout(12_000) },
+    )
+    if (res.status === 404) definitive = true
+    if (res.ok) {
+      definitive = true
+      const j = (await res.json()) as { PropertyTable?: { Properties?: Array<Record<string, unknown>> } }
+      out = parseDetail(j.PropertyTable?.Properties?.[0], String(term))
+    }
+  } catch {
+    out = null
+  }
+  if (definitive) apiCache.set(key, out)
+  return out
+}
+
+/** PubChem 计算性质（按 CID） */
+export function pubchemDetailByCid(cid: number, signal?: AbortSignal): Promise<PubChemDetail | null> {
+  return fetchPubChemDetail('cid', cid, signal)
+}
+
+/** PubChem 计算性质（按 InChIKey — RCSB 组分 → PubChem 匹配通道） */
+export function pubchemDetailByInchiKey(inchiKey: string, signal?: AbortSignal): Promise<PubChemDetail | null> {
+  return fetchPubChemDetail('inchikey', inchiKey.trim(), signal)
+}
+
+/**
+ * PubChem 2D 结构式（CID → PNG → data URI；报告内嵌用）。
+ * 磁盘缓存 db/cache/ligand2d/{cid}.png（化学结构不变 — 永久缓存）。
+ */
+export async function pubchem2dStructure(
+  cid: number,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (!Number.isFinite(cid) || cid <= 0) return undefined
+  const cacheDir = `${process.cwd()}/db/cache/ligand2d`
+  const file = `${cacheDir}/${cid}.png`
+  try {
+    const cached = await import('node:fs/promises').then(fs => fs.readFile(file))
+    if (cached.length > 300) return `data:image/png;base64,${cached.toString('base64')}`
+  } catch { /* 未缓存 */ }
+  try {
+    const res = await fetch(
+      `${PUG_BASE}/compound/cid/${cid}/PNG?image_size=300x300&record_type=2d`,
+      { signal: signal ?? AbortSignal.timeout(15_000) },
+    )
+    if (!res.ok) return undefined
+    const png = Buffer.from(await res.arrayBuffer())
+    if (png.length < 300 || !png.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))) return undefined
+    try {
+      await import('node:fs/promises').then(fs => fs.mkdir(cacheDir, { recursive: true }).then(() => fs.writeFile(file, png)))
+    } catch { /* 缓存失败不影响返回 */ }
+    return `data:image/png;base64,${png.toString('base64')}`
+  } catch {
+    return undefined
+  }
+}
+
 // ─── RCSB 化学检索（SMILES → 组分候选）───────────────────────────────────────
 
 export interface ChemCandidate {

@@ -663,6 +663,26 @@ export interface LigandResolution {
   structures: LigandStructureLite[]
   /** v2.2：PubChem 识别详情（无 PDB 对应组分时仍能给出分子式/MW/名称/CID） */
   pubchem?: { cid: number; iupacName?: string; smiles?: string }
+  /** v2.7：配体详情（PubChem 计算性质 + 2D 结构式 dataUri） */
+  detail?: LigandDetail
+}
+
+/** v2.7：PubChem 计算性质 + 2D 化学结构式（服务端 enrichLigandDetail 产出） */
+export interface LigandDetail {
+  cid?: number
+  iupacName?: string
+  xlogp?: number
+  tpsa?: number
+  hBondDonor?: number
+  hBondAcceptor?: number
+  rotatableBonds?: number
+  heavyAtoms?: number
+  exactMass?: number
+  charge?: number
+  inchiKey?: string
+  canonicalSmiles?: string
+  /** 2D 化学结构式（PubChem PNG，data URI） */
+  structure2d?: string
 }
 
 export interface AlphafoldSummaryInfo {

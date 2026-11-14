@@ -62,4 +62,6 @@ server.log
 /db/custom.db
 /db/custom.db-journal
 /db/cache/alphafold/
+/db/cache/ligand2d/
+/scripts/out/
 !/db/cache/3dmol.min.js

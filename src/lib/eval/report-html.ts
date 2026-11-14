@@ -540,10 +540,31 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const blastRan = ctx.blastStatus && (ctx.blastStatus.status === 'ok' || ctx.blastStatus.status === 'no-hits')
   const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus)
   const ligNo = (ctx.ligands?.length ?? 0) > 0 ? nextNo() : ''
+  /** v2.7：配体详情展示构件（PubChem 计算性质 + 2D 结构式） */
+  const ligDetailProps = (d: { xlogp?: number; tpsa?: number; hBondDonor?: number; hBondAcceptor?: number; rotatableBonds?: number; heavyAtoms?: number; exactMass?: number; charge?: number }) => {
+    const items: string[] = []
+    if (d.xlogp != null) items.push(`XLogP <b>${d.xlogp}</b>`)
+    if (d.tpsa != null) items.push(`TPSA <b>${d.tpsa} Å²</b>`)
+    if (d.hBondDonor != null) items.push(`氢供体 <b>${d.hBondDonor}</b>`)
+    if (d.hBondAcceptor != null) items.push(`氢受体 <b>${d.hBondAcceptor}</b>`)
+    if (d.rotatableBonds != null) items.push(`可旋转键 <b>${d.rotatableBonds}</b>`)
+    if (d.heavyAtoms != null) items.push(`重原子 <b>${d.heavyAtoms}</b>`)
+    if (d.exactMass != null) items.push(`精确质量 <b>${d.exactMass}</b>`)
+    if (d.charge != null && d.charge !== 0) items.push(`形式电荷 <b>${d.charge > 0 ? '+' : ''}${d.charge}</b>`)
+    return items.length ? items.map(i => `<span>${i}</span>`).join('') : ''
+  }
+  const ligStructFig = (l: { detail?: { structure2d?: string; cid?: number } }) => l.detail?.structure2d
+    ? `<figure class="lig-struct"><img src="${l.detail.structure2d}" alt="2D 化学结构式"><figcaption>2D 结构式 · PubChem${l.detail.cid ? ` · CID ${l.detail.cid}` : ''}</figcaption></figure>`
+    : ''
+  const ligIdentFold = (l: { detail?: { inchiKey?: string; canonicalSmiles?: string } }) => {
+    const d = l.detail
+    if (!d?.inchiKey && !d?.canonicalSmiles) return ''
+    return `<details class="fold lig-fold"><summary>结构标识符（InChIKey / SMILES）</summary><div class="lig-ident">${d.inchiKey ? `<div><b>InChIKey</b> <span class="mono">${esc(d.inchiKey)}</span></div>` : ''}${d.canonicalSmiles ? `<div><b>Canonical SMILES</b> <span class="mono">${esc(d.canonicalSmiles)}</span></div>` : ''}</div></details>`
+  }
   const ligandSecHtml = (ctx.ligands?.length ?? 0) > 0 ? `
   <section class="sec" id="ligands">
     <h2><span class="sec-no">${ligNo}</span><span class="sec-title">配体研究数据</span><span class="sec-en">Ligands · ${ctx.ligands!.filter(l => l.ok).length}/${ctx.ligands!.length}</span></h2>
-    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / PubChem / AI 兜底）映射为 RCSB 化学组分 ID；PDB 无对应组分时以 PubChem 详情（CID / 分子式 / MW / IUPAC 名）成卡。结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为本靶点直接结构的条目。</p>
+    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / PubChem / AI 兜底）映射为 RCSB 化学组分 ID；PDB 无对应组分时以 PubChem 详情（CID / 分子式 / MW / IUPAC 名）成卡。结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为本靶点直接结构的条目；计算性质与 2D 化学结构式来自 PubChem。</p>
     <div class="lig-grid">
     ${ctx.ligands!.map(l => {
       if (!l.ok) return `
@@ -551,14 +572,22 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
         <div class="lig-head"><span class="lig-id lig-id-fail">?</span><span class="lig-name">${esc(l.raw.length > 40 ? l.raw.slice(0, 39) + '…' : l.raw)}</span></div>
         <div class="lig-meta"><span>未能归一 — ${esc(l.error ?? '未知原因')}</span></div>
       </div>`
-      // v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡
+      const d = l.detail
+      const propsHtml = d ? ligDetailProps(d) : ''
+      const structFig = ligStructFig(l)
+      const identFold = ligIdentFold(l)
+      // v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡（v2.7 + 性质/结构式）
       if (!l.compId) {
         const pc = l.pubchem
+        const cid = d?.cid ?? pc?.cid
         return `
       <div class="lig-card">
+        <div class="lig-main">
+        ${structFig}
+        <div class="lig-info">
         <div class="lig-head">
-          ${pc
-            ? `<a class="lig-id lig-id-pc" href="https://pubchem.ncbi.nlm.nih.gov/compound/${pc.cid}" target="_blank" rel="noopener" title="在 PubChem 查看化合物详情">CID ${pc.cid}</a>`
+          ${cid
+            ? `<a class="lig-id lig-id-pc" href="https://pubchem.ncbi.nlm.nih.gov/compound/${cid}" target="_blank" rel="noopener" title="在 PubChem 查看化合物详情">CID ${cid}</a>`
             : `<span class="lig-id lig-id-pc">已识别</span>`}
           <span class="lig-name">${esc(l.name || l.raw)}</span>
           <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(strategyZh(l.strategy))}${l.source === 'eval-table' ? ' · 评估表' : l.source === 'file' ? ' · 文件' : ''}</span>
@@ -567,7 +596,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
           <span>分子式 <b>${esc(l.formula || '—')}</b></span>
           ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
         </div>
-        ${pc?.iupacName ? `<div class="lig-iupac">IUPAC 名 ${esc(pc.iupacName)}</div>` : ''}
+        ${propsHtml ? `<div class="lig-props">${propsHtml}</div>` : ''}
+        ${(d?.iupacName ?? pc?.iupacName) ? `<div class="lig-iupac">IUPAC 名 ${esc((d?.iupacName ?? pc?.iupacName) ?? '')}</div>` : ''}
+        ${identFold}
+        </div>
+        </div>
         <div class="lig-pdbs lig-none">PDB 化学组分库无对应条目 — 已通过 PubChem 识别，点击 CID 查看化合物详情</div>
       </div>`
       }
@@ -577,6 +610,9 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       ).join('')
       return `
       <div class="lig-card">
+        <div class="lig-main">
+        ${structFig}
+        <div class="lig-info">
         <div class="lig-head">
           <span class="lig-id">${esc(l.compId)}</span>
           <span class="lig-name">${esc(l.name || l.raw)}</span>
@@ -587,6 +623,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
           ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
           <span>含该配体结构 <b>${l.totalStructures}</b> 个</span>
           ${best != null ? `<span>最佳分辨率 <b>${best.toFixed(2)} Å</b></span>` : ''}
+        </div>
+        ${propsHtml ? `<div class="lig-props">${propsHtml}</div>` : ''}
+        ${(d?.iupacName ?? l.pubchem?.iupacName) ? `<div class="lig-iupac">IUPAC 名 ${esc((d?.iupacName ?? l.pubchem?.iupacName) ?? '')}</div>` : ''}
+        ${identFold}
+        </div>
         </div>
         ${l.structures.length ? `
         <div class="lig-pdbs">${chips}${l.totalStructures > 12 ? `<span class="lig-more">+${l.totalStructures - 12}</span>` : ''}</div>` : `<div class="lig-pdbs lig-none">暂无含该配体的 PDB 结构记录</div>`}
@@ -1137,9 +1178,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .fig-group { margin:18px 0 4px !important; font-size:14.5px !important; color:#064e3b; display:flex; align-items:baseline; gap:8px; }
   .fig-group-count { font-family:var(--mono); font-size:10.5px; font-weight:500; color:var(--faint); letter-spacing:1px; }
 
-  /* ── 报告头图与元信息并排（v2.0 AlphaFold；v2.2 截图去白边后上提 + 放大）── */
+  /* ── 报告头图与元信息并排（v2.0 AlphaFold；v2.2 截图去白边；v2.7 图上提与标题齐平）──
+   *  头部双栏：左栏 = 眉标/标题/副标/蛋白信息/徽标，右栏 = AlphaFold 头图顶端对齐 —
+   *  图不再挂在蛋白信息下方（原来信息栏下方留出大片空白）。移动端 (<720px) 上下堆叠。 */
   .rpt-headflex { display:flex; gap:26px; align-items:flex-start; }
-  .rpt-headflex .meta-grid { flex:1 1 auto; }
+  .rpt-headtxt { flex:1 1 auto; min-width:0; }
   .af-fig { flex:0 0 320px; margin:0; text-align:center; align-self:flex-start; }
   .af-fig img { display:block; width:320px; max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; padding:4px; box-shadow:0 1px 3px rgba(28,25,23,.06); }
   .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
@@ -1147,10 +1190,15 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .af-fig figcaption a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
   @media (max-width:720px){ .rpt-headflex{flex-direction:column} .af-fig{flex-basis:auto; width:100%; max-width:400px; margin:0 auto} }
 
-  /* ── 配体卡（v2.0）── */
-  .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:14px; margin-top:8px; }
+  /* ── 配体卡（v2.0；v2.7 + 2D 结构式与计算性质双栏卡）── */
+  .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(400px,1fr)); gap:14px; margin-top:8px; }
   .lig-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:14px 18px; break-inside:avoid; }
   .lig-fail { border-style:dashed; opacity:.78; }
+  .lig-main { display:flex; gap:14px; align-items:flex-start; }
+  .lig-struct { flex:0 0 150px; margin:0; text-align:center; }
+  .lig-struct img { display:block; width:150px; height:150px; object-fit:contain; background:#fff; border:1px solid var(--line); border-radius:4px; padding:3px; box-shadow:0 1px 2px rgba(28,25,23,.05); }
+  .lig-struct figcaption { margin-top:5px; font-size:9.5px; line-height:1.5; color:var(--faint); font-family:var(--mono); }
+  .lig-info { flex:1 1 auto; min-width:0; }
   .lig-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
   .lig-id { font-family:var(--mono); font-size:14.5px; font-weight:700; color:#065f46; background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; }
   .lig-id-fail { color:#92400e; background:#fffbeb; border-color:#fde68a; }
@@ -1160,6 +1208,12 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .lig-src { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--faint); letter-spacing:.4px; }
   .lig-meta { display:flex; flex-wrap:wrap; gap:4px 16px; margin-top:9px; font-size:11.5px; color:var(--sub); }
   .lig-meta b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .lig-props { display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:8px; padding-top:8px; border-top:1px dashed var(--hairline); font-size:11px; color:var(--sub); }
+  .lig-props b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .lig-fold { margin:8px 0 0; }
+  .lig-ident { font-size:11px; color:var(--sub); line-height:1.9; overflow-wrap:anywhere; }
+  .lig-ident b { color:var(--ink); font-weight:600; margin-right:4px; }
+  .lig-ident .mono { font-size:10px; color:var(--sub); }
   .lig-pdbs { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; padding-top:10px; border-top:1px dashed var(--hairline); }
   .lig-pdbs a { font-family:var(--mono); font-size:10.5px; font-weight:600; color:var(--accent); background:var(--accent-bg); border:1px solid #c7ece0; border-radius:3px; padding:1px 8px; text-decoration:none; white-space:nowrap; }
   .lig-pdbs a i { font-style:normal; color:var(--faint); font-weight:400; margin-left:3px; }
@@ -1167,6 +1221,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .lig-pdbs a:hover { background:#d9f5e8; }
   .lig-more { align-self:center; font-family:var(--mono); font-size:10.5px; color:var(--faint); }
   .lig-none { font-size:12px; color:var(--faint); border-top:1px dashed var(--hairline); margin-top:10px; padding-top:8px; }
+  @media (max-width:560px){ .lig-main{flex-direction:column; align-items:center} .lig-info{align-self:stretch} .lig-struct{flex-basis:auto} }
 
   /* ── 页脚 ── */
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:var(--mono); }
@@ -1177,10 +1232,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
 <div class="page" id="top">
 
   <header class="rpt-head">
+    <div class="rpt-headflex">
+    <div class="rpt-headtxt">
     <div class="rpt-eyebrow">TargetEval · Structure Feasibility Report</div>
     <h1 class="rpt-title">${esc(proteinTitle)}</h1>
     <div class="rpt-subtitle">蛋白靶点结构解析可行性评估报告</div>
-    <div class="rpt-headflex">
     <div class="meta-grid">
       <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : '—（序列直接输入）'}</div>
       <div><b>蛋白名称</b> ${esc(u?.proteinName ?? '—')}</div>
@@ -1193,11 +1249,14 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
       <div><b>报告日期</b> ${dateStr}</div>
     </div>
-    ${afFigureHtml}
-    </div>
     <div class="rpt-badges">
       <span class="badge">数据源：UniProt · RCSB · PDBe${blastRan ? (ctx.blastStatus?.provider === 'rcsb' ? ' · RCSB 序列检索' : ' · BLAST') : ''}${ctx.literature.length ? ' · PubMed' : ''}</span>
-      ${input.llmOk ? '<span class="badge">LLM 分析：已完成</span>' : '<span class="badge amber">LLM 分析：失败（见数据区块）</span>'}
+      ${input.llmOk
+        ? (input.llmErrors.length ? '<span class="badge amber">LLM 分析：部分完成（有章节缺失）</span>' : '<span class="badge">LLM 分析：已完成</span>')
+        : '<span class="badge amber">LLM 分析：失败（见数据区块）</span>'}
+    </div>
+    </div>
+    ${afFigureHtml}
     </div>
   </header>
 
@@ -1217,7 +1276,13 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     </ol>
   </nav>
 
-  ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点，可稍后重试生成。</div>`}
+  ${input.llmErrors.length ? (() => {
+    const shown = input.llmErrors.slice(0, 3).map(esc).join('；')
+    const more = input.llmErrors.length > 3 ? `；等共 ${input.llmErrors.length} 章` : ''
+    return input.llmOk
+      ? `<div class="warn-box">部分 LLM 章节未能生成（${shown}${more}）— 报告相应章节缺失，其余章节正常；可重新评估补全。</div>`
+      : `<div class="warn-box">LLM 分析生成失败（${shown}${more || '；未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点，可稍后重试生成。</div>`
+  })() : ''}
 
   <section class="sec" id="llm">
     <h2>${secHead(llmNo, '评估分析', 'Analysis')}</h2>

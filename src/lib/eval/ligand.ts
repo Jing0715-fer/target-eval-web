@@ -25,7 +25,7 @@ import { llmChat } from './llm'
 import { apiCache } from './cache'
 import { LIGAND_JUNK_IDS } from './ligand-parse'
 import { cutFormTemplateTail } from './types'
-import { pubchemLookupName, rcsbChemicalCandidates, type PubChemCompound } from './pubchem'
+import { pubchemLookupName, rcsbChemicalCandidates, pubchemDetailByCid, pubchemDetailByInchiKey, pubchem2dStructure, type PubChemCompound, type PubChemDetail } from './pubchem'
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -66,6 +66,27 @@ export interface LigandResolution {
   structures: LigandStructureLite[]
   /** v2.2：PubChem 识别详情（无 PDB 对应时仍能给出分子式/MW/名称/CID） */
   pubchem?: { cid: number; iupacName?: string; smiles?: string }
+  /** v2.7：配体详情（计算性质 + 2D 结构式 — enrichLigandDetail 填充，报告配体卡展示） */
+  detail?: LigandDetail
+}
+
+/** v2.7：PubChem 计算性质 + 2D 结构式（enrichLigandDetail 产出） */
+export interface LigandDetail {
+  /** PubChem CID（有则可得结构式图） */
+  cid?: number
+  iupacName?: string
+  xlogp?: number
+  tpsa?: number
+  hBondDonor?: number
+  hBondAcceptor?: number
+  rotatableBonds?: number
+  heavyAtoms?: number
+  exactMass?: number
+  charge?: number
+  inchiKey?: string
+  canonicalSmiles?: string
+  /** 2D 化学结构式（PubChem PNG，data URI；未获取时缺省） */
+  structure2d?: string
 }
 
 // ─── 别名表（id 与名称均经 RCSB chemcomp 官方核实，2026-11）────────────────
@@ -189,6 +210,38 @@ export async function fetchChemComp(id: string): Promise<ChemCompInfo | null> {
   } catch {
     return null
   }
+}
+
+/** RCSB 化学组分 InChIKey（descriptor；PDB 组分 → PubChem 匹配通道用） */
+export async function fetchChemCompInchiKey(compId: string, signal?: AbortSignal): Promise<string | null> {
+  const key = `ligand:chemik:${compId.toUpperCase()}`
+  const hit = apiCache.get<string | null>(key)
+  if (hit !== undefined) return hit
+  let out: string | null = null
+  let definitive = false
+  try {
+    const res = await fetch(`https://data.rcsb.org/rest/v1/core/chemcomp/${encodeURIComponent(compId.toUpperCase())}`, {
+      headers: { Accept: 'application/json' },
+      signal: signal ?? AbortSignal.timeout(12_000),
+    })
+    if (res.status === 404) definitive = true
+    if (res.ok) {
+      definitive = true
+      const j = (await res.json()) as {
+        pdbx_chem_comp_descriptor?: Array<{ type?: string; descriptor?: string }>
+      }
+      for (const d of j.pdbx_chem_comp_descriptor ?? []) {
+        if (d.type === 'InChIKey' && typeof d.descriptor === 'string' && /^[A-Z\-]{14,30}$/.test(d.descriptor.trim())) {
+          out = d.descriptor.trim()
+          break
+        }
+      }
+    }
+  } catch {
+    out = null
+  }
+  if (definitive) apiCache.set(key, out)
+  return out
 }
 
 interface SolrDoc {
@@ -554,6 +607,51 @@ export async function fetchLigandStructures(
     return a.resolution - b.resolution
   })
   return { total: r.numFound, structures: list }
+}
+
+// ─── v2.7 配体详情（PubChem 计算性质 + 2D 结构式）─────────────────────────
+
+/** 就地充实 LigandResolution.detail（幂等 — 已有 detail 直接返回） */
+export async function enrichLigandDetail(res: LigandResolution, signal?: AbortSignal): Promise<void> {
+  if (res.detail) return
+  const target: LigandDetail = {}
+  let cid = res.pubchem?.cid
+  let detail: PubChemDetail | null = null
+  try {
+    if (cid) {
+      detail = await pubchemDetailByCid(cid, signal)
+    } else if (res.compId) {
+      // PDB 组分 → InChIKey → PubChem（同一化学实体的性质与结构式）
+      const ik = await fetchChemCompInchiKey(res.compId, signal)
+      if (ik) {
+        detail = await pubchemDetailByInchiKey(ik, signal)
+        if (!detail?.inchiKey) target.inchiKey = ik
+      }
+    }
+  } catch { /* 详情链路失败不阻塞主流程 */ }
+  if (detail) {
+    cid = detail.cid
+    target.cid = detail.cid
+    if (detail.iupacName) target.iupacName = detail.iupacName
+    if (detail.xlogp != null) target.xlogp = detail.xlogp
+    if (detail.tpsa != null) target.tpsa = detail.tpsa
+    if (detail.hBondDonor != null) target.hBondDonor = detail.hBondDonor
+    if (detail.hBondAcceptor != null) target.hBondAcceptor = detail.hBondAcceptor
+    if (detail.rotatableBonds != null) target.rotatableBonds = detail.rotatableBonds
+    if (detail.heavyAtoms != null) target.heavyAtoms = detail.heavyAtoms
+    if (detail.exactMass != null) target.exactMass = detail.exactMass
+    if (detail.charge != null) target.charge = detail.charge
+    if (detail.inchiKey) target.inchiKey = detail.inchiKey
+    if (detail.canonicalSmiles) target.canonicalSmiles = detail.canonicalSmiles
+  }
+  if (cid) {
+    try {
+      const img = await pubchem2dStructure(cid, signal)
+      if (img) target.structure2d = img
+    } catch { /* 结构式失败不影响性质 */ }
+  }
+  // 有实质内容才挂 detail（空对象无展示价值）
+  if (target.cid || target.inchiKey || target.structure2d) res.detail = target
 }
 
 // ─── 评估表配体识别（字典扫描；LLM 提取由 docx-llm 负责）──────────────────

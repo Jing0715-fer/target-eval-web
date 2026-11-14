@@ -1,7 +1,8 @@
 /**
  * LLM 评估报告编排 — 相对原项目的优化：
- *  1. 三段式生成（摘要/背景 → 结构研究全景 → 可行性与策略），每段独立调用，
- *     输入输出体积受限，稳定性与内存占用优于单次超长调用
+ *  1. 分章生成（v2.7：执行摘要/目标可行性/…/总结共 10 章，见 REPORT_CHAPTERS），
+ *     每章独立调用，单章生成时长可控地落在分段预算内（v2.6 三段式 1300-2100 字/段
+ *     在 ~50s 段预算内频繁超时 aborted），输入输出体积受限，稳定性与内存占用更优
  *  2. 确定性数据（PDB 表/文献列表/评分/胶图）由模板直接渲染，杜绝 LLM 幻觉
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
@@ -341,36 +342,47 @@ function buildDigest(ctx: ReportContext): string {
   return lines.join('\n')
 }
 
-// ─── 三段式生成 ───────────────────────────────────────────────────────────────
+// ─── 分章生成（v2.7：原三段 A/B/C 拆为 10 个章节级调用）──────────────────────
+//
+//  背景：v2.6 分段模式下单段 LLM 调用超时钳制在段预算内（~50s）；原三段式每段
+//  1300-2100 字的生成时长频繁超过该预算（部署站点三段全部 aborted → 报告退
+//  化为规则兜底）。v2.7 拆为章节级调用（200-800 字/章）：单章生成时长可控
+//  地落在段预算内；已完成章节随 checkpoint 续跑保留，失败章节下一段整预
+//  算自动重试（同章连续 3 次失败由调用方 giveUp 接受缺章，防慢引擎无限循环）。
 
-export interface ReportPart { key: string; markdown: string; llmOk: boolean; error?: string }
+export interface ReportPart { key: string; label: string; markdown: string; llmOk: boolean; error?: string }
 
-async function callPart(name: string, instruction: string, digest: string, signal?: AbortSignal): Promise<ReportPart> {
+async function callPart(key: string, label: string, instruction: string, digest: string, signal?: AbortSignal): Promise<ReportPart> {
   const prompt = `${digest}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━
 基于以上数据上下文，${instruction}`
   const r = await llmChat(prompt, SYSTEM, signal)
-  return { key: name, markdown: r.ok ? r.text : '', llmOk: r.ok, error: r.error }
+  return { key, label, markdown: r.ok ? r.text : '', llmOk: r.ok, error: r.error }
 }
 
-/** 第一段：执行摘要 + 客户目标可行性 + 生物学背景 */
-function partAInstruction(ctx: ReportContext): string {
-  const questions = ctx.insights?.scientificQuestions ?? []
-  const qLine = questions.length
-    ? `- **待解决科学问题**：逐条列出评估表提取到的科学问题（共 ${questions.length} 条），并逐条回应其从结构解析角度的可回答性与难度\n`
-    : ''
+/** A1 执行摘要 */
+function chA1(ctx: ReportContext): string {
   const mwLine = ctx.mwAugment?.applicable
     ? `，并一句话点明分子量结论（单体 ~${ctx.mwAugment.monomerKda} kDa${ctx.mwAugment.assemblyKda != null ? `，装配后 ~${ctx.mwAugment.assemblyKda} kDa${ctx.mwAugment.assemblyPath === 'homolog-complex' ? '（同源复合物推断）' : ''}` : '，无生物装配增重路径'} — 对方法选择的影响）`
     : ''
   const itxLine = ctx.interaction?.applicable && ctx.interaction.hasEvidence
     ? `；无直接/同源结构时点明互作复合物证据（${ctx.interaction.complexes[0] ? `${ctx.interaction.complexes[0].complexAc} curated 复合物${ctx.interaction.complexes[0].componentsWithStructure > 0 ? '，其他组分有结构' : ''}${ctx.interaction.complexes[0].sharedPdbTotal ? `（含 ${ctx.interaction.complexes[0].sharedPdbTotal} 个共有结构 — 组分共组装先例）` : ''}` : 'binary 互作伙伴有结构'} — 是本评估的结构证据基础）`
     : ''
-  return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
+  return `撰写报告的「执行摘要」一章（以 ## 执行摘要 开头，仅输出这一章，不要输出其他章节）：
 
 ## 执行摘要
 - 3-4 段：第一段直接给出总体结论（该靶点结构解析可行性如何、推荐什么方法）${ctx.oligomer ? '，并点明聚集形式判定（' + (ctx.oligomer.label || ctx.oligomer.summary.split('—')[0].trim()) + '）及其对方法选择的影响' : ''}${mwLine}${itxLine}；第二段概括已有结构研究情况（引用具体数字，无直接结构时说明结构证据的实际来源）；第三段概括客户目标的达成路径与主要风险；第四段一句话给出明确的下一步建议${ctx.batchNote ? '，并用 1-2 句说明本项目在同批次多靶点中的定位（独立项目/复合物相关）' : ''}
-- 篇幅 400-600 字
+- 篇幅 350-550 字`
+}
+
+/** A2 客户目标与可行性结论 */
+function chA2(ctx: ReportContext): string {
+  const questions = ctx.insights?.scientificQuestions ?? []
+  const qLine = questions.length
+    ? `- **待解决科学问题**：逐条列出评估表提取到的科学问题（共 ${questions.length} 条），并逐条回应其从结构解析角度的可回答性与难度\n`
+    : ''
+  return `撰写报告的「客户目标与可行性结论」一章（以 ## 客户目标与可行性结论 开头，仅输出这一章，不要输出其他章节）：
 
 ## 客户目标与可行性结论
 - 先逐字重述客户目标（未提供则写"通用结构解析可行性评估"）
@@ -378,23 +390,23 @@ ${qLine}- **可行性结论**：直接给出分级（高/中/低）并用一段�
 - **关键依据**：3-5 条列表，每条引用具体数据（PDB 数量/覆盖率/最佳分辨率/同源 identity/文献证据）
 - **主要风险**：2-4 条列表（构象柔性/覆盖空白/表达纯化难度/竞争风险等，基于数据判断）
 - **达成建议**：1-2 段，给出最可行的切入角度
-- 篇幅 500-800 字${questions.length ? '（含科学问题逐条回应）' : ''}
+- 篇幅 400-600${questions.length ? '（含科学问题逐条回应）' : ''} 字（宁精炼勿超长）`
+}
+
+/** A3 靶点生物学背景 */
+function chA3(): string {
+  return `撰写报告的「靶点生物学背景」一章（以 ## 靶点生物学背景 开头，仅输出这一章，不要输出其他章节）：
 
 ## 靶点生物学背景
 - ### 功能与机制（基于功能注释与文献，2-3 段）
 - ### 疾病与成药关联（引用文献标题证据；无数据则明确说明）
 - ### 亚细胞定位与组织表达（基于定位注释，1 段）
-- 篇幅 500-700 字`
+- 篇幅 400-600 字`
 }
 
-/** 第二段：已有结构研究全景（强化模块） */
-function partBInstruction(ctx: ReportContext): string {
-  const itxB = ctx.interaction?.applicable && ctx.interaction.hasEvidence
-    ? ctx.interaction.complexes.some(c => c.componentsWithStructure > 0)
-      ? `\n- 本靶点无直接结构，但互作复合物（Complex Portal curated）其他组分有结构：在本章「同源结构分析」中改以「复合物组分结构参考」展开 — 各组分（基因名/PDB/分辨率）对靶点构建设计（边界借鉴）与组装策略（化学计量、共表达组合）的参考价值；组分结构不能替代靶点自身结构，需明确区分`
-      : `\n- 本靶点无直接结构与同源结构，仅有互作证据（IntAct binary 伙伴/curated 复合物无组分结构）：如实说明结构证据缺位，基于 SUBUNIT 注释与互作伙伴讨论复合物组装可能性`
-    : ''
-  return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
+/** B1 已有结构研究全景（核心章节） */
+function chB1(): string {
+  return `撰写报告的「已有结构研究全景」一章（以 ## 已有结构研究全景 开头，仅输出这一章，不要输出其他章节）：
 
 ## 已有结构研究全景
 这是本报告的核心章节，要求"尽量全面总结已有结构的研究情况"，按以下小节展开：
@@ -403,28 +415,39 @@ function partBInstruction(ctx: ReportContext): string {
 - ### 构象状态与配体覆盖：已覆盖哪些配体结合态/突变体/复合物形式，哪些状态仍缺失（基于配体列表与结构标题推断，禁止编造）
 - ### 聚集形式与装配状态：引用「蛋白聚集形式（寡聚态）分析」的判定（类别/化学计量/置信度）与证据链（已有结构 → 同源结构 → UniProt interaction → 文献），说明该靶点以何种装配形式发挥功能、已有结构以何种形式解析、以及对结构解析策略的具体影响（组装界面保留/有效分子量与三方法适配/SEC-MALS 组装验证/共表达 vs 体外组装）；证据不足处如实说明
 - ### 结构覆盖与空白区：覆盖区间 vs 未覆盖区间（引用具体区间号），分析空白区可能的生物学意义（如无序区/跨膜区/末端结构域）与研究机会
-- 篇幅 700-1000 字
+- 篇幅 500-750 字（硬上限 750 字 — 宁精炼勿超长）`
+}
+
+/** B2 同源结构分析 */
+function chB2(ctx: ReportContext): string {
+  const itxB = ctx.interaction?.applicable && ctx.interaction.hasEvidence
+    ? ctx.interaction.complexes.some(c => c.componentsWithStructure > 0)
+      ? `\n- 本靶点无直接结构，但互作复合物（Complex Portal curated）其他组分有结构：在本章中以「复合物组分结构参考」展开 — 各组分（基因名/PDB/分辨率）对靶点构建设计（边界借鉴）与组装策略（化学计量、共表达组合）的参考价值；组分结构不能替代靶点自身结构，需明确区分`
+      : `\n- 本靶点无直接结构与同源结构，仅有互作证据（IntAct binary 伙伴/curated 复合物无组分结构）：如实说明结构证据缺位，基于 SUBUNIT 注释与互作伙伴讨论复合物组装可能性`
+    : ''
+  return `撰写报告的「同源结构分析」一章（以 ## 同源结构分析 开头，仅输出这一章，不要输出其他章节）：
 
 ## 同源结构分析
 - 基于 BLAST 命中（若有）：identity 梯度分析、跨物种/旁系同源情况、对目标蛋白结构解析的参考价值（可作为分子置换模型/ Cryo-EM 初始模型/域边界参考）
 - 若无 BLAST 数据，说明本次未运行或无命中，并给出基于直接结构的替代分析${itxB}
-- 篇幅 300-500 字
+- 篇幅 250-450 字`
+}
+
+/** B3 关键文献证据综合 */
+function chB3(): string {
+  return `撰写报告的「关键文献证据综合」一章（以 ## 关键文献证据综合 开头，仅输出这一章，不要输出其他章节）：
 
 ## 关键文献证据综合
 - 按主题（结构机制/抑制剂的发现/疾病遗传学/方法学）归类综合文献证据，每条引用 PMID
 - 指出文献证据支持的结论与尚存的空白
-- 篇幅 300-500 字`
+- 篇幅 250-450 字`
 }
 
-/** 第三段：实验数据评估 + 可行性矩阵 + 方案（强化模块） */
-function partCInstruction(ctx: ReportContext): string {
+/** C1 实验数据评估（客户评估表） */
+function chC1(ctx: ReportContext): string {
   const hasImages = ctx.images.length > 0
   const expText = ctx.insights?.experimentalSummary
-  const cmp = ctx.providedSequence?.comparison
-  const itxC = ctx.interaction?.applicable && ctx.interaction.hasEvidence
-    ? `\n- 互作复合物路线（无直接结构时的核心路径）：${ctx.interaction.complexes[0] ? `Complex Portal curated 复合物 ${ctx.interaction.complexes[0].complexAc}（${ctx.interaction.complexes[0].componentsWithStructure}/${ctx.interaction.complexes[0].components.length - 1} 个其他组分有结构${ctx.interaction.complexes[0].assemblyKda != null ? `，装配 ~${ctx.interaction.complexes[0].assemblyKda} kDa` : ''}）` : 'IntAct binary 互作伙伴有结构'} — 给出复合物组装路线（共表达组合/体外组装顺序/化学计量验证 SEC-MALS）与单体路线的优先级比对；组分结构用作构建边界参考；说明该路线与客户目的是否契合（需要靶点单独结构时复合物路线为间接路径）`
-    : ''
-  return `撰写报告的以下三章（以 ## 开头，顺序输出，不要输出其他章节）：
+  return `撰写报告的「实验数据评估」一章（以 ## 实验数据评估 开头，仅输出这一章，不要输出其他章节）：
 
 ## 实验数据评估${hasImages ? '（客户评估表）' : ''}
 ${hasImages
@@ -444,13 +467,27 @@ ${ctx.images.map(i => {
 - 篇幅 250-400 字`
       : `- 客户未上传评估表实验数据，说明无法评估当前样品状态
 - 列出结构解析前的标准样品质控清单（SDS-PAGE 纯度、SEC 单分散性、DLS、热稳定性 DSF 等）与各项的判定标准
-- 篇幅 200-300 字`}
+- 篇幅 200-300 字`}`
+}
+
+/** C2 结构解析可行性评估 */
+function chC2(ctx: ReportContext): string {
+  return `撰写报告的「结构解析可行性评估」一章（以 ## 结构解析可行性评估 开头，仅输出这一章，不要输出其他章节）：
 
 ## 结构解析可行性评估
 - ### 三方法对比矩阵：用 Markdown 表格对比 X-ray / Cryo-EM / NMR 在本靶点上的适配性，行维度至少包括：分子量适配、可结晶性/成象条件、已有成功先例、构象异质性处理、预计周期、综合评分（引用系统评分）${ctx.mwAugment?.applicable ? '\n- 分子量维度（小分子量靶点）：Cryo-EM 的「分子量适配」按装配有效分子量（~' + (ctx.mwAugment.assemblyKda ?? ctx.mwAugment.monomerKda) + ' kDa' + (ctx.mwAugment.assemblyPath === 'homolog-complex' ? '，同源复合物推断 — 需组装验证' : ctx.mwAugment.assemblyKda == null ? '，无生物装配路径 — 需技术增重' : '') + '）评估而非单体分子量；X-ray/NMR 行说明分子量对其影响的差异（增重对 NMR 无益、对 X-ray 非瓶颈）' : ''}
 - ### 评分依据解读：逐方法解释系统评分的含义（引用评分依据文本），哪些因素是加分项/减分项${ctx.mwAugment?.applicable ? '；Cryo-EM 评分中的「分子量维度」调整（' + (ctx.scores.mwAugmentAdjust ? ctx.scores.mwAugmentAdjust.note : '无') + '）需明确解读' : ''}
-- ### 推荐技术路线：明确给出第一推荐方法与理由、备选方法与触发条件（如 X-ray 失败多少轮后转 Cryo-EM）${ctx.mwAugment?.applicable ? '\n- 增重路径优先级：生理装配（寡聚/复合物，已有结构先例）→ 同源复合物（BLAST 推断，identity 按高低取舍，共表达/体外组装前需 pull-down/SPR 验证互作）→ 互作伙伴复合物（无结构先例，需共表达/体外组装与 SEC-MALS 验证）→ 技术组分（Fab/nanobody/MBP/ferritin 支架）；逐条回应「与客户目的的比对」中的契合/需注意/冲突条目（加入的蛋白是否改变研究对象/锁定构象/遮蔽界面）' : ''}${itxC}
-- 篇幅 500-800 字
+- ### 推荐技术路线：明确给出第一推荐方法与理由、备选方法与触发条件（如 X-ray 失败多少轮后转 Cryo-EM）${ctx.mwAugment?.applicable ? '\n- 增重路径优先级：生理装配（寡聚/复合物，已有结构先例）→ 同源复合物（BLAST 推断，identity 按高低取舍，共表达/体外组装前需 pull-down/SPR 验证互作）→ 互作伙伴复合物（无结构先例，需共表达/体外组装与 SEC-MALS 验证）→ 技术组分（Fab/nanobody/MBP/ferritin 支架）；逐条回应「与客户目的的比对」中的契合/需注意/冲突条目（加入的蛋白是否改变研究对象/锁定构象/遮蔽界面）' : ''}
+- 篇幅 400-600 字（宁精炼勿超长）`
+}
+
+/** C3 实验方案建议 */
+function chC3(ctx: ReportContext): string {
+  const cmp = ctx.providedSequence?.comparison
+  const itxC = ctx.interaction?.applicable && ctx.interaction.hasEvidence
+    ? `\n- 互作复合物路线（无直接结构时的核心路径）：${ctx.interaction.complexes[0] ? `Complex Portal curated 复合物 ${ctx.interaction.complexes[0].complexAc}（${ctx.interaction.complexes[0].componentsWithStructure}/${ctx.interaction.complexes[0].components.length - 1} 个其他组分有结构${ctx.interaction.complexes[0].assemblyKda != null ? `，装配 ~${ctx.interaction.complexes[0].assemblyKda} kDa` : ''}）` : 'IntAct binary 互作伙伴有结构'} — 给出复合物组装路线（共表达组合/体外组装顺序/化学计量验证 SEC-MALS）与单体路线的优先级比对；组分结构用作构建边界参考；说明该路线与客户目的是否契合（需要靶点单独结构时复合物路线为间接路径）`
+    : ''
+  return `撰写报告的「实验方案建议」一章（以 ## 实验方案建议 开头，仅输出这一章，不要输出其他章节）：
 
 ## 实验方案建议
 - ### 构建设计：${cmp
@@ -459,12 +496,31 @@ ${ctx.images.map(i => {
       : '基于结构域特征与覆盖空白，建议截短边界（引用具体区间号）、标签位置、是否需要点突变（如无序区删除/糖基化位点突变/稳定化突变）'}${ctx.oligomer ? '；聚集形式考量：若为同源寡聚体，截短边界必须保留寡聚化界面/组装结构域（引用证据中的多拷贝链结构）；若为异源复合物依赖，说明单独亚基构建与复合物构建的分阶段策略' : ''}
 - ### 表达与纯化策略：推荐表达系统（基于物种与结构域类型）、纯化流程要点（含去垢剂选择若为膜蛋白）${ctx.oligomer && ctx.oligomer.category !== 'monomer' ? '；组装验证：SEC-MALS/DLS 验证实际聚集状态与化学计量（引用寡聚态分析判定），同源寡聚体验证表观分子量为单体整数倍，异源复合物需确定亚基化学计量比' : ''}
 - ### 时间规划：Markdown 表格（阶段/预计时间/关键里程碑/风险点），总计给出一个现实的时间范围
-- 篇幅 400-600 字
+- 篇幅 300-500 字${itxC}`
+}
+
+/** C4 总结 */
+function chC4(): string {
+  return `撰写报告的「总结」一章（以 ## 总结 开头，仅输出这一章，不要输出其他章节）：
 
 ## 总结
 - 3 段以内：核心结论重申 + 给客户的 3 条最重要建议 + 明确的 go/no-go 倾向性意见
 - 篇幅 200-300 字`
 }
+
+/** 章节注册表（生成顺序 = 报告章节顺序） */
+export const REPORT_CHAPTERS: Array<{ key: string; label: string; instruction: (ctx: ReportContext) => string }> = [
+  { key: 'A1', label: '执行摘要', instruction: chA1 },
+  { key: 'A2', label: '客户目标与可行性结论', instruction: chA2 },
+  { key: 'A3', label: '靶点生物学背景', instruction: chA3 },
+  { key: 'B1', label: '已有结构研究全景', instruction: chB1 },
+  { key: 'B2', label: '同源结构分析', instruction: chB2 },
+  { key: 'B3', label: '关键文献证据综合', instruction: chB3 },
+  { key: 'C1', label: '实验数据评估', instruction: chC1 },
+  { key: 'C2', label: '结构解析可行性评估', instruction: chC2 },
+  { key: 'C3', label: '实验方案建议', instruction: chC3 },
+  { key: 'C4', label: '总结', instruction: chC4 },
+]
 
 export interface GeneratedReport {
   parts: ReportPart[]
@@ -476,14 +532,14 @@ export interface GeneratedReport {
 }
 
 export interface GenerateSectionsOpts {
-  /** v2.6 分段预算（epoch ms）：到点不再开启新段，返回 partial（已完成的段保留） */
+  /** v2.6 分段预算（epoch ms）：到点不再开启新章，返回 partial（已完成的章保留） */
   deadline?: number
-  /** v2.6 已完成的段（续跑 — 只生成缺失的段；失败段不含在「已完成」中，下一段自动重试） */
+  /** v2.6/v2.7 已完成的章（续跑 — 只生成缺失的章；失败章不含在「已完成」中，下一段自动重试） */
   completedParts?: ReportPart[]
-  /** v2.6 单段 LLM 调用超时（分段模式收紧到段预算内 — 防慢引擎超出网关切断时长） */
+  /** v2.6 单章 LLM 调用超时（分段模式收紧到段预算内 — 防慢引擎超出网关切断时长） */
   partTimeoutMs?: number
-  /** v2.6.3 放弃 LLM 重试的段键（同键连续 3 次失败后由调用方传入）：
-  *  其失败段（规则兜底 markdown）视为终稿不再重试 — 防慢引擎无限段循环。 */
+  /** v2.6.3/v2.7 放弃 LLM 重试的章键（同键连续 3 次失败后由调用方传入）：
+   *  其失败章视为终稿不再重试 — 防慢引擎无限段循环。 */
   giveUpKeys?: string[]
 }
 
@@ -493,15 +549,17 @@ export async function generateReportSections(
   opts: GenerateSectionsOpts = {},
 ): Promise<GeneratedReport> {
   const digest = buildDigest(ctx)
-  // v2.6：只有成功段视为「已完成」；失败段（llmOk=false）不占用 have — 下一段自动重试。
-  // v2.6.3：giveUpKeys 例外 — 放弃重试的键把失败段（规则兜底内容）当作终稿保留。
+  // v2.6：只有成功章视为「已完成」；失败章（llmOk=false）不占用 have — 下一段自动重试。
+  // v2.6.3：giveUpKeys 例外 — 放弃重试的章把失败结果当作终稿保留。
+  // v2.7：旧版三段键（A/B/C）不在章节表内 — 被过滤后由章节级调用整体重生成。
   const giveUp = new Set(opts.giveUpKeys ?? [])
+  const knownKeys = new Set(REPORT_CHAPTERS.map(c => c.key))
   const have = new Set([
     ...(opts.completedParts ?? []).filter(p => p.llmOk).map(p => p.key),
     ...giveUp,
   ])
-  const parts: ReportPart[] = [...(opts.completedParts ?? []).filter(p => p.llmOk || giveUp.has(p.key))]
-  // v2.6.3：逐段调用超时随剩余预算收紧（晚开启的段不吃超过段截止 — checkpoint 不迟到）
+  const parts: ReportPart[] = [...(opts.completedParts ?? []).filter(p => (p.llmOk || giveUp.has(p.key)) && knownKeys.has(p.key))]
+  // v2.6.3：逐章调用超时随剩余预算收紧（晚开启的章不吃超过段截止 — checkpoint 不迟到）
   const partSignal = (): AbortSignal | undefined => {
     let to = opts.partTimeoutMs ?? 0
     if (opts.deadline != null && opts.deadline > 0) {
@@ -510,31 +568,24 @@ export async function generateReportSections(
     if (to <= 0) return signal
     return AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(to)])
   }
-  /** v2.6.3：预算不足以开启一段完整 LLM 调用（≥8s 才开；零碎预算只会在超时
-  * 失败白计一次 giveUp 计数）→ 不再开启，交还续跑（下一段整预算重试）。 */
+  /** v2.6.3：预算不足以开启一章完整 LLM 调用（≥8s 才开；零碎预算只会在超时
+  *  失败白计一次 giveUp 计数）→ 不再开启，交还续跑（下一段整预算重试）。 */
   const PART_OPEN_MIN_MS = 8_000
   const budgetOk = () => opts.deadline == null || opts.deadline <= 0 || Date.now() + PART_OPEN_MIN_MS < opts.deadline
-  // 段间依赖：A/B/C 相互独立（三段各自独立提示词），可任意续跑
-  if (!have.has('A') && budgetOk()) {
-    parts.push(await callPart('A', partAInstruction(ctx), digest, partSignal()))
-  } else if (!have.has('A')) {
-    return assemble(parts, true)
-  }
-  if (!have.has('B') && budgetOk()) {
-    parts.push(await callPart('B', partBInstruction(ctx), digest, partSignal()))
-  } else if (!have.has('B')) {
-    return assemble(parts, true)
-  }
-  if (!have.has('C') && budgetOk()) {
-    parts.push(await callPart('C', partCInstruction(ctx), digest, partSignal()))
-  } else if (!have.has('C')) {
-    return assemble(parts, true)
+  // 章节相互独立（各自独立提示词），可任意续跑
+  for (const ch of REPORT_CHAPTERS) {
+    if (have.has(ch.key)) continue
+    if (!budgetOk()) return assemble(parts, true)
+    parts.push(await callPart(ch.key, ch.label, ch.instruction(ctx), digest, partSignal()))
   }
   return assemble(parts, false)
 }
 
 function assemble(parts: ReportPart[], partial: boolean): GeneratedReport {
-  const fullMarkdown = parts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n')
-  const errors = parts.filter(p => !p.llmOk).map(p => `段${p.key}: ${p.error}`)
-  return { parts, fullMarkdown, ok: parts.some(p => p.llmOk), errors, ...(partial ? { partial: true } : {}) }
+  // v2.7：按章节注册表顺序输出（缺失章自然跳过）
+  const byKey = new Map(parts.map(p => [p.key, p]))
+  const ordered = REPORT_CHAPTERS.map(c => byKey.get(c.key)).filter((p): p is ReportPart => Boolean(p))
+  const fullMarkdown = ordered.map(p => p.markdown.trim()).filter(Boolean).join('\n\n')
+  const errors = ordered.filter(p => !p.llmOk).map(p => `${p.label}(${p.key}): ${p.error}`)
+  return { parts: ordered, fullMarkdown, ok: ordered.some(p => p.llmOk), errors, ...(partial ? { partial: true } : {}) }
 }

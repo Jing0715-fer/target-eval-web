@@ -35,9 +35,31 @@ import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { AssetGallery } from './asset-gallery'
 import { InteractionStructures } from './interaction-structures'
-import type { BlastStatusCode, JobDetail, ScoreItem } from './types'
+import type { BlastStatusCode, JobDetail, LigandDetail, ScoreItem } from './types'
 
 /* ---------------- 通用小组件 ---------------- */
+
+/** v2.7：配体 PubChem 计算性质行（XLogP/TPSA/氢供受体/可旋转键/重原子/精确质量；无数据时渲染空） */
+function LigandPropsRow({ d }: { d?: LigandDetail }) {
+  if (!d) return null
+  const items: Array<[string, string]> = []
+  if (d.xlogp != null) items.push(['XLogP', String(d.xlogp)])
+  if (d.tpsa != null) items.push(['TPSA', `${d.tpsa} Å²`])
+  if (d.hBondDonor != null) items.push(['氢供体', String(d.hBondDonor)])
+  if (d.hBondAcceptor != null) items.push(['氢受体', String(d.hBondAcceptor)])
+  if (d.rotatableBonds != null) items.push(['可旋转键', String(d.rotatableBonds)])
+  if (d.heavyAtoms != null) items.push(['重原子', String(d.heavyAtoms)])
+  if (d.exactMass != null) items.push(['精确质量', String(d.exactMass)])
+  if (d.charge != null && d.charge !== 0) items.push(['形式电荷', `${d.charge > 0 ? '+' : ''}${d.charge}`])
+  if (!items.length) return null
+  return (
+    <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-dashed border-border pt-2 text-[11px] text-muted-foreground">
+      {items.map(([k, v]) => (
+        <span key={k}>{k} <b className="font-mono text-foreground/75">{v}</b></span>
+      ))}
+    </div>
+  )
+}
 
 /** 规格栅格单元（Linear 仪表读数）：mono 眉题 + 大数字 + 注释 */
 function SpecCell({
@@ -1124,9 +1146,16 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 </CardContent>
               </Card>
             ) : !l.compId ? (
-              /* v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡 */
+              /* v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡（v2.7 + 结构式/性质） */
               <Card key={`${l.raw}-pc`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
-                <CardContent className="flex flex-col gap-3 px-4.5 py-4">
+                <CardContent className="flex gap-3.5 px-4.5 py-4">
+                  {l.detail?.structure2d && (
+                    <figure className="flex-none self-start text-center">
+                      <img src={l.detail.structure2d} alt="2D 化学结构式" className="h-32 w-32 rounded-md border border-border bg-white object-contain p-1" />
+                      <figcaption className="mt-1 font-mono text-[9px] text-muted-foreground/60">2D 结构式 · PubChem{l.detail.cid ? ` · CID ${l.detail.cid}` : ''}</figcaption>
+                    </figure>
+                  )}
+                  <div className="flex min-w-0 flex-1 flex-col gap-3">
                   <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
                     {l.pubchem ? (
                       <a
@@ -1147,9 +1176,10 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                     <span>分子式 <b className="font-mono text-foreground/80">{l.formula || '—'}</b></span>
                     {l.weight != null && <span>MW <b className="font-mono text-foreground/80">{l.weight.toFixed(1)}</b></span>}
                   </div>
-                  {l.pubchem?.iupacName && (
+                  <LigandPropsRow d={l.detail} />
+                  {(l.detail?.iupacName ?? l.pubchem?.iupacName) && (
                     <p className="text-[11px] leading-relaxed break-all text-muted-foreground/70">
-                      IUPAC 名 <span className="font-mono">{l.pubchem.iupacName}</span>
+                      IUPAC 名 <span className="font-mono">{l.detail?.iupacName ?? l.pubchem?.iupacName}</span>
                     </p>
                   )}
                   <p className="text-xs text-muted-foreground/70">
@@ -1158,11 +1188,19 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
                     输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}
                   </p>
+                  </div>
                 </CardContent>
               </Card>
             ) : (
               <Card key={`${l.raw}-ok`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
-                <CardContent className="flex flex-col gap-3 px-4.5 py-4">
+                <CardContent className="flex gap-3.5 px-4.5 py-4">
+                  {l.detail?.structure2d && (
+                    <figure className="flex-none self-start text-center">
+                      <img src={l.detail.structure2d} alt="2D 化学结构式" className="h-32 w-32 rounded-md border border-border bg-white object-contain p-1" />
+                      <figcaption className="mt-1 font-mono text-[9px] text-muted-foreground/60">2D 结构式 · PubChem{l.detail.cid ? ` · CID ${l.detail.cid}` : ''}</figcaption>
+                    </figure>
+                  )}
+                  <div className="flex min-w-0 flex-1 flex-col gap-3">
                   <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
                     <span className="inline-flex min-h-7 items-center rounded-md border border-primary/30 bg-primary/[0.06] px-2.5 font-mono text-sm font-bold tracking-wide text-primary">{l.compId}</span>
                     <span className="min-w-0 flex-1 text-sm font-semibold text-foreground">{l.name || l.raw}</span>
@@ -1172,6 +1210,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                     {l.weight != null && <span>MW <b className="font-mono text-foreground/80">{l.weight.toFixed(1)}</b></span>}
                     <span>含该配体结构 <b className="font-mono text-foreground/80">{l.totalStructures}</b> 个</span>
                   </div>
+                  <LigandPropsRow d={l.detail} />
                   {l.structures.length > 0 ? (
                     <div className="flex flex-wrap gap-1.5">
                       {l.structures.slice(0, 12).map(s => (
@@ -1200,8 +1239,9 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                     <p className="text-xs text-muted-foreground/70">暂无含该配体的 PDB 结构记录</p>
                   )}
                   <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
-                    输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}
+                    输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}{l.detail?.inchiKey ? ` · InChIKey ${l.detail.inchiKey}` : ''}
                   </p>
+                  </div>
                 </CardContent>
               </Card>
             ))}

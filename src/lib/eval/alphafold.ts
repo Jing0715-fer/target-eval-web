@@ -190,13 +190,18 @@ export function buildRenderPage(bundleJs: string, pdbText: string, width: number
   var viewer = $3Dmol.createViewer('viewport', { defaultcolors: $3Dmol.rasmolElementColors });
   viewer.setBackgroundColor(0xffffff);
   viewer.addModel(pdb, 'pdb');
+  // v2.7 兜底基础样式：无 pLDDT 桶的残基（若有）以浅灰可见，避免「透明看不到」
+  viewer.setStyle({}, { cartoon: { color: '#e7e5e4' } });
   var ok = true;
   try {
     var groups = [['hi', '${PLDDT_COLORS.hi}'], ['mid', '${PLDDT_COLORS.mid}'], ['low', '${PLDDT_COLORS.low}'], ['poor', '${PLDDT_COLORS.poor}']];
     for (var g = 0; g < groups.length; g++) {
       var runs = runsOf(groups[g][0]);
       for (var q = 0; q < runs.length; q++) {
-        viewer.setStyle({ resi: runs[q] }, { cartoon: { color: groups[g][1] } });
+        // v2.7 关键修复：3Dmol 的 resi 数组语义是「任一命中」（仅两端点残基被着色，
+        // 区间中段无样式 → 结构大片透明/不可见）。区间选择必须用 "min-max" 字符串
+        // （propertyMatches 解析 (\d+)\s*-\s*(\d+) 为闭区间）。
+        viewer.setStyle({ resi: runs[q][0] + '-' + runs[q][1] }, { cartoon: { color: groups[g][1] } });
       }
     }
   } catch (e) { ok = false; }
@@ -317,12 +322,14 @@ export interface AlphafoldFigure {
   meta: AlphafoldPrediction
 }
 
-/** AFDB 预测结构图（带 db/cache/alphafold/{uniprot}.png 磁盘缓存） */
+/** AFDB 预测结构图（带 db/cache/alphafold/v2/{uniprot}.png 磁盘缓存）
+ *  v2.7：缓存路径升到 v2 子目录 — 旧渲染存在「区间中段残基未着色（透明看不到）」缺陷，
+ *  与修复后的选择器产物不兼容，需整体失效重新渲染。 */
 export async function alphafoldFigureFor(uniprotId: string): Promise<AlphafoldFigure | null> {
   const id = uniprotId.trim().toUpperCase()
   const meta = await fetchAlphafoldPrediction(id)
   if (!meta) return null
-  const cacheDir = path.join(process.cwd(), 'db', 'cache', 'alphafold')
+  const cacheDir = path.join(process.cwd(), 'db', 'cache', 'alphafold', 'v2')
   const file = path.join(cacheDir, `${id}.png`)
   try {
     const cached = await fs.readFile(file)
