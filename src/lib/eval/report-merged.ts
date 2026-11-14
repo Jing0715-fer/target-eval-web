@@ -431,7 +431,10 @@ async function embedImages(images: ParsedImage[], assetDir: string): Promise<Arr
   for (const meta of ordered) {
     const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
     try {
-      const buf = await fs.readFile(path.join(assetDir, `${meta.id}.${ext}`))
+      // turbopackIgnore：assetDir 为运行时上传产物目录（db/reports/<id>/assets），
+      // 构建期不可静态确定；若不忽略，Turbopack 会把整个项目根（含 node_modules 全量、
+      // skills/、docs/ 等 ~295MB）追踪进 standalone 产物，触发部署平台体积上限导致部署失败。
+      const buf = await fs.readFile(path.join(/*turbopackIgnore: true*/ assetDir, `${meta.id}.${ext}`))
       if (used + buf.length > budget) continue
       used += buf.length
       out.push({ meta, dataUri: `data:${meta.mime};base64,${buf.toString('base64')}` })

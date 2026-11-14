@@ -1363,7 +1363,9 @@ class SegmentRunner {
         alphafoldFigure: st.afFigure ?? undefined,
         resolveImagePath: (meta) => {
           const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
-          return path.join(st.assetDir, `${meta.id}.${ext}`)
+          // turbopackIgnore：st.assetDir 为运行时上传目录（db/reports/<id>/assets），
+          // 静态追踪会把整个项目根收进 standalone 产物导致部署超体积失败。
+          return path.join(/*turbopackIgnore: true*/ st.assetDir, `${meta.id}.${ext}`)
         },
       })
       const reportDir = path.join(process.cwd(), 'db', 'reports', this.input.jobId)
@@ -1460,7 +1462,7 @@ class SegmentRunner {
         const rowId = `${meta.id}__${this.input.jobId}`.slice(0, 64)
         await db.reportAsset.upsert({
           where: { id: rowId },
-          create: { id: rowId, jobId: this.input.jobId, kind: meta.kind, caption: meta.caption, mime: meta.mime, size: meta.sizeKB * 1024, path: path.join(st.assetDir, `${meta.id}.${ext}`), order: i, vlm: meta.vlmKind ?? false },
+          create: { id: rowId, jobId: this.input.jobId, kind: meta.kind, caption: meta.caption, mime: meta.mime, size: meta.sizeKB * 1024, path: path.join(/*turbopackIgnore: true*/ st.assetDir, `${meta.id}.${ext}`), order: i, vlm: meta.vlmKind ?? false },
           update: { order: i, vlm: meta.vlmKind ?? false },
         }).catch(() => undefined)
       }
