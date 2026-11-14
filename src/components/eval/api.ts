@@ -313,8 +313,12 @@ export async function fetchDocxInsights(
   }
 }
 
-/** 断流类错误识别（自动重试一次）；其余错误（4xx 语义错误等）直接抛出 */
-const STREAM_BROKEN_RE = /流中断|网络|Stream broken|HTTP 5\d\d/
+/** 断流类错误识别（自动重试 → quick 兜底）；其余错误（4xx 语义错误等）直接抛出。
+ * v2.6.3：覆盖浏览器原生英文断流报文 — Chrome 读流被网关切断时抛
+ * TypeError「network error」/「Failed to fetch」/「terminated」等，旧版正则只
+ * 认中文「网络」导致断流直接透出给用户（用户实测报错「network error」根因）。
+ */
+const STREAM_BROKEN_RE = /流中断|网络|network|failed to fetch|fetch failed|load failed|terminated|socket|econnreset|etimedout|timeout|超时|stream broken|http 5\d\d/i
 
 async function fetchInsightsStream(body: Record<string, unknown>): Promise<InsightsResponse> {
   const res = await fetch('/api/evaluate/insights', {
@@ -354,7 +358,7 @@ async function fetchInsightsStream(body: Record<string, unknown>): Promise<Insig
       nl = buffer.indexOf('\n')
     }
   }
-  throw new Error('智能解析流中断（网络波动），正在自动重试…')
+  throw new Error('智能解析流中断（网络波动/网关超时），正在自动重试…')
 }
 
 // ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────
@@ -559,7 +563,9 @@ export interface SyncEvaluateResult {
  * abort 信号触发时中止请求（服务器同步中止管线）。
  * 段上限防呆（MAX_SEGMENTS）：异常循环时最终以流中断错误终止。
  */
-const SYNC_MAX_SEGMENTS = 90 // ≈90 段 × ~55s ≈ 80 分钟总预算（超过视为异常）
+const SYNC_MAX_SEGMENTS = 120 // ≈120 段 × ~14s ≈ 28 分钟总预算（超过视为异常）
+/** v2.6.3：段流中断后携同快照重试同一段的连续上限（收到事件即清零） */
+const SYNC_BROKEN_RETRIES = 3
 
 export async function evaluateSyncStream(
   body: SyncEvaluateBody,
@@ -571,20 +577,39 @@ export async function evaluateSyncStream(
   // 引擎配置覆写（内存暂存的原始配置随请求内联携带 — 每段都带）
   const llm = getLlmEngineOverride()
   let checkpoint: unknown | undefined
+  let brokenRetrySeg = 0 // v2.6.3：连续段流中断重试计数（收到事件即清零）
 
   for (let segment = 0; ; segment++) {
     const payload: SyncEvaluateBody = { ...body }
     if (llm && !payload.llm) payload.llm = llm
     if (checkpoint) (payload as { checkpoint?: unknown }).checkpoint = checkpoint
 
-    const res = await fetch('/api/evaluate/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: opts.signal,
-    })
-
-    if (!res.ok || !res.body) {
+    // v2.6.3：段流中断（网关切断/抖动 → fetch 或读流抛错）自动携同快照重试同一段 —
+    // 段执行幂等（输入重派生 + 相位重入守卫），最多连续 3 次；收到事件即清零计数。
+    let streamBroken = false
+    let res: Response
+    try {
+      res = await fetch('/api/evaluate/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: opts.signal,
+      })
+    } catch (e) {
+      if (opts.signal?.aborted) throw e
+      streamBroken = true
+      res = null as unknown as Response
+      void e
+    }
+    if (streamBroken || !res.ok || !res.body) {
+      if (streamBroken && brokenRetrySeg < SYNC_BROKEN_RETRIES && !opts.signal?.aborted) {
+        brokenRetrySeg++
+        segment-- // 同段重试（segment-- 与 for 自增抵消）
+        continue
+      }
+      if (streamBroken) {
+        throw new Error('评估连接建立失败（网络波动，已自动重试）— 请重试；若持续出现请稍后再试')
+      }
       const err = (await res.json().catch(() => null)) as { error?: string } | null
       throw new Error(err?.error ?? `同步评估启动失败（HTTP ${res.status}）`)
     }
@@ -596,46 +621,61 @@ export async function evaluateSyncStream(
     let streamError: string | null = null
     let nextCheckpoint: unknown | null = null
 
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      // 按行解析 NDJSON 事件
-      let nl = buffer.indexOf('\n')
-      while (nl >= 0) {
-        const line = buffer.slice(0, nl).trim()
-        buffer = buffer.slice(nl + 1)
-        if (line) {
-          try {
-            const ev = JSON.parse(line) as {
-              type: 'job' | 'ping' | 'done' | 'error' | 'checkpoint'
-              job?: JobDetail
-              reportHtml?: string | null
-              error?: string
-              checkpoint?: unknown
-            }
-            if (ev.type === 'job' && ev.job) {
-              opts.onProgress?.(ev.job)
-            } else if (ev.type === 'done' && ev.job) {
-              result = { job: ev.job, reportHtml: ev.reportHtml ?? null }
-            } else if (ev.type === 'error') {
-              streamError = ev.error ?? '评估失败'
-              if (ev.job) opts.onProgress?.(ev.job)
-            } else if (ev.type === 'checkpoint' && ev.checkpoint) {
-              // v2.6：本段到点 — 携快照进入下一段（对调用方完全透明）
-              nextCheckpoint = ev.checkpoint
-              if (ev.job) opts.onProgress?.(ev.job)
-            }
-            // ping 心跳：仅保活，无需处理
-          } catch { /* 半行/坏行丢弃，等下一块补齐 */ }
+    // v2.6.3：读流被网关切断/抖动抛 TypeError（network error / terminated 等）—
+    // 段幂等可重入，携同快照重试同一段（连续 ≤3 次）
+    let readBroken = false
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // 按行解析 NDJSON 事件
+        let nl = buffer.indexOf('\n')
+        while (nl >= 0) {
+          const line = buffer.slice(0, nl).trim()
+          buffer = buffer.slice(nl + 1)
+          if (line) {
+            try {
+              const ev = JSON.parse(line) as {
+                type: 'job' | 'ping' | 'done' | 'error' | 'checkpoint'
+                job?: JobDetail
+                reportHtml?: string | null
+                error?: string
+                checkpoint?: unknown
+              }
+              if (ev.type === 'job' && ev.job) {
+                brokenRetrySeg = 0 // 数据在流动 — 清零断流计数
+                opts.onProgress?.(ev.job)
+              } else if (ev.type === 'done' && ev.job) {
+                result = { job: ev.job, reportHtml: ev.reportHtml ?? null }
+              } else if (ev.type === 'error') {
+                streamError = ev.error ?? '评估失败'
+                if (ev.job) opts.onProgress?.(ev.job)
+              } else if (ev.type === 'checkpoint' && ev.checkpoint) {
+                // v2.6：本段到点 — 携快照进入下一段（对调用方完全透明）
+                nextCheckpoint = ev.checkpoint
+                if (ev.job) opts.onProgress?.(ev.job)
+              }
+              // ping 心跳：仅保活，无需处理
+            } catch { /* 半行/坏行丢弃，等下一块补齐 */ }
+          }
+          nl = buffer.indexOf('\n')
         }
-        nl = buffer.indexOf('\n')
+        if (result || streamError || nextCheckpoint) break
       }
-      if (result || streamError || nextCheckpoint) break
+    } catch (e) {
+      if (opts.signal?.aborted) throw e
+      readBroken = true
+      void e
     }
 
     if (result) return result
     if (streamError) throw new Error(streamError)
+    if (readBroken && brokenRetrySeg < SYNC_BROKEN_RETRIES) {
+      brokenRetrySeg++
+      segment-- // 同段重试（segment-- 与 for 自增抵消）
+      continue
+    }
     if (nextCheckpoint) {
       checkpoint = nextCheckpoint
       if (segment + 1 >= SYNC_MAX_SEGMENTS) {
@@ -644,6 +684,6 @@ export async function evaluateSyncStream(
       continue // 立即再发一段
     }
     // 流中断且无终态（网关切断/超时）
-    throw new Error('评估流中断（网络或网关超时）。已完成的部分数据已丢失，请重试；若持续出现，请减少并发或稍后再试。')
+    throw new Error('评估流中断（网络或网关超时）。已完成的部分数据已丢失，请重试；若持续出现，请稍后再试。')
   }
 }

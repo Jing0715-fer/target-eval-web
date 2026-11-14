@@ -159,6 +159,8 @@ interface PipelineState {
   /** last-resort 重试下一段待执行（gate 子步骤跨段） */
   blastRetryPending: boolean
   blastRetrySegments: number
+  /** v2.6.3：BLAST 提交被段预算切断的累计次数（≥3 → 置 failed 走 RCSB 兜底，防无限重试） */
+  blastSubmitCuts: number
   interaction: InteractionAnalysis | null
   oligomer: OligomerAnalysis | null
   mwAugment: MwAugmentAnalysis | null
@@ -168,6 +170,8 @@ interface PipelineState {
   afSummary: AlphafoldSummaryInfo | null
   reportParts: ReportPart[]
   reportDone: boolean
+  /** v2.6.3：各报告段 LLM 失败累计（同键 ≥3 → 放弃重试接受规则兜底，防慢引擎无限段循环） */
+  reportPartFails: Partial<Record<'A' | 'B' | 'C', number>>
   /** 渲染产物 */
   reportPath: string | null
   reportMarkdown: string | null
@@ -223,6 +227,7 @@ function freshState(): PipelineState {
     blastRetryFailed: false,
     blastRetryPending: false,
     blastRetrySegments: 0,
+    blastSubmitCuts: 0,
     interaction: null,
     oligomer: null,
     mwAugment: null,
@@ -231,6 +236,7 @@ function freshState(): PipelineState {
     afSummary: null,
     reportParts: [],
     reportDone: false,
+    reportPartFails: {},
     reportPath: null,
     reportMarkdown: null,
   }
@@ -340,6 +346,14 @@ export function sanitizeCheckpoint(raw: unknown): PipelineCheckpoint | null {
   if (st.pdbCompletedIds != null && !Array.isArray(st.pdbCompletedIds)) return null
   if (Array.isArray(st.pdbCompletedIds) && st.pdbCompletedIds.some(x => typeof x !== 'string' || !PDB_ID_RE.test(x))) return null
   if (st.reportParts != null && !Array.isArray(st.reportParts)) return null
+  // v2.6.3：新增跨段计数器消毒（数值有界 — 防伪造 state 注入异常值）
+  if (st.blastSubmitCuts != null && (typeof st.blastSubmitCuts !== 'number' || st.blastSubmitCuts < 0 || st.blastSubmitCuts > 10)) return null
+  if (st.reportPartFails != null) {
+    if (typeof st.reportPartFails !== 'object' || Array.isArray(st.reportPartFails)) return null
+    for (const v of Object.values(st.reportPartFails)) {
+      if (typeof v !== 'number' || v < 0 || v > 10) return null
+    }
+  }
   return { version: 2, state: st as unknown as PipelineState }
 }
 
@@ -369,11 +383,14 @@ class SegmentRunner {
   private input: PipelineInput
   private cb: PipelineCallbacks
   private maxPdb: number
+  /** v2.6.3：段总预算（构造时快照）— 闸门随段预算等比伸缩（小段部署网关环境） */
+  private segBudgetMs: number
 
   constructor(input: PipelineInput, cb: PipelineCallbacks, st: PipelineState) {
     this.input = input
     this.cb = cb
     this.st = st
+    this.segBudgetMs = budgetLeft(cb)
     // v2.5：MAX_PDB_UNLIMITED（10000）= 不限（由 RCSB 检索分页上限封顶）；普通值 20-300
     this.maxPdb = input.options.maxPdb === MAX_PDB_UNLIMITED ? MAX_PDB_UNLIMITED : Math.min(300, Math.max(20, input.options.maxPdb || 150))
   }
@@ -381,6 +398,14 @@ class SegmentRunner {
   private get signal(): AbortSignal { return this.cb.signal }
   private get report() { return this.cb.report }
   private get log() { return this.cb.log }
+
+  /** v2.6.3：绑定段截止的调用信号 — in-flight 调用不越过段边界（checkpoint 事件不迟到）。
+   * 无预算（异步作业路径）退化为 cb.signal。 */
+  private deadlineSignal(): AbortSignal {
+    const dl = this.cb.deadline
+    if (dl == null || dl <= 0) return this.signal
+    return AbortSignal.any([this.signal, AbortSignal.timeout(Math.max(1_000, dl - Date.now()))])
+  }
 
   /** 阶段推进 */
   private advance(next: Phase): void {
@@ -608,9 +633,11 @@ class SegmentRunner {
       st.blastStatus = { status: 'skipped-antibody', note: abVerdict.evidence.slice(0, 2).join('；') }
       this.log(`跳过 BLAST：检测到抗体序列（${abVerdict.evidence.join('；')}）— 抗体结构库命中众多但参考价值低`)
     } else if (st.sequence.length >= 30) {
-      // v2.6 分段预算闸门：提交含 3 次重试（最坏 ~99s）超出网关切断时长 —
-      // 预算不足 45s 时交还下一段提交（防段内超限）
-      if (budgetLeft(this.cb) < 45_000) {
+      // v2.6.3 闸门随段预算伸缩：部署网关转发窗 ~24-28s → 段预算 14s，不再要求
+      // 45s 提交预算 —— 提交尝试绑定段截止（见 deadlineSignal），预算不足 ~5s
+      // 时交还下一段提交（开了必被切断，无意义）。
+      const submitGateMs = Math.min(45_000, Math.max(5_000, this.segBudgetMs * 0.35))
+      if (budgetLeft(this.cb) < submitGateMs) {
         return this.handoff()
       }
       // v1.11 同源家族委托：组内首个到达此处的作业认领代表并提交；其余成员跳过检索，
@@ -633,15 +660,31 @@ class SegmentRunner {
       }
       try {
         this.report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
-        const submitted = await submitBlastPdb(st.sequence, msg => this.log(msg), this.signal)
+        // v2.6.3：提交绑定段截止 — in-flight 尝试不越过段边界（checkpoint 不迟到）；
+        // 切断不算 NCBI 真实失败，交还下一段重试提交。
+        const submitSignal = this.deadlineSignal()
+        const submitted = await submitBlastPdb(st.sequence, msg => this.log(msg), submitSignal)
         st.blastSubmitted = { rid: submitted.rid, rtoe: submitted.rtoe }
         this.log(`BLAST 提前提交完成（RID=${submitted.rid}，预计 ${submitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
       } catch (e) {
         if (this.signal.aborted) throw e
         const msg = e instanceof Error ? e.message : String(e)
-        st.blastStatus = { status: 'failed', note: `提交失败：${msg.slice(0, 100)}` }
-        if (st.familyRep && this.input.homologBlast) releaseBlastFamily(this.input.homologBlast.groupKey, this.input.jobId)
-        this.log(`BLAST 提交失败：${msg}（稍后阶段将尝试 RCSB 序列检索兜底）`, 'warn')
+        if (this.cb.deadline != null && this.cb.deadline > 0 && Date.now() >= this.cb.deadline - 2_000) {
+          // v2.6.3：段预算切断（非 NCBI 拒收）— 不置 failed：下一段重试提交；
+          // 连续 3 段都未在预算内提交成功 → 置 failed 走 RCSB 序列检索兜底（防无限循环）
+          st.blastSubmitCuts++
+          if (st.blastSubmitCuts < 3) {
+            this.log(`BLAST 提交被段预算切断（第 ${st.blastSubmitCuts}/3 次）— 下一段继续提交`, 'warn')
+            return this.handoff()
+          }
+          st.blastStatus = { status: 'failed', note: `提交持续超段预算（NCBI 响应过慢）：${msg.slice(0, 100)}` }
+          if (st.familyRep && this.input.homologBlast) releaseBlastFamily(this.input.homologBlast.groupKey, this.input.jobId)
+          this.log(`BLAST 提交连续 ${st.blastSubmitCuts} 段未在预算内完成 — 置为失败，稍后走 RCSB 序列检索兜底`, 'warn')
+        } else {
+          st.blastStatus = { status: 'failed', note: `提交失败：${msg.slice(0, 100)}` }
+          if (st.familyRep && this.input.homologBlast) releaseBlastFamily(this.input.homologBlast.groupKey, this.input.jobId)
+          this.log(`BLAST 提交失败：${msg}（稍后阶段将尝试 RCSB 序列检索兜底）`, 'warn')
+        }
       }
     }
     this.advance('rcsb')
@@ -930,8 +973,10 @@ class SegmentRunner {
 
       // 序列模式且尚未识别 UniProt：从最佳命中回填（blastBackfillDone 重入守卫）
       if (!st.uniprotInfo && st.blastHits.length > 0 && !st.blastBackfillDone) {
-        if (budgetLeft(this.cb) < 20_000) {
-          return this.handoff() // 回填是多步网络调用 — 不足 20s 预算时下一段再做
+        // v2.6.3：闸门随段预算伸缩（原绝对 20s 在小段下永远交还会死锁）
+        const backfillGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.5))
+        if (budgetLeft(this.cb) < backfillGateMs) {
+          return this.handoff() // 回填是多步网络调用 — 预算不足时下一段再做
         }
         const best = st.blastHits[0]
         const acc = (st.blastStatus.provider ?? 'ncbi') === 'rcsb'
@@ -1024,8 +1069,9 @@ class SegmentRunner {
         this.log(`结构证据守门：直接结构 0 个 + 同源检索失败（${failNote}）→ 启动 last-resort 整周期重试（RCSB 直连 + NCBI 完整周期，最多 2 轮）`, 'warn')
         // v2.6 分段模式：每段做一轮有界重试（attemptWallMs 随剩余预算收紧），
         // 多段累计后放弃（blastRetrySegments ≥ 4 ≈ 4 分钟）；无预算模式维持原整轮语义
+        // v2.6.3：attemptWall 收紧到剩余预算内（原 max(20s, budget-15s) 在 14s 段下超出边界）
         const segMode = this.cb.deadline != null && this.cb.deadline > 0
-        const attemptWall = segMode ? Math.max(20_000, budgetLeft(this.cb) - 15_000) : undefined
+        const attemptWall = segMode ? Math.max(8_000, budgetLeft(this.cb) - 2_000) : undefined
         try {
           const rescue = await runBlastWithRetry(
             st.sequence,
@@ -1222,14 +1268,26 @@ class SegmentRunner {
     if (!st.reportDone) {
       this.report('report', '整理数据上下文…', 0.05)
       // v2.6 分段模式：单段 LLM 调用超时收紧到段预算内（慢引擎不至于超出网关
-      // 切断时长；超时段 llmOk=false 且不视为已完成 — 下一段自动重试）
+      // 切断时长；超时段 llmOk=false 且不视为已完成 — 下一段自动重试）。
+      // v2.6.3：a) 超时钳制随段预算（原 25-70s 钳制下限在 14s 段下超界）；
+      // b) 同键连续 3 次失败 → 放弃该段 LLM 重试（接受规则兜底内容）— 防慢引擎
+      // 无限段循环（每段都超时重试永远到不了终态）。
       const segMode = this.cb.deadline != null && this.cb.deadline > 0
-      const partTimeoutMs = segMode ? Math.max(25_000, Math.min(70_000, budgetLeft(this.cb))) : undefined
+      const partTimeoutMs = segMode ? Math.max(8_000, Math.min(70_000, budgetLeft(this.cb) - 1_000)) : undefined
+      const fails: Partial<Record<'A' | 'B' | 'C', number>> = { ...(st.reportPartFails ?? {}) }
+      const giveUpKeys = (['A', 'B', 'C'] as const).filter(k => (fails[k] ?? 0) >= 3)
       const gen = await generateReportSections(this.reportContext(), this.signal, {
         deadline: this.cb.deadline,
         completedParts: st.reportParts.length ? st.reportParts : undefined,
         partTimeoutMs,
+        giveUpKeys,
       })
+      // v2.6.3：逐段 LLM 失败累计（连续语义 — 成功即清零；同键 ≥3 → giveUp 接受规则兜底）
+      for (const p of gen.parts) {
+        if (!p.llmOk) fails[p.key] = (fails[p.key] ?? 0) + 1
+        else delete fails[p.key]
+      }
+      st.reportPartFails = fails
       // v2.6：失败段下一段重试后可能同 key 重复 — 保留最新一条（成功覆盖失败）
       const byKey = new Map<string, ReportPart>()
       for (const p of gen.parts) byKey.set(p.key, p)

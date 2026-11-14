@@ -8,14 +8,13 @@
  * 后续解析），完全不读盘、不写缓存 —— 适配函数计算等「服务器数据不跨请求保留」的
  * 部署。text 优先级低于 uploadId 磁盘路径（两者并存时按磁盘缓存路径走）。
  *
- * v2.6.2 心跳形态复刻 sync（用户反馈「重新部署后依然 502」根因修复）：
- *  v2.6.1 的 16B 小 ping 在部署链路上全程未穿透（客户端 0 字节直到 50s 应用
- *  兜底时刻被 ALB 502），而 /api/evaluate/sync 的流式在同网关下稳定透传 —
- *  差异在报文形态：sync 首事件为 1.2s 后的 ~1.5KB 大块。故本版将 insights
- *  心跳完全复刻 sync 形态：异步首个 beat（1.2s）+ ~1.4KB pad + 3s 周期，
- *  同时删除 start() 内的同步 enqueue（规避疑似首块吞噬）；LLM 预算收紧到
- *  40s（远离 ALB ~50s 接收超时，close 时刻也落在安全窗）；另增 quick 快速
- *  兜底模式（前端三级降级的最后一級，跳过 LLM 毫秒级返回规则提取，永不卡死）。
+ * v2.6.3 网关转发窗实测收紧（用户反馈「报错变了：network error」定位）：
+ *  部署链路对流式响应的**字节转发窗口实测仅 ~24-28s**（与心跳内容/节奏无关 —
+ *  1.4KB×3s 心跳与 sync 1.2s 大事件流同样在 ~24s 停止转发；服务端正常 close 的
+ *  EOF 也不达客户端，socket 直到 ~91s 才被杀 → 浏览器读流抛 TypeError 原文
+ *  「network error」直接透出）。40s 预算的 done 事件永远落在转发窗之外 → 客户端
+ *  必然 network error。故预算收紧到 **12s**：done ≤ ~13s 入队，安全落在窗口内；
+ *  LLM 未归即返回规则提取（前端英文断流识别重试 + quick 兜底链路完整）。
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
@@ -30,10 +29,12 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 70
 
 /**
- * LLM 智能解析墙钟预算：40s —— 远离部署 ALB ~50s 接收超时（流正常 close
- * 也落在安全窗内）。EVAL_INSIGHTS_BUDGET_MS 可调（>10s 生效）。
+ * LLM 智能解析墙钟预算：12s —— 网关对流式响应的转发窗口实测 ~24-28s，done
+ * 事件必须在窗口内入队才能到达客户端（v2.6.2 的 40s 预算使兜底 done 永远落在
+ * 窗外 → 前端读流 TypeError「network error」直接透出）。EVAL_INSIGHTS_BUDGET_MS
+ * 可调（>10s 生效；勿超过 ~15s，否则 done 可能再次落窗）。
  */
-const INSIGHTS_BUDGET_MS = Number(process.env.EVAL_INSIGHTS_BUDGET_MS) > 10_000 ? Number(process.env.EVAL_INSIGHTS_BUDGET_MS) : 40_000
+const INSIGHTS_BUDGET_MS = Number(process.env.EVAL_INSIGHTS_BUDGET_MS) > 10_000 ? Number(process.env.EVAL_INSIGHTS_BUDGET_MS) : 12_000
 /** 心跳间隔（复刻 sync 已验证穿透的事件节奏；≤sync 的 8s ping 空闲间隔） */
 const HEARTBEAT_MS = 3_000
 /** 心跳 pad 体积：对齐 sync 首个进度事件 ~1.5KB —— 防小帧被中间层缓冲吞没 */
@@ -77,7 +78,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: 'uploadId 无效' }, { status: 400 })
   }
 
-  // ── v2.6.2 流式执行：心跳形态复刻 sync + LLM 40s 预算 ──
+  // ── v2.6.2/v2.6.3 流式执行：心跳形态复刻 sync + LLM 12s 预算（转发窗内出兜底 done） ──
   const encoder = new TextEncoder()
   const t0 = Date.now()
   const stream = new ReadableStream<Uint8Array>({
@@ -207,8 +208,8 @@ export async function POST(req: Request) {
 
 /**
  * 墙钟预算内的 LLM 提取；超时/失败返回规则兜底（v2.5 兜底为全文结构化提取）。
- * v2.6.2：预算收紧至 ~40s（远离 ALB ~50s 接收超时）；超时同时向 LLM 传
- * AbortSignal（底层重试不再拖住后台资源），客户端断开（callerSignal）同样中止。
+ * v2.6.3：预算收紧至 ~12s（网关 ~24-28s 转发窗 — done 必须窗内入队）；超时同时向
+ * LLM 传 AbortSignal（底层重试不再拖住后台资源），客户端断开（callerSignal）同样中止。
  */
 async function runExtraction(
   text: string,

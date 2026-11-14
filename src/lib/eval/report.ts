@@ -482,6 +482,9 @@ export interface GenerateSectionsOpts {
   completedParts?: ReportPart[]
   /** v2.6 单段 LLM 调用超时（分段模式收紧到段预算内 — 防慢引擎超出网关切断时长） */
   partTimeoutMs?: number
+  /** v2.6.3 放弃 LLM 重试的段键（同键连续 3 次失败后由调用方传入）：
+  *  其失败段（规则兜底 markdown）视为终稿不再重试 — 防慢引擎无限段循环。 */
+  giveUpKeys?: string[]
 }
 
 export async function generateReportSections(
@@ -490,15 +493,27 @@ export async function generateReportSections(
   opts: GenerateSectionsOpts = {},
 ): Promise<GeneratedReport> {
   const digest = buildDigest(ctx)
-  // v2.6：只有成功段视为「已完成」；失败段（llmOk=false）不占用 have — 下一段自动重试
-  const have = new Set((opts.completedParts ?? []).filter(p => p.llmOk).map(p => p.key))
-  const parts: ReportPart[] = [...(opts.completedParts ?? []).filter(p => p.llmOk)]
+  // v2.6：只有成功段视为「已完成」；失败段（llmOk=false）不占用 have — 下一段自动重试。
+  // v2.6.3：giveUpKeys 例外 — 放弃重试的键把失败段（规则兜底内容）当作终稿保留。
+  const giveUp = new Set(opts.giveUpKeys ?? [])
+  const have = new Set([
+    ...(opts.completedParts ?? []).filter(p => p.llmOk).map(p => p.key),
+    ...giveUp,
+  ])
+  const parts: ReportPart[] = [...(opts.completedParts ?? []).filter(p => p.llmOk || giveUp.has(p.key))]
+  // v2.6.3：逐段调用超时随剩余预算收紧（晚开启的段不吃超过段截止 — checkpoint 不迟到）
   const partSignal = (): AbortSignal | undefined => {
-    if (!opts.partTimeoutMs || opts.partTimeoutMs <= 0) return signal
-    return AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(opts.partTimeoutMs)])
+    let to = opts.partTimeoutMs ?? 0
+    if (opts.deadline != null && opts.deadline > 0) {
+      to = Math.min(to > 0 ? to : opts.deadline - Date.now(), opts.deadline - Date.now())
+    }
+    if (to <= 0) return signal
+    return AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(to)])
   }
-  /** 预算不足开启一段完整 LLM 调用（~30-90s）→ 不再开启，交还续跑 */
-  const budgetOk = () => opts.deadline == null || opts.deadline <= 0 || Date.now() < opts.deadline
+  /** v2.6.3：预算不足以开启一段完整 LLM 调用（≥8s 才开；零碎预算只会在超时
+  * 失败白计一次 giveUp 计数）→ 不再开启，交还续跑（下一段整预算重试）。 */
+  const PART_OPEN_MIN_MS = 8_000
+  const budgetOk = () => opts.deadline == null || opts.deadline <= 0 || Date.now() + PART_OPEN_MIN_MS < opts.deadline
   // 段间依赖：A/B/C 相互独立（三段各自独立提示词），可任意续跑
   if (!have.has('A') && budgetOk()) {
     parts.push(await callPart('A', partAInstruction(ctx), digest, partSignal()))

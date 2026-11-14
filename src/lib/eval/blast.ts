@@ -245,13 +245,22 @@ export async function collectBlastPdbWithRescue(
 
   while (true) {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
-    // v2.6 分段预算：剩余不足一轮完整轮询周期 → 交还续跑（下一段带 pollState 继续）
-    if (budgetLeft() < (attempts === 0 ? 35_000 : 12_000)) {
+    // v2.6.3 分段预算自适应：原固定闸门（首等 35s / 常规 12s）按 55s 段设计 —
+    // 部署 14s 段下首轮轮询永远开不了（每段空转交还，100 段死循环实测）。
+    // 现改：剩余 ≥6s 即开轮（等待时长已钳到预算内，见下方 clampedSleep），
+    // 到点交还续跑（RID 在 NCBI 侧存活，pollState 随 checkpoint 往返）。
+    if (budgetLeft() < 6_000) {
       return { stillRunning: true, pollState: snapshot() }
     }
     // 首 poll 等待 RTOE（但上限 30s — NCBI 队列拥堵时会返回极端 RTOE 如 24830s，
-    // 直译会睡 ~7 小时；RTOE 只是提示值，多等不会更快，30s 后进入常规 6s 轮询）
-    await sleep(attempts === 0 ? Math.min(Math.max(3000, rtoe * 1000), 30_000) : 6000, signal)
+    // 直译会睡 ~7 小时；RTOE 只是提示值，多等不会更快，30s 后进入常规 6s 轮询）；
+    // v2.6.3：等待时长钳制到段预算内（留 4s GET 余量 — 小段下截短等待，
+    // 不越过段边界使 checkpoint 迟到）
+    const clampedSleep = (ms: number): number => {
+      const bl = budgetLeft()
+      return bl === Infinity ? ms : Math.max(2_000, Math.min(ms, bl - 4_000))
+    }
+    await sleep(clampedSleep(attempts === 0 ? Math.min(Math.max(3000, rtoe * 1000), 30_000) : 6000), signal)
     attempts++
     const elapsed = Math.round((Date.now() - startedAt) / 1000)
     let pollRes: Response

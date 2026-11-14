@@ -304,7 +304,11 @@ const evalTable: InlineEvalTable | undefined = body.evalTable
           // v2.6 分段预算：每段 ≤55s（网关 ~91s 切断长连接；预算留足余量容纳单次
           // 慢调用超额）。到点管线交还 checkpoint → 本路由发 checkpoint 事件，
           // 前端立即携快照再发一段继续（对前端表现为连续的进度流）。
-          const SEGMENT_MS = Number(process.env.EVAL_SYNC_SEGMENT_MS) > 10_000 ? Number(process.env.EVAL_SYNC_SEGMENT_MS) : 55_000
+          // v2.6.3：实测部署网关对流式响应的**字节转发窗口仅 ~24-28s**（与事件
+          // 内容/节奏无关；55s 段的 checkpoint 事件必然落在窗外 → 前端读流
+          // TypeError「network error」）。段预算收紧到 14s：checkpoint ≤ ~15s
+          // 入队，安全落在窗口内。EVAL_SYNC_SEGMENT_MS 可调（>10s 生效，勿超 ~18s）。
+          const SEGMENT_MS = Number(process.env.EVAL_SYNC_SEGMENT_MS) > 10_000 ? Number(process.env.EVAL_SYNC_SEGMENT_MS) : 14_000
           // v2.6：续跑快照消毒（客户端回传 — phase 枚举 + RID/PDB ID 形态 + 体积上限）
           let checkpoint: PipelineCheckpoint | undefined
           try {

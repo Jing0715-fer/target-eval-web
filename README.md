@@ -217,10 +217,10 @@ scripts/                         # BLAST 队列诊断 / 同源算法回归等运
    }
    ```
    未接代理时直连请求同属 `direct` 归属组（本地调试用；公网必须接代理隔离用户）
-2. **网关超时（v2.6 可续跑分段评估）**：无状态网关 ~90s 切断长连接时，前端自动走分段续跑 — 每段 POST ≤55s 预算（`EVAL_SYNC_SEGMENT_MS` 可调），到点服务端交还 checkpoint 快照，前端立即携快照续跑直至终态（BLAST RID 跨段轮询 / PDB·配体·LLM 报告增量续跑）；分块上传 / 后台解析 / 异步报告本身均为短请求
-3. **智能解析流式心跳（v2.6.2）**：`/api/evaluate/insights` 为 NDJSON 流，心跳 beat 形态与 `/api/evaluate/sync` 一致（异步首事件 1.2s + ~1.4KB pad + 3s 周期）—— 小帧心跳在部分云网关/中间层会被缓冲至流结束才冲刷，撞上 ALB ~50s 接收超时即 502（实测 v2.6.1 的 16B ping 全程未穿透）；LLM 预算 40s（`EVAL_INSIGHTS_BUDGET_MS` 可调）落在安全窗内；前端三级降级（流式 → 流式重试 → quick 规则兜底）保证永不卡死。`/api/llm/test` 连通性探测同样收紧至 12s 快速失败
+2. **网关超时（v2.6/v2.6.3 可续跑分段评估）**：无状态网关切断长连接时，前端自动走分段续跑 — 到点服务端交还 checkpoint 快照，前端立即携快照续跑直至终态（BLAST RID 跨段轮询 / PDB·配体·LLM 报告增量续跑）。**v2.6.3 实测部署网关对流式响应的字节转发窗口仅 ~24-28s**（与心跳内容/节奏无关，服务端 EOF 亦不达客户端，socket ~91s 才被杀）：段预算收紧到 14s（`EVAL_SYNC_SEGMENT_MS` 可调，勿超 ~18s），checkpoint 事件安全落在窗口内；分块上传 / 后台解析 / 异步报告本身均为短请求
+3. **智能解析流式心跳（v2.6.2/v2.6.3）**：`/api/evaluate/insights` 为 NDJSON 流，心跳 beat 形态与 `/api/evaluate/sync` 一致（异步首事件 1.2s + ~1.4KB pad + 3s 周期）。**v2.6.3：LLM 预算 40s → 12s（`EVAL_INSIGHTS_BUDGET_MS` 可调，勿超 ~15s）** — 40s 的兜底 done 事件落在网关 ~24s 转发窗之外，客户端只能读流至 ~91s socket 切断抛 TypeError「network error」（用户实测报错）；12s 预算保证 done ≤ ~13s 入队；前端断流识别已覆盖英文 network error / terminated / failed to fetch，三级降级（流式 → 流式重试 → quick 规则兜底）真正生效。`/api/llm/test` 连通性探测同样收紧至 12s 快速失败
 4. **数据与备份**：`db/custom.db` 与 `db/reports/` 含用户数据；终态记录 7 天自动清理
-5. **配额环境变量**：`EVAL_MAX_QUEUE`(8) · `EVAL_MAX_ACTIVE_PER_IP`(2) · `EVAL_MAX_JOBS_PER_DAY`(30) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_JOB_CONCURRENCY`(2) · `EVAL_JOB_TTL_DAYS`(7) · `EVAL_SYNC_SEGMENT_MS`(55000，分段评估单段预算)
+5. **配额环境变量**：`EVAL_MAX_QUEUE`(8) · `EVAL_MAX_ACTIVE_PER_IP`(2) · `EVAL_MAX_JOBS_PER_DAY`(30) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_JOB_CONCURRENCY`(2) · `EVAL_JOB_TTL_DAYS`(7) · `EVAL_SYNC_SEGMENT_MS`(14000，分段评估单段预算) · `EVAL_INSIGHTS_BUDGET_MS`(12000，智能解析 LLM 预算)
 6. 外部 LLM API Key 明文存本地 SQLite，面向内网 / 单机沙箱设计；不可信人群公网开放前建议改用内置引擎或为配置面板加访问控制
 
 ## 版本演进
@@ -238,7 +238,8 @@ scripts/                         # BLAST 队列诊断 / 同源算法回归等运
 | v2.4-v2.5 | 评估表 AI 提取配体自动入表 · 规则提取结构化（标签行配对）· PDB 不限选项 · 直传回退 |
 | v2.6 | 可续跑分段评估：同步流接口每段 ≤55s 交还 checkpoint，前端携快照续跑（BLAST RID 跨段轮询 / LLM 报告增量），修复网关 ~91s 切断的「未知错误」 |
 | v2.6.1 | insights 智能解析流式化（NDJSON + 心跳），初次修复部署节点 502 |
-| **v2.6.2** | **insights 心跳形态复刻 sync（异步首事件 + 1.4KB pad + 3s 周期）**：小帧 ping 在部署链路被缓冲吞没、close 时撞 ALB ~50s 接收超时的 502 根除；LLM 预算 40s；前端三级降级（流式 → 流式重试 → quick 规则兜底）永不卡死；`/api/llm/test` 收紧至 12s 快速失败 |
+| **v2.6.2** | **insights 心跳形态复刻 sync（异步首事件 + 1.4KB pad + 3s 周期）**：小帧 ping 在部署链路被缓冲吞没的 502 根除；前端三级降级（流式 → 流式重试 → quick 规则兜底）永不卡死；`/api/llm/test` 收紧至 12s 快速失败 |
+| **v2.6.3** | **网关转发窗实测定位（~24-28s 字节转发窗，socket ~91s 切断）后全面收紧**：insights LLM 预算 40s→12s（done 必在窗内入队，根除「network error」透出）；sync 段预算 55s→14s；管线闸门随段预算伸缩（BLAST 提交绑定段截止，连续 3 次切断置 failed 走 RCSB 兜底）；LLM 报告段同键连续 3 次失败后放弃重试（规则兜底内容定稿，防慢引擎无限段循环）；前端断流识别覆盖英文 network error/terminated，sync 段流中断自动携 checkpoint 重试 |
 
 ## 说明
 
