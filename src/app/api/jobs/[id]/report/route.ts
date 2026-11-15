@@ -7,6 +7,7 @@ import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
+import { applyResponsiveOverride } from '@/lib/eval/report-html'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -26,6 +27,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   } catch {
     return NextResponse.json({ error: '报告文件已丢失' }, { status: 404 })
   }
+  // v2.7.3：旧报告（无响应式版心标记）注入覆盖 CSS —— 历史作业同样宽屏自适应/移动端自适配；幂等
+  html = applyResponsiveOverride(html)
   const url = new URL(req.url)
   const download = url.searchParams.get('download') === '1'
   const headers: Record<string, string> = {

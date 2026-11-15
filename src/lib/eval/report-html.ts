@@ -15,6 +15,49 @@ import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
 
+// ─── v2.7.3 响应式版心（单源规则）────────────────────────────────────────────
+//  版心随视口分级放宽（920 → 1088 → 1224 → 1360 → 1480 → 1600），宽屏两侧不再大片留白；
+//  字号随版心微升保持行宽可读；数据表（min-width 856px）在 ≥1000px 版心内免横向滚动；
+//  窄屏收紧留白 + 网格列最小值不超过容器宽（防小屏撑爆横向滚动）。
+//  单源使用：① 新报告内嵌于模板 <style> 尾部（后于全部基础规则，层级安全）；
+//           ② 旧报告（落盘于 v2.7.3 之前的 report.html）由报告路由经
+//              applyResponsiveOverride 注入到 </head> 前 —— 历史作业同样自适配。
+
+const RESPONSIVE_PAGE_MARKER = 'rpt-rw-v3'
+
+export const RESPONSIVE_PAGE_CSS = `  /* ${RESPONSIVE_PAGE_MARKER} 响应式版心（v2.7.3）：窄屏收紧留白 / 宽屏分级放宽，字号随版心微升 */
+  @media (max-width:1024px){ .page{padding:40px 30px 56px} }
+  @media (max-width:640px){
+    .page{padding:26px 16px 38px}
+    h1.rpt-title{font-size:22px}
+    .glance-kicker,.glance-foot{padding-left:14px;padding-right:14px}
+    .backtop{right:14px;bottom:16px;width:38px;height:38px}
+  }
+  @media (min-width:1280px){ .page{max-width:1088px} }
+  @media (min-width:1440px){ .page{max-width:1224px} body{font-size:15.5px} }
+  @media (min-width:1600px){
+    .page{max-width:1360px} body{font-size:16px}
+    h1.rpt-title{font-size:30px} .sec>h2{font-size:20px}
+    .af-fig{flex-basis:360px} .af-fig>img{width:360px} .af-stage,.af-poster{height:280px}
+  }
+  @media (min-width:1920px){ .page{max-width:1480px} body{font-size:17px} }
+  @media (min-width:2200px){ .page{max-width:1600px} body{font-size:17.5px} }
+  /* 窄容器防溢出：网格列最小值不超过容器宽（小屏手机） */
+  .lig-grid { grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr)); }
+  .fig-grid { grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); }
+  .oligo-ev-line { flex-wrap:wrap; }
+  .oligo-ev-line .oligo-ev-text { min-width:120px; }
+  @media print { .page{padding:0;max-width:none;box-shadow:none} }
+`
+
+/** 旧报告兼容：无 v2.7.3 响应式版心标记的历史 report.html，注入覆盖 CSS（幂等，已有则原样返回） */
+export function applyResponsiveOverride(html: string): string {
+  if (html.includes(RESPONSIVE_PAGE_MARKER)) return html
+  const i = html.indexOf('</head>')
+  if (i < 0) return html
+  return `${html.slice(0, i)}<style id="rpt-rw">${RESPONSIVE_PAGE_CSS}</style>\n${html.slice(i)}`
+}
+
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
 
 export function esc(s: string): string {
@@ -980,7 +1023,6 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   ::-webkit-scrollbar-track{background:transparent}
   html{scrollbar-width:thin;scrollbar-color:#d6d3d1 transparent}
   .page { max-width:920px; margin:0 auto; padding:56px 44px 72px; background:var(--paper); min-height:100vh; box-shadow:0 0 0 1px var(--hairline); }
-  @media (max-width:640px){ .page{padding:28px 18px 40px} }
   @media print {
     body{background:#fff} .page{padding:0;max-width:none;box-shadow:none}
     .no-print{display:none!important} .sec{break-inside:avoid-page} .fig{break-inside:avoid}
@@ -1231,7 +1273,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .lit-pdbs a:hover { background:#d9f5e8; }
 
   /* ── 图 ── */
-  .fig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:20px; margin-top:6px; }
+  .fig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); gap:20px; margin-top:6px; }
   .fig { text-align:center; }
   .fig img { max-width:100%; max-height:420px; border:1px solid var(--line); border-radius:4px; background:#fff; padding:8px; }
   .fig-missing { padding:40px; background:#fafaf9; border:1px dashed var(--line); border-radius:4px; color:var(--sub); }
@@ -1269,7 +1311,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   @media (max-width:720px){ .rpt-headflex{flex-direction:column} .af-fig{flex-basis:auto; width:100%; max-width:400px; margin:0 auto} .af-stage,.af-poster{height:260px} }
 
   /* ── 配体卡（v2.0；v2.7 + 2D 结构式与计算性质双栏卡）── */
-  .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(400px,1fr)); gap:14px; margin-top:8px; }
+  .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr)); gap:14px; margin-top:8px; }
   .lig-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:14px 18px; break-inside:avoid; }
   .lig-fail { border-style:dashed; opacity:.78; }
   .lig-main { display:flex; gap:14px; align-items:flex-start; }
@@ -1304,7 +1346,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   /* ── 页脚 ── */
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:var(--mono); }
   .warn-box { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:4px; padding:12px 16px; font-size:12.5px; margin:14px 0; }
-</style>
+
+${RESPONSIVE_PAGE_CSS}</style>
 </head>
 <body>
 <div class="page" id="top">

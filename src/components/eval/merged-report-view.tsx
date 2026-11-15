@@ -580,7 +580,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         <DialogContent
           showCloseButton
-          className="flex h-[88vh] w-full max-w-6xl flex-col gap-0 overflow-hidden rounded-xl p-0 sm:max-w-6xl"
+          className="flex h-[88vh] w-[calc(100vw-2rem)] max-w-6xl flex-col gap-0 overflow-hidden rounded-xl p-0 sm:w-full xl:max-w-[1280px] 2xl:max-w-[1560px]"
         >
           <DialogHeader className="flex-row items-center justify-between gap-4 border-b border-border px-5 py-3 pr-14 text-left">
             <div className="flex flex-col gap-0.5">

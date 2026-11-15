@@ -11,7 +11,7 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
-import { esc, renderMarkdown } from './report-html'
+import { esc, renderMarkdown, RESPONSIVE_PAGE_CSS } from './report-html'
 import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution, type SharedStructure } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import type { LigandResolution } from './ligand'
@@ -821,8 +821,9 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .note { font-size:12.5px; color:#57534e; background:#f7f6f3; border-left:3px solid #a8a29e; padding:8px 14px; margin:10px 0; border-radius:0 4px 4px 0; }
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:ui-monospace,Menlo,monospace; }
   @media print { body { background:#fff; } .page { padding:24px 8px; } .pdb-fold, .fold { page-break-inside:avoid; } }
-  @media (max-width:640px) { .page { padding:28px 18px; } .rpt-title { font-size:20px; } .toc ol { columns:1; } }
-</style>
+  @media (max-width:640px) { .toc ol { columns:1; } }
+
+${RESPONSIVE_PAGE_CSS}</style>
 </head>
 <body>
 <div class="page">
