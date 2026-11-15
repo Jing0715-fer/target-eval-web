@@ -243,6 +243,7 @@ scripts/                         # BLAST 队列诊断 / 同源算法回归等运
 | **v2.6.3** | **网关转发窗实测定位（~24-28s 字节转发窗，socket ~91s 切断）后全面收紧**：insights LLM 预算 40s→12s（done 必在窗内入队，根除「network error」透出）；sync 段预算 55s→14s；管线闸门随段预算伸缩（BLAST 提交绑定段截止，连续 3 次切断置 failed 走 RCSB 兜底）；LLM 报告段同键连续 3 次失败后放弃重试（规则兜底内容定稿，防慢引擎无限段循环）；前端断流识别覆盖英文 network error/terminated，sync 段流中断自动携 checkpoint 重试 |
 | **v2.7** | **报告可读性与 LLM 章节化重构**：① LLM 分析三段式拆为 10 章节级调用（200-800 字/章，实测单章 2-5s，稳落 ~12.5s 段预算内 — 修复 14s 段预算下三段全部 aborted 的「LLM 分析失败」；缺章降级为局部提示而非整体失败）；② AlphaFold 头图区间着色修复（3Dmol resi 数组「任一命中」语义导致区间中段残基不着色 — 结构大片透明看不到 → 改用 `"min-max"` 区间字符串全区间着色，覆盖率 5.0%→8.3%，缓存升 v2 子目录整体失效重渲染）；③ 报告头部双栏重构（头图上提与标题齐平，消除蛋白信息下方空白）；④ 配体卡增强（PubChem 2D 化学结构式图 + XLogP/TPSA/氢供受体/可旋转键/重原子/精确质量等计算性质 + InChIKey/SMILES 标识符折叠，磁盘缓存 ligand2d） |
 | **v2.7.1** | **部署产物瘦身修复**：pipeline/report-merged 三处运行时资产路径补 `turbopackIgnore` — 根除 Turbopack 因动态 fs 路径把整个项目根（node_modules 全量 + 沙盒 skills 等 ~295MB standalone）追踪进部署包导致的部署失败；standalone 295MB→180MB、部署包 ~68MB，平台构建脚本端到端复验通过 |
+| **v2.7.2** | **AlphaFold 报告内嵌交互式 3D 视图（根治部署节点图片生成失败）**：旧 af2 相位在服务端用 Playwright 无头 Chromium 截图（冷启动 15-40s 且不可中断），远超 14s 段预算与网关 ~24s 转发窗 — 多实例负载均衡下每次重试都重付冷启动，图片永远渲染不完 → 报告缺图。新架构：af2 仅取元数据（apiCache 秒级）；render 相位按需下载 PDB（磁盘缓存 + 12s 上限 + 预算闸门）；报告头内嵌 3Dmol bundle + PDB 文本 + 共用 plddtStyleApplyJs 四段着色 — 拖拽旋转/滚轮缩放，离线单文件可交互，服务端零浏览器依赖；legacy PNG 仅作只读缓存回落/打印海报（viewer 成功后 pngURI 生成）；Playwright 单例毒丸修复（launch 失败不再永久缓存拒绝） |
 
 ## 说明
 

@@ -31,13 +31,47 @@ async function jfetch(url, opts = {}) {
   return res
 }
 
+/** v2.7.2 双通道上传：multipart 直传（dev/无状态回退）；生产 standalone 上
+ *  Next 16 对 multipart POST 有动作解析拦截（409 Server Action unavailable，
+ *  #95447 同族）→ 切换分块上传通道（部署用户主路径：init → PUT chunk → complete → status 轮询）*/
+async function uploadDocx() {
+  const buf = fs.readFileSync(DOCX)
+  const form = new FormData()
+  form.append('file', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), '评估表.docx')
+  const direct = await jfetch('/api/evaluate/upload?stateless=1&noVlm=1', { method: 'POST', body: form }).catch(() => null)
+  if (direct && direct.ok) return await direct.json()
+  if (direct && direct.status === 409) {
+    log('  [multipart 直传被生产模式拦截（409）— 切换分块上传通道]')
+    const init = await jfetch('/api/evaluate/upload/init', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '评估表.docx', size: buf.length }) })
+    const initJ = await init.json()
+    if (!initJ.ok) throw new Error('init 失败: ' + JSON.stringify(initJ).slice(0, 200))
+    const uploadId = initJ.uploadId
+    const CHUNK = 512 * 1024
+    for (let off = 0; off < buf.length; off += CHUNK) {
+      const slice = buf.subarray(off, Math.min(off + CHUNK, buf.length))
+      const r = await jfetch(`/api/evaluate/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&offset=${off}`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: slice })
+      if (!r.ok) throw new Error('chunk 失败 HTTP ' + r.status + ': ' + (await r.text()).slice(0, 120))
+    }
+    const comp = await jfetch('/api/evaluate/upload/complete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uploadId }) })
+    const compJ = await comp.json()
+    if (!compJ.ok) throw new Error('complete 失败: ' + JSON.stringify(compJ).slice(0, 200))
+    for (let i = 0; i < 150; i++) {
+      const st = await jfetch(`/api/evaluate/upload/status?uploadId=${encodeURIComponent(uploadId)}`)
+      const stJ = await st.json()
+      if (stJ.phase === 'done' && stJ.parsed) return { ok: true, uploadId, parsed: stJ.parsed, fullText: stJ.parsed.fullText || '' }
+      if (stJ.phase === 'error') throw new Error('解析失败: ' + (stJ.error || ''))
+      if (i % 10 === 0) log(`  [解析中 phase=${stJ.phase}… ${i}s]`)
+      await new Promise(r => setTimeout(r, 1000))
+    }
+    throw new Error('解析轮询超时（150s）')
+  }
+  throw new Error('直传上传失败 HTTP ' + (direct ? direct.status : 'network') + '（无 409 回退条件）')
+}
+
 async function main() {
   // ── 1. 直传上传（无状态模式）──
   log('── [1] 直传上传（stateless）──')
-  const form = new FormData()
-  form.append('file', new Blob([fs.readFileSync(DOCX)], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), '评估表.docx')
-  const up = await jfetch('/api/evaluate/upload?stateless=1&noVlm=1', { method: 'POST', body: form })
-  const upJson = await up.json()
+  const upJson = await uploadDocx()
   if (!upJson.ok) throw new Error('上传失败: ' + JSON.stringify(upJson).slice(0, 200))
   log('  uploadId:', upJson.uploadId, '· stateless:', upJson.stateless, '· uniprots:', upJson.parsed.uniprotIds, '· fullText:', (upJson.fullText || '').length, 'chars · goalHints:', (upJson.parsed.goalHints || []).length)
 
@@ -202,6 +236,13 @@ async function main() {
   if (!final.reportHtml || final.reportHtml.length < 5000) throw new Error('FAIL: reportHtml 缺失或过短')
   if (!final.reportHtml.includes('rpt-head')) throw new Error('FAIL: reportHtml 无报告头（渲染异常）')
   if (!job.summary?.ligands?.length) throw new Error('FAIL: summary.ligands 空')
+
+  // v2.7.2：报告落盘（供 test-af-viewer.mjs 做内嵌交互式 3D 视图的浏览器级断言）
+  try {
+    await fs.promises.mkdir('scripts/out', { recursive: true })
+    await fs.promises.writeFile('scripts/out/report.html', final.reportHtml || '', 'utf-8')
+    log('  report.html 已落盘 scripts/out/（' + Math.round((final.reportHtml || '').length / 1024) + 'KB）')
+  } catch { /* 落盘失败不影响 E2E 结论 */ }
 
   log('')
   log('✅ E2E 全链路通过：直传上传 → 内联 insights → 同步流式评估 → 配体归一（Resmetirom→PubChem C17H12Cl2N6O4 / ATP→direct-id）→ 内联 HTML 报告')

@@ -41,7 +41,7 @@ import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
-import { alphafoldFigureFor } from './alphafold'
+import { alphafoldStructureFor, alphafoldFigureCached, fetchAlphafoldPrediction } from './alphafold'
 import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
 /** v2.4 无状态（函数计算）部署：评估表数据由前端内联携带（服务器磁盘不跨请求保留） */
@@ -1223,23 +1223,32 @@ class SegmentRunner {
     if (st.uniprotInfo && !st.afSummary) {
       try {
         this.report('report', '获取 AlphaFold 预测结构…', 0.06)
-        const fig = await alphafoldFigureFor(st.uniprotInfo.uniprotId)
-        if (fig) {
-          st.afFigure = {
-            dataUri: 'data:image/png;base64,' + fig.png.toString('base64'),
-            modelId: fig.meta.modelId,
-            globalPlddt: fig.meta.globalPlddt,
-            version: fig.meta.latestVersion,
-            fracVeryHigh: fig.meta.fracVeryHigh,
+        // v2.7.2：af2 相位只取元数据（apiCache 秒级命中，稳落段预算）；PDB 模型
+        // 文本挪到 render 相位按需下载（磁盘缓存 + 12s 上限 + 预算闸门）。旧实现
+        // 在此调 alphafoldFigureFor 做无头 Chromium 截图 —— 冷启动 15-40s 且不可
+        // 中断，远超 14s 段预算与网关 ~24s 转发窗；多实例负载均衡下每次重试都落在
+        // 冷实例重付启动成本，部署节点上图片永远渲染不完（报告缺图的根因）。报告
+        // 内嵌 3Dmol 交互式 3D 视图后，服务端不再依赖任何浏览器。
+        const meta = await fetchAlphafoldPrediction(st.uniprotInfo.uniprotId)
+        if (meta) {
+          const figCached = await alphafoldFigureCached(st.uniprotInfo.uniprotId)
+          if (figCached) {
+            st.afFigure = {
+              dataUri: 'data:image/png;base64,' + figCached.png.toString('base64'),
+              modelId: figCached.meta.modelId,
+              globalPlddt: figCached.meta.globalPlddt,
+              version: figCached.meta.latestVersion,
+              fracVeryHigh: figCached.meta.fracVeryHigh,
+            }
           }
           st.afSummary = {
-            available: true, modelId: fig.meta.modelId, globalPlddt: fig.meta.globalPlddt,
-            version: fig.meta.latestVersion, fracVeryHigh: fig.meta.fracVeryHigh,
+            available: true, modelId: meta.modelId, globalPlddt: meta.globalPlddt,
+            version: meta.latestVersion, fracVeryHigh: meta.fracVeryHigh,
           }
-          this.log(`AlphaFold 预测获取成功：${fig.meta.modelId}（平均 pLDDT ${fig.meta.globalPlddt ?? '—'}，v${fig.meta.latestVersion}）— pLDDT 着色结构图已渲染`)
+          this.log(`AlphaFold 预测获取成功：${meta.modelId}（平均 pLDDT ${meta.globalPlddt ?? '—'}，v${meta.latestVersion}）— 报告将内嵌可交互 3D 视图（拖拽旋转/滚轮缩放/pLDDT 着色）`)
         } else {
-          st.afSummary = { available: false, note: '该靶点在 AlphaFold DB 无预测或渲染失败' }
-          this.log('AlphaFold 预测结构：不可用（无预测/渲染失败），报告将以无图呈现')
+          st.afSummary = { available: false, note: '该靶点在 AlphaFold DB 无预测' }
+          this.log('AlphaFold 预测结构：该靶点在 AlphaFold DB 无预测，报告将以无图呈现')
         }
       } catch {
         st.afSummary = { available: false, note: 'AlphaFold 预测获取失败' }
@@ -1350,6 +1359,26 @@ class SegmentRunner {
       const generatedFullMarkdown = parts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n')
       const generatedOk = parts.some(p => p.llmOk)
       const generatedErrors = parts.filter(p => !p.llmOk).map(p => `${p.label}（${p.key}）: ${p.error}`)
+      // v2.7.2：AlphaFold 交互视图 — render 相位按需取模型 PDB（磁盘缓存优先；
+      // 预算闸门：剩余 <12s 交还下一段再试，防下载越过网关转发窗导致流被切）。
+      // 获取失败/超预算不影响报告生成（视图降级为统计信息，永不阻塞）。
+      let alphafoldStructure: { pdbText: string; uniprotId: string; modelId: string; globalPlddt: number | null; version: number; fracVeryHigh: number | null } | undefined
+      if (st.afSummary?.available && st.uniprotInfo) {
+        if (budgetLeft(this.cb) < 12_000) return this.handoff()
+        try {
+          const struct = await alphafoldStructureFor(st.uniprotInfo.uniprotId)
+          if (struct?.embeddable) {
+            alphafoldStructure = {
+              pdbText: struct.pdbText, uniprotId: struct.uniprotId, modelId: struct.meta.modelId,
+              globalPlddt: struct.meta.globalPlddt, version: struct.meta.latestVersion, fracVeryHigh: struct.meta.fracVeryHigh,
+            }
+          } else if (struct) {
+            this.log(`AlphaFold 模型过大（${Math.round(struct.pdbText.length / 1024)}KB > 内嵌预算 2560KB）— 报告仅展示结构统计信息`, 'warn')
+          } else {
+            this.log('AlphaFold 模型 PDB 获取失败（下载超时/网络）— 报告仅展示结构统计信息', 'warn')
+          }
+        } catch { /* 视图降级，不阻塞报告 */ }
+      }
       const html = await renderReportHtml({
         ctx: this.reportContext(),
         methodStats: st.scores!.methodStats,
@@ -1361,6 +1390,7 @@ class SegmentRunner {
         totalPdbFound: st.totalPdbFound,
         engineSummary,
         alphafoldFigure: st.afFigure ?? undefined,
+        alphafoldStructure,
         resolveImagePath: (meta) => {
           const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
           // turbopackIgnore：st.assetDir 为运行时上传目录（db/reports/<id>/assets），

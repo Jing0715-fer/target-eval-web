@@ -1,10 +1,13 @@
 /**
  * AlphaFold DB 预测结构集成（仅服务端）：
  *  - fetchAlphafoldPrediction: AFDB REST（/api/prediction/{uniprot}）→ 模型地址与 pLDDT 指标
- *  - alphafoldFigure: 下载模型 PDB → 3Dmol.js（本地缓存 bundle）+ Playwright 无头截图
- *    → pLDDT 着色卡通图（官方四段配色：≥90 蓝 / 70-90 青 / 50-70 黄 / <50 橙）
- *    → sharp 后处理：白底压平 + trim 去白边 + 均匀小边距（v2.2：结构占满画布，
- *      报告头图不再大面积空白；sharp 不可用时优雅降级为原图）
+ *  - alphafoldStructureFor: 下载模型 PDB → 磁盘缓存（db/cache/alphafold/pdb/）——
+ *    v2.7.2 报告内嵌 3Dmol 交互视图的数据源（拖拽旋转/滚轮缩放/pLDDT 着色），
+ *    下载上限 12s，稳落 14s 段预算与网关 ~24s 转发窗内
+ *  - alphafoldFigure: （旧路径，v2.7.2 起仅当 legacy PNG 缓存已存在时复用）
+ *    3Dmol.js + Playwright 无头截图 → sharp 后处理。生产管线不再调用其冷渲染：
+ *    无头 Chromium 冷启动 15-40s 且不可中断，远超段预算——多实例负载均衡下
+ *    图片永远渲染不完（部署节点「生成 alphafold 图片失败」的根因）
  *
  * 图片落盘缓存 db/cache/alphafold/{uniprot}.png（TTL 无限 — 模型版本升级才失效，
  * 命中时直接复用）。渲染失败静默降级（报告无图但不阻塞生成）。
@@ -97,13 +100,13 @@ export async function fetchAlphafoldPrediction(uniprotId: string): Promise<Alpha
   return out
 }
 
-/** 下载 AlphaFold 模型 PDB 文本（≤4MB） */
-async function downloadModelPdb(pdbUrl: string): Promise<string | null> {
+/** 下载 AlphaFold 模型 PDB 文本（≤4MB；timeoutMs 可调 — 结构获取路径用 12s 上限） */
+async function downloadModelPdb(pdbUrl: string, timeoutMs = 30_000): Promise<string | null> {
   // log via wrapper
   try {
     const res = await fetch(pdbUrl, {
       headers: { 'User-Agent': AFDB_UA },
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     if (!res.ok) return null
     const text = await res.text()
@@ -115,8 +118,8 @@ async function downloadModelPdb(pdbUrl: string): Promise<string | null> {
   }
 }
 
-/** 3Dmol bundle 本地缓存（db/cache/3dmol.min.js） */
-async function ensure3DmolBundle(): Promise<string | null> {
+/** 3Dmol bundle 本地缓存（db/cache/3dmol.min.js）；报告内嵌交互视图共用（v2.7.2 导出） */
+export async function ensure3DmolBundle(): Promise<string | null> {
   const cacheDir = path.join(process.cwd(), 'db', 'cache')
   const file = path.join(cacheDir, '3dmol.min.js')
   try {
@@ -140,25 +143,21 @@ async function ensure3DmolBundle(): Promise<string | null> {
   return null
 }
 
-// ─── pLDDT 着色渲染页 ─────────────────────────────────────────────────────────
+// ─── pLDDT 着色（无头渲染页与报告内嵌交互视图共用同一实现）──────────────────
 
 /** 残基 pLDDT → 官方四段配色（AlphaFold DB 配色规范） */
 const PLDDT_COLORS = { hi: '#0053D6', mid: '#65CBF3', low: '#FFDB13', poor: '#FF7D45' } as const
 
-export function buildRenderPage(bundleJs: string, pdbText: string, width: number, height: number): string {
-  const safePdb = JSON.stringify(pdbText)
-  return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>
-  html,body { margin:0; padding:0; background:#ffffff; overflow:hidden; }
-  #viewport { width:${width}px; height:${height}px; position:relative; }
-</style>
-<script>${bundleJs}</script>
-</head>
-<body>
-<div id="viewport"></div>
-<script>
-(function () {
-  var pdb = ${safePdb};
+/**
+ * pLDDT 四段着色脚本（v2.7.2 抽出共用 — 无头截图页与报告内嵌 3Dmol 交互视图同源，
+ * 防两处逻辑漂移）。IIFE 接受 (pdb, viewer)；调用方作用域需已定义同名变量且
+ * viewer 已 addModel 完成模型加载。
+ * 关键语义（v2.7 修复）：3Dmol 的 resi 数组是「任一命中」（仅端点残基着色，
+ * 区间中段无样式 → 结构大片透明看不到）；区间选择必须用 "min-max" 字符串
+ * （propertyMatches 解析 (\d+)\s*-\s*(\d+) 为闭区间，全区间残基着色）。
+ */
+export function plddtStyleApplyJs(): string {
+  return `(function (pdb, viewer) {
   // 残基 pLDDT（B-factor 列）分桶
   var lines = pdb.split('\\n');
   var resB = {};
@@ -187,10 +186,7 @@ export function buildRenderPage(bundleJs: string, pdbText: string, width: number
     if (cur) runs.push(cur);
     return runs;
   }
-  var viewer = $3Dmol.createViewer('viewport', { defaultcolors: $3Dmol.rasmolElementColors });
-  viewer.setBackgroundColor(0xffffff);
-  viewer.addModel(pdb, 'pdb');
-  // v2.7 兜底基础样式：无 pLDDT 桶的残基（若有）以浅灰可见，避免「透明看不到」
+  // 兜底基础样式：无 pLDDT 桶的残基（若有）以浅灰可见，避免「透明看不到」
   viewer.setStyle({}, { cartoon: { color: '#e7e5e4' } });
   var ok = true;
   try {
@@ -198,14 +194,32 @@ export function buildRenderPage(bundleJs: string, pdbText: string, width: number
     for (var g = 0; g < groups.length; g++) {
       var runs = runsOf(groups[g][0]);
       for (var q = 0; q < runs.length; q++) {
-        // v2.7 关键修复：3Dmol 的 resi 数组语义是「任一命中」（仅两端点残基被着色，
-        // 区间中段无样式 → 结构大片透明/不可见）。区间选择必须用 "min-max" 字符串
-        // （propertyMatches 解析 (\d+)\s*-\s*(\d+) 为闭区间）。
         viewer.setStyle({ resi: runs[q][0] + '-' + runs[q][1] }, { cartoon: { color: groups[g][1] } });
       }
     }
   } catch (e) { ok = false; }
   if (!ok) viewer.setStyle({}, { cartoon: { color: 'spectrum' } });
+})(pdb, viewer);`
+}
+
+export function buildRenderPage(bundleJs: string, pdbText: string, width: number, height: number): string {
+  const safePdb = JSON.stringify(pdbText)
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><style>
+  html,body { margin:0; padding:0; background:#ffffff; overflow:hidden; }
+  #viewport { width:${width}px; height:${height}px; position:relative; }
+</style>
+<script>${bundleJs}</script>
+</head>
+<body>
+<div id="viewport"></div>
+<script>
+(function () {
+  var pdb = ${safePdb};
+  var viewer = $3Dmol.createViewer('viewport', { defaultcolors: $3Dmol.rasmolElementColors });
+  viewer.setBackgroundColor(0xffffff);
+  viewer.addModel(pdb, 'pdb');
+  ${plddtStyleApplyJs()}
   viewer.zoomTo();
   viewer.zoom(1.2); // framing: fit then modest zoom-in, leaves margins without cropping
   viewer.render();
@@ -238,9 +252,13 @@ interface PageLike {
 
 async function getBrowser(): Promise<BrowserLike> {
   const mod = (await import('playwright')) as unknown as { chromium: ChromiumLike }
-  pwGlobal.__afBrowser ??= mod.chromium.launch({
+  const p = mod.chromium.launch({
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   })
+  // v2.7.2 毒丸修复：launch 失败会把被拒绝的 promise 永久缓在单例里，后续所有
+  // 尝试都重放同一拒绝（进程生命周期内 AF 图永远失败）。失败即清除单例，下次重试。
+  pwGlobal.__afBrowser ??= p
+  p.catch(() => { if (pwGlobal.__afBrowser === p) pwGlobal.__afBrowser = undefined })
   return pwGlobal.__afBrowser as Promise<BrowserLike>
 }
 
@@ -346,4 +364,61 @@ export async function alphafoldFigureFor(uniprotId: string): Promise<AlphafoldFi
     await fs.writeFile(file, png)
   } catch { /* 缓存失败不影响返回 */ }
   return { uniprotId: id, png, meta }
+}
+
+// ─── v2.7.2：报告内嵌交互视图数据源（无 Playwright/Chromium 依赖）────────────
+
+/** 内嵌报告的 PDB 文本预算（>2.5MB 的超大蛋白跳过交互视图，保统计信息呈现） */
+export const AF_EMBED_MAX_BYTES = 2.5 * 1024 * 1024
+
+export interface AlphafoldStructure {
+  uniprotId: string
+  pdbText: string
+  meta: AlphafoldPrediction
+  /** ≤AF_EMBED_MAX_BYTES（可安全内嵌进报告 HTML，经 done 事件回传前端） */
+  embeddable: boolean
+}
+
+/**
+ * AFDB 模型 PDB 文本（v2.7.2 报告内嵌 3Dmol 交互视图的数据源）：
+ * db/cache/alphafold/pdb/{id}.pdb 磁盘缓存（TTL 无限）；下载上限 12s ——
+ * 稳落 14s 段预算与网关 ~24s 转发窗内，与旧 Playwright 截图路径（冷启动
+ * 15-40s 不可中断）形成对照：这是部署节点图片生成失败根因的修复侧。
+ */
+export async function alphafoldStructureFor(uniprotId: string): Promise<AlphafoldStructure | null> {
+  const id = uniprotId.trim().toUpperCase()
+  const meta = await fetchAlphafoldPrediction(id)
+  if (!meta) return null
+  const cacheDir = path.join(process.cwd(), 'db', 'cache', 'alphafold', 'pdb')
+  const file = path.join(cacheDir, `${id}.pdb`)
+  let pdbText: string | null = null
+  try {
+    const cached = await fs.readFile(file, 'utf-8')
+    if (cached.includes('ATOM')) pdbText = cached
+  } catch { /* 未缓存 */ }
+  if (pdbText == null) {
+    pdbText = await downloadModelPdb(meta.pdbUrl, 12_000)
+    if (pdbText == null) console.error('[af] model pdb download failed:', meta.pdbUrl)
+    if (pdbText != null) {
+      try {
+        await fs.mkdir(cacheDir, { recursive: true })
+        await fs.writeFile(file, pdbText, 'utf-8')
+      } catch { /* 缓存失败不影响返回 */ }
+    }
+  }
+  if (pdbText == null) return null
+  return { uniprotId: id, pdbText, meta, embeddable: pdbText.length <= AF_EMBED_MAX_BYTES }
+}
+
+/** 已缓存的 legacy PNG 头图（只读复用 — 不再冷渲染；v2.7.2 起生产管线仅此路径取 PNG） */
+export async function alphafoldFigureCached(uniprotId: string): Promise<AlphafoldFigure | null> {
+  const id = uniprotId.trim().toUpperCase()
+  const meta = await fetchAlphafoldPrediction(id)
+  if (!meta) return null
+  try {
+    const file = path.join(process.cwd(), 'db', 'cache', 'alphafold', 'v2', `${id}.png`)
+    const cached = await fs.readFile(file)
+    if (cached.length > 5_000) return { uniprotId: id, png: cached, meta }
+  } catch { /* 未缓存 */ }
+  return null
 }
