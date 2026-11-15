@@ -303,10 +303,10 @@ const checks: [string, boolean][] = [
   ['横滚指示 JS（scrollWidth 检测）', html.includes('w.scrollWidth - w.clientWidth > 4')],
   // 结构完整性
   ['UX JS 位于 </body> 前（新报告）', html.indexOf('/* rpt-ux-v1 InChIKey/SMILES') > 0 && html.indexOf('/* rpt-ux-v1 InChIKey/SMILES') < html.indexOf('</body>')],
-  ['响应式版心 + 灯箱未被破坏（rpt-rw-v3 / rpt-zoom-v2）', html.includes('rpt-rw-v3') && html.includes('rpt-zoom-v2')],
+  ['响应式版心 + 灯箱未被破坏（rpt-rw-v3 / rpt-zoom-v3）', html.includes('rpt-rw-v3') && html.includes('rpt-zoom-v3')],
   // 旧报告注入路径
-  ['旧模拟报告已剥离全部升级标记', !legacy.includes('rpt-ux-v1') && !legacy.includes('rpt-pr-v1') && !legacy.includes('rpt-zoom-v2') && !legacy.includes('rpt-rw-v3')],
-  ['注入后恢复 UX/打印/灯箱/版心标记', injected.includes('rpt-ux-v1') && injected.includes('rpt-pr-v1') && injected.includes('rpt-zoom-v2') && injected.includes('rpt-rw-v3')],
+  ['旧模拟报告已剥离全部升级标记', !legacy.includes('rpt-ux-v1') && !legacy.includes('rpt-pr-v1') && !legacy.includes('rpt-zoom-v3') && !legacy.includes('rpt-rw-v3')],
+  ['注入后恢复 UX/打印/灯箱/版心标记', injected.includes('rpt-ux-v1') && injected.includes('rpt-pr-v1') && injected.includes('rpt-zoom-v3') && injected.includes('rpt-rw-v3')],
   ['注入含 UX JS 与复制挂载', injected.includes('legacyCopy') && injected.includes("querySelectorAll('.lig-ident')")],
   ['注入幂等（applyUxUpgrade 二次不变）', applyUxUpgrade(injected) === injected && applyZoomUpgrade(injected) === injected && applyResponsiveOverride(injected) === injected],
   ['注入保留内容完整性（剥离三个注入块后等于旧报告）', injected

@@ -1,14 +1,16 @@
 /**
- * 图片点击放大 E2E fixture 渲染（bun 直接跑 TS，v2.7.5 → v2.7.7）：
+ * 图片点击放大 E2E fixture 渲染（bun 直接跑 TS，v2.7.5 → v2.7.8）：
  *  1. 富上下文 mock（真实尺寸 PNG：配体结构式 / gel / sec + AlphaFold 3D 内嵌）→ report-new.html
  *  2. 剥离响应式版心 + 灯箱 CSS/JS → report-legacy.html（模拟 v2.7.4 旧报告）
  *  3. applyResponsiveOverride + applyZoomUpgrade → report-legacy-injected.html（旧报告 serve 路径）
  *  4. 合并报告最小 mock → renderMergedReportHtml → report-merged.html（原生内嵌灯箱）
- *  5. v2.7.6 baked v1 灯箱模拟（fake v1 script）→ applyZoomUpgrade v2 注入 → report-v276-injected.html
+ *  5. v2.7.6 baked v1 灯箱模拟（fake v1 script）→ applyZoomUpgrade v3 注入 → report-v276-injected.html
  *     （v1/v2 共存清理路径：v1 根移除 + img 克隆剥离句柄）
- *  6. 嵌入宿主模拟（ReportFrame 同构：自动高度 iframe + 父页滚动）→ embed-host.html
- *  7. 字符串断言：marker / 可缩放图选择器覆盖 / __rptEmb 嵌入自适应 / af-expand 3D 放大 /
- *     注入幂等 / 内容完整性 / 合并报告内嵌
+ *  6. 嵌入宿主模拟（ReportFrame 同构：自动高度 iframe + 父页滚动 + 吸顶栏）→ embed-host.html
+ *  7. v2.7.7 baked v2 模拟（marker 降级）→ applyZoomUpgrade v3 注入 → report-v277-injected.html
+ *  8. Dialog 宿主模拟（在线预览同构：h-full 内部可滚 iframe）→ dialog-host.html
+ *  9. 字符串断言：marker / 可缩放图选择器覆盖 / __rptEmb 嵌入自适应 / af-expand 3D 放大 /
+ *     注入幂等 / 内容完整性 / 合并报告内嵌 / v2.7.8 三项修复标记
  * 配套交互断言见 scripts/e2e-ligand-zoom.mjs（playwright）。
  */
 import * as fs from 'node:fs'
@@ -235,8 +237,10 @@ const v276Injected = applyZoomUpgrade(v276)
 fs.writeFileSync(`${OUT}/report-v276-injected.html`, v276Injected, 'utf-8')
 
 // ─── 嵌入宿主模拟（ReportFrame 同构：外层父页 + 自动高度 iframe，父页滚动）──────
+//  v2.7.8：新增吸顶栏（AppShell 同构 sticky top-0 z-40）— 验证灯箱关闭钮避让不被遮挡
 const hostHtml = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>embed host</title></head>
 <body style="margin:0">
+<header id="appbar" style="position:sticky;top:0;z-index:40;height:52px;background:#f8f8f7;border-bottom:1px solid #ddd;display:flex;align-items:center;padding:0 16px;font:600 12px sans-serif">App Shell 吸顶栏（h=52 · z-40）</header>
 <div id="pad-top" style="height:1500px;background:#f3f3f2">pad-top</div>
 <iframe id="rf" style="width:100%;border:0;display:block"></iframe>
 <div id="pad-bot" style="height:1500px;background:#f3f3f2">pad-bot</div>
@@ -255,6 +259,25 @@ const hostHtml = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
   });
 </` + `script></body></html>`
 fs.writeFileSync(`${OUT}/embed-host.html`, hostHtml, 'utf-8')
+
+// ─── Dialog 宿主模拟（在线预览同构：h-full 内部可滚 iframe — fixed 形态回归）──────
+const dlgHostHtml = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>dialog host</title></head>
+<body style="margin:0;font:12px sans-serif">
+<div style="height:56px;background:#eee;padding:8px 16px">Dialog Header（打印 / 新窗口）</div>
+<iframe id="rf" style="width:100%;height:700px;border:0;display:block"></iframe>
+<script>
+  var f = document.getElementById('rf');
+  f.srcdoc = ${JSON.stringify(html).replace(/<\//g, '<\\/')};
+  f.addEventListener('load', function () { f.setAttribute('data-ready', '1'); });
+</` + `script></body></html>`
+fs.writeFileSync(`${OUT}/dialog-host.html`, dlgHostHtml, 'utf-8')
+
+// ─── v2.7.7 baked v2 模拟：marker 降级 v3→v2（脚本体同 v3）→ serve 注入 v3 ──────
+//  验证 v2/v3 共存清理：v2 根移除 + img 克隆 + v2 af-expand（带旧闭包）移除重挂
+const v277 = html.replace(/rpt-zoom-v3/g, 'rpt-zoom-v2')
+fs.writeFileSync(`${OUT}/report-v277.html`, v277, 'utf-8')
+const v277Injected = applyZoomUpgrade(v277)
+fs.writeFileSync(`${OUT}/report-v277-injected.html`, v277Injected, 'utf-8')
 
 // ─── 模拟旧报告（v2.7.4 及以前）：剥离响应式版心 + 灯箱 CSS/JS ────────────────
 let legacy = html.replace(`\n${RESPONSIVE_PAGE_CSS}`, '').replace(`${LIGHTBOX_CSS}`, '').replace(`\n${LIGHTBOX_JS}`, '\n')
@@ -309,23 +332,29 @@ fs.writeFileSync(`${OUT}/report-merged.html`, mergedHtml, 'utf-8')
 const ligFigCount = (html.match(/<figure class="lig-struct">/g) ?? []).length
 const figCount = (html.match(/<figure class="fig">/g) ?? []).length
 const checks: [string, boolean][] = [
-  ['新报告含灯箱标记 rpt-zoom-v2', html.includes('rpt-zoom-v2') && html.includes('/* rpt-zoom-v2 图片点击放大 + 嵌入自适应 + AlphaFold 3D 视图放大')],
+  ['新报告含灯箱标记 rpt-zoom-v3', html.includes('rpt-zoom-v3') && html.includes('/* rpt-zoom-v3 图片点击放大 + 嵌入自适应 + AlphaFold 3D 视图放大')],
   ['新报告内嵌灯箱 CSS（.rpt-zoom-stage）', html.includes('.rpt-zoom-stage')],
   ['新报告内嵌灯箱 JS（SEL 选择器含 .lig-struct img）', html.includes("var SEL = '.lig-struct img, .fig img, .af-fig img'")],
-  ['新报告灯箱 JS 位于 </body> 前', html.indexOf('<script>\n/* rpt-zoom-v2 图片') >= 0 && html.indexOf('<script>\n/* rpt-zoom-v2 图片') < html.indexOf('</body>')],
+  ['新报告灯箱 JS 位于 </body> 前', html.indexOf('<script>\n/* rpt-zoom-v3 图片') >= 0 && html.indexOf('<script>\n/* rpt-zoom-v3 图片') < html.indexOf('</body>')],
   ['新报告响应式版心未被破坏（rpt-rw-v3）', html.includes('rpt-rw-v3')],
   ['新报告配体结构式 figure ≥ 2', ligFigCount >= 2],
   ['新报告实验图 figure = 2', figCount === 2],
   ['新报告嵌入自适应助手 __rptEmb（slice/pin/watch）', html.includes('window.__rptEmb') && html.includes('function slice()') && html.includes('function pin(el)') && html.includes('function watch(fn)')],
-  ['新报告 v1 共存清理（img 克隆剥离句柄）', html.includes("im.replaceWith(im.cloneNode(false))")],
+  ['新报告 v1/v2 共存清理（img 克隆剥离句柄 + 旧 af-expand 移除）', html.includes('im.replaceWith(im.cloneNode(false))') && html.includes("querySelectorAll('.af-stage .af-expand'), function (b) { b.remove(); }")],
   ['新报告 AF 3D 视图放大挂载（af-expand / af-fullwrap / canvas 迁移）', html.includes('function afFullscreen') && html.includes('.af-expand') && html.includes('.af-fullwrap') && html.includes('slot.appendChild(cv)')],
   ['新报告 AF 3D 全屏图例（pLDDT 四桶）', html.includes('af-full-legend') && html.includes('#0053D6')],
   ['新报告 AF 3D 内嵌视图存在（af-stage + 内嵌 3Dmol bundle）', html.includes('id="af-stage"') && html.includes('createViewer')],
   ['新报告 AF viewer 句柄导出（__afViewer resize 保险）', html.includes('window.__afViewer = viewer')],
-  ['新报告嵌入宿主已生成（embed-host.html）', hostHtml.includes('srcdoc') && hostHtml.includes("f.style.height = (h + 16) + 'px'")],
-  ['旧模拟报告已剥离灯箱标记', !legacy.includes('rpt-zoom-v2')],
+  ['新报告 v2.7.8 ⑨ 双按钮互斥（af-zoom-off + MutationObserver）', html.includes('figure.rpt-zoomable.af-zoom-off .rpt-zoom-badge') && html.includes("classList.toggle('af-zoom-off'") && html.includes('MutationObserver(syncAf)')],
+  ['新报告 v2.7.8 ⑩ 吸顶栏避让（headerH + H - r.top）', html.includes('function headerH(ow)') && html.includes('H - r.top')],
+  ['新报告 v2.7.8 ⑪ 父页滚动锁（lockParent/unlock + 滚动条补偿）', html.includes('function lockParent()') && html.includes('b.style.paddingRight = sw') && html.includes('EMB.lockParent(); // v2.7.8') && html.includes('EMB.unlock(); // v2.7.8')],
+  ['新报告嵌入宿主已生成（含吸顶栏 + 高度同步）', hostHtml.includes('position:sticky') && hostHtml.includes('srcdoc') && hostHtml.includes("f.style.height = (h + 16) + 'px'")],
+  ['Dialog 宿主已生成（h-full 内部可滚 iframe）', dlgHostHtml.includes('height:700px') && dlgHostHtml.includes('srcdoc')],
+  ['v2.7.7 模拟（marker 降级）+ 注入 v3 双脚本共存', v277Injected.includes('rpt-zoom-v3') && v277Injected.includes('rpt-zoom-v2') && (v277Injected.match(/<script>\n\/\* rpt-zoom/g) ?? []).length === 2],
+  ['v2.7.7 模拟注入含 v2 清理代码（旧 af-expand 移除）', v277Injected.includes("querySelectorAll('.af-stage .af-expand'), function (b) { b.remove(); }")],
+  ['旧模拟报告已剥离灯箱标记', !legacy.includes('rpt-zoom-v3')],
   ['旧模拟报告已剥离响应式版心标记', !legacy.includes('rpt-rw-v3')],
-  ['注入后恢复灯箱标记', injected.includes('rpt-zoom-v2')],
+  ['注入后恢复灯箱标记', injected.includes('rpt-zoom-v3')],
   ['注入后恢复版心标记', injected.includes('rpt-rw-v3')],
   ['注入 CSS 位于 </head> 前（<style id="rpt-zoom">）', injected.includes('<style id="rpt-zoom">')],
   ['注入 JS 位于 </body> 前', injected.lastIndexOf('<script>') < injected.lastIndexOf('</body>')],
@@ -334,11 +363,11 @@ const checks: [string, boolean][] = [
     .replace('<style id="rpt-zoom">' + LIGHTBOX_CSS + '</style>\n', '')
     .replace('\n' + LIGHTBOX_JS, '')
     .replace('<style id="rpt-rw">' + RESPONSIVE_PAGE_CSS + '</style>\n', '') === legacy],
-  ['v2.7.6 模拟（fake v1 灯箱）注入 v2 成功（v1 CSS+JS 均换，v2 CSS/JS 注入到位）', v276Injected.includes('window.__rptEmb') && v276Injected.includes('<style id="rpt-zoom">') && v276Injected.includes('function afFullscreen')],
+  ['v2.7.6 模拟（fake v1 灯箱）注入 v3 成功（v3 CSS/JS 注入到位）', v276Injected.includes('window.__rptEmb') && v276Injected.includes('<style id="rpt-zoom">') && v276Injected.includes('function afFullscreen')],
   ['v2.7.6 模拟注入含 v1 清理代码', v276Injected.includes("im.replaceWith(im.cloneNode(false))")],
-  ['合并报告原生内嵌灯箱标记', mergedHtml.includes('rpt-zoom-v2')],
-  ['合并报告内嵌灯箱 CSS/JS', mergedHtml.includes('.rpt-zoom-stage') && mergedHtml.includes('/* rpt-zoom-v2 图片')],
-  ['合并报告配体卡不含 2D 图（selector 不误配）', !mergedHtml.includes('<figure class="lig-struct">') || mergedHtml.includes('rpt-zoom-v2')],
+  ['合并报告原生内嵌灯箱标记', mergedHtml.includes('rpt-zoom-v3')],
+  ['合并报告内嵌灯箱 CSS/JS', mergedHtml.includes('.rpt-zoom-stage') && mergedHtml.includes('/* rpt-zoom-v3 图片')],
+  ['合并报告配体卡不含 2D 图（selector 不误配）', !mergedHtml.includes('<figure class="lig-struct">') || mergedHtml.includes('rpt-zoom-v3')],
   ['合并报告实验图存在', (mergedHtml.match(/<figure class="fig">/g) ?? []).length === 2],
   ['合并报告同样带 AF 放大/嵌入自适应（单源常量）', mergedHtml.includes('afFullscreen') && mergedHtml.includes('window.__rptEmb')],
 ]

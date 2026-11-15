@@ -14,6 +14,11 @@
  *    新报告模板与旧报告注入同路径）；⑧灯箱嵌入自适应 —— 应用内嵌自动高度 iframe 中
  *    position:fixed 相对 iframe 全文档高（中部图片点击后灯箱跑出屏幕、需回滚查找）→
  *    __rptEmb 可视切片定位（父页滚动实时重跟）+ 图片严格限高；旧版 v1 灯箱共存自动清理。
+ *  - v2.7.8：⑨AF 卡「双放大按钮」根除（af-live 时图片角标让位 3D 全屏，MutationObserver
+ *    跟随 stage 类名）；⑩嵌入遮罩避让应用吸顶栏（切片 top 下移至 header 下沿 — 关闭钮
+ *    不再被顶栏遮挡）；⑪父页滚动锁（灯箱/AF 全屏开启期间锁父页 body overflow，
+ *    滚轮落在 iframe 外不再派生滚动）。marker 升 rpt-zoom-v3，v1/v2 baked 旧报告
+ *    serve 注入 v3 时自动清理旧根与旧句柄。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -68,21 +73,29 @@ export function applyResponsiveOverride(html: string): string {
   return `${html.slice(0, i)}<style id="rpt-rw">${RESPONSIVE_PAGE_CSS}</style>\n${html.slice(i)}`
 }
 
-// ─── v2.7.5/v2.7.7 图片点击放大灯箱 + AlphaFold 3D 视图放大（单源规则）────────
+// ─── v2.7.5/v2.7.8 图片点击放大灯箱 + AlphaFold 3D 视图放大（单源规则）────────
 //  配体 2D 结构式 / 客户实验图 / AlphaFold 静态图（af-poster 与 legacy PNG 分支）
 //  点击进入全屏灯箱：滚轮（锚定光标）或双指捏合缩放、拖拽平移、双击/双轻点切换
 //  适配 ↔ 2.5×、Esc/×/背景点击关闭；右下控制条（− 百分比 ＋ 复位）便于触屏；
 //  打印自动隐藏；纯内联 JS 无外部依赖 — 离线单文件报告同样可用。
-//  v2.7.7 新增：⑦ AlphaFold 交互 3D 视图「放大」按钮 — canvas 节点迁入全屏遮罩
+//  v2.7.7：⑦ AlphaFold 交互 3D 视图「放大」按钮 — canvas 节点迁入全屏遮罩
 //  （WebGL 上下文保留，3Dmol ResizeObserver 自动按新尺寸重渲染），pLDDT 图例随行；
 //  ⑧ 嵌入自适应定位 —— 自动高度 iframe（应用内嵌报告预览）中 fixed 相对的是
 //  iframe 全文档高度而非屏幕可视区，改由 __rptEmb 探测并以「可视切片」绝对定位
 //  （父页滚动 rAF 重跟、滚轮/触摸阻断滚动链），iframe 内部可滚或独立打开仍为 fixed。
+//  v2.7.8：⑨ AF 卡「双放大按钮」根除 — af-live 时 poster 隐藏、3D 全屏是唯一放大
+//  入口，MutationObserver 同步 figure.af-zoom-off 隐藏图片角标（af-fail/静态图恢复，
+//  此时图片灯箱是唯一入口）；放大期间 af-expand 也让位幽灵提示。
+//  ⑩ 嵌入遮罩避让应用吸顶栏 — 可视切片 top 由「屏幕顶」下移至「父页吸顶 header 下沿」
+//  （同源可测：sticky/fixed header 高度），根除关闭按钮被应用顶栏遮挡不可见。
+//  ⑪ 父页滚动锁 — 灯箱/AF 全屏开启期间锁父页 body overflow（滚动条宽度补偿防横跳，
+//  仅嵌入形态；Dialog 形态宿主 Radix 已锁、独立打开无父页），根除「滚轮落在 iframe 外
+//  （应用顶栏等）父页仍滚动」。
 //  单源使用：① 新报告内嵌（模板 <style> 尾部 + </body> 前，report-merged 同）；
-//           ② 旧报告（含 v2.7.5/2.7.6 落盘 report.html — 已带 v1 灯箱）由报告路由经
-//              applyZoomUpgrade 注入 v2（marker 幂等 + v1 根自动清理）—— 历史作业同样可用。
+//           ② 旧报告（含 v2.7.5–2.7.7 落盘 report.html — v1/v2 灯箱）由报告路由经
+//              applyZoomUpgrade 注入 v3（marker 幂等 + v1/v2 根自动清理）—— 历史作业同样可用。
 
-const ZOOM_PAGE_MARKER = 'rpt-zoom-v2'
+const ZOOM_PAGE_MARKER = 'rpt-zoom-v3'
 
 export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配体结构式 / 实验图 / AlphaFold 静态图） + AF 3D 视图放大 */
   img.rpt-zoomable { cursor:zoom-in; }
@@ -106,6 +119,10 @@ export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配�
   .rpt-zoom-ctl button:hover { background:rgba(23,21,19,.88); }
   .rpt-zoom-ctl .rpt-zoom-pct { min-width:54px; height:34px; display:flex; align-items:center; justify-content:center; border-radius:8px; border:1px solid rgba(255,255,255,.22); background:rgba(23,21,19,.78); font-size:11px; color:#f5f4f2; }
   @media (max-width:640px){ .rpt-zoom-cap{height:50px;padding-right:56px} .rpt-zoom-stage{inset:0 0 50px 0} .rpt-zoom-cap .rpt-zoom-hint{display:none} .rpt-zoom-ctl{bottom:62px;right:10px} .rpt-zoom-close{top:10px;right:10px} }
+  /* v2.7.8 ⑨：AF 交互视图与图片角标互斥 — af-live/af-expanded 时图片角标隐藏（防双放大按钮） */
+  figure.rpt-zoomable.af-zoom-off .rpt-zoom-badge { display:none !important; }
+  /* v2.7.8 ⑨：放大期间内嵌槽位按钮让位幽灵提示（点击无效果，隐藏免误导） */
+  .af-stage.af-expanded .af-expand { display:none; }
 
   /* ── AlphaFold 交互 3D 视图放大（v2.7.7）：小画布看不清细节 → 一键全屏交互 ── */
   .af-expand { position:absolute; top:8px; right:8px; z-index:5; display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); opacity:0; transition:opacity .18s; }
@@ -136,24 +153,42 @@ export const LIGHTBOX_JS = `<script>
 (function () {
   var SEL = '.lig-struct img, .fig img, .af-fig img';
 
-  // ── 旧版灯箱（v2.7.5/2.7.6 baked v1）共存清理：移除 v1 根 + 克隆剥离 v1 事件句柄 ──
-  // 旧报告 serve 注入本版时 v1 已先行执行：v1 根随 remove() 销毁其监听；
-  //  img 克隆不携带监听（cloneNode 不复制句柄）— 根除 v1/v2 双开、滚动锁错乱。
+  // ── 旧版灯箱（v2.7.5–2.7.7 baked v1/v2）共存清理：移除旧根 + 克隆剥离旧事件句柄 ──
+  // 旧报告 serve 注入本版时旧版已先行执行：旧根随 remove() 销毁其监听；
+  //  img 克隆不携带监听（cloneNode 不复制句柄）、旧 af-expand 带旧闭包一并移除
+  //  由本版重新挂载 — 根除新旧双开、滚动锁错乱、双放大按钮。
   var oldRoot = document.querySelector('.rpt-zoom');
   if (oldRoot) {
     oldRoot.remove();
     Array.prototype.forEach.call(document.querySelectorAll('img.rpt-zoomable'), function (im) {
       im.replaceWith(im.cloneNode(false));
     });
+    Array.prototype.forEach.call(document.querySelectorAll('.af-stage .af-expand'), function (b) { b.remove(); });
   }
 
-  // ── 嵌入环境感知（v2.7.7）：应用内嵌报告为「自动高度 iframe」—— iframe 高 = 报告全文高 ──
+  // ── 嵌入环境感知（v2.7.7/v2.7.8）：应用内嵌报告为「自动高度 iframe」—— iframe 高 = 报告全文高 ──
   //  此时 position:fixed 相对的是 iframe 全文档高（非屏幕可视区）：中部图片点击后
   //  灯箱居中于全文中点、跑出屏幕需回滚查找。改以「可视切片」文档坐标绝对定位：
   //  屏幕与 iframe 文档的交集（父页滚动实时重跟）；iframe 内部可滚（预览 Dialog h-full）
   //  或独立打开时 fixed 本就正确 — 维持原行为。
+  //  v2.7.8：切片 top 下移至父页吸顶栏下沿（否则关闭钮被应用顶栏遮挡），
+  //  并提供父页滚动锁（灯箱开启期间滚轮落在 iframe 外父页不派生滚动）。
   var EMB = window.__rptEmb = (function () {
     function frame() { try { return window.frameElement || null } catch (e) { return null } }
+    function ownerWin() { try { var f = frame(); return f ? f.ownerDocument.defaultView : null } catch (e) { return null } }
+    /** 父页吸顶 header 高度（v2.7.8 ⑩）：同源才量得到；独立打开/跨域 → 0。
+     *  仅 sticky/fixed 且位于屏幕顶时计入 — 遮罩 top 避让其下沿，关闭钮不再被顶栏遮挡。 */
+    function headerH(ow) {
+      if (!ow || ow === window) return 0;
+      try {
+        var h = ow.document.querySelector('header');
+        if (!h) return 0;
+        var cs = ow.getComputedStyle(h);
+        if (cs.position !== 'sticky' && cs.position !== 'fixed') return 0;
+        var hr = h.getBoundingClientRect();
+        return hr.top <= 1 ? Math.round(hr.height) : 0;
+      } catch (e) { return 0 }
+    }
     /** 可视切片（frame 文档坐标 {top,height}）；null = 视口模式（独立打开 / iframe 内部可滚） */
     function slice() {
       var f = frame();
@@ -166,9 +201,10 @@ export const LIGHTBOX_JS = `<script>
         var ow = f.ownerDocument.defaultView;
         var pH = ow.innerHeight || (ow.document.documentElement && ow.document.documentElement.clientHeight) || 0;
         if (!pH) return null;
-        var top = Math.max(0, -r.top);
+        var H = headerH(ow); // v2.7.8 ⑩：吸顶栏避让（H=0 时与旧版行为一致）
+        var top = Math.max(0, H - r.top);
         var bot = Math.min(r.height, pH - r.top);
-        if (bot - top < 160) { top = 0; bot = Math.min(r.height, pH); } // 屏上交集过小 → 整窗兜底
+        if (bot - top < 160) { top = Math.max(0, H - r.top); bot = Math.min(r.height, pH); } // 屏上交集过小 → 整窗兜底（仍避让吸顶栏）
         return { top: top, height: bot - top };
       } catch (e) { return null }
     }
@@ -202,7 +238,32 @@ export const LIGHTBOX_JS = `<script>
         if (ow && ow !== window) { try { ow.removeEventListener('resize', cb); ow.removeEventListener('scroll', cb) } catch (e) {} }
       };
     }
-    return { pin: pin, watch: watch, slice: slice };
+    /** v2.7.8 ⑪：父页滚动锁 — 灯箱/AF 全屏开启期间，滚轮落在 iframe 外（应用吸顶栏等）
+     *  父页仍会派生滚动。仅「可视切片」形态（父页实际滚动）才锁；同源才可写；
+     *  滚动条宽度补偿防布局横跳；重复调用幂等。unlock() 在关闭时恢复。 */
+    var unlockFn = null;
+    function lockParent() {
+      if (unlockFn) return;
+      var ow = ownerWin();
+      if (!ow || ow === window) return;
+      if (!slice()) return; // 独立打开 / iframe 内部可滚（预览 Dialog）→ 父页无需本版接管
+      try {
+        var b = ow.document.body;
+        var prev = { ov: b.style.overflow, pad: b.style.paddingRight };
+        var sw = ow.innerWidth - ow.document.documentElement.clientWidth;
+        b.style.overflow = 'hidden';
+        if (sw > 0) b.style.paddingRight = sw + 'px';
+        unlockFn = function () {
+          try {
+            b.style.overflow = prev.ov;
+            b.style.paddingRight = prev.pad;
+          } catch (e) {}
+          unlockFn = null;
+        };
+      } catch (e) {}
+    }
+    function unlock() { if (unlockFn) unlockFn(); }
+    return { pin: pin, watch: watch, slice: slice, lockParent: lockParent, unlock: unlock };
   })();
 
   var ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>';
@@ -239,6 +300,7 @@ export const LIGHTBOX_JS = `<script>
     big.src = img.src;
     big.alt = img.alt || '放大预览';
     EMB.pin(root); // 嵌入形态 → 可视切片；独立打开 → 视口 fixed
+    EMB.lockParent(); // v2.7.8 ⑪：嵌入形态锁父页滚动（吸顶栏等遮罩外区域滚轮不再派生滚动）
     fit();
     if (unwatch) { unwatch(); unwatch = null; }
     unwatch = EMB.watch(function () { EMB.pin(root); }); // 父页滚动实时跟停（遮罩贴屏不跑丢）
@@ -251,6 +313,7 @@ export const LIGHTBOX_JS = `<script>
   function close() {
     root.hidden = true;
     document.body.style.overflow = savedOverflow;
+    EMB.unlock(); // v2.7.8 ⑪：父页滚动解锁
     if (unwatch) { unwatch(); unwatch = null; }
     if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
   }
@@ -381,12 +444,27 @@ export const LIGHTBOX_JS = `<script>
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(img); }
       });
     });
+
+    // ── v2.7.8 ⑨：AF 交互视图与图片角标互斥（根除「双放大按钮」）──
+    // af-live 时 poster 隐藏、3D 全屏是唯一放大入口 → figure 加 af-zoom-off 隐藏图片角标；
+    // af-fail / legacy 静态图时恢复（此时图片灯箱是唯一入口）。3Dmol 异步初始化改
+    // stage 类名 → MutationObserver 跟随同步（af-expanded 全屏期间同样让位）。
+    Array.prototype.forEach.call(document.querySelectorAll('.af-stage'), function (st) {
+      var fig = st.closest('figure');
+      if (!fig) return;
+      function syncAf() {
+        fig.classList.toggle('af-zoom-off', st.classList.contains('af-live') || st.classList.contains('af-expanded'));
+      }
+      syncAf();
+      try { new MutationObserver(syncAf).observe(st, { attributes: true, attributeFilter: ['class'] }); } catch (e) {}
+    });
   }
 
   // ── AlphaFold 交互 3D 视图一键全屏放大（新报告模板 + 旧报告注入 — 同一挂载路径）──
   //  内嵌画布仅 320×252，看不清口袋/螺旋细节 → 「放大」按钮把 canvas 节点迁入全屏
   //  遮罩（WebGL 上下文保留；3Dmol ResizeObserver 监视容器自动按新尺寸重渲染，
-  //  退出时归位自动缩回）。嵌入形态遮罩同样走 __rptEmb 可视切片定位。
+  //  退出时归位自动缩回）。嵌入形态遮罩同样走 __rptEmb 可视切片定位（含 v2.7.8
+  //  吸顶栏避让 + 父页滚动锁）。注入旧报告时旧 af-expand 已随启动清理移除 → 此处全新挂载。
   function afFullscreen(stageEl) {
     var cv = stageEl.querySelector('.af-canvas');
     if (!cv) return;
@@ -411,12 +489,14 @@ export const LIGHTBOX_JS = `<script>
     slot.appendChild(cv); // canvas 迁移（3Dmol ResizeObserver → 全屏尺寸重渲染）
     stageEl.classList.add('af-expanded');
     document.body.appendChild(wrap);
-    EMB.pin(wrap);
+    EMB.pin(wrap); // 嵌入形态 → 可视切片（含吸顶栏避让）
+    EMB.lockParent(); // v2.7.8 ⑪：嵌入形态锁父页滚动
     var unwatchAf = EMB.watch(function () { EMB.pin(wrap); });
     function closeAf() {
       if (wrap._closed) return;
       wrap._closed = true;
       unwatchAf();
+      EMB.unlock(); // v2.7.8 ⑪：父页滚动解锁
       stageEl.appendChild(cv); // 归位（viewer 随容器尺寸自动缩回）
       stageEl.classList.remove('af-expanded');
       wrap.remove();
@@ -449,8 +529,9 @@ export const LIGHTBOX_JS = `<script>
 })();
 </script>`
 
-/** 旧报告兼容：无 v2 灯箱标记的历史 report.html，注入灯箱 CSS+JS（含嵌入自适应 + AF 3D 放大；
- *  v2.7.5/2.7.6 已带 v1 灯箱的报告同样注入 — v2 脚本开头自动清理 v1 根与旧句柄；幂等，已有则原样返回） */
+/** 旧报告兼容：无 v3 灯箱标记的历史 report.html（含 v2.7.5–2.7.7 baked v1/v2），
+ *  注入灯箱 CSS+JS（含嵌入自适应 + AF 3D 放大 + v2.7.8 三项）；v3 脚本开头自动清理
+ *  v1/v2 根、旧图片句柄与旧 af-expand（幂等，已有 v3 标记则原样返回） */
 export function applyZoomUpgrade(html: string): string {
   if (html.includes(ZOOM_PAGE_MARKER)) return html
   let out = html
