@@ -4,6 +4,7 @@
  *  - LLM 章节用轻量 Markdown 子集渲染器（无 JSDOM/react-markdown，零额外内存）
  *  - 确定性数据区块（评分/结构表/文献/实验图）模板直出，图片按预算 base64 内嵌
  *  - PDB ↔ 文献双向关联（PMID 映射）；长列表 details 折叠，打印时自动展开
+ *  - v2.7.5：配体结构式/实验图/AlphaFold 静态图点击放大灯箱（滚轮/双指缩放 + 拖拽平移，离线内联无依赖）
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -56,6 +57,220 @@ export function applyResponsiveOverride(html: string): string {
   const i = html.indexOf('</head>')
   if (i < 0) return html
   return `${html.slice(0, i)}<style id="rpt-rw">${RESPONSIVE_PAGE_CSS}</style>\n${html.slice(i)}`
+}
+
+// ─── v2.7.5 图片点击放大灯箱（单源规则）────────────────────────────────────────
+//  配体 2D 结构式 / 客户实验图 / AlphaFold 静态图（af-poster 与 legacy PNG 分支）
+//  点击进入全屏灯箱：滚轮（锚定光标）或双指捏合缩放、拖拽平移、双击/双轻点切换
+//  适配 ↔ 2.5×、Esc/×/背景点击关闭；右下控制条（− 百分比 ＋ 复位）便于触屏；
+//  打印自动隐藏；纯内联 JS 无外部依赖 — 离线单文件报告同样可用。
+//  单源使用：① 新报告内嵌（模板 <style> 尾部 + </body> 前，report-merged 同）；
+//           ② 旧报告（含 v2.7.2/2.7.3/2.7.4 落盘 report.html）由报告路由经
+//              applyZoomUpgrade 注入 <style>+<script>（marker 幂等）—— 历史作业同样可放大。
+
+const ZOOM_PAGE_MARKER = 'rpt-zoom-v1'
+
+export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配体结构式 / 实验图 / AlphaFold 静态图） */
+  img.rpt-zoomable { cursor:zoom-in; }
+  figure.rpt-zoomable { position:relative; }
+  .rpt-zoom-badge { position:absolute; top:6px; right:6px; z-index:6; display:inline-flex; align-items:center; gap:4px; padding:2.5px 6px; border-radius:4px; background:rgba(255,255,255,.93); border:1px solid rgba(28,25,23,.22); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; box-shadow:0 1px 3px rgba(28,25,23,.14); opacity:0; transition:opacity .18s; pointer-events:none; }
+  figure.rpt-zoomable:hover .rpt-zoom-badge { opacity:1; }
+  @media (hover:none) { .rpt-zoom-badge { opacity:.92; } }
+  @media print { .rpt-zoom-badge { display:none; } .rpt-zoom { display:none !important; } }
+  .rpt-zoom { position:fixed; inset:0; z-index:80; font-family:var(--mono,ui-monospace,Menlo,monospace); }
+  .rpt-zoom[hidden] { display:none; }
+  .rpt-zoom-bg { position:absolute; inset:0; background:rgba(23,21,19,.85); cursor:zoom-out; }
+  .rpt-zoom-stage { position:absolute; inset:0 0 56px 0; display:flex; align-items:center; justify-content:center; overflow:hidden; touch-action:none; }
+  .rpt-zoom-stage img { max-width:min(92vw,1500px); max-height:100%; background:#fff; box-shadow:0 10px 44px rgba(0,0,0,.5); transform-origin:50% 50%; will-change:transform; user-select:none; -webkit-user-drag:none; }
+  .rpt-zoom-cap { position:absolute; left:0; right:0; bottom:0; height:56px; display:flex; align-items:center; gap:10px; padding:0 64px 0 18px; background:rgba(23,21,19,.93); color:#f5f4f2; font-size:10px; letter-spacing:.4px; }
+  .rpt-zoom-cap b { color:#fff; font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rpt-zoom-cap .rpt-zoom-hint { color:#a8a29e; margin-left:auto; white-space:nowrap; }
+  .rpt-zoom-close { position:absolute; top:14px; right:14px; width:38px; height:38px; border-radius:50%; border:1px solid rgba(255,255,255,.28); background:rgba(23,21,19,.6); color:#fff; font-size:20px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .rpt-zoom-close:hover { background:rgba(23,21,19,.88); }
+  .rpt-zoom-ctl { position:absolute; right:14px; bottom:68px; display:flex; align-items:center; gap:5px; }
+  .rpt-zoom-ctl button { width:34px; height:34px; border-radius:8px; border:1px solid rgba(255,255,255,.22); background:rgba(23,21,19,.78); color:#fff; font-size:13px; cursor:pointer; }
+  .rpt-zoom-ctl button:hover { background:rgba(23,21,19,.88); }
+  .rpt-zoom-ctl .rpt-zoom-pct { min-width:50px; text-align:center; font-size:10.5px; color:#e7e5e4; }
+  @media (max-width:640px){ .rpt-zoom-cap{height:50px;padding-right:56px} .rpt-zoom-stage{inset:0 0 50px 0} .rpt-zoom-cap .rpt-zoom-hint{display:none} .rpt-zoom-ctl{bottom:62px;right:10px} .rpt-zoom-close{top:10px;right:10px} }
+`
+
+export const LIGHTBOX_JS = `<script>
+/* ${ZOOM_PAGE_MARKER} 图片点击放大 */
+(function () {
+  var SEL = '.lig-struct img, .fig img, .af-fig img';
+  var imgs = Array.prototype.slice.call(document.querySelectorAll(SEL));
+  if (!imgs.length) return;
+  var ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>';
+
+  var root = document.createElement('div');
+  root.className = 'rpt-zoom';
+  root.hidden = true;
+  root.setAttribute('role', 'dialog');
+  root.setAttribute('aria-modal', 'true');
+  root.setAttribute('aria-label', '图片放大预览');
+  root.innerHTML =
+    '<div class="rpt-zoom-bg"></div>' +
+    '<div class="rpt-zoom-stage"><img alt=""></div>' +
+    '<button type="button" class="rpt-zoom-close" aria-label="关闭预览">×</button>' +
+    '<div class="rpt-zoom-ctl">' +
+      '<button type="button" data-z="out" aria-label="缩小">−</button>' +
+      '<span class="rpt-zoom-pct">100%</span>' +
+      '<button type="button" data-z="in" aria-label="放大">＋</button>' +
+      '<button type="button" data-z="fit" aria-label="复位" title="复位到适配大小">1:1</button>' +
+    '</div>' +
+    '<div class="rpt-zoom-cap"><b class="rpt-zoom-title"></b><span class="rpt-zoom-hint">滚轮/双指缩放 · 拖拽平移 · 双击复位 · Esc 关闭</span></div>';
+  document.body.appendChild(root);
+
+  var stage = root.querySelector('.rpt-zoom-stage');
+  var bg = root.querySelector('.rpt-zoom-bg');
+  var big = stage.querySelector('img');
+  var titleEl = root.querySelector('.rpt-zoom-title');
+  var pctEl = root.querySelector('.rpt-zoom-pct');
+  var closeBtn = root.querySelector('.rpt-zoom-close');
+  var ctlBtns = Array.prototype.slice.call(root.querySelectorAll('.rpt-zoom-ctl button'));
+  var savedOverflow = '', lastFocus = null;
+  var s = 1, tx = 0, ty = 0;
+
+  function apply() {
+    big.style.transform = 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) scale(' + s.toFixed(3) + ')';
+    pctEl.textContent = Math.round(s * 100) + '%';
+  }
+  function clampS(v) { return Math.min(12, Math.max(0.25, v)); }
+  /** 以视口坐标 (cx,cy) 为锚点缩放到 ns — 锚点像素在缩放前后保持不动 */
+  function zoomAt(ns, cx, cy) {
+    var r = stage.getBoundingClientRect();
+    var ccx = r.left + r.width / 2, ccy = r.top + r.height / 2;
+    ns = clampS(ns);
+    tx = cx - ccx - (cx - ccx - tx) * ns / s;
+    ty = cy - ccy - (cy - ccy - ty) * ns / s;
+    s = ns;
+    apply();
+  }
+  function fit() { s = 1; tx = 0; ty = 0; apply(); }
+  function open(img) {
+    var fig = img.closest('figure');
+    var cap = fig ? fig.querySelector('figcaption') : null;
+    var t = ((cap ? cap.textContent : '') || img.alt || '').replace(/\\s+/g, ' ').trim();
+    titleEl.textContent = t.length > 110 ? t.slice(0, 109) + '…' : (t || '图片预览');
+    big.src = img.src;
+    big.alt = img.alt || '放大预览';
+    fit();
+    lastFocus = document.activeElement;
+    root.hidden = false;
+    savedOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    closeBtn.focus();
+  }
+  function close() {
+    root.hidden = true;
+    document.body.style.overflow = savedOverflow;
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+  }
+
+  bg.addEventListener('click', close);
+  closeBtn.addEventListener('click', close);
+  ctlBtns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var z = b.getAttribute('data-z');
+      if (z === 'fit') return fit();
+      var r = stage.getBoundingClientRect();
+      zoomAt(s * (z === 'in' ? 1.5 : 1 / 1.5), r.left + r.width / 2, r.top + r.height / 2);
+    });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (root.hidden) return;
+    if (e.key === 'Escape') close();
+    else if (e.key === '+' || e.key === '=') zoomAt(s * 1.25, innerWidth / 2, innerHeight / 2);
+    else if (e.key === '-') zoomAt(s / 1.25, innerWidth / 2, innerHeight / 2);
+    else if (e.key === '0') fit();
+  });
+  stage.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    zoomAt(s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY);
+  }, { passive: false });
+
+  // 指针交互：单指/鼠标拖拽平移；双指捏合缩放；触屏双轻点 = 双击（适配 ↔ 2.5×）
+  var ptrs = {}, pinch = null, drag = null, lastTap = 0, lastX = 0, lastY = 0, tapZoomedAt = 0;
+  function pCount() { return Object.keys(ptrs).length; }
+  stage.addEventListener('pointerdown', function (e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+    if (pCount() === 1) {
+      drag = { x: e.clientX, y: e.clientY, moved: 0 };
+      try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+    } else { drag = null; pinch = null; }
+  });
+  stage.addEventListener('pointermove', function (e) {
+    if (!ptrs[e.pointerId]) return;
+    ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+    if (pCount() >= 2) {
+      var ids = Object.keys(ptrs);
+      var a = ptrs[ids[0]], b = ptrs[ids[1]];
+      var d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      if (!pinch) pinch = { d: d, s: s };
+      zoomAt(pinch.s * d / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    } else if (drag) {
+      var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.moved += Math.abs(dx) + Math.abs(dy);
+      tx += dx; ty += dy;
+      drag.x = e.clientX; drag.y = e.clientY;
+      apply();
+    }
+  });
+  function endPtr(e) {
+    if (ptrs[e.pointerId] && drag && drag.moved < 6 && e.pointerType !== 'mouse') {
+      var now = Date.now();
+      if (now - lastTap < 320 && Math.abs(e.clientX - lastX) < 30 && Math.abs(e.clientY - lastY) < 30) {
+        lastTap = 0;
+        tapZoomedAt = now;
+        zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
+      } else { lastTap = now; lastX = e.clientX; lastY = e.clientY; }
+    }
+    delete ptrs[e.pointerId];
+    if (pCount() < 2) pinch = null;
+    if (pCount() === 0) drag = null;
+  }
+  stage.addEventListener('pointerup', endPtr);
+  stage.addEventListener('pointercancel', endPtr);
+  stage.addEventListener('dblclick', function (e) {
+    e.preventDefault();
+    // 触屏双轻点已由 pointerup 分支处理 — 跳过其后合成的 dblclick（否则会立刻复位掉刚触发的 2.5×）
+    if (Date.now() - tapZoomedAt < 500) return;
+    zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
+  });
+
+  // 缩略图 → 可点击放大（角标提示 + 键盘可达）
+  imgs.forEach(function (img) {
+    img.classList.add('rpt-zoomable');
+    var fig = img.closest('figure');
+    if (fig) {
+      fig.classList.add('rpt-zoomable');
+      var badge = document.createElement('span');
+      badge.className = 'rpt-zoom-badge';
+      badge.innerHTML = ICON + '<span>放大</span>';
+      fig.insertBefore(badge, fig.firstChild);
+    }
+    img.title = '点击放大查看';
+    img.setAttribute('role', 'button');
+    img.setAttribute('tabindex', '0');
+    img.setAttribute('aria-label', '放大查看' + (img.alt ? '：' + img.alt : ''));
+    img.addEventListener('click', function () { open(img); });
+    img.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(img); }
+    });
+  });
+})();
+</script>`
+
+/** 旧报告兼容：无灯箱标记的历史 report.html，注入灯箱 CSS+JS（幂等，已有则原样返回） */
+export function applyZoomUpgrade(html: string): string {
+  if (html.includes(ZOOM_PAGE_MARKER)) return html
+  let out = html
+  const h = out.indexOf('</head>')
+  if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-zoom">${LIGHTBOX_CSS}</style>\n${out.slice(h)}`
+  const b = out.lastIndexOf('</body>')
+  if (b >= 0) out = `${out.slice(0, b)}${LIGHTBOX_JS}\n${out.slice(b)}`
+  return out
 }
 
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
@@ -1347,7 +1562,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:var(--mono); }
   .warn-box { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:4px; padding:12px 16px; font-size:12.5px; margin:14px 0; }
 
-${RESPONSIVE_PAGE_CSS}</style>
+${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}</style>
 </head>
 <body>
 <div class="page" id="top">
@@ -1495,6 +1710,7 @@ ${RESPONSIVE_PAGE_CSS}</style>
   }
 })();
 </script>
+${LIGHTBOX_JS}
 </body>
 </html>`
   return html

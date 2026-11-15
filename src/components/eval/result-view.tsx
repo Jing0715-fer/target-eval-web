@@ -34,6 +34,7 @@ import { PdbTable } from './pdb-table'
 import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { AssetGallery } from './asset-gallery'
+import { Ligand2dFigure } from './ligand-2d'
 import { InteractionStructures } from './interaction-structures'
 import type { BlastStatusCode, JobDetail, LigandDetail, ScoreItem } from './types'
 
@@ -1150,10 +1151,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <Card key={`${l.raw}-pc`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
                 <CardContent className="flex gap-3.5 px-4.5 py-4">
                   {l.detail?.structure2d && (
-                    <figure className="flex-none self-start text-center">
-                      <img src={l.detail.structure2d} alt="2D 化学结构式" className="h-32 w-32 rounded-md border border-border bg-white object-contain p-1" />
-                      <figcaption className="mt-1 font-mono text-[9px] text-muted-foreground/60">2D 结构式 · PubChem{l.detail.cid ? ` · CID ${l.detail.cid}` : ''}</figcaption>
-                    </figure>
+                    /* v2.7.5：缩略图点击放大（Dialog 预览 + 原始分辨率） */
+                    <Ligand2dFigure src={l.detail.structure2d} cid={l.detail.cid} name={l.name || l.raw} />
                   )}
                   <div className="flex min-w-0 flex-1 flex-col gap-3">
                   <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
@@ -1195,10 +1194,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <Card key={`${l.raw}-ok`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
                 <CardContent className="flex gap-3.5 px-4.5 py-4">
                   {l.detail?.structure2d && (
-                    <figure className="flex-none self-start text-center">
-                      <img src={l.detail.structure2d} alt="2D 化学结构式" className="h-32 w-32 rounded-md border border-border bg-white object-contain p-1" />
-                      <figcaption className="mt-1 font-mono text-[9px] text-muted-foreground/60">2D 结构式 · PubChem{l.detail.cid ? ` · CID ${l.detail.cid}` : ''}</figcaption>
-                    </figure>
+                    /* v2.7.5：缩略图点击放大（Dialog 预览 + 原始分辨率） */
+                    <Ligand2dFigure src={l.detail.structure2d} cid={l.detail.cid} name={l.name || l.raw} />
                   )}
                   <div className="flex min-w-0 flex-1 flex-col gap-3">
                   <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">

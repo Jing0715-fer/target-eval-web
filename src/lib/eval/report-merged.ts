@@ -11,7 +11,7 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
-import { esc, renderMarkdown, RESPONSIVE_PAGE_CSS } from './report-html'
+import { esc, renderMarkdown, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS } from './report-html'
 import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution, type SharedStructure } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import type { LigandResolution } from './ligand'
@@ -823,7 +823,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   @media print { body { background:#fff; } .page { padding:24px 8px; } .pdb-fold, .fold { page-break-inside:avoid; } }
   @media (max-width:640px) { .toc ol { columns:1; } }
 
-${RESPONSIVE_PAGE_CSS}</style>
+${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}</style>
 </head>
 <body>
 <div class="page">
@@ -928,6 +928,7 @@ ${RESPONSIVE_PAGE_CSS}</style>
   window.addEventListener('afterprint', restore);
 })();
 </script>
+${LIGHTBOX_JS}
 </body>
 </html>`
 }

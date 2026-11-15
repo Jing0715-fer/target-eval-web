@@ -133,7 +133,11 @@ for (const w of [375, 1920]) {
       }
     })
     ok(`首页[${w}px] 无横向溢出`, m.scrollW <= m.clientW + 1, `scrollW=${m.scrollW} clientW=${m.clientW}`)
-    if (w === 1920) ok(`首页页脚版本 v2.7.3`, m.footer === 'v2.7.3', `actual=${m.footer}`)
+    if (w === 1920) {
+      // 版本号数值比较（v2.7.5 及以后均通过 — 不再逐版硬编码）
+      const ver = (m.footer.match(/\d+\.\d+\.\d+/)?.[0] ?? '0.0.0').split('.').map(Number)
+      ok(`首页页脚版本 ≥ v2.7.5`, ver.length === 3 && (ver[0] > 2 || ver[1] > 7 || (ver[1] === 7 && ver[2] >= 5)), `actual=${m.footer}`)
+    }
     await page.screenshot({ path: `${SHOTS}/app-${w}.jpg`, type: 'jpeg', quality: 60 })
   } catch (e) {
     ok(`首页[${w}px] 可访问`, false, String(e).slice(0, 120))

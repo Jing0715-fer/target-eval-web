@@ -165,22 +165,25 @@ export function pubchemDetailByInchiKey(inchiKey: string, signal?: AbortSignal):
 
 /**
  * PubChem 2D 结构式（CID → PNG → data URI；报告内嵌用）。
- * 磁盘缓存 db/cache/ligand2d/{cid}.png（化学结构不变 — 永久缓存）。
+ * 磁盘缓存 db/cache/ligand2d/{cid}_{px}.png（化学结构不变 — 永久缓存；
+ * 文件名带尺寸 — v2.7.5 点击放大将取图升到 600px，旧 300px 缓存不会被误用）。
  */
+/** 取图像素（v2.7.5：300→600 — 报告缩略图 150px 外，点击放大需 2× 原生清晰度；PubChem 上限 1000px） */
+const LIG2D_PX = 600
 export async function pubchem2dStructure(
   cid: number,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (!Number.isFinite(cid) || cid <= 0) return undefined
   const cacheDir = `${process.cwd()}/db/cache/ligand2d`
-  const file = `${cacheDir}/${cid}.png`
+  const file = `${cacheDir}/${cid}_${LIG2D_PX}.png`
   try {
     const cached = await import('node:fs/promises').then(fs => fs.readFile(file))
     if (cached.length > 300) return `data:image/png;base64,${cached.toString('base64')}`
   } catch { /* 未缓存 */ }
   try {
     const res = await fetch(
-      `${PUG_BASE}/compound/cid/${cid}/PNG?image_size=300x300&record_type=2d`,
+      `${PUG_BASE}/compound/cid/${cid}/PNG?image_size=${LIG2D_PX}x${LIG2D_PX}&record_type=2d`,
       { signal: signal ?? AbortSignal.timeout(15_000) },
     )
     if (!res.ok) return undefined
