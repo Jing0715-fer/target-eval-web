@@ -90,7 +90,7 @@ export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配�
   .rpt-zoom-ctl { position:absolute; right:14px; bottom:68px; display:flex; align-items:center; gap:5px; }
   .rpt-zoom-ctl button { width:34px; height:34px; border-radius:8px; border:1px solid rgba(255,255,255,.22); background:rgba(23,21,19,.78); color:#fff; font-size:13px; cursor:pointer; }
   .rpt-zoom-ctl button:hover { background:rgba(23,21,19,.88); }
-  .rpt-zoom-ctl .rpt-zoom-pct { min-width:50px; text-align:center; font-size:10.5px; color:#e7e5e4; }
+  .rpt-zoom-ctl .rpt-zoom-pct { min-width:54px; height:34px; display:flex; align-items:center; justify-content:center; border-radius:8px; border:1px solid rgba(255,255,255,.22); background:rgba(23,21,19,.78); font-size:11px; color:#f5f4f2; }
   @media (max-width:640px){ .rpt-zoom-cap{height:50px;padding-right:56px} .rpt-zoom-stage{inset:0 0 50px 0} .rpt-zoom-cap .rpt-zoom-hint{display:none} .rpt-zoom-ctl{bottom:62px;right:10px} .rpt-zoom-close{top:10px;right:10px} }
 `
 
