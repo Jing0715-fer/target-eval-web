@@ -7,7 +7,7 @@ import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
-import { applyResponsiveOverride, applyZoomUpgrade } from '@/lib/eval/report-html'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -31,6 +31,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   html = applyResponsiveOverride(html)
   // v2.7.5：旧报告（无灯箱标记）注入点击放大 CSS+JS —— 历史作业的配体结构式/实验图同样可放大；幂等
   html = applyZoomUpgrade(html)
+  // v2.7.6：旧报告（无 UX 标记）注入 A4 打印分页 + InChIKey/SMILES 复制 + 表格横滚指示；幂等
+  html = applyUxUpgrade(html)
   const url = new URL(req.url)
   const download = url.searchParams.get('download') === '1'
   const headers: Record<string, string> = {

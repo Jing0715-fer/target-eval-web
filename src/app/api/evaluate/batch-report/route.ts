@@ -14,7 +14,7 @@ import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound, ownerListFilter } from '@/lib/eval/request-guard'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
-import { applyResponsiveOverride, applyZoomUpgrade } from '@/lib/eval/report-html'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
 import { propagateFamilyBlast } from '@/lib/eval/blast-family'
 import { getEngineSummary } from '@/lib/eval/llm-provider'
 import { fetchUniprotInfo } from '@/lib/eval/uniprot'
@@ -292,7 +292,7 @@ export async function GET(req: Request) {
   if (url.searchParams.get('inline') === '1') {
     if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
     try {
-      const html = applyZoomUpgrade(applyResponsiveOverride(await fs.readFile(record.htmlPath, 'utf-8')))
+      const html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(await fs.readFile(record.htmlPath, 'utf-8'))))
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
@@ -309,7 +309,7 @@ export async function GET(req: Request) {
   if (url.searchParams.get('download') === '1') {
     if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
     try {
-      const html = applyZoomUpgrade(applyResponsiveOverride(await fs.readFile(record.htmlPath, 'utf-8')))
+      const html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(await fs.readFile(record.htmlPath, 'utf-8'))))
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',

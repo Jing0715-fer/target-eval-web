@@ -5,6 +5,11 @@
  *  - 确定性数据区块（评分/结构表/文献/实验图）模板直出，图片按预算 base64 内嵌
  *  - PDB ↔ 文献双向关联（PMID 映射）；长列表 details 折叠，打印时自动展开
  *  - v2.7.5：配体结构式/实验图/AlphaFold 静态图点击放大灯箱（滚轮/双指缩放 + 拖拽平移，离线内联无依赖）
+ *  - v2.7.6：①A4 打印分页（@page 边距 + 分页避让 + 数据表打印自动布局防右截断）；
+ *    ②配体 2D 结构式 SVG 矢量版（RCSB CCD 矢量描述优先，灯箱无限缩放不糊，PNG 回落）；
+ *    ③InChIKey/SMILES 一键复制（页级 JS 自挂按钮，clipboard API + execCommand 降级）；
+ *    ④覆盖率区段可视化（SVG 轨道：已覆盖绿/未覆盖琥珀 + 残基刻度，服务端渲染零 JS）；
+ *    ⑥移动端表格横滚边缘渐隐指示（可滚动亮起、滚到头熄灭）。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -273,6 +278,144 @@ export function applyZoomUpgrade(html: string): string {
   return out
 }
 
+// ─── v2.7.6 报告六项优化之 ①③⑥（单源规则）────────────────────────────────
+//  ① 打印/PDF 导出 A4 分页：@page 边距 + 分页避让（标题不孤行/卡片不跨页腰斩）
+//     + 数据表打印自动布局（打印视窗窄于 856px min-width — 固定布局会右截断，
+//     auto 布局换行自适应 + 表头跨页重复）。
+//  ③ InChIKey / SMILES 一键复制：页级 JS 扫描 .lig-ident 行自动挂「复制」按钮
+//     （clipboard API + execCommand 兼容降级，成功/失败状态反馈）。
+//  ⑥ 移动端表格横滚指示：.tbl-wrap 可滚动时边缘渐变亮起、滚到头熄灭。
+//  单源使用：① 新报告内嵌于模板 <style> 尾部 + </body> 前；② 旧报告由报告路由
+//  经 applyUxUpgrade 注入（marker 幂等）—— 历史作业同样获得 A4 打印/复制/横滚体验。
+
+const UX_PAGE_MARKER = 'rpt-ux-v1'
+const PRINT_PAGE_MARKER = 'rpt-pr-v1'
+
+export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.6）：@page 边距 + 分页避让 + 表格自动布局防右截断 */
+  @page { size: A4; margin: 12mm 10mm 14mm; }
+  @media print {
+    body { font-size: 12px; line-height: 1.78; }
+    p { orphans: 3; widows: 3; }
+    .sec { break-inside: auto; }
+    .sec > h2, .sec h3, .sec h4, .sec h5, .fig-group, .itx-h3 { break-after: avoid-page; }
+    .rpt-head, .glance, .toc, .score-row, .score-rationale, .fig, .lig-card, .lit-item,
+    .callout, .warn-box, .cx-card, .cx-shared, .cx-solo-comp, .oligo-strip, .oligo-card,
+    .lig-ident, .cov-fig, blockquote { break-inside: avoid-page; }
+    thead { display: table-header-group; }
+    .tbl-wrap { overflow: visible; }
+    table { table-layout: auto !important; min-width: 0 !important; font-size: 9.5px; }
+    th { white-space: normal; overflow: visible; text-overflow: clip; }
+    th, td { padding: 4px 6px; }
+    .fig img { max-height: 300px; }
+    .lig-struct img { width: 96px; height: 96px; }
+    .af-stage, .af-poster { height: 200px; }
+    .copy-btn, .rpt-zoom-badge, .backtop { display: none !important; }
+  }
+`
+
+export const UX_PAGE_CSS = `  /* ${UX_PAGE_MARKER} 一键复制按钮 + 表格横滚指示（v2.7.6） */
+  .lig-ident div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px; }
+  .lig-ident .mono { flex: 1 1 auto; min-width: 0; }
+  .copy-btn { flex: none; margin-left: 8px; padding: 1px 9px; border-radius: 4px; border: 1px solid #c7ece0; background: #f0fdf7; color: #047857; font-family: var(--mono, ui-monospace, Menlo, monospace); font-size: 10px; font-weight: 600; letter-spacing: .4px; line-height: 1.7; cursor: pointer; }
+  .copy-btn:hover { background: #d9f5e8; border-color: #a7f3d0; }
+  .copy-btn.copied { background: #047857; border-color: #047857; color: #fff; }
+  .copy-btn.copy-fail { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+  .tbl-wrap { position: relative; }
+  .tbl-wrap::before, .tbl-wrap::after { content: ''; position: absolute; top: 0; bottom: 0; width: 26px; pointer-events: none; z-index: 3; opacity: 0; transition: opacity .18s; }
+  .tbl-wrap::after { right: 0; background: linear-gradient(270deg, rgba(28,25,23,.10), rgba(28,25,23,0)); }
+  .tbl-wrap::before { left: 0; background: linear-gradient(90deg, rgba(28,25,23,.10), rgba(28,25,23,0)); }
+  .tbl-wrap.rw-right::after, .tbl-wrap.rw-left::before { opacity: 1; }
+  @media print { .tbl-wrap::before, .tbl-wrap::after { display: none; } }
+`
+
+export const UX_PAGE_JS = `<script>
+/* ${UX_PAGE_MARKER} InChIKey/SMILES 一键复制 + 表格横滚边缘指示 */
+(function () {
+  // ── ③ 一键复制：.lig-ident 行自动挂按钮（新旧报告同路径，无需服务端改 HTML）──
+  function legacyCopy(t) {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    return ok ? Promise.resolve() : Promise.reject(new Error('copy denied'));
+  }
+  function copyText(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(t).catch(function () { return legacyCopy(t); });
+    }
+    return legacyCopy(t);
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.lig-ident'), function (box) {
+    Array.prototype.forEach.call(box.querySelectorAll(':scope > div'), function (row) {
+      if (row.querySelector('.copy-btn')) return;
+      var b = row.querySelector('b'), mono = row.querySelector('.mono');
+      if (!b || !mono) return;
+      var label = (b.textContent || '').trim();
+      if (!/InChIKey|SMILES/i.test(label)) return;
+      var val = (mono.textContent || '').trim();
+      if (!val) return;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy-btn';
+      btn.setAttribute('data-copy', val);
+      btn.setAttribute('aria-label', '复制' + label);
+      btn.title = '复制' + label;
+      btn.textContent = '复制';
+      row.appendChild(btn);
+    });
+  });
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    var btn = t && t.closest ? t.closest('.copy-btn') : null;
+    if (!btn) return;
+    copyText(btn.getAttribute('data-copy') || '').then(function () {
+      btn.classList.remove('copy-fail');
+      btn.classList.add('copied');
+      btn.textContent = '已复制✓';
+    }).catch(function () {
+      btn.classList.remove('copied');
+      btn.classList.add('copy-fail');
+      btn.textContent = '复制失败';
+    });
+    clearTimeout(btn._t);
+    btn._t = setTimeout(function () {
+      btn.classList.remove('copied');
+      btn.classList.remove('copy-fail');
+      btn.textContent = '复制';
+    }, 1600);
+  });
+
+  // ── ⑥ 表格横滚边缘渐隐指示（可滚动时亮起，滚到头熄灭；打印隐藏）──
+  var wraps = Array.prototype.slice.call(document.querySelectorAll('.tbl-wrap'));
+  function upd(w) {
+    var has = w.scrollWidth - w.clientWidth > 4;
+    w.classList.toggle('rw-right', has && w.scrollLeft + w.clientWidth < w.scrollWidth - 4);
+    w.classList.toggle('rw-left', has && w.scrollLeft > 4);
+  }
+  wraps.forEach(function (w) {
+    w.addEventListener('scroll', function () { upd(w); }, { passive: true });
+    upd(w);
+  });
+  window.addEventListener('resize', function () { wraps.forEach(upd); }, { passive: true });
+})();
+</script>`
+
+/** 旧报告兼容：无 UX 标记的历史 report.html，注入打印版式 + 复制/横滚 CSS+JS（幂等，已有则原样返回） */
+export function applyUxUpgrade(html: string): string {
+  if (html.includes(UX_PAGE_MARKER)) return html
+  let out = html
+  const h = out.indexOf('</head>')
+  if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-ux">${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>\n${out.slice(h)}`
+  const b = out.lastIndexOf('</body>')
+  if (b >= 0) out = `${out.slice(0, b)}${UX_PAGE_JS}\n${out.slice(b)}`
+  return out
+}
+
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
 
 export function esc(s: string): string {
@@ -374,7 +517,7 @@ function shortLigand(l: string, nameMax = 22): string {
 }
 
 /** 配体归一策略 → 中文短标签 */
-function strategyZh(s: string): string {
+export function strategyZh(s: string): string {
   switch (s) {
     case 'direct-id': return '直接ID'
     case 'alias': return '别名表'
@@ -386,6 +529,114 @@ function strategyZh(s: string): string {
     case 'llm+pubchem': return 'AI+PubChem'
     default: return s || '—'
   }
+}
+
+// ─── v2.7 / v2.7.6 配体卡展示构件（单靶点与合并报告共享 — 单源）────────────────
+
+/** 配体卡 detail 视图（LigandResolution.detail 的结构化展示形状） */
+export interface LigandCardDetail {
+  cid?: number
+  iupacName?: string
+  xlogp?: number
+  tpsa?: number
+  hBondDonor?: number
+  hBondAcceptor?: number
+  rotatableBonds?: number
+  heavyAtoms?: number
+  exactMass?: number
+  charge?: number
+  inchiKey?: string
+  canonicalSmiles?: string
+  structure2d?: string
+  /** v2.7.6：RCSB CCD 矢量结构式（优先于 PNG — 灯箱无限缩放不失真） */
+  structure2dSvg?: string
+}
+
+/** 配体详情计算性质 chips（PubChem 计算性质，有值才显示） */
+export function ligDetailProps(d: LigandCardDetail): string {
+  const items: string[] = []
+  if (d.xlogp != null) items.push(`XLogP <b>${d.xlogp}</b>`)
+  if (d.tpsa != null) items.push(`TPSA <b>${d.tpsa} Å²</b>`)
+  if (d.hBondDonor != null) items.push(`氢供体 <b>${d.hBondDonor}</b>`)
+  if (d.hBondAcceptor != null) items.push(`氢受体 <b>${d.hBondAcceptor}</b>`)
+  if (d.rotatableBonds != null) items.push(`可旋转键 <b>${d.rotatableBonds}</b>`)
+  if (d.heavyAtoms != null) items.push(`重原子 <b>${d.heavyAtoms}</b>`)
+  if (d.exactMass != null) items.push(`精确质量 <b>${d.exactMass}</b>`)
+  if (d.charge != null && d.charge !== 0) items.push(`形式电荷 <b>${d.charge > 0 ? '+' : ''}${d.charge}</b>`)
+  return items.length ? items.map(i => `<span>${i}</span>`).join('') : ''
+}
+
+/** 配体 2D 结构式 figure（RCSB CCD SVG 矢量优先，PubChem PNG 位图回落 — 点击可进灯箱放大） */
+export function ligStructFig(l: { detail?: LigandCardDetail }): string {
+  const d = l.detail
+  if (!d) return ''
+  const src = d.structure2dSvg ?? d.structure2d
+  if (!src) return ''
+  const isSvg = d.structure2dSvg != null && src === d.structure2dSvg
+  return `<figure class="lig-struct"><img src="${src}" alt="2D 化学结构式${isSvg ? '（SVG 矢量）' : ''}"><figcaption>2D 结构式 · ${isSvg ? 'RCSB CCD · SVG 矢量（缩放不失真）' : `PubChem${d.cid ? ` · CID ${d.cid}` : ''}`}</figcaption></figure>`
+}
+
+/** 结构标识符折叠（InChIKey / SMILES — 复制按钮由页级 UX JS 自动挂载，新旧报告同路径） */
+export function ligIdentFold(l: { detail?: LigandCardDetail }): string {
+  const d = l.detail
+  if (!d?.inchiKey && !d?.canonicalSmiles) return ''
+  return `<details class="fold lig-fold"><summary>结构标识符（InChIKey / SMILES · 可一键复制）</summary><div class="lig-ident">${d.inchiKey ? `<div><b>InChIKey</b> <span class="mono">${esc(d.inchiKey)}</span></div>` : ''}${d.canonicalSmiles ? `<div><b>Canonical SMILES</b> <span class="mono">${esc(d.canonicalSmiles)}</span></div>` : ''}</div></details>`
+}
+
+// ─── v2.7.6 ④ 覆盖率区段可视化（SVG 轨道 — 服务端渲染，零 JS 依赖，打印友好）──
+
+/** 覆盖区间 → 未覆盖区间（1 基；ranges 已排序合并） */
+function coverageGaps(ranges: Array<[number, number]>, seqLen: number): Array<[number, number]> {
+  const gaps: Array<[number, number]> = []
+  let cursor = 1
+  for (const [a, b] of ranges) {
+    if (a > cursor) gaps.push([cursor, Math.min(a - 1, seqLen)])
+    cursor = Math.max(cursor, b + 1)
+  }
+  if (cursor <= seqLen) gaps.push([cursor, seqLen])
+  return gaps
+}
+
+/**
+ * 结构覆盖率区段图（PDB 结构清单章节头部）：
+ *  - 全长序列为轨道，已覆盖区间绿色实心、未覆盖区间琥珀半透明（段悬停显示区间明细）
+ *  - 残基刻度 1 / 25% / 50% / 75% / 全长 — 与 UniProt 残基编号口径一致
+ *  - 纯内联 SVG（无 JS、无外部依赖）— 离线打开/打印均正常呈现
+ */
+export function coverageFigureHtml(
+  coverage: { coveragePercent: number; coveredRanges?: Array<[number, number]> } | null | undefined,
+  seqLen: number,
+): string {
+  if (!coverage || !Number.isFinite(seqLen) || seqLen <= 0) return ''
+  const ranges = (coverage.coveredRanges ?? []).filter(r => Array.isArray(r) && r[0] > 0 && r[1] >= r[0])
+  const gaps = coverageGaps(ranges, seqLen)
+  const W = 820, H = 64
+  const x0 = 8, innerW = W - 16
+  const pos = (res: number) => x0 + Math.max(0, Math.min(1, res / seqLen)) * innerW
+  const seg = (a: number, b: number, fill: string, op: number, kind: string) => {
+    const w = pos(b) - pos(a - 1)
+    if (w < 1) return ''
+    return `<rect x="${pos(a - 1).toFixed(1)}" y="16" width="${Math.max(1.2, w).toFixed(1)}" height="22" rx="2.5" fill="${fill}" opacity="${op}"><title>${a}-${b} · ${b - a + 1} aa ${kind}</title></rect>`
+  }
+  const rects = ranges.map(([a, b]) => seg(a, b, '#059669', .88, '已覆盖')).join('')
+    + gaps.map(([a, b]) => seg(a, b, '#d97706', .22, '未覆盖')).join('')
+  const ticks = [0, .25, .5, .75, 1].map((f, i) => {
+    const x = x0 + f * innerW
+    const label = String(Math.max(1, Math.round(seqLen * f)))
+    const anchor = i === 0 ? 'start' : i === 4 ? 'end' : 'middle'
+    return `<line x1="${x.toFixed(1)}" y1="42" x2="${x.toFixed(1)}" y2="46" stroke="#a8a29e"/><text x="${x.toFixed(1)}" y="57" text-anchor="${anchor}" font-size="9.5" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" fill="#a8a29e">${label}</text>`
+  }).join('')
+  const pct = coverage.coveragePercent
+  const gapsShow = gaps.slice(0, 6).map(([a, b]) => `${a}-${b}`).join('、')
+  return `
+  <figure class="cov-fig" aria-label="结构覆盖率区段图">
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="结构覆盖率 ${pct}%（残基 1-${seqLen}）">
+      <text x="${x0}" y="9" font-size="9" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" fill="#a8a29e" letter-spacing="1.5">COVERAGE MAP · ${seqLen} aa</text>
+      <rect x="${x0 - 1}" y="15" width="${innerW + 2}" height="24" rx="3.5" fill="#f5f5f4" stroke="#e7e5e4"/>
+      ${rects}${ticks}
+    </svg>
+    <figcaption><b>结构覆盖率 ${pct}%</b> · 已覆盖 ${ranges.length} 段（绿）${gaps.length ? ` · 未覆盖 ${gaps.length} 段（琥珀）${gapsShow}${gaps.length > 6 ? ' …' : ''}` : ' · 全长覆盖'} · 段悬停可见区间明细 · 数据源 PDBe 映射</figcaption>
+  </figure>`
 }
 
 /** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题） */
@@ -809,27 +1060,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const blastRan = ctx.blastStatus && (ctx.blastStatus.status === 'ok' || ctx.blastStatus.status === 'no-hits')
   const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus)
   const ligNo = (ctx.ligands?.length ?? 0) > 0 ? nextNo() : ''
-  /** v2.7：配体详情展示构件（PubChem 计算性质 + 2D 结构式） */
-  const ligDetailProps = (d: { xlogp?: number; tpsa?: number; hBondDonor?: number; hBondAcceptor?: number; rotatableBonds?: number; heavyAtoms?: number; exactMass?: number; charge?: number }) => {
-    const items: string[] = []
-    if (d.xlogp != null) items.push(`XLogP <b>${d.xlogp}</b>`)
-    if (d.tpsa != null) items.push(`TPSA <b>${d.tpsa} Å²</b>`)
-    if (d.hBondDonor != null) items.push(`氢供体 <b>${d.hBondDonor}</b>`)
-    if (d.hBondAcceptor != null) items.push(`氢受体 <b>${d.hBondAcceptor}</b>`)
-    if (d.rotatableBonds != null) items.push(`可旋转键 <b>${d.rotatableBonds}</b>`)
-    if (d.heavyAtoms != null) items.push(`重原子 <b>${d.heavyAtoms}</b>`)
-    if (d.exactMass != null) items.push(`精确质量 <b>${d.exactMass}</b>`)
-    if (d.charge != null && d.charge !== 0) items.push(`形式电荷 <b>${d.charge > 0 ? '+' : ''}${d.charge}</b>`)
-    return items.length ? items.map(i => `<span>${i}</span>`).join('') : ''
-  }
-  const ligStructFig = (l: { detail?: { structure2d?: string; cid?: number } }) => l.detail?.structure2d
-    ? `<figure class="lig-struct"><img src="${l.detail.structure2d}" alt="2D 化学结构式"><figcaption>2D 结构式 · PubChem${l.detail.cid ? ` · CID ${l.detail.cid}` : ''}</figcaption></figure>`
-    : ''
-  const ligIdentFold = (l: { detail?: { inchiKey?: string; canonicalSmiles?: string } }) => {
-    const d = l.detail
-    if (!d?.inchiKey && !d?.canonicalSmiles) return ''
-    return `<details class="fold lig-fold"><summary>结构标识符（InChIKey / SMILES）</summary><div class="lig-ident">${d.inchiKey ? `<div><b>InChIKey</b> <span class="mono">${esc(d.inchiKey)}</span></div>` : ''}${d.canonicalSmiles ? `<div><b>Canonical SMILES</b> <span class="mono">${esc(d.canonicalSmiles)}</span></div>` : ''}</div></details>`
-  }
+  // v2.7/v2.7.6 配体卡展示构件（ligDetailProps / ligStructFig / ligIdentFold / strategyZh）
+  // 已提升为模块级共享导出 —— 单靶点与合并报告单源同版
   const ligandSecHtml = (ctx.ligands?.length ?? 0) > 0 ? `
   <section class="sec" id="ligands">
     <h2><span class="sec-no">${ligNo}</span><span class="sec-title">配体研究数据</span><span class="sec-en">Ligands · ${ctx.ligands!.filter(l => l.ok).length}/${ctx.ligands!.length}</span></h2>
@@ -1149,6 +1381,9 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   </section>` : ''
 
   const pdbCountHtml = `${ctx.directPdbs.length}${input.totalPdbFound > ctx.directPdbs.length ? ` / 检索命中 ${input.totalPdbFound}` : ''}`
+
+  // v2.7.6 ④：覆盖率区段图（PDB 结构清单章节头部 — 已覆盖/未覆盖区间一目了然）
+  const covFigHtml = coverageFigureHtml(ctx.coverage, u ? u.sequenceLength : (ctx.sequence?.length ?? 0))
 
   // v2.7.2：AlphaFold 头图 — 优先内嵌 3Dmol 交互式 3D 视图（拖拽旋转/滚轮缩放，
   // pLDDT 四段着色；与无头截图页共用 plddtStyleApplyJs 同一着色实现）。失败降级链：
@@ -1501,6 +1736,12 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .fig-group { margin:18px 0 4px !important; font-size:14.5px !important; color:#064e3b; display:flex; align-items:baseline; gap:8px; }
   .fig-group-count { font-family:var(--mono); font-size:10.5px; font-weight:500; color:var(--faint); letter-spacing:1px; }
 
+  /* ── v2.7.6 覆盖率区段图（SVG 轨道 — 服务器渲染，零 JS，打印友好）── */
+  .cov-fig { margin: 14px 0 10px; }
+  .cov-fig svg { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; background: #fdfdfc; padding: 6px 8px; }
+  .cov-fig figcaption { font-size: 11px; color: var(--sub); margin-top: 6px; line-height: 1.8; }
+  .cov-fig figcaption b { color: var(--accent); }
+
   /* ── 报告头图与元信息并排（v2.0 AlphaFold；v2.2 截图去白边；v2.7 图上提与标题齐平）──
    *  头部双栏：左栏 = 眉标/标题/副标/蛋白信息/徽标，右栏 = AlphaFold 头图顶端对齐 —
    *  图不再挂在蛋白信息下方（原来信息栏下方留出大片空白）。移动端 (<720px) 上下堆叠。 */
@@ -1562,7 +1803,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:var(--mono); }
   .warn-box { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:4px; padding:12px 16px; font-size:12.5px; margin:14px 0; }
 
-${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}</style>
+${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 </head>
 <body>
 <div class="page" id="top">
@@ -1649,6 +1890,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}</style>
 
   <section class="sec" id="pdbs">
     <h2>${secHead(pdbsNo, 'PDB 结构清单', ctx.directPdbs.length ? `Structures · ${ctx.directPdbs.length}` : (ctx.interaction?.hasEvidence ? 'Structures · 互作组分证据' : 'Structures · 0'))}</h2>
+    ${covFigHtml}
     ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid)}` +
       (input.totalPdbFound > 150 ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示前 150 个（按分辨率排序）。</p>`
       : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : ''))
@@ -1710,6 +1952,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}</style>
   }
 })();
 </script>
+${UX_PAGE_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`

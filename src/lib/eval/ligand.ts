@@ -87,6 +87,8 @@ export interface LigandDetail {
   canonicalSmiles?: string
   /** 2D 化学结构式（PubChem PNG，data URI；未获取时缺省） */
   structure2d?: string
+  /** v2.7.6：2D 结构式 SVG 矢量版（RCSB CCD 矢量描述；优先于 PNG — 灯箱无限缩放不失真） */
+  structure2dSvg?: string
 }
 
 // ─── 别名表（id 与名称均经 RCSB chemcomp 官方核实，2026-11）────────────────
@@ -611,6 +613,80 @@ export async function fetchLigandStructures(
 
 // ─── v2.7 配体详情（PubChem 计算性质 + 2D 结构式）─────────────────────────
 
+// ─── v2.7.6 SVG 矢量结构式（RCSB CCD 矢量描述 — 无限缩放不糊）────────────────
+
+/** SVG 体积上限（CCD 描述典型 8-20KB；超大视为异常） */
+const LIG_SVG_MAX = 300 * 1024
+
+/** SVG 规范化：去 xml/DOCTYPE 声明与固定 width/height（img CSS 控尺寸）；缺 viewBox 时由宽高推导注入 */
+function normalizeDepictionSvg(text: string): string | null {
+  let svg = text.replace(/^[\uFEFF\s]*/, '')
+    .replace(/<\?xml[^>]*\?>\s*/i, '')
+    .replace(/<!DOCTYPE[^>]*>\s*/i, '')
+  const m = svg.match(/<svg([^>]*)>/i)
+  if (!m) return null
+  let attrs = m[1]
+  const w = parseFloat((attrs.match(/\swidth="([\d.]+)"/i) ?? [])[1] ?? '')
+  const h = parseFloat((attrs.match(/\sheight="([\d.]+)"/i) ?? [])[1] ?? '')
+  if (!/\sviewBox="/i.test(attrs) && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+    attrs += ` viewBox="0 0 ${w} ${h}"`
+  }
+  attrs = attrs.replace(/\s(width|height)="[^"]*"/gi, '')
+  svg = svg.replace(/<svg([^>]*)>/i, () => `<svg${attrs}>`)
+  return svg
+}
+
+/**
+ * RCSB CCD 矢量结构式（compId → cdn.rcsb.org/images/ccd/unlabeled/{首字母}/{compId}.svg，
+ * OpenEye 渲染的化学组分 2D 描述）→ 规范化 → data URI；报告内嵌/灯箱无限缩放不糊。
+ * 磁盘缓存 db/cache/ligand2d/{compId}.svg（静态 CDN 文件 — 永久缓存，与 PNG 缓存并存，
+ * PNG 为无 compId（PubChem-only）配体的位图回落）。动态 fs 访问走动态 import
+ * （与 PNG 通道一致，规避 Turbopack 构建期追踪）。
+ */
+export async function rcsbCcdDepictionSvg(compId: string, signal?: AbortSignal): Promise<string | undefined> {
+  const id = compId.trim().toUpperCase()
+  if (!/^[A-Z0-9]{1,6}$/.test(id)) return undefined
+  const key = `ligand:ccdsvg:${id}`
+  const hit = apiCache.get<string | null>(key)
+  if (hit !== undefined) return hit ?? undefined
+  let out: string | undefined
+  let definitive = false
+  const cacheDir = `${process.cwd()}/db/cache/ligand2d`
+  const file = `${cacheDir}/${id}.svg`
+  const fsp = await import('node:fs/promises')
+  try {
+    const cached = await fsp.readFile(file)
+    if (cached.length > 200 && cached.length <= LIG_SVG_MAX) {
+      out = `data:image/svg+xml;base64,${cached.toString('base64')}`
+    }
+  } catch { /* 未缓存 */ }
+  if (!out) {
+    try {
+      const res = await fetch(`https://cdn.rcsb.org/images/ccd/unlabeled/${id[0]}/${id}.svg`, {
+        headers: { Accept: 'image/svg+xml' },
+        signal: signal ?? AbortSignal.timeout(12_000),
+      })
+      if (res.status === 404) definitive = true
+      if (res.ok) {
+        definitive = true
+        const raw = Buffer.from(await res.arrayBuffer())
+        if (raw.length < 200 || raw.length > LIG_SVG_MAX) return undefined
+        const normalized = normalizeDepictionSvg(raw.toString('utf-8'))
+        if (!normalized) return undefined
+        const buf = Buffer.from(normalized, 'utf-8')
+        out = `data:image/svg+xml;base64,${buf.toString('base64')}`
+        try {
+          await fsp.mkdir(cacheDir, { recursive: true }).then(() => fsp.writeFile(file, buf))
+        } catch { /* 缓存失败不影响返回 */ }
+      }
+    } catch {
+      out = undefined
+    }
+  }
+  if (definitive) apiCache.set(key, out ?? null)
+  return out
+}
+
 /** 就地充实 LigandResolution.detail（幂等 — 已有 detail 直接返回） */
 export async function enrichLigandDetail(res: LigandResolution, signal?: AbortSignal): Promise<void> {
   if (res.detail) return
@@ -644,14 +720,36 @@ export async function enrichLigandDetail(res: LigandResolution, signal?: AbortSi
     if (detail.inchiKey) target.inchiKey = detail.inchiKey
     if (detail.canonicalSmiles) target.canonicalSmiles = detail.canonicalSmiles
   }
-  if (cid) {
+  if (res.compId) {
+    // v2.7.6：RCSB CCD 矢量结构式优先（灯箱无限缩放不糊）
+    try {
+      const svg = await rcsbCcdDepictionSvg(res.compId, signal)
+      if (svg) target.structure2dSvg = svg
+    } catch { /* SVG 失败回落 PNG */ }
+  }
+  if (!target.structure2dSvg && cid) {
+    // PubChem PNG 位图回落（无 compId 的 PubChem-only 配体主通道）
     try {
       const img = await pubchem2dStructure(cid, signal)
       if (img) target.structure2d = img
     } catch { /* 结构式失败不影响性质 */ }
   }
   // 有实质内容才挂 detail（空对象无展示价值）
-  if (target.cid || target.inchiKey || target.structure2d) res.detail = target
+  if (target.cid || target.inchiKey || target.structure2d || target.structure2dSvg) res.detail = target
+}
+
+/** v2.7.6：合并报告渲染前兜底充实 —— detail 缺失补全（旧作业）+ PNG-only 详情回补 SVG 矢量 */
+export async function ensureLigand2dVector(res: LigandResolution, signal?: AbortSignal): Promise<void> {
+  await enrichLigandDetail(res, signal)
+  if (!res.detail?.structure2dSvg && res.compId) {
+    try {
+      const svg = await rcsbCcdDepictionSvg(res.compId, signal)
+      if (svg) {
+        if (res.detail) res.detail.structure2dSvg = svg
+        else res.detail = { structure2dSvg: svg }
+      }
+    } catch { /* 回补失败保留 PNG */ }
+  }
 }
 
 // ─── 评估表配体识别（字典扫描；LLM 提取由 docx-llm 负责）──────────────────

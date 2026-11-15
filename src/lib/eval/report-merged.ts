@@ -11,10 +11,10 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
-import { esc, renderMarkdown, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS } from './report-html'
+import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS } from './report-html'
 import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution, type SharedStructure } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
-import type { LigandResolution } from './ligand'
+import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
@@ -668,25 +668,70 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // v1.15：评估表 AI 解析要点（LLM 失败时作为兜底证据；正常时作为可溯源原始要点）
   // v2.0：配体研究数据（批次共享，取首个有数据的靶点）
   const batchLigands = targets.find(t => (t.ligands?.length ?? 0) > 0)?.ligands ?? []
+  // v2.7.6 ⑤：配体卡补 2D 结构式 —— 渲染前兜底充实（v2.7 前旧作业 detail 缺失补全；
+  // PNG-only 详情回补 SVG 矢量版，磁盘缓存命中零网络开销）
+  await Promise.all(batchLigands.filter(l => l.ok).map(async l => {
+    try { await ensureLigand2dVector(l) } catch { /* 充实失败不阻塞渲染（保留既有字段） */ }
+  }))
   const ligandCard = (l: LigandResolution): string => {
     if (!l.ok) return `
     <div class="lig-card lig-fail">
       <div class="lig-head"><span class="lig-id lig-id-fail">?</span><span class="lig-name">${esc(l.raw.length > 40 ? l.raw.slice(0, 39) + '…' : l.raw)}</span></div>
       <div class="lig-meta"><span>未能归一 — ${esc(l.error ?? '未知原因')}</span></div>
     </div>`
+    const d = l.detail
+    const structFig = ligStructFig(l)
+    const propsHtml = d ? ligDetailProps(d) : ''
+    const identFold = ligIdentFold(l)
     const best = l.structures.find(s => s.resolution != null)?.resolution
+    // v2.7.6：PubChem 已识别但 PDB 无对应组分 → CID 详情卡（与单靶点报告同版：2D 结构式 + 性质 + 标识符折叠）
+    if (!l.compId) {
+      const pc = l.pubchem
+      const cid = d?.cid ?? pc?.cid
+      return `
+      <div class="lig-card">
+        <div class="lig-main">
+        ${structFig}
+        <div class="lig-info">
+        <div class="lig-head">
+          ${cid
+            ? `<a class="lig-id lig-id-pc" href="https://pubchem.ncbi.nlm.nih.gov/compound/${cid}" target="_blank" rel="noopener" title="在 PubChem 查看化合物详情">CID ${cid}</a>`
+            : `<span class="lig-id lig-id-pc">已识别</span>`}
+          <span class="lig-name">${esc(l.name || l.raw)}</span>
+          <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(strategyZh(l.strategy))}${l.source === 'eval-table' ? ' · 评估表' : l.source === 'file' ? ' · 文件' : ''}</span>
+        </div>
+        <div class="lig-meta">
+          <span>分子式 <b>${esc(l.formula || '—')}</b></span>
+          ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
+        </div>
+        ${propsHtml ? `<div class="lig-props">${propsHtml}</div>` : ''}
+        ${(d?.iupacName ?? pc?.iupacName) ? `<div class="lig-iupac">IUPAC 名 ${esc((d?.iupacName ?? pc?.iupacName) ?? '')}</div>` : ''}
+        ${identFold}
+        </div>
+        </div>
+        <div class="lig-pdbs lig-none">PDB 化学组分库无对应条目 — 已通过 PubChem 识别，点击 CID 查看化合物详情</div>
+      </div>`
+    }
     return `
     <div class="lig-card">
+      <div class="lig-main">
+      ${structFig}
+      <div class="lig-info">
       <div class="lig-head">
         <span class="lig-id">${esc(l.compId)}</span>
         <span class="lig-name">${esc(l.name || l.raw)}</span>
-        <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(l.strategy)}</span>
+        <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(strategyZh(l.strategy))}${l.source === 'eval-table' ? ' · 评估表' : l.source === 'file' ? ' · 文件' : ''}</span>
       </div>
       <div class="lig-meta">
         <span>分子式 <b>${esc(l.formula || '—')}</b></span>
         ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
         <span>含该配体结构 <b>${l.totalStructures}</b> 个</span>
         ${best != null ? `<span>最佳分辨率 <b>${best.toFixed(2)} Å</b></span>` : ''}
+      </div>
+      ${propsHtml ? `<div class="lig-props">${propsHtml}</div>` : ''}
+      ${(d?.iupacName ?? l.pubchem?.iupacName) ? `<div class="lig-iupac">IUPAC 名 ${esc((d?.iupacName ?? l.pubchem?.iupacName) ?? '')}</div>` : ''}
+      ${identFold}
+      </div>
       </div>
       ${l.structures.length ? `
       <div class="lig-pdbs">${l.structures.slice(0, 12).map(s => `<a class="${s.alsoTarget ? 'lig-also' : ''}" href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener" title="${esc(s.title)}${s.resolution != null ? ` · ${s.resolution}Å` : ''}${s.alsoTarget ? ' · 本靶点直接结构' : ''}">${s.pdbId}${s.resolution != null ? ` <i>${s.resolution.toFixed(1)}</i>` : ''}</a>`).join('')}${l.totalStructures > 12 ? `<span class="lig-more">+${l.totalStructures - 12}</span>` : ''}</div>` : `<div class="lig-pdbs lig-none">暂无含该配体的 PDB 结构记录</div>`}
@@ -695,7 +740,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const ligandsHtml = batchLigands.length ? `
   <section class="sec" id="ligands">
     <h2>配体研究数据<span class="sec-en">Ligands · ${batchLigands.filter(l => l.ok).length}/${batchLigands.length}</span></h2>
-    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / AI 兜底）映射为 RCSB 三位化学组分 ID；结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为批次内靶点直接结构的条目。</p>
+    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / PubChem / AI 兜底）映射为 RCSB 化学组分 ID；结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为批次内靶点直接结构的条目；计算性质与 2D 化学结构式来自 PubChem（SVG 矢量优先，点击可放大）。</p>
     <div class="lig-grid">${batchLigands.map(ligandCard).join('')}
     </div>
   </section>` : ''
@@ -740,6 +785,22 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .lig-pdbs a:hover { background:#d9f5e8; }
   .lig-more { align-self:center; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--faint); }
   .lig-none { font-size:12px; color:var(--faint); border-top:1px dashed #efedeb; margin-top:10px; padding-top:8px; }
+  /* v2.7.6 ⑤：配体卡 2D 结构式 + 性质 + 标识符（与单靶点报告同版布局） */
+  .lig-main { display:flex; gap:14px; align-items:flex-start; }
+  .lig-struct { flex:0 0 150px; margin:0; text-align:center; }
+  .lig-struct img { display:block; width:150px; height:150px; object-fit:contain; background:#fff; border:1px solid var(--line); border-radius:4px; padding:3px; box-shadow:0 1px 2px rgba(28,25,23,.05); }
+  .lig-struct figcaption { margin-top:5px; font-size:9.5px; line-height:1.5; color:var(--faint); font-family:ui-monospace,Menlo,monospace; }
+  .lig-info { flex:1 1 auto; min-width:0; }
+  .lig-id-pc { color:#4c5fd7; background:#eef0fd; border-color:#c6cdf6; }
+  .lig-iupac { margin-top:7px; font-size:10.5px; line-height:1.65; color:var(--faint); overflow-wrap:anywhere; }
+  .lig-props { display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:8px; padding-top:8px; border-top:1px dashed #efedeb; font-size:11px; color:var(--sub); }
+  .lig-props b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .lig-fold { margin:8px 0 0; border-radius:4px; padding:4px 8px; }
+  .lig-fold > summary { font-size:11.5px; color:var(--accent-2); }
+  .lig-ident { font-size:11px; color:var(--sub); line-height:1.9; overflow-wrap:anywhere; }
+  .lig-ident b { color:var(--ink); font-weight:600; margin-right:4px; }
+  .lig-ident .mono { font-size:10px; color:var(--sub); font-family:ui-monospace,Menlo,monospace; }
+  @media (max-width:560px){ .lig-main{flex-direction:column; align-items:center} .lig-info{align-self:stretch} .lig-struct{flex-basis:auto} }
   :root { --ink:#1c1917; --sub:#57534e; --faint:#a8a29e; --line:#e7e5e4; --accent:#047857; --accent-2:#059669; --paper:#fffdf9; }
   * { margin:0; padding:0; box-sizing:border-box; }
   body { font-family:"Source Serif 4","Noto Serif SC","Source Han Serif SC","Songti SC",Georgia,serif; background:#f0efec; color:var(--ink); font-size:15px; line-height:1.92; }
@@ -823,7 +884,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   @media print { body { background:#fff; } .page { padding:24px 8px; } .pdb-fold, .fold { page-break-inside:avoid; } }
   @media (max-width:640px) { .toc ol { columns:1; } }
 
-${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}</style>
+${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 </head>
 <body>
 <div class="page">
@@ -928,6 +989,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}</style>
   window.addEventListener('afterprint', restore);
 })();
 </script>
+${UX_PAGE_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`
