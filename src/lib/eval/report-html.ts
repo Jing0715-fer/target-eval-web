@@ -10,6 +10,10 @@
  *    ③InChIKey/SMILES 一键复制（页级 JS 自挂按钮，clipboard API + execCommand 降级）；
  *    ④覆盖率区段可视化（SVG 轨道：已覆盖绿/未覆盖琥珀 + 残基刻度，服务端渲染零 JS）；
  *    ⑥移动端表格横滚边缘渐隐指示（可滚动亮起、滚到头熄灭）。
+ *  - v2.7.7：⑦AlphaFold 交互 3D 视图一键全屏放大（canvas 迁移遮罩 + pLDDT 图例 + Esc 退出，
+ *    新报告模板与旧报告注入同路径）；⑧灯箱嵌入自适应 —— 应用内嵌自动高度 iframe 中
+ *    position:fixed 相对 iframe 全文档高（中部图片点击后灯箱跑出屏幕、需回滚查找）→
+ *    __rptEmb 可视切片定位（父页滚动实时重跟）+ 图片严格限高；旧版 v1 灯箱共存自动清理。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -64,24 +68,29 @@ export function applyResponsiveOverride(html: string): string {
   return `${html.slice(0, i)}<style id="rpt-rw">${RESPONSIVE_PAGE_CSS}</style>\n${html.slice(i)}`
 }
 
-// ─── v2.7.5 图片点击放大灯箱（单源规则）────────────────────────────────────────
+// ─── v2.7.5/v2.7.7 图片点击放大灯箱 + AlphaFold 3D 视图放大（单源规则）────────
 //  配体 2D 结构式 / 客户实验图 / AlphaFold 静态图（af-poster 与 legacy PNG 分支）
 //  点击进入全屏灯箱：滚轮（锚定光标）或双指捏合缩放、拖拽平移、双击/双轻点切换
 //  适配 ↔ 2.5×、Esc/×/背景点击关闭；右下控制条（− 百分比 ＋ 复位）便于触屏；
 //  打印自动隐藏；纯内联 JS 无外部依赖 — 离线单文件报告同样可用。
+//  v2.7.7 新增：⑦ AlphaFold 交互 3D 视图「放大」按钮 — canvas 节点迁入全屏遮罩
+//  （WebGL 上下文保留，3Dmol ResizeObserver 自动按新尺寸重渲染），pLDDT 图例随行；
+//  ⑧ 嵌入自适应定位 —— 自动高度 iframe（应用内嵌报告预览）中 fixed 相对的是
+//  iframe 全文档高度而非屏幕可视区，改由 __rptEmb 探测并以「可视切片」绝对定位
+//  （父页滚动 rAF 重跟、滚轮/触摸阻断滚动链），iframe 内部可滚或独立打开仍为 fixed。
 //  单源使用：① 新报告内嵌（模板 <style> 尾部 + </body> 前，report-merged 同）；
-//           ② 旧报告（含 v2.7.2/2.7.3/2.7.4 落盘 report.html）由报告路由经
-//              applyZoomUpgrade 注入 <style>+<script>（marker 幂等）—— 历史作业同样可放大。
+//           ② 旧报告（含 v2.7.5/2.7.6 落盘 report.html — 已带 v1 灯箱）由报告路由经
+//              applyZoomUpgrade 注入 v2（marker 幂等 + v1 根自动清理）—— 历史作业同样可用。
 
-const ZOOM_PAGE_MARKER = 'rpt-zoom-v1'
+const ZOOM_PAGE_MARKER = 'rpt-zoom-v2'
 
-export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配体结构式 / 实验图 / AlphaFold 静态图） */
+export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配体结构式 / 实验图 / AlphaFold 静态图） + AF 3D 视图放大 */
   img.rpt-zoomable { cursor:zoom-in; }
   figure.rpt-zoomable { position:relative; }
   .rpt-zoom-badge { position:absolute; top:6px; right:6px; z-index:6; display:inline-flex; align-items:center; gap:4px; padding:2.5px 6px; border-radius:4px; background:rgba(255,255,255,.93); border:1px solid rgba(28,25,23,.22); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; box-shadow:0 1px 3px rgba(28,25,23,.14); opacity:0; transition:opacity .18s; pointer-events:none; }
   figure.rpt-zoomable:hover .rpt-zoom-badge { opacity:1; }
   @media (hover:none) { .rpt-zoom-badge { opacity:.92; } }
-  @media print { .rpt-zoom-badge { display:none; } .rpt-zoom { display:none !important; } }
+  /* 嵌入自适应（v2.7.7）：自动高度 iframe 内 fixed 相对全文档高 — 遮罩实际几何由 JS __rptEmb.pin 按可视切片覆盖；此处 fixed 为独立打开/内部滚动 iframe 的基准 */
   .rpt-zoom { position:fixed; inset:0; z-index:80; font-family:var(--mono,ui-monospace,Menlo,monospace); }
   .rpt-zoom[hidden] { display:none; }
   .rpt-zoom-bg { position:absolute; inset:0; background:rgba(23,21,19,.85); cursor:zoom-out; }
@@ -97,43 +106,113 @@ export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配�
   .rpt-zoom-ctl button:hover { background:rgba(23,21,19,.88); }
   .rpt-zoom-ctl .rpt-zoom-pct { min-width:54px; height:34px; display:flex; align-items:center; justify-content:center; border-radius:8px; border:1px solid rgba(255,255,255,.22); background:rgba(23,21,19,.78); font-size:11px; color:#f5f4f2; }
   @media (max-width:640px){ .rpt-zoom-cap{height:50px;padding-right:56px} .rpt-zoom-stage{inset:0 0 50px 0} .rpt-zoom-cap .rpt-zoom-hint{display:none} .rpt-zoom-ctl{bottom:62px;right:10px} .rpt-zoom-close{top:10px;right:10px} }
+
+  /* ── AlphaFold 交互 3D 视图放大（v2.7.7）：小画布看不清细节 → 一键全屏交互 ── */
+  .af-expand { position:absolute; top:8px; right:8px; z-index:5; display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); opacity:0; transition:opacity .18s; }
+  .af-expand:hover { background:#fff; color:#1c1917; }
+  .af-stage:hover .af-expand, .af-expand:focus-visible { opacity:1; }
+  @media (hover:none) { .af-expand { opacity:.92; } }
+  .af-stage:not(.af-live) .af-expand { display:none; }
+  /* 放大期间内嵌槽位：静态海报占位 + 幽灵提示（canvas 已迁入全屏遮罩） */
+  .af-stage.af-expanded .af-poster { display:block; }
+  .af-stage.af-expanded::after { content:'交互 3D 视图已放大 · 按 Esc 恢复'; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:10px; letter-spacing:.6px; color:#a8a29e; background:rgba(253,253,252,.72); }
+  .af-fullwrap { position:fixed; inset:0; z-index:70; display:flex; flex-direction:column; background:rgba(23,21,19,.87); font-family:var(--mono,ui-monospace,Menlo,monospace); }
+  .af-fullwrap[hidden] { display:none; }
+  .af-fullbar { display:flex; align-items:center; flex-wrap:wrap; gap:6px 14px; padding:10px 58px 10px 18px; background:rgba(23,21,19,.94); color:#f5f4f2; }
+  .af-fullttl b { font-size:12px; font-weight:600; color:#fff; }
+  .af-fullttl span { margin-left:10px; font-size:10px; color:#a8a29e; letter-spacing:.4px; }
+  .af-full-legend { display:flex; flex-wrap:wrap; gap:6px 12px; margin-left:auto; font-size:9px; color:#a8a29e; }
+  .af-full-legend span { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+  .af-full-legend i { display:inline-block; width:9px; height:9px; border-radius:2px; border:1px solid rgba(28,25,23,.3); }
+  .af-fullclose { position:absolute; top:10px; right:12px; width:34px; height:34px; border-radius:50%; border:1px solid rgba(255,255,255,.28); background:rgba(23,21,19,.6); color:#fff; font-size:19px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .af-fullclose:hover { background:rgba(23,21,19,.88); }
+  .af-fullslot { flex:1 1 auto; position:relative; margin:14px auto; width:min(96%,1400px); background:#fff; border-radius:10px; overflow:hidden; box-shadow:0 10px 44px rgba(0,0,0,.5); }
+  @media (max-width:640px){ .af-fullslot{margin:8px auto;width:calc(100% - 16px);border-radius:8px} .af-fullttl span{display:none} .af-full-legend{margin-left:0} }
+  @media print { .rpt-zoom-badge, .af-expand, .af-fullwrap { display:none !important; } .rpt-zoom { display:none !important; } }
 `
 
 export const LIGHTBOX_JS = `<script>
-/* ${ZOOM_PAGE_MARKER} 图片点击放大 */
+/* ${ZOOM_PAGE_MARKER} 图片点击放大 + 嵌入自适应 + AlphaFold 3D 视图放大 */
 (function () {
   var SEL = '.lig-struct img, .fig img, .af-fig img';
-  var imgs = Array.prototype.slice.call(document.querySelectorAll(SEL));
-  if (!imgs.length) return;
+
+  // ── 旧版灯箱（v2.7.5/2.7.6 baked v1）共存清理：移除 v1 根 + 克隆剥离 v1 事件句柄 ──
+  // 旧报告 serve 注入本版时 v1 已先行执行：v1 根随 remove() 销毁其监听；
+  //  img 克隆不携带监听（cloneNode 不复制句柄）— 根除 v1/v2 双开、滚动锁错乱。
+  var oldRoot = document.querySelector('.rpt-zoom');
+  if (oldRoot) {
+    oldRoot.remove();
+    Array.prototype.forEach.call(document.querySelectorAll('img.rpt-zoomable'), function (im) {
+      im.replaceWith(im.cloneNode(false));
+    });
+  }
+
+  // ── 嵌入环境感知（v2.7.7）：应用内嵌报告为「自动高度 iframe」—— iframe 高 = 报告全文高 ──
+  //  此时 position:fixed 相对的是 iframe 全文档高（非屏幕可视区）：中部图片点击后
+  //  灯箱居中于全文中点、跑出屏幕需回滚查找。改以「可视切片」文档坐标绝对定位：
+  //  屏幕与 iframe 文档的交集（父页滚动实时重跟）；iframe 内部可滚（预览 Dialog h-full）
+  //  或独立打开时 fixed 本就正确 — 维持原行为。
+  var EMB = window.__rptEmb = (function () {
+    function frame() { try { return window.frameElement || null } catch (e) { return null } }
+    /** 可视切片（frame 文档坐标 {top,height}）；null = 视口模式（独立打开 / iframe 内部可滚） */
+    function slice() {
+      var f = frame();
+      if (!f) return null;
+      try {
+        var doc = document.documentElement;
+        var contentH = Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0);
+        var r = f.getBoundingClientRect();
+        if (contentH > r.height + 8) return null; // iframe 内部可滚 → fixed 正确
+        var ow = f.ownerDocument.defaultView;
+        var pH = ow.innerHeight || (ow.document.documentElement && ow.document.documentElement.clientHeight) || 0;
+        if (!pH) return null;
+        var top = Math.max(0, -r.top);
+        var bot = Math.min(r.height, pH - r.top);
+        if (bot - top < 160) { top = 0; bot = Math.min(r.height, pH); } // 屏上交集过小 → 整窗兜底
+        return { top: top, height: bot - top };
+      } catch (e) { return null }
+    }
+    /** 全屏遮罩按当前模式定位（fixed=全视口 / slice=可视切片绝对定位）；返回模式名 */
+    function pin(el) {
+      var rc = slice();
+      if (!rc) {
+        el.style.position = 'fixed'; el.style.top = '0'; el.style.bottom = '0'; el.style.height = '';
+        el.style.left = '0'; el.style.right = '0'; el.style.width = '';
+        return 'fixed';
+      }
+      el.style.position = 'absolute'; el.style.top = rc.top + 'px'; el.style.bottom = ''; el.style.height = rc.height + 'px';
+      el.style.left = '0'; el.style.right = '0'; el.style.width = '';
+      return 'slice';
+    }
+    /** 父页滚动/窗口尺寸变化 → rAF 节流重定位（仅嵌入形态需要）；返回解绑函数 */
+    function watch(fn) {
+      var ow = null;
+      try { var f = frame(); if (f) ow = f.ownerDocument.defaultView } catch (e) {}
+      var raf = 0;
+      var cb = function () {
+        if (raf) return;
+        raf = requestAnimationFrame(function () { raf = 0; fn(); });
+      };
+      window.addEventListener('resize', cb, { passive: true });
+      if (ow && ow !== window) {
+        try { ow.addEventListener('resize', cb, { passive: true }); ow.addEventListener('scroll', cb, { passive: true }) } catch (e) {}
+      }
+      return function () {
+        window.removeEventListener('resize', cb);
+        if (ow && ow !== window) { try { ow.removeEventListener('resize', cb); ow.removeEventListener('scroll', cb) } catch (e) {} }
+      };
+    }
+    return { pin: pin, watch: watch, slice: slice };
+  })();
+
   var ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>';
+  var ICON_EXPAND = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M21 3l-7 7"/><path d="M9 21H3v-6"/><path d="M3 21l7-7"/></svg>';
+  var LEGEND_AF = '<div class="af-full-legend"><span><i style="background:#0053D6"></i>pLDDT ≥ 90</span><span><i style="background:#65CBF3"></i>70–90</span><span><i style="background:#FFDB13"></i>50–70</span><span><i style="background:#FF7D45"></i>&lt; 50</span></div>';
 
-  var root = document.createElement('div');
-  root.className = 'rpt-zoom';
-  root.hidden = true;
-  root.setAttribute('role', 'dialog');
-  root.setAttribute('aria-modal', 'true');
-  root.setAttribute('aria-label', '图片放大预览');
-  root.innerHTML =
-    '<div class="rpt-zoom-bg"></div>' +
-    '<div class="rpt-zoom-stage"><img alt=""></div>' +
-    '<button type="button" class="rpt-zoom-close" aria-label="关闭预览">×</button>' +
-    '<div class="rpt-zoom-ctl">' +
-      '<button type="button" data-z="out" aria-label="缩小">−</button>' +
-      '<span class="rpt-zoom-pct">100%</span>' +
-      '<button type="button" data-z="in" aria-label="放大">＋</button>' +
-      '<button type="button" data-z="fit" aria-label="复位" title="复位到适配大小">1:1</button>' +
-    '</div>' +
-    '<div class="rpt-zoom-cap"><b class="rpt-zoom-title"></b><span class="rpt-zoom-hint">滚轮/双指缩放 · 拖拽平移 · 双击复位 · Esc 关闭</span></div>';
-  document.body.appendChild(root);
+  var imgs = Array.prototype.slice.call(document.querySelectorAll(SEL));
 
-  var stage = root.querySelector('.rpt-zoom-stage');
-  var bg = root.querySelector('.rpt-zoom-bg');
-  var big = stage.querySelector('img');
-  var titleEl = root.querySelector('.rpt-zoom-title');
-  var pctEl = root.querySelector('.rpt-zoom-pct');
-  var closeBtn = root.querySelector('.rpt-zoom-close');
-  var ctlBtns = Array.prototype.slice.call(root.querySelectorAll('.rpt-zoom-ctl button'));
-  var savedOverflow = '', lastFocus = null;
+  var root = null, stage = null, bg = null, big = null, titleEl = null, pctEl = null, closeBtn = null, ctlBtns = [];
+  var savedOverflow = '', lastFocus = null, unwatch = null;
   var s = 1, tx = 0, ty = 0;
 
   function apply() {
@@ -159,7 +238,10 @@ export const LIGHTBOX_JS = `<script>
     titleEl.textContent = t.length > 110 ? t.slice(0, 109) + '…' : (t || '图片预览');
     big.src = img.src;
     big.alt = img.alt || '放大预览';
+    EMB.pin(root); // 嵌入形态 → 可视切片；独立打开 → 视口 fixed
     fit();
+    if (unwatch) { unwatch(); unwatch = null; }
+    unwatch = EMB.watch(function () { EMB.pin(root); }); // 父页滚动实时跟停（遮罩贴屏不跑丢）
     lastFocus = document.activeElement;
     root.hidden = false;
     savedOverflow = document.body.style.overflow;
@@ -169,105 +251,206 @@ export const LIGHTBOX_JS = `<script>
   function close() {
     root.hidden = true;
     document.body.style.overflow = savedOverflow;
+    if (unwatch) { unwatch(); unwatch = null; }
     if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
   }
 
-  bg.addEventListener('click', close);
-  closeBtn.addEventListener('click', close);
-  ctlBtns.forEach(function (b) {
-    b.addEventListener('click', function () {
-      var z = b.getAttribute('data-z');
-      if (z === 'fit') return fit();
-      var r = stage.getBoundingClientRect();
-      zoomAt(s * (z === 'in' ? 1.5 : 1 / 1.5), r.left + r.width / 2, r.top + r.height / 2);
-    });
-  });
-  document.addEventListener('keydown', function (e) {
-    if (root.hidden) return;
-    if (e.key === 'Escape') close();
-    else if (e.key === '+' || e.key === '=') zoomAt(s * 1.25, innerWidth / 2, innerHeight / 2);
-    else if (e.key === '-') zoomAt(s / 1.25, innerWidth / 2, innerHeight / 2);
-    else if (e.key === '0') fit();
-  });
-  stage.addEventListener('wheel', function (e) {
-    e.preventDefault();
-    zoomAt(s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY);
-  }, { passive: false });
+  if (imgs.length) {
+    root = document.createElement('div');
+    root.className = 'rpt-zoom';
+    root.hidden = true;
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-modal', 'true');
+    root.setAttribute('aria-label', '图片放大预览');
+    root.innerHTML =
+      '<div class="rpt-zoom-bg"></div>' +
+      '<div class="rpt-zoom-stage"><img alt=""></div>' +
+      '<button type="button" class="rpt-zoom-close" aria-label="关闭预览">×</button>' +
+      '<div class="rpt-zoom-ctl">' +
+        '<button type="button" data-z="out" aria-label="缩小">−</button>' +
+        '<span class="rpt-zoom-pct">100%</span>' +
+        '<button type="button" data-z="in" aria-label="放大">＋</button>' +
+        '<button type="button" data-z="fit" aria-label="复位" title="复位到适配大小">1:1</button>' +
+      '</div>' +
+      '<div class="rpt-zoom-cap"><b class="rpt-zoom-title"></b><span class="rpt-zoom-hint">滚轮/双指缩放 · 拖拽平移 · 双击复位 · Esc 关闭</span></div>';
+    document.body.appendChild(root);
 
-  // 指针交互：单指/鼠标拖拽平移；双指捏合缩放；触屏双轻点 = 双击（适配 ↔ 2.5×）
-  var ptrs = {}, pinch = null, drag = null, lastTap = 0, lastX = 0, lastY = 0, tapZoomedAt = 0;
-  function pCount() { return Object.keys(ptrs).length; }
-  stage.addEventListener('pointerdown', function (e) {
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
-    ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
-    if (pCount() === 1) {
-      drag = { x: e.clientX, y: e.clientY, moved: 0 };
-      try { stage.setPointerCapture(e.pointerId); } catch (err) {}
-    } else { drag = null; pinch = null; }
-  });
-  stage.addEventListener('pointermove', function (e) {
-    if (!ptrs[e.pointerId]) return;
-    ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
-    if (pCount() >= 2) {
-      var ids = Object.keys(ptrs);
-      var a = ptrs[ids[0]], b = ptrs[ids[1]];
-      var d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
-      if (!pinch) pinch = { d: d, s: s };
-      zoomAt(pinch.s * d / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
-    } else if (drag) {
-      var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      drag.moved += Math.abs(dx) + Math.abs(dy);
-      tx += dx; ty += dy;
-      drag.x = e.clientX; drag.y = e.clientY;
-      apply();
+    stage = root.querySelector('.rpt-zoom-stage');
+    bg = root.querySelector('.rpt-zoom-bg');
+    big = stage.querySelector('img');
+    titleEl = root.querySelector('.rpt-zoom-title');
+    pctEl = root.querySelector('.rpt-zoom-pct');
+    closeBtn = root.querySelector('.rpt-zoom-close');
+    ctlBtns = Array.prototype.slice.call(root.querySelectorAll('.rpt-zoom-ctl button'));
+
+    bg.addEventListener('click', close);
+    closeBtn.addEventListener('click', close);
+    // 遮罩全域阻断滚动链（wheel/touch 预防默认 — 嵌入形态下防事件链至父页滚动）
+    root.addEventListener('wheel', function (e) { e.preventDefault(); }, { passive: false });
+    root.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+    ctlBtns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        var z = b.getAttribute('data-z');
+        if (z === 'fit') return fit();
+        var r = stage.getBoundingClientRect();
+        zoomAt(s * (z === 'in' ? 1.5 : 1 / 1.5), r.left + r.width / 2, r.top + r.height / 2);
+      });
+    });
+    document.addEventListener('keydown', function (e) {
+      if (root.hidden) return;
+      var r = stage.getBoundingClientRect(); // 锚点取遮罩中心（嵌入形态下 innerHeight 非屏幕高 — 不可用）
+      if (e.key === 'Escape') close();
+      else if (e.key === '+' || e.key === '=') zoomAt(s * 1.25, r.left + r.width / 2, r.top + r.height / 2);
+      else if (e.key === '-') zoomAt(s / 1.25, r.left + r.width / 2, r.top + r.height / 2);
+      else if (e.key === '0') fit();
+    });
+    stage.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      zoomAt(s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY);
+    }, { passive: false });
+
+    // 指针交互：单指/鼠标拖拽平移；双指捏合缩放；触屏双轻点 = 双击（适配 ↔ 2.5×）
+    var ptrs = {}, pinch = null, drag = null, lastTap = 0, lastX = 0, lastY = 0, tapZoomedAt = 0;
+    function pCount() { return Object.keys(ptrs).length; }
+    stage.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      if (pCount() === 1) {
+        drag = { x: e.clientX, y: e.clientY, moved: 0 };
+        try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+      } else { drag = null; pinch = null; }
+    });
+    stage.addEventListener('pointermove', function (e) {
+      if (!ptrs[e.pointerId]) return;
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      if (pCount() >= 2) {
+        var ids = Object.keys(ptrs);
+        var a = ptrs[ids[0]], b = ptrs[ids[1]];
+        var d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        if (!pinch) pinch = { d: d, s: s };
+        zoomAt(pinch.s * d / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      } else if (drag) {
+        var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+        drag.moved += Math.abs(dx) + Math.abs(dy);
+        tx += dx; ty += dy;
+        drag.x = e.clientX; drag.y = e.clientY;
+        apply();
+      }
+    });
+    function endPtr(e) {
+      if (ptrs[e.pointerId] && drag && drag.moved < 6 && e.pointerType !== 'mouse') {
+        var now = Date.now();
+        if (now - lastTap < 320 && Math.abs(e.clientX - lastX) < 30 && Math.abs(e.clientY - lastY) < 30) {
+          lastTap = 0;
+          tapZoomedAt = now;
+          zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
+        } else { lastTap = now; lastX = e.clientX; lastY = e.clientY; }
+      }
+      delete ptrs[e.pointerId];
+      if (pCount() < 2) pinch = null;
+      if (pCount() === 0) drag = null;
     }
-  });
-  function endPtr(e) {
-    if (ptrs[e.pointerId] && drag && drag.moved < 6 && e.pointerType !== 'mouse') {
-      var now = Date.now();
-      if (now - lastTap < 320 && Math.abs(e.clientX - lastX) < 30 && Math.abs(e.clientY - lastY) < 30) {
-        lastTap = 0;
-        tapZoomedAt = now;
-        zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
-      } else { lastTap = now; lastX = e.clientX; lastY = e.clientY; }
-    }
-    delete ptrs[e.pointerId];
-    if (pCount() < 2) pinch = null;
-    if (pCount() === 0) drag = null;
+    stage.addEventListener('pointerup', endPtr);
+    stage.addEventListener('pointercancel', endPtr);
+    stage.addEventListener('dblclick', function (e) {
+      e.preventDefault();
+      // 触屏双轻点已由 pointerup 分支处理 — 跳过其后合成的 dblclick（否则会立刻复位掉刚触发的 2.5×）
+      if (Date.now() - tapZoomedAt < 500) return;
+      zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
+    });
+
+    // 缩略图 → 可点击放大（角标提示 + 键盘可达；v1 角标残留则复用 — 幂等）
+    imgs.forEach(function (img) {
+      img.classList.add('rpt-zoomable');
+      var fig = img.closest('figure');
+      if (fig) {
+        fig.classList.add('rpt-zoomable');
+        if (!fig.querySelector('.rpt-zoom-badge')) {
+          var badge = document.createElement('span');
+          badge.className = 'rpt-zoom-badge';
+          badge.innerHTML = ICON + '<span>放大</span>';
+          fig.insertBefore(badge, fig.firstChild);
+        }
+      }
+      img.title = '点击放大查看';
+      img.setAttribute('role', 'button');
+      img.setAttribute('tabindex', '0');
+      img.setAttribute('aria-label', '放大查看' + (img.alt ? '：' + img.alt : ''));
+      img.addEventListener('click', function () { open(img); });
+      img.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(img); }
+      });
+    });
   }
-  stage.addEventListener('pointerup', endPtr);
-  stage.addEventListener('pointercancel', endPtr);
-  stage.addEventListener('dblclick', function (e) {
-    e.preventDefault();
-    // 触屏双轻点已由 pointerup 分支处理 — 跳过其后合成的 dblclick（否则会立刻复位掉刚触发的 2.5×）
-    if (Date.now() - tapZoomedAt < 500) return;
-    zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
-  });
 
-  // 缩略图 → 可点击放大（角标提示 + 键盘可达）
-  imgs.forEach(function (img) {
-    img.classList.add('rpt-zoomable');
-    var fig = img.closest('figure');
-    if (fig) {
-      fig.classList.add('rpt-zoomable');
-      var badge = document.createElement('span');
-      badge.className = 'rpt-zoom-badge';
-      badge.innerHTML = ICON + '<span>放大</span>';
-      fig.insertBefore(badge, fig.firstChild);
+  // ── AlphaFold 交互 3D 视图一键全屏放大（新报告模板 + 旧报告注入 — 同一挂载路径）──
+  //  内嵌画布仅 320×252，看不清口袋/螺旋细节 → 「放大」按钮把 canvas 节点迁入全屏
+  //  遮罩（WebGL 上下文保留；3Dmol ResizeObserver 监视容器自动按新尺寸重渲染，
+  //  退出时归位自动缩回）。嵌入形态遮罩同样走 __rptEmb 可视切片定位。
+  function afFullscreen(stageEl) {
+    var cv = stageEl.querySelector('.af-canvas');
+    if (!cv) return;
+    var prevFocus = document.activeElement;
+    var wrap = document.createElement('div');
+    wrap.className = 'af-fullwrap';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.setAttribute('aria-label', 'AlphaFold 预测结构放大视图');
+    wrap.innerHTML =
+      '<div class="af-fullbar">' +
+        '<div class="af-fullttl"><b>AlphaFold 预测结构</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合</span></div>' +
+        LEGEND_AF +
+        '<button type="button" class="af-fullclose" aria-label="退出放大视图">×</button>' +
+      '</div>';
+    var slot = document.createElement('div');
+    slot.className = 'af-fullslot';
+    wrap.appendChild(slot);
+    // 遮罩全域阻断滚动链（wheel/touch 预防默认 — 嵌入形态下防事件链至父页滚动）
+    wrap.addEventListener('wheel', function (e) { e.preventDefault(); }, { passive: false });
+    wrap.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+    slot.appendChild(cv); // canvas 迁移（3Dmol ResizeObserver → 全屏尺寸重渲染）
+    stageEl.classList.add('af-expanded');
+    document.body.appendChild(wrap);
+    EMB.pin(wrap);
+    var unwatchAf = EMB.watch(function () { EMB.pin(wrap); });
+    function closeAf() {
+      if (wrap._closed) return;
+      wrap._closed = true;
+      unwatchAf();
+      stageEl.appendChild(cv); // 归位（viewer 随容器尺寸自动缩回）
+      stageEl.classList.remove('af-expanded');
+      wrap.remove();
+      document.removeEventListener('keydown', onKey, true);
+      var btn = stageEl.querySelector('.af-expand');
+      if (btn && btn.focus) { try { btn.focus(); } catch (e) {} }
+      else if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) {} }
     }
-    img.title = '点击放大查看';
-    img.setAttribute('role', 'button');
-    img.setAttribute('tabindex', '0');
-    img.setAttribute('aria-label', '放大查看' + (img.alt ? '：' + img.alt : ''));
-    img.addEventListener('click', function () { open(img); });
-    img.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(img); }
-    });
+    function onKey(e) { if (e.key === 'Escape') closeAf(); }
+    wrap.querySelector('.af-fullclose').addEventListener('click', closeAf);
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) closeAf(); });
+    document.addEventListener('keydown', onKey, true);
+    try {
+      if (window.__afViewer && window.__afViewer.resize) {
+        requestAnimationFrame(function () { try { window.__afViewer.resize(); } catch (e) {} });
+      }
+    } catch (e) { /* ResizeObserver 兜底已足够 */ }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.af-stage'), function (stageEl) {
+    if (stageEl.querySelector('.af-expand')) return; // 幂等（新报告模板已挂载则跳过）
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'af-expand';
+    btn.title = '放大交互 3D 视图';
+    btn.setAttribute('aria-label', '放大交互 3D 视图');
+    btn.innerHTML = ICON_EXPAND + '<span>放大</span>';
+    btn.addEventListener('click', function (e) { e.stopPropagation(); afFullscreen(stageEl); });
+    stageEl.appendChild(btn);
   });
 })();
 </script>`
 
-/** 旧报告兼容：无灯箱标记的历史 report.html，注入灯箱 CSS+JS（幂等，已有则原样返回） */
+/** 旧报告兼容：无 v2 灯箱标记的历史 report.html，注入灯箱 CSS+JS（含嵌入自适应 + AF 3D 放大；
+ *  v2.7.5/2.7.6 已带 v1 灯箱的报告同样注入 — v2 脚本开头自动清理 v1 根与旧句柄；幂等，已有则原样返回） */
 export function applyZoomUpgrade(html: string): string {
   if (html.includes(ZOOM_PAGE_MARKER)) return html
   let out = html
@@ -1423,6 +1606,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
               viewer.render();
               stage.className = 'af-stage af-live';
               window.__afViewerReady = true;
+              window.__afViewer = viewer; // v2.7.7：全屏放大后显式 resize（ResizeObserver 之外的保险）
               try {
                 var uri = viewer.pngURI ? viewer.pngURI() : null;
                 if (uri && poster) poster.src = uri;
@@ -1438,7 +1622,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
           }
         })();
         </script>
-        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
       </figure>`
     : (input.alphafoldFigure ? `
       <figure class="af-fig">
