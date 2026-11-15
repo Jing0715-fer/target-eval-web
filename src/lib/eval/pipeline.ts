@@ -41,7 +41,7 @@ import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
-import { alphafoldStructureFor, alphafoldFigureCached, fetchAlphafoldPrediction } from './alphafold'
+import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
 import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
 /** v2.4 无状态（函数计算）部署：评估表数据由前端内联携带（服务器磁盘不跨请求保留） */
@@ -1223,13 +1223,15 @@ class SegmentRunner {
     if (st.uniprotInfo && !st.afSummary) {
       try {
         this.report('report', '获取 AlphaFold 预测结构…', 0.06)
-        // v2.7.2：af2 相位只取元数据（apiCache 秒级命中，稳落段预算）；PDB 模型
+        // v2.7.2：af2 相位只取元数据（秒级命中，稳落段预算）；PDB 模型
         // 文本挪到 render 相位按需下载（磁盘缓存 + 12s 上限 + 预算闸门）。旧实现
         // 在此调 alphafoldFigureFor 做无头 Chromium 截图 —— 冷启动 15-40s 且不可
         // 中断，远超 14s 段预算与网关 ~24s 转发窗；多实例负载均衡下每次重试都落在
         // 冷实例重付启动成本，部署节点上图片永远渲染不完（报告缺图的根因）。报告
         // 内嵌 3Dmol 交互式 3D 视图后，服务端不再依赖任何浏览器。
-        const meta = await fetchAlphafoldPrediction(st.uniprotInfo.uniprotId)
+        // v2.7.4：元数据改走 alphafoldMetaFor 磁盘优先（sidecar 7 天新鲜窗口
+        // 零网络；断网回退本地）— 部署节点断网时已评估过的靶点仍能出完整区块。
+        const meta = await alphafoldMetaFor(st.uniprotInfo.uniprotId)
         if (meta) {
           const figCached = await alphafoldFigureCached(st.uniprotInfo.uniprotId)
           if (figCached) {

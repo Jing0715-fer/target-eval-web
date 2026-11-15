@@ -3,7 +3,10 @@
  *  - fetchAlphafoldPrediction: AFDB REST（/api/prediction/{uniprot}）→ 模型地址与 pLDDT 指标
  *  - alphafoldStructureFor: 下载模型 PDB → 磁盘缓存（db/cache/alphafold/pdb/）——
  *    v2.7.2 报告内嵌 3Dmol 交互视图的数据源（拖拽旋转/滚轮缩放/pLDDT 着色），
- *    下载上限 12s，稳落 14s 段预算与网关 ~24s 转发窗内
+ *    下载上限 12s，稳落 14s 段预算与网关 ~24s 转发窗内；v2.7.4 起磁盘优先
+ *  - alphafoldMetaFor（v2.7.4）：元数据「磁盘优先」——sidecar {id}.meta.json
+ *    7 天新鲜窗口内零网络直读；过期联网核对模型版本；网络失败回退本地。
+ *    部署节点断网时已评估过的靶点仍能出完整 AlphaFold 区块（元数据+PDB+3D 视图）
  *  - alphafoldFigure: （旧路径，v2.7.2 起仅当 legacy PNG 缓存已存在时复用）
  *    3Dmol.js + Playwright 无头截图 → sharp 后处理。生产管线不再调用其冷渲染：
  *    无头 Chromium 冷启动 15-40s 且不可中断，远超段预算——多实例负载均衡下
@@ -379,41 +382,137 @@ export interface AlphafoldStructure {
   embeddable: boolean
 }
 
-/**
- * AFDB 模型 PDB 文本（v2.7.2 报告内嵌 3Dmol 交互视图的数据源）：
- * db/cache/alphafold/pdb/{id}.pdb 磁盘缓存（TTL 无限）；下载上限 12s ——
- * 稳落 14s 段预算与网关 ~24s 转发窗内，与旧 Playwright 截图路径（冷启动
- * 15-40s 不可中断）形成对照：这是部署节点图片生成失败根因的修复侧。
- */
-export async function alphafoldStructureFor(uniprotId: string): Promise<AlphafoldStructure | null> {
+// ─── v2.7.4：磁盘优先元数据/结构（离线可用）──────────────────────────────
+
+/** 元数据 sidecar 新鲜度窗口：7 天内零网络直读；过期联网核对模型版本，失败回退本地 */
+const AF_META_TTL_MS = 7 * 24 * 3600 * 1000
+
+/** 磁盘缓存目录（db/cache/alphafold/pdb/：元数据 {id}.meta.json + 模型 {id}.pdb） */
+function afDiskDir(): string {
+  return path.join(process.cwd(), 'db', 'cache', 'alphafold', 'pdb')
+}
+
+/** ID 白名单（UniProt accession 字符集 — 防路径注入；异常 ID 直接视为无预测） */
+function safeAfId(uniprotId: string): string | null {
   const id = uniprotId.trim().toUpperCase()
-  const meta = await fetchAlphafoldPrediction(id)
-  if (!meta) return null
-  const cacheDir = path.join(process.cwd(), 'db', 'cache', 'alphafold', 'pdb')
-  const file = path.join(cacheDir, `${id}.pdb`)
-  let pdbText: string | null = null
+  return /^[A-Z0-9_-]{1,12}$/.test(id) ? id : null
+}
+
+interface AfDiskMeta {
+  savedAt: number
+  meta: AlphafoldPrediction
+}
+
+async function readAfMetaFile(id: string): Promise<AfDiskMeta | null> {
   try {
-    const cached = await fs.readFile(file, 'utf-8')
-    if (cached.includes('ATOM')) pdbText = cached
+    const raw = await fs.readFile(path.join(afDiskDir(), `${id}.meta.json`), 'utf-8')
+    const parsed = JSON.parse(raw) as AfDiskMeta
+    if (parsed?.meta?.pdbUrl && typeof parsed.savedAt === 'number') return parsed
+  } catch { /* 未缓存/损坏 */ }
+  return null
+}
+
+async function writeAfMetaFile(id: string, meta: AlphafoldPrediction): Promise<void> {
+  try {
+    await fs.mkdir(afDiskDir(), { recursive: true })
+    const payload: AfDiskMeta = { savedAt: Date.now(), meta }
+    await fs.writeFile(path.join(afDiskDir(), `${id}.meta.json`), JSON.stringify(payload), 'utf-8')
+  } catch { /* 缓存失败不影响主流程 */ }
+}
+
+async function readAfPdbFile(id: string): Promise<string | null> {
+  try {
+    const cached = await fs.readFile(path.join(afDiskDir(), `${id}.pdb`), 'utf-8')
+    return cached.includes('ATOM') ? cached : null
   } catch { /* 未缓存 */ }
-  if (pdbText == null) {
-    pdbText = await downloadModelPdb(meta.pdbUrl, 12_000)
-    if (pdbText == null) console.error('[af] model pdb download failed:', meta.pdbUrl)
-    if (pdbText != null) {
-      try {
-        await fs.mkdir(cacheDir, { recursive: true })
-        await fs.writeFile(file, pdbText, 'utf-8')
-      } catch { /* 缓存失败不影响返回 */ }
-    }
-  }
-  if (pdbText == null) return null
+  return null
+}
+
+async function writeAfPdbFile(id: string, pdbText: string): Promise<void> {
+  try {
+    await fs.mkdir(afDiskDir(), { recursive: true })
+    await fs.writeFile(path.join(afDiskDir(), `${id}.pdb`), pdbText, 'utf-8')
+  } catch { /* 缓存失败不影响主流程 */ }
+}
+
+function makeAfStructure(id: string, pdbText: string, meta: AlphafoldPrediction): AlphafoldStructure {
   return { uniprotId: id, pdbText, meta, embeddable: pdbText.length <= AF_EMBED_MAX_BYTES }
 }
 
-/** 已缓存的 legacy PNG 头图（只读复用 — 不再冷渲染；v2.7.2 起生产管线仅此路径取 PNG） */
-export async function alphafoldFigureCached(uniprotId: string): Promise<AlphafoldFigure | null> {
-  const id = uniprotId.trim().toUpperCase()
+/**
+ * v2.7.4：AF 元数据「磁盘优先」——sidecar 7 天新鲜窗口内零网络直读；
+ * 过期联网核对（模型版本升级换 pdbUrl）；网络失败回退本地缓存（离线可用）。
+ * af2 相位与 legacy PNG 复用均改走本入口，部署节点断网不再丢 AlphaFold 区块。
+ */
+export async function alphafoldMetaFor(uniprotId: string): Promise<AlphafoldPrediction | null> {
+  const id = safeAfId(uniprotId)
+  if (!id) return null
+  const disk = await readAfMetaFile(id)
+  if (disk && Date.now() - disk.savedAt < AF_META_TTL_MS) return disk.meta
   const meta = await fetchAlphafoldPrediction(id)
+  if (meta) {
+    await writeAfMetaFile(id, meta)
+    return meta
+  }
+  if (disk) {
+    console.warn('[af] metadata network unavailable — serving local cache:', id)
+    return disk.meta
+  }
+  return null
+}
+
+/**
+ * AFDB 模型 PDB 文本（v2.7.2 报告内嵌 3Dmol 交互视图的数据源；v2.7.4 磁盘优先）。
+ * 磁盘缓存 db/cache/alphafold/pdb/{id}.pdb + {id}.meta.json sidecar：
+ *  - 元数据新鲜（<7 天）且模型已缓存 → 零网络直读（部署节点离线可用）；
+ *  - 过期 → 联网核对（模型版本升级换 pdbUrl 时重下载）；
+ *  - 网络失败 → 回退本地缓存（降级不丢区块）；下载上限 12s ——
+ *   稳落 14s 段预算与网关 ~24s 转发窗内，与旧 Playwright 截图路径（冷启动
+ *   15-40s 不可中断）形成对照：这是部署节点图片生成失败根因的修复侧。
+ */
+export async function alphafoldStructureFor(uniprotId: string): Promise<AlphafoldStructure | null> {
+  const id = safeAfId(uniprotId)
+  if (!id) return null
+  const diskMeta = await readAfMetaFile(id)
+  const diskPdb = await readAfPdbFile(id)
+  const fresh = diskMeta != null && Date.now() - diskMeta.savedAt < AF_META_TTL_MS
+
+  // 快路径：元数据新鲜 + 模型已缓存 → 零网络（离线可用核心路径）
+  if (fresh && diskMeta) {
+    if (diskPdb) return makeAfStructure(id, diskPdb, diskMeta.meta)
+    const pdbText = await downloadModelPdb(diskMeta.meta.pdbUrl, 12_000)
+    if (pdbText == null) {
+      console.error('[af] model pdb download failed:', diskMeta.meta.pdbUrl)
+      return null
+    }
+    await writeAfPdbFile(id, pdbText)
+    return makeAfStructure(id, pdbText, diskMeta.meta)
+  }
+
+  // 慢路径：sidecar 缺失/过期 → 联网刷新（alphafoldMetaFor 内含断网回退）
+  const meta = await alphafoldMetaFor(id)
+  if (meta) {
+    const unchanged = diskMeta != null && diskMeta.meta.pdbUrl === meta.pdbUrl
+    let pdbText = unchanged ? diskPdb : null
+    if (pdbText == null) {
+      pdbText = await downloadModelPdb(meta.pdbUrl, 12_000)
+      if (pdbText == null) console.error('[af] model pdb download failed:', meta.pdbUrl)
+      if (pdbText != null) await writeAfPdbFile(id, pdbText)
+    }
+    if (pdbText != null) return makeAfStructure(id, pdbText, meta)
+    // 新版下载失败但本地旧模型在 → 旧 meta+旧 pdb 成对回退（版本口径一致）
+    if (diskPdb && diskMeta) return makeAfStructure(id, diskPdb, diskMeta.meta)
+    return null
+  }
+  return null
+}
+
+/** 已缓存的 legacy PNG 头图（只读复用 — 不再冷渲染；v2.7.2 起生产管线仅此路径取 PNG。
+ *  v2.7.4 起元数据改走 alphafoldMetaFor 磁盘优先 — 断网时 poster 兜底同样可用） */
+export async function alphafoldFigureCached(uniprotId: string): Promise<AlphafoldFigure | null> {
+  const id = safeAfId(uniprotId)
+  if (!id) return null
+  const meta = await alphafoldMetaFor(id)
   if (!meta) return null
   try {
     const file = path.join(process.cwd(), 'db', 'cache', 'alphafold', 'v2', `${id}.png`)
