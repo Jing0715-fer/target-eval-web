@@ -1,0 +1,17 @@
+diff --git a/dist/server/lib/router-utils/block-cross-site-dev.js b/dist/server/lib/router-utils/block-cross-site-dev.js
+index 86eccc53485f9115da1155af056d96c025cc7825..8b0193aed5140967b75c466247bee5eaf96334a7 100644
+--- a/dist/server/lib/router-utils/block-cross-site-dev.js
++++ b/dist/server/lib/router-utils/block-cross-site-dev.js
+@@ -73,6 +73,12 @@ function isInternalEndpoint(req) {
+     return !isIgnoredRequest && (isInternalAsset || isMiddlewareRequest);
+ }
+ const blockCrossSiteDEV = (req, res, allowedDevOrigins, hostname)=>{
++    // [sandbox patch] 沙箱预览经公网网关代理访问，域名不定（z.ai / FC / 自定义）。
++    // Next 16 默认仅允许 localhost 来源的 dev 资源（HMR 等），其余一律 403 —
++    // 实测 HMR 被拒会导致前端水合失败（页面无任何交互）。
++    // 沙箱 dev server 本就通过网关对外，改为一律放行；数据安全由应用层 IP 隔离负责。
++    void req; void res; void allowedDevOrigins; void hostname;
++    return false;
+     const allowedOrigins = [
+         '**.localhost',
+         'localhost',

@@ -1,0 +1,2225 @@
+/**
+ * 独立 HTML 评估报告渲染（期刊版式）：
+ *  - 内联 CSS，无外部依赖，单文件可离线打开/打印；衬线标题 + 等宽数据标签的学术排版
+ *  - LLM 章节用轻量 Markdown 子集渲染器（无 JSDOM/react-markdown，零额外内存）
+ *  - 确定性数据区块（评分/结构表/文献/实验图）模板直出，图片按预算 base64 内嵌
+ *  - PDB ↔ 文献双向关联（PMID 映射）；长列表 details 折叠，打印时自动展开
+ *  - v2.7.5：配体结构式/实验图/AlphaFold 静态图点击放大灯箱（滚轮/双指缩放 + 拖拽平移，离线内联无依赖）
+ *  - v2.7.6：①A4 打印分页（@page 边距 + 分页避让 + 数据表打印自动布局防右截断）；
+ *    ②配体 2D 结构式 SVG 矢量版（RCSB CCD 矢量描述优先，灯箱无限缩放不糊，PNG 回落）；
+ *    ③InChIKey/SMILES 一键复制（页级 JS 自挂按钮，clipboard API + execCommand 降级）；
+ *    ④覆盖率区段可视化（SVG 轨道：已覆盖绿/未覆盖琥珀 + 残基刻度，服务端渲染零 JS）；
+ *    ⑥移动端表格横滚边缘渐隐指示（可滚动亮起、滚到头熄灭）。
+ *  - v2.7.7：⑦AlphaFold 交互 3D 视图一键全屏放大（canvas 迁移遮罩 + pLDDT 图例 + Esc 退出，
+ *    新报告模板与旧报告注入同路径）；⑧灯箱嵌入自适应 —— 应用内嵌自动高度 iframe 中
+ *    position:fixed 相对 iframe 全文档高（中部图片点击后灯箱跑出屏幕、需回滚查找）→
+ *    __rptEmb 可视切片定位（父页滚动实时重跟）+ 图片严格限高；旧版 v1 灯箱共存自动清理。
+ *  - v2.7.8：⑨AF 卡「双放大按钮」根除（af-live 时图片角标让位 3D 全屏，MutationObserver
+ *    跟随 stage 类名）；⑩嵌入遮罩避让应用吸顶栏（切片 top 下移至 header 下沿 — 关闭钮
+ *    不再被顶栏遮挡）；⑪父页滚动锁（灯箱/AF 全屏开启期间锁父页 body overflow，
+ *    滚轮落在 iframe 外不再派生滚动）。marker 升 rpt-zoom-v3，v1/v2 baked 旧报告
+ *    serve 注入 v3 时自动清理旧根与旧句柄。
+ * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
+ */
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
+import type { BlastHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats } from './types'
+import { describeBlastStatus } from './types'
+import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb } from './types'
+import type { ReportContext } from './report'
+import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
+import { ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+
+// ─── v2.7.3 响应式版心（单源规则）────────────────────────────────────────────
+//  版心随视口分级放宽（920 → 1088 → 1224 → 1360 → 1480 → 1600），宽屏两侧不再大片留白；
+//  字号随版心微升保持行宽可读；数据表（min-width 856px）在 ≥1000px 版心内免横向滚动；
+//  窄屏收紧留白 + 网格列最小值不超过容器宽（防小屏撑爆横向滚动）。
+//  单源使用：① 新报告内嵌于模板 <style> 尾部（后于全部基础规则，层级安全）；
+//           ② 旧报告（落盘于 v2.7.3 之前的 report.html）由报告路由经
+//              applyResponsiveOverride 注入到 </head> 前 —— 历史作业同样自适配。
+
+const RESPONSIVE_PAGE_MARKER = 'rpt-rw-v3'
+
+export const RESPONSIVE_PAGE_CSS = `  /* ${RESPONSIVE_PAGE_MARKER} 响应式版心（v2.7.3）：窄屏收紧留白 / 宽屏分级放宽，字号随版心微升 */
+  @media (max-width:1024px){ .page{padding:40px 30px 56px} }
+  @media (max-width:640px){
+    .page{padding:26px 16px 38px}
+    h1.rpt-title{font-size:22px}
+    .glance-kicker,.glance-foot{padding-left:14px;padding-right:14px}
+    .backtop{right:14px;bottom:16px;width:38px;height:38px}
+  }
+  @media (min-width:1280px){ .page{max-width:1088px} }
+  @media (min-width:1440px){ .page{max-width:1224px} body{font-size:15.5px} }
+  @media (min-width:1600px){
+    .page{max-width:1360px} body{font-size:16px}
+    h1.rpt-title{font-size:30px} .sec>h2{font-size:20px}
+    .af-fig{flex-basis:360px} .af-fig>img{width:360px} .af-stage,.af-poster{height:280px}
+  }
+  @media (min-width:1920px){ .page{max-width:1480px} body{font-size:17px} }
+  @media (min-width:2200px){ .page{max-width:1600px} body{font-size:17.5px} }
+  /* 窄容器防溢出：网格列最小值不超过容器宽（小屏手机） */
+  .lig-grid { grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr)); }
+  .fig-grid { grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); }
+  .oligo-ev-line { flex-wrap:wrap; }
+  .oligo-ev-line .oligo-ev-text { min-width:120px; }
+  @media print { .page{padding:0;max-width:none;box-shadow:none} }
+`
+
+/** 旧报告兼容：无 v2.7.3 响应式版心标记的历史 report.html，注入覆盖 CSS（幂等，已有则原样返回） */
+export function applyResponsiveOverride(html: string): string {
+  if (html.includes(RESPONSIVE_PAGE_MARKER)) return html
+  const i = html.indexOf('</head>')
+  if (i < 0) return html
+  return `${html.slice(0, i)}<style id="rpt-rw">${RESPONSIVE_PAGE_CSS}</style>\n${html.slice(i)}`
+}
+
+// ─── v2.7.5/v2.7.8 图片点击放大灯箱 + AlphaFold 3D 视图放大（单源规则）────────
+//  配体 2D 结构式 / 客户实验图 / AlphaFold 静态图（af-poster 与 legacy PNG 分支）
+//  点击进入全屏灯箱：滚轮（锚定光标）或双指捏合缩放、拖拽平移、双击/双轻点切换
+//  适配 ↔ 2.5×、Esc/×/背景点击关闭；右下控制条（− 百分比 ＋ 复位）便于触屏；
+//  打印自动隐藏；纯内联 JS 无外部依赖 — 离线单文件报告同样可用。
+//  v2.7.7：⑦ AlphaFold 交互 3D 视图「放大」按钮 — canvas 节点迁入全屏遮罩
+//  （WebGL 上下文保留，3Dmol ResizeObserver 自动按新尺寸重渲染），pLDDT 图例随行；
+//  ⑧ 嵌入自适应定位 —— 自动高度 iframe（应用内嵌报告预览）中 fixed 相对的是
+//  iframe 全文档高度而非屏幕可视区，改由 __rptEmb 探测并以「可视切片」绝对定位
+//  （父页滚动 rAF 重跟、滚轮/触摸阻断滚动链），iframe 内部可滚或独立打开仍为 fixed。
+//  v2.7.8：⑨ AF 卡「双放大按钮」根除 — af-live 时 poster 隐藏、3D 全屏是唯一放大
+//  入口，MutationObserver 同步 figure.af-zoom-off 隐藏图片角标（af-fail/静态图恢复，
+//  此时图片灯箱是唯一入口）；放大期间 af-expand 也让位幽灵提示。
+//  ⑩ 嵌入遮罩避让应用吸顶栏 — 可视切片 top 由「屏幕顶」下移至「父页吸顶 header 下沿」
+//  （同源可测：sticky/fixed header 高度），根除关闭按钮被应用顶栏遮挡不可见。
+//  ⑪ 父页滚动锁 — 灯箱/AF 全屏开启期间锁父页 body overflow（滚动条宽度补偿防横跳，
+//  仅嵌入形态；Dialog 形态宿主 Radix 已锁、独立打开无父页），根除「滚轮落在 iframe 外
+//  （应用顶栏等）父页仍滚动」。
+//  单源使用：① 新报告内嵌（模板 <style> 尾部 + </body> 前，report-merged 同）；
+//           ② 旧报告（含 v2.7.5–2.7.7 落盘 report.html — v1/v2 灯箱）由报告路由经
+//              applyZoomUpgrade 注入 v3（marker 幂等 + v1/v2 根自动清理）—— 历史作业同样可用。
+
+const ZOOM_PAGE_MARKER = 'rpt-zoom-v3'
+
+export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配体结构式 / 实验图 / AlphaFold 静态图） + AF 3D 视图放大 */
+  img.rpt-zoomable { cursor:zoom-in; }
+  figure.rpt-zoomable { position:relative; }
+  .rpt-zoom-badge { position:absolute; top:6px; right:6px; z-index:6; display:inline-flex; align-items:center; gap:4px; padding:2.5px 6px; border-radius:4px; background:rgba(255,255,255,.93); border:1px solid rgba(28,25,23,.22); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; box-shadow:0 1px 3px rgba(28,25,23,.14); opacity:0; transition:opacity .18s; pointer-events:none; }
+  figure.rpt-zoomable:hover .rpt-zoom-badge { opacity:1; }
+  @media (hover:none) { .rpt-zoom-badge { opacity:.92; } }
+  /* 嵌入自适应（v2.7.7）：自动高度 iframe 内 fixed 相对全文档高 — 遮罩实际几何由 JS __rptEmb.pin 按可视切片覆盖；此处 fixed 为独立打开/内部滚动 iframe 的基准 */
+  .rpt-zoom { position:fixed; inset:0; z-index:80; font-family:var(--mono,ui-monospace,Menlo,monospace); }
+  .rpt-zoom[hidden] { display:none; }
+  .rpt-zoom-bg { position:absolute; inset:0; background:rgba(23,21,19,.85); cursor:zoom-out; }
+  .rpt-zoom-stage { position:absolute; inset:0 0 56px 0; display:flex; align-items:center; justify-content:center; overflow:hidden; touch-action:none; }
+  .rpt-zoom-stage img { max-width:min(92vw,1500px); max-height:100%; background:#fff; box-shadow:0 10px 44px rgba(0,0,0,.5); transform-origin:50% 50%; will-change:transform; user-select:none; -webkit-user-drag:none; }
+  .rpt-zoom-cap { position:absolute; left:0; right:0; bottom:0; height:56px; display:flex; align-items:center; gap:10px; padding:0 64px 0 18px; background:rgba(23,21,19,.93); color:#f5f4f2; font-size:10px; letter-spacing:.4px; }
+  .rpt-zoom-cap b { color:#fff; font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rpt-zoom-cap .rpt-zoom-hint { color:#a8a29e; margin-left:auto; white-space:nowrap; }
+  .rpt-zoom-close { position:absolute; top:14px; right:14px; width:38px; height:38px; border-radius:50%; border:1px solid rgba(255,255,255,.28); background:rgba(23,21,19,.6); color:#fff; font-size:20px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .rpt-zoom-close:hover { background:rgba(23,21,19,.88); }
+  .rpt-zoom-ctl { position:absolute; right:14px; bottom:68px; display:flex; align-items:center; gap:5px; }
+  .rpt-zoom-ctl button { width:34px; height:34px; border-radius:8px; border:1px solid rgba(255,255,255,.22); background:rgba(23,21,19,.78); color:#fff; font-size:13px; cursor:pointer; }
+  .rpt-zoom-ctl button:hover { background:rgba(23,21,19,.88); }
+  .rpt-zoom-ctl .rpt-zoom-pct { min-width:54px; height:34px; display:flex; align-items:center; justify-content:center; border-radius:8px; border:1px solid rgba(255,255,255,.22); background:rgba(23,21,19,.78); font-size:11px; color:#f5f4f2; }
+  @media (max-width:640px){ .rpt-zoom-cap{height:50px;padding-right:56px} .rpt-zoom-stage{inset:0 0 50px 0} .rpt-zoom-cap .rpt-zoom-hint{display:none} .rpt-zoom-ctl{bottom:62px;right:10px} .rpt-zoom-close{top:10px;right:10px} }
+  /* v2.7.8 ⑨：AF 交互视图与图片角标互斥 — af-live/af-expanded 时图片角标隐藏（防双放大按钮） */
+  figure.rpt-zoomable.af-zoom-off .rpt-zoom-badge { display:none !important; }
+  /* v2.7.8 ⑨：放大期间内嵌槽位按钮让位幽灵提示（点击无效果，隐藏免误导） */
+  .af-stage.af-expanded .af-expand { display:none; }
+
+  /* ── AlphaFold 交互 3D 视图放大（v2.7.7）：小画布看不清细节 → 一键全屏交互 ── */
+  .af-expand { position:absolute; top:8px; right:8px; z-index:5; display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); opacity:0; transition:opacity .18s; }
+  .af-expand:hover { background:#fff; color:#1c1917; }
+  .af-stage:hover .af-expand, .af-expand:focus-visible { opacity:1; }
+  @media (hover:none) { .af-expand { opacity:.92; } }
+  .af-stage:not(.af-live) .af-expand { display:none; }
+  /* 放大期间内嵌槽位：静态海报占位 + 幽灵提示（canvas 已迁入全屏遮罩） */
+  .af-stage.af-expanded .af-poster { display:block; }
+  .af-stage.af-expanded::after { content:'交互 3D 视图已放大 · 按 Esc 恢复'; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:10px; letter-spacing:.6px; color:#a8a29e; background:rgba(253,253,252,.72); }
+  .af-fullwrap { position:fixed; inset:0; z-index:70; display:flex; flex-direction:column; background:rgba(23,21,19,.87); font-family:var(--mono,ui-monospace,Menlo,monospace); }
+  .af-fullwrap[hidden] { display:none; }
+  .af-fullbar { display:flex; align-items:center; flex-wrap:wrap; gap:6px 14px; padding:10px 58px 10px 18px; background:rgba(23,21,19,.94); color:#f5f4f2; }
+  .af-fullttl b { font-size:12px; font-weight:600; color:#fff; }
+  .af-fullttl span { margin-left:10px; font-size:10px; color:#a8a29e; letter-spacing:.4px; }
+  .af-full-legend { display:flex; flex-wrap:wrap; gap:6px 12px; margin-left:auto; font-size:9px; color:#a8a29e; }
+  .af-full-legend span { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+  .af-full-legend i { display:inline-block; width:9px; height:9px; border-radius:2px; border:1px solid rgba(28,25,23,.3); }
+  .af-fullclose { position:absolute; top:10px; right:12px; width:34px; height:34px; border-radius:50%; border:1px solid rgba(255,255,255,.28); background:rgba(23,21,19,.6); color:#fff; font-size:19px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .af-fullclose:hover { background:rgba(23,21,19,.88); }
+  .af-fullslot { flex:1 1 auto; position:relative; margin:14px auto; width:min(96%,1400px); background:#fff; border-radius:10px; overflow:hidden; box-shadow:0 10px 44px rgba(0,0,0,.5); }
+  @media (max-width:640px){ .af-fullslot{margin:8px auto;width:calc(100% - 16px);border-radius:8px} .af-fullttl span{display:none} .af-full-legend{margin-left:0} }
+  @media print { .rpt-zoom-badge, .af-expand, .af-fullwrap { display:none !important; } .rpt-zoom { display:none !important; } }
+`
+
+export const LIGHTBOX_JS = `<script>
+/* ${ZOOM_PAGE_MARKER} 图片点击放大 + 嵌入自适应 + AlphaFold 3D 视图放大 */
+(function () {
+  var SEL = '.lig-struct img, .fig img, .af-fig img';
+
+  // ── 旧版灯箱（v2.7.5–2.7.7 baked v1/v2）共存清理：移除旧根 + 克隆剥离旧事件句柄 ──
+  // 旧报告 serve 注入本版时旧版已先行执行：旧根随 remove() 销毁其监听；
+  //  img 克隆不携带监听（cloneNode 不复制句柄）、旧 af-expand 带旧闭包一并移除
+  //  由本版重新挂载 — 根除新旧双开、滚动锁错乱、双放大按钮。
+  var oldRoot = document.querySelector('.rpt-zoom');
+  if (oldRoot) {
+    oldRoot.remove();
+    Array.prototype.forEach.call(document.querySelectorAll('img.rpt-zoomable'), function (im) {
+      im.replaceWith(im.cloneNode(false));
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.af-stage .af-expand'), function (b) { b.remove(); });
+  }
+
+  // ── 嵌入环境感知（v2.7.7/v2.7.8）：应用内嵌报告为「自动高度 iframe」—— iframe 高 = 报告全文高 ──
+  //  此时 position:fixed 相对的是 iframe 全文档高（非屏幕可视区）：中部图片点击后
+  //  灯箱居中于全文中点、跑出屏幕需回滚查找。改以「可视切片」文档坐标绝对定位：
+  //  屏幕与 iframe 文档的交集（父页滚动实时重跟）；iframe 内部可滚（预览 Dialog h-full）
+  //  或独立打开时 fixed 本就正确 — 维持原行为。
+  //  v2.7.8：切片 top 下移至父页吸顶栏下沿（否则关闭钮被应用顶栏遮挡），
+  //  并提供父页滚动锁（灯箱开启期间滚轮落在 iframe 外父页不派生滚动）。
+  var EMB = window.__rptEmb = (function () {
+    function frame() { try { return window.frameElement || null } catch (e) { return null } }
+    function ownerWin() { try { var f = frame(); return f ? f.ownerDocument.defaultView : null } catch (e) { return null } }
+    /** 父页吸顶 header 高度（v2.7.8 ⑩）：同源才量得到；独立打开/跨域 → 0。
+     *  仅 sticky/fixed 且位于屏幕顶时计入 — 遮罩 top 避让其下沿，关闭钮不再被顶栏遮挡。 */
+    function headerH(ow) {
+      if (!ow || ow === window) return 0;
+      try {
+        var h = ow.document.querySelector('header');
+        if (!h) return 0;
+        var cs = ow.getComputedStyle(h);
+        if (cs.position !== 'sticky' && cs.position !== 'fixed') return 0;
+        var hr = h.getBoundingClientRect();
+        return hr.top <= 1 ? Math.round(hr.height) : 0;
+      } catch (e) { return 0 }
+    }
+    /** 可视切片（frame 文档坐标 {top,height}）；null = 视口模式（独立打开 / iframe 内部可滚） */
+    function slice() {
+      var f = frame();
+      if (!f) return null;
+      try {
+        var doc = document.documentElement;
+        var contentH = Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0);
+        var r = f.getBoundingClientRect();
+        if (contentH > r.height + 8) return null; // iframe 内部可滚 → fixed 正确
+        var ow = f.ownerDocument.defaultView;
+        var pH = ow.innerHeight || (ow.document.documentElement && ow.document.documentElement.clientHeight) || 0;
+        if (!pH) return null;
+        var H = headerH(ow); // v2.7.8 ⑩：吸顶栏避让（H=0 时与旧版行为一致）
+        var top = Math.max(0, H - r.top);
+        var bot = Math.min(r.height, pH - r.top);
+        if (bot - top < 160) { top = Math.max(0, H - r.top); bot = Math.min(r.height, pH); } // 屏上交集过小 → 整窗兜底（仍避让吸顶栏）
+        return { top: top, height: bot - top };
+      } catch (e) { return null }
+    }
+    /** 全屏遮罩按当前模式定位（fixed=全视口 / slice=可视切片绝对定位）；返回模式名 */
+    function pin(el) {
+      var rc = slice();
+      if (!rc) {
+        el.style.position = 'fixed'; el.style.top = '0'; el.style.bottom = '0'; el.style.height = '';
+        el.style.left = '0'; el.style.right = '0'; el.style.width = '';
+        return 'fixed';
+      }
+      el.style.position = 'absolute'; el.style.top = rc.top + 'px'; el.style.bottom = ''; el.style.height = rc.height + 'px';
+      el.style.left = '0'; el.style.right = '0'; el.style.width = '';
+      return 'slice';
+    }
+    /** 父页滚动/窗口尺寸变化 → rAF 节流重定位（仅嵌入形态需要）；返回解绑函数 */
+    function watch(fn) {
+      var ow = null;
+      try { var f = frame(); if (f) ow = f.ownerDocument.defaultView } catch (e) {}
+      var raf = 0;
+      var cb = function () {
+        if (raf) return;
+        raf = requestAnimationFrame(function () { raf = 0; fn(); });
+      };
+      window.addEventListener('resize', cb, { passive: true });
+      if (ow && ow !== window) {
+        try { ow.addEventListener('resize', cb, { passive: true }); ow.addEventListener('scroll', cb, { passive: true }) } catch (e) {}
+      }
+      return function () {
+        window.removeEventListener('resize', cb);
+        if (ow && ow !== window) { try { ow.removeEventListener('resize', cb); ow.removeEventListener('scroll', cb) } catch (e) {} }
+      };
+    }
+    /** v2.7.8 ⑪：父页滚动锁 — 灯箱/AF 全屏开启期间，滚轮落在 iframe 外（应用吸顶栏等）
+     *  父页仍会派生滚动。仅「可视切片」形态（父页实际滚动）才锁；同源才可写；
+     *  滚动条宽度补偿防布局横跳；重复调用幂等。unlock() 在关闭时恢复。 */
+    var unlockFn = null;
+    function lockParent() {
+      if (unlockFn) return;
+      var ow = ownerWin();
+      if (!ow || ow === window) return;
+      if (!slice()) return; // 独立打开 / iframe 内部可滚（预览 Dialog）→ 父页无需本版接管
+      try {
+        var b = ow.document.body;
+        var prev = { ov: b.style.overflow, pad: b.style.paddingRight };
+        var sw = ow.innerWidth - ow.document.documentElement.clientWidth;
+        b.style.overflow = 'hidden';
+        if (sw > 0) b.style.paddingRight = sw + 'px';
+        unlockFn = function () {
+          try {
+            b.style.overflow = prev.ov;
+            b.style.paddingRight = prev.pad;
+          } catch (e) {}
+          unlockFn = null;
+        };
+      } catch (e) {}
+    }
+    function unlock() { if (unlockFn) unlockFn(); }
+    return { pin: pin, watch: watch, slice: slice, lockParent: lockParent, unlock: unlock };
+  })();
+
+  var ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>';
+  var ICON_EXPAND = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M21 3l-7 7"/><path d="M9 21H3v-6"/><path d="M3 21l7-7"/></svg>';
+  var LEGEND_AF = '<div class="af-full-legend"><span><i style="background:#0053D6"></i>pLDDT ≥ 90</span><span><i style="background:#65CBF3"></i>70–90</span><span><i style="background:#FFDB13"></i>50–70</span><span><i style="background:#FF7D45"></i>&lt; 50</span></div>';
+
+  var imgs = Array.prototype.slice.call(document.querySelectorAll(SEL));
+
+  var root = null, stage = null, bg = null, big = null, titleEl = null, pctEl = null, closeBtn = null, ctlBtns = [];
+  var savedOverflow = '', lastFocus = null, unwatch = null;
+  var s = 1, tx = 0, ty = 0;
+
+  function apply() {
+    big.style.transform = 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) scale(' + s.toFixed(3) + ')';
+    pctEl.textContent = Math.round(s * 100) + '%';
+  }
+  function clampS(v) { return Math.min(12, Math.max(0.25, v)); }
+  /** 以视口坐标 (cx,cy) 为锚点缩放到 ns — 锚点像素在缩放前后保持不动 */
+  function zoomAt(ns, cx, cy) {
+    var r = stage.getBoundingClientRect();
+    var ccx = r.left + r.width / 2, ccy = r.top + r.height / 2;
+    ns = clampS(ns);
+    tx = cx - ccx - (cx - ccx - tx) * ns / s;
+    ty = cy - ccy - (cy - ccy - ty) * ns / s;
+    s = ns;
+    apply();
+  }
+  function fit() { s = 1; tx = 0; ty = 0; apply(); }
+  function open(img) {
+    var fig = img.closest('figure');
+    var cap = fig ? fig.querySelector('figcaption') : null;
+    var t = ((cap ? cap.textContent : '') || img.alt || '').replace(/\\s+/g, ' ').trim();
+    titleEl.textContent = t.length > 110 ? t.slice(0, 109) + '…' : (t || '图片预览');
+    big.src = img.src;
+    big.alt = img.alt || '放大预览';
+    EMB.pin(root); // 嵌入形态 → 可视切片；独立打开 → 视口 fixed
+    EMB.lockParent(); // v2.7.8 ⑪：嵌入形态锁父页滚动（吸顶栏等遮罩外区域滚轮不再派生滚动）
+    fit();
+    if (unwatch) { unwatch(); unwatch = null; }
+    unwatch = EMB.watch(function () { EMB.pin(root); }); // 父页滚动实时跟停（遮罩贴屏不跑丢）
+    lastFocus = document.activeElement;
+    root.hidden = false;
+    savedOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    closeBtn.focus();
+  }
+  function close() {
+    root.hidden = true;
+    document.body.style.overflow = savedOverflow;
+    EMB.unlock(); // v2.7.8 ⑪：父页滚动解锁
+    if (unwatch) { unwatch(); unwatch = null; }
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+  }
+
+  if (imgs.length) {
+    root = document.createElement('div');
+    root.className = 'rpt-zoom';
+    root.hidden = true;
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-modal', 'true');
+    root.setAttribute('aria-label', '图片放大预览');
+    root.innerHTML =
+      '<div class="rpt-zoom-bg"></div>' +
+      '<div class="rpt-zoom-stage"><img alt=""></div>' +
+      '<button type="button" class="rpt-zoom-close" aria-label="关闭预览">×</button>' +
+      '<div class="rpt-zoom-ctl">' +
+        '<button type="button" data-z="out" aria-label="缩小">−</button>' +
+        '<span class="rpt-zoom-pct">100%</span>' +
+        '<button type="button" data-z="in" aria-label="放大">＋</button>' +
+        '<button type="button" data-z="fit" aria-label="复位" title="复位到适配大小">1:1</button>' +
+      '</div>' +
+      '<div class="rpt-zoom-cap"><b class="rpt-zoom-title"></b><span class="rpt-zoom-hint">滚轮/双指缩放 · 拖拽平移 · 双击复位 · Esc 关闭</span></div>';
+    document.body.appendChild(root);
+
+    stage = root.querySelector('.rpt-zoom-stage');
+    bg = root.querySelector('.rpt-zoom-bg');
+    big = stage.querySelector('img');
+    titleEl = root.querySelector('.rpt-zoom-title');
+    pctEl = root.querySelector('.rpt-zoom-pct');
+    closeBtn = root.querySelector('.rpt-zoom-close');
+    ctlBtns = Array.prototype.slice.call(root.querySelectorAll('.rpt-zoom-ctl button'));
+
+    bg.addEventListener('click', close);
+    closeBtn.addEventListener('click', close);
+    // 遮罩全域阻断滚动链（wheel/touch 预防默认 — 嵌入形态下防事件链至父页滚动）
+    root.addEventListener('wheel', function (e) { e.preventDefault(); }, { passive: false });
+    root.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+    ctlBtns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        var z = b.getAttribute('data-z');
+        if (z === 'fit') return fit();
+        var r = stage.getBoundingClientRect();
+        zoomAt(s * (z === 'in' ? 1.5 : 1 / 1.5), r.left + r.width / 2, r.top + r.height / 2);
+      });
+    });
+    document.addEventListener('keydown', function (e) {
+      if (root.hidden) return;
+      var r = stage.getBoundingClientRect(); // 锚点取遮罩中心（嵌入形态下 innerHeight 非屏幕高 — 不可用）
+      if (e.key === 'Escape') close();
+      else if (e.key === '+' || e.key === '=') zoomAt(s * 1.25, r.left + r.width / 2, r.top + r.height / 2);
+      else if (e.key === '-') zoomAt(s / 1.25, r.left + r.width / 2, r.top + r.height / 2);
+      else if (e.key === '0') fit();
+    });
+    stage.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      zoomAt(s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY);
+    }, { passive: false });
+
+    // 指针交互：单指/鼠标拖拽平移；双指捏合缩放；触屏双轻点 = 双击（适配 ↔ 2.5×）
+    var ptrs = {}, pinch = null, drag = null, lastTap = 0, lastX = 0, lastY = 0, tapZoomedAt = 0;
+    function pCount() { return Object.keys(ptrs).length; }
+    stage.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      if (pCount() === 1) {
+        drag = { x: e.clientX, y: e.clientY, moved: 0 };
+        try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+      } else { drag = null; pinch = null; }
+    });
+    stage.addEventListener('pointermove', function (e) {
+      if (!ptrs[e.pointerId]) return;
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      if (pCount() >= 2) {
+        var ids = Object.keys(ptrs);
+        var a = ptrs[ids[0]], b = ptrs[ids[1]];
+        var d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        if (!pinch) pinch = { d: d, s: s };
+        zoomAt(pinch.s * d / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      } else if (drag) {
+        var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+        drag.moved += Math.abs(dx) + Math.abs(dy);
+        tx += dx; ty += dy;
+        drag.x = e.clientX; drag.y = e.clientY;
+        apply();
+      }
+    });
+    function endPtr(e) {
+      if (ptrs[e.pointerId] && drag && drag.moved < 6 && e.pointerType !== 'mouse') {
+        var now = Date.now();
+        if (now - lastTap < 320 && Math.abs(e.clientX - lastX) < 30 && Math.abs(e.clientY - lastY) < 30) {
+          lastTap = 0;
+          tapZoomedAt = now;
+          zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
+        } else { lastTap = now; lastX = e.clientX; lastY = e.clientY; }
+      }
+      delete ptrs[e.pointerId];
+      if (pCount() < 2) pinch = null;
+      if (pCount() === 0) drag = null;
+    }
+    stage.addEventListener('pointerup', endPtr);
+    stage.addEventListener('pointercancel', endPtr);
+    stage.addEventListener('dblclick', function (e) {
+      e.preventDefault();
+      // 触屏双轻点已由 pointerup 分支处理 — 跳过其后合成的 dblclick（否则会立刻复位掉刚触发的 2.5×）
+      if (Date.now() - tapZoomedAt < 500) return;
+      zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
+    });
+
+    // 缩略图 → 可点击放大（角标提示 + 键盘可达；v1 角标残留则复用 — 幂等）
+    imgs.forEach(function (img) {
+      img.classList.add('rpt-zoomable');
+      var fig = img.closest('figure');
+      if (fig) {
+        fig.classList.add('rpt-zoomable');
+        if (!fig.querySelector('.rpt-zoom-badge')) {
+          var badge = document.createElement('span');
+          badge.className = 'rpt-zoom-badge';
+          badge.innerHTML = ICON + '<span>放大</span>';
+          fig.insertBefore(badge, fig.firstChild);
+        }
+      }
+      img.title = '点击放大查看';
+      img.setAttribute('role', 'button');
+      img.setAttribute('tabindex', '0');
+      img.setAttribute('aria-label', '放大查看' + (img.alt ? '：' + img.alt : ''));
+      img.addEventListener('click', function () { open(img); });
+      img.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(img); }
+      });
+    });
+
+    // ── v2.7.8 ⑨：AF 交互视图与图片角标互斥（根除「双放大按钮」）──
+    // af-live 时 poster 隐藏、3D 全屏是唯一放大入口 → figure 加 af-zoom-off 隐藏图片角标；
+    // af-fail / legacy 静态图时恢复（此时图片灯箱是唯一入口）。3Dmol 异步初始化改
+    // stage 类名 → MutationObserver 跟随同步（af-expanded 全屏期间同样让位）。
+    Array.prototype.forEach.call(document.querySelectorAll('.af-stage'), function (st) {
+      var fig = st.closest('figure');
+      if (!fig) return;
+      function syncAf() {
+        fig.classList.toggle('af-zoom-off', st.classList.contains('af-live') || st.classList.contains('af-expanded'));
+      }
+      syncAf();
+      try { new MutationObserver(syncAf).observe(st, { attributes: true, attributeFilter: ['class'] }); } catch (e) {}
+    });
+  }
+
+  // ── AlphaFold 交互 3D 视图一键全屏放大（新报告模板 + 旧报告注入 — 同一挂载路径）──
+  //  内嵌画布仅 320×252，看不清口袋/螺旋细节 → 「放大」按钮把 canvas 节点迁入全屏
+  //  遮罩（WebGL 上下文保留；3Dmol ResizeObserver 监视容器自动按新尺寸重渲染，
+  //  退出时归位自动缩回）。嵌入形态遮罩同样走 __rptEmb 可视切片定位（含 v2.7.8
+  //  吸顶栏避让 + 父页滚动锁）。注入旧报告时旧 af-expand 已随启动清理移除 → 此处全新挂载。
+  function afFullscreen(stageEl) {
+    var cv = stageEl.querySelector('.af-canvas');
+    if (!cv) return;
+    var prevFocus = document.activeElement;
+    var wrap = document.createElement('div');
+    wrap.className = 'af-fullwrap';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.setAttribute('aria-label', 'AlphaFold 预测结构放大视图');
+    wrap.innerHTML =
+      '<div class="af-fullbar">' +
+        '<div class="af-fullttl"><b>AlphaFold 预测结构</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合</span></div>' +
+        LEGEND_AF +
+        '<button type="button" class="af-fullclose" aria-label="退出放大视图">×</button>' +
+      '</div>';
+    var slot = document.createElement('div');
+    slot.className = 'af-fullslot';
+    wrap.appendChild(slot);
+    // 遮罩全域阻断滚动链（wheel/touch 预防默认 — 嵌入形态下防事件链至父页滚动）
+    wrap.addEventListener('wheel', function (e) { e.preventDefault(); }, { passive: false });
+    wrap.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+    slot.appendChild(cv); // canvas 迁移（3Dmol ResizeObserver → 全屏尺寸重渲染）
+    stageEl.classList.add('af-expanded');
+    document.body.appendChild(wrap);
+    EMB.pin(wrap); // 嵌入形态 → 可视切片（含吸顶栏避让）
+    EMB.lockParent(); // v2.7.8 ⑪：嵌入形态锁父页滚动
+    var unwatchAf = EMB.watch(function () { EMB.pin(wrap); });
+    function closeAf() {
+      if (wrap._closed) return;
+      wrap._closed = true;
+      unwatchAf();
+      EMB.unlock(); // v2.7.8 ⑪：父页滚动解锁
+      stageEl.appendChild(cv); // 归位（viewer 随容器尺寸自动缩回）
+      stageEl.classList.remove('af-expanded');
+      wrap.remove();
+      document.removeEventListener('keydown', onKey, true);
+      var btn = stageEl.querySelector('.af-expand');
+      if (btn && btn.focus) { try { btn.focus(); } catch (e) {} }
+      else if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) {} }
+    }
+    function onKey(e) { if (e.key === 'Escape') closeAf(); }
+    wrap.querySelector('.af-fullclose').addEventListener('click', closeAf);
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) closeAf(); });
+    document.addEventListener('keydown', onKey, true);
+    try {
+      if (window.__afViewer && window.__afViewer.resize) {
+        requestAnimationFrame(function () { try { window.__afViewer.resize(); } catch (e) {} });
+      }
+    } catch (e) { /* ResizeObserver 兜底已足够 */ }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.af-stage'), function (stageEl) {
+    if (stageEl.querySelector('.af-expand')) return; // 幂等（新报告模板已挂载则跳过）
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'af-expand';
+    btn.title = '放大交互 3D 视图';
+    btn.setAttribute('aria-label', '放大交互 3D 视图');
+    btn.innerHTML = ICON_EXPAND + '<span>放大</span>';
+    btn.addEventListener('click', function (e) { e.stopPropagation(); afFullscreen(stageEl); });
+    stageEl.appendChild(btn);
+  });
+})();
+</script>`
+
+/** 旧报告兼容：无 v3 灯箱标记的历史 report.html（含 v2.7.5–2.7.7 baked v1/v2），
+ *  注入灯箱 CSS+JS（含嵌入自适应 + AF 3D 放大 + v2.7.8 三项）；v3 脚本开头自动清理
+ *  v1/v2 根、旧图片句柄与旧 af-expand（幂等，已有 v3 标记则原样返回） */
+export function applyZoomUpgrade(html: string): string {
+  if (html.includes(ZOOM_PAGE_MARKER)) return html
+  let out = html
+  const h = out.indexOf('</head>')
+  if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-zoom">${LIGHTBOX_CSS}</style>\n${out.slice(h)}`
+  const b = out.lastIndexOf('</body>')
+  if (b >= 0) out = `${out.slice(0, b)}${LIGHTBOX_JS}\n${out.slice(b)}`
+  return out
+}
+
+// ─── v2.7.6 报告六项优化之 ①③⑥（单源规则）────────────────────────────────
+//  ① 打印/PDF 导出 A4 分页：@page 边距 + 分页避让（标题不孤行/卡片不跨页腰斩）
+//     + 数据表打印自动布局（打印视窗窄于 856px min-width — 固定布局会右截断，
+//     auto 布局换行自适应 + 表头跨页重复）。
+//  ③ InChIKey / SMILES 一键复制：页级 JS 扫描 .lig-ident 行自动挂「复制」按钮
+//     （clipboard API + execCommand 兼容降级，成功/失败状态反馈）。
+//  ⑥ 移动端表格横滚指示：.tbl-wrap 可滚动时边缘渐变亮起、滚到头熄灭。
+//  单源使用：① 新报告内嵌于模板 <style> 尾部 + </body> 前；② 旧报告由报告路由
+//  经 applyUxUpgrade 注入（marker 幂等）—— 历史作业同样获得 A4 打印/复制/横滚体验。
+
+const UX_PAGE_MARKER = 'rpt-ux-v1'
+const PRINT_PAGE_MARKER = 'rpt-pr-v1'
+
+export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.6）：@page 边距 + 分页避让 + 表格自动布局防右截断 */
+  @page { size: A4; margin: 12mm 10mm 14mm; }
+  @media print {
+    body { font-size: 12px; line-height: 1.78; }
+    p { orphans: 3; widows: 3; }
+    .sec { break-inside: auto; }
+    .sec > h2, .sec h3, .sec h4, .sec h5, .fig-group, .itx-h3 { break-after: avoid-page; }
+    .rpt-head, .glance, .toc, .score-row, .score-rationale, .fig, .lig-card, .lit-item,
+    .callout, .warn-box, .cx-card, .cx-shared, .cx-solo-comp, .oligo-strip, .oligo-card,
+    .lig-ident, .cov-fig, blockquote { break-inside: avoid-page; }
+    thead { display: table-header-group; }
+    .tbl-wrap { overflow: visible; }
+    table { table-layout: auto !important; min-width: 0 !important; font-size: 9.5px; }
+    th { white-space: normal; overflow: visible; text-overflow: clip; }
+    th, td { padding: 4px 6px; }
+    .fig img { max-height: 300px; }
+    .lig-struct img { width: 96px; height: 96px; }
+    .af-stage, .af-poster { height: 200px; }
+    .copy-btn, .rpt-zoom-badge, .backtop { display: none !important; }
+  }
+`
+
+export const UX_PAGE_CSS = `  /* ${UX_PAGE_MARKER} 一键复制按钮 + 表格横滚指示（v2.7.6） */
+  .lig-ident div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px; }
+  .lig-ident .mono { flex: 1 1 auto; min-width: 0; }
+  .copy-btn { flex: none; margin-left: 8px; padding: 1px 9px; border-radius: 4px; border: 1px solid #c7ece0; background: #f0fdf7; color: #047857; font-family: var(--mono, ui-monospace, Menlo, monospace); font-size: 10px; font-weight: 600; letter-spacing: .4px; line-height: 1.7; cursor: pointer; }
+  .copy-btn:hover { background: #d9f5e8; border-color: #a7f3d0; }
+  .copy-btn.copied { background: #047857; border-color: #047857; color: #fff; }
+  .copy-btn.copy-fail { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+  .tbl-wrap { position: relative; }
+  .tbl-wrap::before, .tbl-wrap::after { content: ''; position: absolute; top: 0; bottom: 0; width: 26px; pointer-events: none; z-index: 3; opacity: 0; transition: opacity .18s; }
+  .tbl-wrap::after { right: 0; background: linear-gradient(270deg, rgba(28,25,23,.10), rgba(28,25,23,0)); }
+  .tbl-wrap::before { left: 0; background: linear-gradient(90deg, rgba(28,25,23,.10), rgba(28,25,23,0)); }
+  .tbl-wrap.rw-right::after, .tbl-wrap.rw-left::before { opacity: 1; }
+  @media print { .tbl-wrap::before, .tbl-wrap::after { display: none; } }
+`
+
+export const UX_PAGE_JS = `<script>
+/* ${UX_PAGE_MARKER} InChIKey/SMILES 一键复制 + 表格横滚边缘指示 */
+(function () {
+  // ── ③ 一键复制：.lig-ident 行自动挂按钮（新旧报告同路径，无需服务端改 HTML）──
+  function legacyCopy(t) {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    return ok ? Promise.resolve() : Promise.reject(new Error('copy denied'));
+  }
+  function copyText(t) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(t).catch(function () { return legacyCopy(t); });
+    }
+    return legacyCopy(t);
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.lig-ident'), function (box) {
+    Array.prototype.forEach.call(box.querySelectorAll(':scope > div'), function (row) {
+      if (row.querySelector('.copy-btn')) return;
+      var b = row.querySelector('b'), mono = row.querySelector('.mono');
+      if (!b || !mono) return;
+      var label = (b.textContent || '').trim();
+      if (!/InChIKey|SMILES/i.test(label)) return;
+      var val = (mono.textContent || '').trim();
+      if (!val) return;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy-btn';
+      btn.setAttribute('data-copy', val);
+      btn.setAttribute('aria-label', '复制' + label);
+      btn.title = '复制' + label;
+      btn.textContent = '复制';
+      row.appendChild(btn);
+    });
+  });
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    var btn = t && t.closest ? t.closest('.copy-btn') : null;
+    if (!btn) return;
+    copyText(btn.getAttribute('data-copy') || '').then(function () {
+      btn.classList.remove('copy-fail');
+      btn.classList.add('copied');
+      btn.textContent = '已复制✓';
+    }).catch(function () {
+      btn.classList.remove('copied');
+      btn.classList.add('copy-fail');
+      btn.textContent = '复制失败';
+    });
+    clearTimeout(btn._t);
+    btn._t = setTimeout(function () {
+      btn.classList.remove('copied');
+      btn.classList.remove('copy-fail');
+      btn.textContent = '复制';
+    }, 1600);
+  });
+
+  // ── ⑥ 表格横滚边缘渐隐指示（可滚动时亮起，滚到头熄灭；打印隐藏）──
+  var wraps = Array.prototype.slice.call(document.querySelectorAll('.tbl-wrap'));
+  function upd(w) {
+    var has = w.scrollWidth - w.clientWidth > 4;
+    w.classList.toggle('rw-right', has && w.scrollLeft + w.clientWidth < w.scrollWidth - 4);
+    w.classList.toggle('rw-left', has && w.scrollLeft > 4);
+  }
+  wraps.forEach(function (w) {
+    w.addEventListener('scroll', function () { upd(w); }, { passive: true });
+    upd(w);
+  });
+  window.addEventListener('resize', function () { wraps.forEach(upd); }, { passive: true });
+})();
+</script>`
+
+/** 旧报告兼容：无 UX 标记的历史 report.html，注入打印版式 + 复制/横滚 CSS+JS（幂等，已有则原样返回） */
+export function applyUxUpgrade(html: string): string {
+  if (html.includes(UX_PAGE_MARKER)) return html
+  let out = html
+  const h = out.indexOf('</head>')
+  if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-ux">${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>\n${out.slice(h)}`
+  const b = out.lastIndexOf('</body>')
+  if (b >= 0) out = `${out.slice(0, b)}${UX_PAGE_JS}\n${out.slice(b)}`
+  return out
+}
+
+// ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
+
+export function esc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function inlineMd(s: string): string {
+  return esc(s)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).。,，；;：:]|$)/g, '$1<em>$2</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/PMID\s*(\d{6,9})/g, 'PMID <a href="https://pubmed.ncbi.nlm.nih.gov/$1/" target="_blank" rel="noopener">$1</a>')
+}
+
+export function renderMarkdown(md: string, headingOffset = 0): string {
+  const lines = md.replace(/\r\n/g, '\n').split('\n')
+  const out: string[] = []
+  let inList = false
+  let tableBuf: string[][] = []
+
+  const flushList = () => { if (inList) { out.push('</ul>'); inList = false } }
+  const flushTable = () => {
+    if (tableBuf.length > 0) {
+      const [head, ...body] = tableBuf
+      out.push('<div class="tbl-wrap"><table>')
+      out.push(`<thead><tr>${head.map(c => `<th>${inlineMd(c)}</th>`).join('')}</tr></thead>`)
+      if (body.length) out.push(`<tbody>${body.map(r => `<tr>${r.map(c => `<td>${inlineMd(c)}</td>`).join('')}</tr>`).join('')}</tbody>`)
+      out.push('</table></div>')
+      tableBuf = []
+    }
+  }
+
+  for (const raw of lines) {
+    const line = raw.trimEnd()
+    if (/^\|(.+)\|\s*$/.test(line)) {
+      flushList()
+      const cells = line.slice(1, -1).split('|').map(c => c.trim())
+      // 跳过分隔行 |---|---|
+      if (cells.every(c => /^:?-{2,}:?$/.test(c) || c === '')) continue
+      tableBuf.push(cells)
+      continue
+    }
+    flushTable()
+    if (!line.trim()) { flushList(); continue }
+    const h = line.match(/^(#{2,4})\s+(.*)$/)
+    if (h) {
+      flushList()
+      const level = Math.min(6, h[1].length + headingOffset)
+      const text = h[2].trim()
+      out.push(`<h${level} id="${slug(text)}">${inlineMd(text)}</h${level}>`)
+      continue
+    }
+    if (/^>\s?/.test(line)) {
+      flushList()
+      out.push(`<blockquote>${inlineMd(line.replace(/^>\s?/, ''))}</blockquote>`)
+      continue
+    }
+    const li = line.match(/^\s*(?:[-*•]|\d+[.、)])\s+(.*)$/)
+    if (li) {
+      if (!inList) { out.push('<ul>'); inList = true }
+      out.push(`<li>${inlineMd(li[1])}</li>`)
+      continue
+    }
+    flushList()
+    out.push(`<p>${inlineMd(line.trim())}</p>`)
+  }
+  flushList()
+  flushTable()
+  return out.join('\n')
+}
+
+function slug(s: string): string {
+  return 's-' + esc(s).replace(/[^\u4e00-\u9fa5a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+}
+
+// ─── 确定性数据区块 ───────────────────────────────────────────────────────────
+
+function scoreBar(label: string, item: { score: number; rating: string }, color: string, cls = ''): string {
+  const pct = Math.round((item.score / 10) * 100)
+  return `
+  <div class="score-row ${cls}">
+    <div class="score-label">${label}</div>
+    <div class="score-track"><div class="score-fill" style="width:${pct}%;background:${color}"></div></div>
+    <div class="score-num">${item.score}<span class="score-max">/10</span></div>
+    <div class="score-rating">${esc(item.rating)}</div>
+  </div>`
+}
+
+/** 配体短显示："A1B6E (N-[4-(3-chloro…))" → 截断化学名保留编号（悬停可见全名） */
+function shortLigand(l: string, nameMax = 22): string {
+  const m = l.match(/^(\S+)\s*\((.*)\)\s*$/)
+  if (!m) return l.length > 32 ? l.slice(0, 31) + '…' : l
+  const [, id, name] = m
+  return name.length > nameMax ? `${id} (${name.slice(0, nameMax - 1)}…)` : `${id} (${name})`
+}
+
+/** 配体归一策略 → 中文短标签 */
+export function strategyZh(s: string): string {
+  switch (s) {
+    case 'direct-id': return '直接ID'
+    case 'alias': return '别名表'
+    case 'pdb-search': return 'PDBe检索'
+    case 'pubchem': return 'PubChem'
+    case 'pubchem+similar': return 'PubChem+相似'
+    case 'llm': return 'AI'
+    case 'llm+pdb-search': return 'AI+检索'
+    case 'llm+pubchem': return 'AI+PubChem'
+    default: return s || '—'
+  }
+}
+
+// ─── v2.7 / v2.7.6 配体卡展示构件（单靶点与合并报告共享 — 单源）────────────────
+
+/** 配体卡 detail 视图（LigandResolution.detail 的结构化展示形状） */
+export interface LigandCardDetail {
+  cid?: number
+  iupacName?: string
+  xlogp?: number
+  tpsa?: number
+  hBondDonor?: number
+  hBondAcceptor?: number
+  rotatableBonds?: number
+  heavyAtoms?: number
+  exactMass?: number
+  charge?: number
+  inchiKey?: string
+  canonicalSmiles?: string
+  structure2d?: string
+  /** v2.7.6：RCSB CCD 矢量结构式（优先于 PNG — 灯箱无限缩放不失真） */
+  structure2dSvg?: string
+}
+
+/** 配体详情计算性质 chips（PubChem 计算性质，有值才显示） */
+export function ligDetailProps(d: LigandCardDetail): string {
+  const items: string[] = []
+  if (d.xlogp != null) items.push(`XLogP <b>${d.xlogp}</b>`)
+  if (d.tpsa != null) items.push(`TPSA <b>${d.tpsa} Å²</b>`)
+  if (d.hBondDonor != null) items.push(`氢供体 <b>${d.hBondDonor}</b>`)
+  if (d.hBondAcceptor != null) items.push(`氢受体 <b>${d.hBondAcceptor}</b>`)
+  if (d.rotatableBonds != null) items.push(`可旋转键 <b>${d.rotatableBonds}</b>`)
+  if (d.heavyAtoms != null) items.push(`重原子 <b>${d.heavyAtoms}</b>`)
+  if (d.exactMass != null) items.push(`精确质量 <b>${d.exactMass}</b>`)
+  if (d.charge != null && d.charge !== 0) items.push(`形式电荷 <b>${d.charge > 0 ? '+' : ''}${d.charge}</b>`)
+  return items.length ? items.map(i => `<span>${i}</span>`).join('') : ''
+}
+
+/** 配体 2D 结构式 figure（RCSB CCD SVG 矢量优先，PubChem PNG 位图回落 — 点击可进灯箱放大） */
+export function ligStructFig(l: { detail?: LigandCardDetail }): string {
+  const d = l.detail
+  if (!d) return ''
+  const src = d.structure2dSvg ?? d.structure2d
+  if (!src) return ''
+  const isSvg = d.structure2dSvg != null && src === d.structure2dSvg
+  return `<figure class="lig-struct"><img src="${src}" alt="2D 化学结构式${isSvg ? '（SVG 矢量）' : ''}"><figcaption>2D 结构式 · ${isSvg ? 'RCSB CCD · SVG 矢量（缩放不失真）' : `PubChem${d.cid ? ` · CID ${d.cid}` : ''}`}</figcaption></figure>`
+}
+
+/** 结构标识符折叠（InChIKey / SMILES — 复制按钮由页级 UX JS 自动挂载，新旧报告同路径） */
+export function ligIdentFold(l: { detail?: LigandCardDetail }): string {
+  const d = l.detail
+  if (!d?.inchiKey && !d?.canonicalSmiles) return ''
+  return `<details class="fold lig-fold"><summary>结构标识符（InChIKey / SMILES · 可一键复制）</summary><div class="lig-ident">${d.inchiKey ? `<div><b>InChIKey</b> <span class="mono">${esc(d.inchiKey)}</span></div>` : ''}${d.canonicalSmiles ? `<div><b>Canonical SMILES</b> <span class="mono">${esc(d.canonicalSmiles)}</span></div>` : ''}</div></details>`
+}
+
+// ─── v2.7.6 ④ 覆盖率区段可视化（SVG 轨道 — 服务端渲染，零 JS 依赖，打印友好）──
+
+/** 覆盖区间 → 未覆盖区间（1 基；ranges 已排序合并） */
+function coverageGaps(ranges: Array<[number, number]>, seqLen: number): Array<[number, number]> {
+  const gaps: Array<[number, number]> = []
+  let cursor = 1
+  for (const [a, b] of ranges) {
+    if (a > cursor) gaps.push([cursor, Math.min(a - 1, seqLen)])
+    cursor = Math.max(cursor, b + 1)
+  }
+  if (cursor <= seqLen) gaps.push([cursor, seqLen])
+  return gaps
+}
+
+/**
+ * 结构覆盖率区段图（PDB 结构清单章节头部）：
+ *  - 全长序列为轨道，已覆盖区间绿色实心、未覆盖区间琥珀半透明（段悬停显示区间明细）
+ *  - 残基刻度 1 / 25% / 50% / 75% / 全长 — 与 UniProt 残基编号口径一致
+ *  - 纯内联 SVG（无 JS、无外部依赖）— 离线打开/打印均正常呈现
+ */
+export function coverageFigureHtml(
+  coverage: { coveragePercent: number; coveredRanges?: Array<[number, number]> } | null | undefined,
+  seqLen: number,
+): string {
+  if (!coverage || !Number.isFinite(seqLen) || seqLen <= 0) return ''
+  const ranges = (coverage.coveredRanges ?? []).filter(r => Array.isArray(r) && r[0] > 0 && r[1] >= r[0])
+  const gaps = coverageGaps(ranges, seqLen)
+  const W = 820, H = 64
+  const x0 = 8, innerW = W - 16
+  const pos = (res: number) => x0 + Math.max(0, Math.min(1, res / seqLen)) * innerW
+  const seg = (a: number, b: number, fill: string, op: number, kind: string) => {
+    const w = pos(b) - pos(a - 1)
+    if (w < 1) return ''
+    return `<rect x="${pos(a - 1).toFixed(1)}" y="16" width="${Math.max(1.2, w).toFixed(1)}" height="22" rx="2.5" fill="${fill}" opacity="${op}"><title>${a}-${b} · ${b - a + 1} aa ${kind}</title></rect>`
+  }
+  const rects = ranges.map(([a, b]) => seg(a, b, '#059669', .88, '已覆盖')).join('')
+    + gaps.map(([a, b]) => seg(a, b, '#d97706', .22, '未覆盖')).join('')
+  const ticks = [0, .25, .5, .75, 1].map((f, i) => {
+    const x = x0 + f * innerW
+    const label = String(Math.max(1, Math.round(seqLen * f)))
+    const anchor = i === 0 ? 'start' : i === 4 ? 'end' : 'middle'
+    return `<line x1="${x.toFixed(1)}" y1="42" x2="${x.toFixed(1)}" y2="46" stroke="#a8a29e"/><text x="${x.toFixed(1)}" y="57" text-anchor="${anchor}" font-size="9.5" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" fill="#a8a29e">${label}</text>`
+  }).join('')
+  const pct = coverage.coveragePercent
+  const gapsShow = gaps.slice(0, 6).map(([a, b]) => `${a}-${b}`).join('、')
+  return `
+  <figure class="cov-fig" aria-label="结构覆盖率区段图">
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="结构覆盖率 ${pct}%（残基 1-${seqLen}）">
+      <text x="${x0}" y="9" font-size="9" font-family="JetBrains Mono,ui-monospace,Menlo,monospace" fill="#a8a29e" letter-spacing="1.5">COVERAGE MAP · ${seqLen} aa</text>
+      <rect x="${x0 - 1}" y="15" width="${innerW + 2}" height="24" rx="3.5" fill="#f5f5f4" stroke="#e7e5e4"/>
+      ${rects}${ticks}
+    </svg>
+    <figcaption><b>结构覆盖率 ${pct}%</b> · 已覆盖 ${ranges.length} 段（绿）${gaps.length ? ` · 未覆盖 ${gaps.length} 段（琥珀）${gapsShow}${gaps.length > 6 ? ' …' : ''}` : ' · 全长覆盖'} · 段悬停可见区间明细 · 数据源 PDBe 映射</figcaption>
+  </figure>`
+}
+
+/** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题） */
+function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, LiteratureItem>): string {
+  return pdbs.slice(0, max).map(p => {
+    const lit = p.pubmedId ? litByPmid.get(p.pubmedId) : undefined
+    const ligShow = p.ligands.slice(0, 2).map(l => shortLigand(l)).join('; ')
+    return `
+    <tr>
+      <td class="td-id"><a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a></td>
+      <td><span class="mth mth-${p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'}">${esc(methodLabel(p))}</span></td>
+      <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
+      <td class="t-rng"${p.chainRanges ? ` title="${esc(p.chainRanges)}（UniProt 残基编号范围）"` : ''}>${esc(p.chainRanges || '—')}</td>
+      <td class="t-title">${esc(p.title)}</td>
+      <td class="num">${esc(p.releaseDate || '—')}</td>
+      <td class="t-lig" title="${esc(p.ligands.slice(0, 5).join('; '))}">${ligShow ? esc(ligShow) : '—'}${p.ligands.length > 2 ? `<span class="lig-more"> 等${p.ligands.length}</span>` : ''}</td>
+      <td class="t-journal">${esc(p.journal || '—')}</td>
+      <td class="td-id">${p.pubmedId
+        ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${p.pubmedId}/" target="_blank" rel="noopener" title="${esc(lit ? `PMID ${p.pubmedId} · ${lit.title}` : `PubMed ${p.pubmedId}`)}">${p.pubmedId}${lit ? '<span class="lit-dot"></span>' : ''}</a>`
+        : '—'}</td>
+    </tr>`
+  }).join('')
+}
+
+/** PDB 数据表 colgroup（固定列宽，杜绝长内容挤压/重叠；窄屏由 .tbl-wrap 横向滚动） */
+const PDB_COLGROUP = `<colgroup>
+  <col style="width:74px"><col style="width:62px"><col style="width:64px"><col style="width:96px"><col>
+  <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:72px">
+</colgroup>`
+
+/** PDB 表格：前 preview 条直出，剩余放入 details 折叠 */
+function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid: Map<string, LiteratureItem>): string {
+  const shown = pdbs.slice(0, max)
+  const head = shown.slice(0, preview)
+  const rest = shown.slice(preview)
+  const headHtml = `
+  <div class="tbl-wrap"><table class="tbl-data">
+    ${PDB_COLGROUP}
+    <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
+    <tbody>${pdbRowsHtml(head, preview, litByPmid)}</tbody>
+  </table></div>`
+  if (rest.length === 0) return headHtml
+  return `${headHtml}
+  <details class="fold">
+    <summary>展开其余 ${rest.length} 条结构（共 ${shown.length} 条，打印时自动展开）</summary>
+    <div class="tbl-wrap"><table class="tbl-data">
+      ${PDB_COLGROUP}
+      <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>
+      <tbody>${pdbRowsHtml(rest, rest.length, litByPmid)}</tbody>
+    </table></div>
+  </details>`
+}
+
+function methodLabel(p: PdbEntry): string {
+  if (p.isXray) return 'X-ray'
+  if (p.isCryoem) return 'Cryo-EM'
+  if (p.isNmr) return 'NMR'
+  return p.method.slice(0, 12) || '—'
+}
+
+// ─── v1.29/v1.30 互作复合物证据（Complex Portal / IntAct，无直接结构时）──────────
+
+function stochShort(text: string): string {
+  return text.replace(/minValue:\s*/g, '').replace(/maxValue:\s*/g, '').replace(/,\s*/g, '–').trim()
+}
+
+/** 共有结构徽标方法标签（X-ray/Cryo-EM/NMR 配色与 PDB 表一致） */
+function sharedMethodBadge(s: { isXray: boolean; isCryoem: boolean; isNmr: boolean; method: string }): string {
+  const cls = s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'
+  const label = s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : s.method.slice(0, 10)
+  return `<span class="mth mth-${cls}">${esc(label)}</span>`
+}
+
+/** v1.31 PubMed 链接（结构主引文 — 共有/单独/BLAST 列表的「文献」列；紧凑号位直显 PMID 号） */
+function pmidLink(pubmedId: string | null | undefined): string {
+  if (!pubmedId) return '<span class="t-pmid-none">—</span>'
+  return `<a class="t-pmid" href="https://pubmed.ncbi.nlm.nih.gov/${esc(pubmedId)}/" target="_blank" rel="noopener" title="跳转 PubMed 文献 PMID ${esc(pubmedId)}">${esc(pubmedId)}</a>`
+}
+
+/** 共有/单独结构表 colgroup（与直接结构表同款列宽策略；紧凑字号 — 9 列在报告页面内免横向滚动） */
+const CX_SHARED_COLGROUP = `<colgroup>
+  <col style="width:66px"><col style="width:58px"><col style="width:50px"><col style="width:120px"><col style="width:84px">
+  <col><col style="width:68px"><col style="width:72px"><col style="width:82px">
+</colgroup>`
+const CX_SHARED_THEAD = `<thead><tr><th>PDB ID</th><th>方法</th><th class="num" title="分辨率（Å）">分辨率</th><th>覆盖组分</th><th>其他组分</th><th>标题</th><th class="num">释放日期</th><th>期刊</th><th>文献</th></tr></thead>`
+const CX_SOLO_COLGROUP = `<colgroup>
+  <col style="width:66px"><col style="width:58px"><col style="width:50px"><col>
+  <col style="width:68px"><col style="width:72px"><col style="width:82px">
+</colgroup>`
+const CX_SOLO_THEAD = `<thead><tr><th>PDB ID</th><th>方法</th><th class="num" title="分辨率（Å）">分辨率</th><th>标题</th><th class="num">释放日期</th><th>期刊</th><th>文献</th></tr></thead>`
+
+/** 共有结构行：覆盖组分（绿 chip）+ 其他组分（琥珀 chip，如 FBXO22）+ 文献直跳 */
+function sharedRowHtml(s: InteractionSharedPdb): string {
+  const extras = s.extraComponents ?? []
+  const extraShow = extras.slice(0, 3)
+  const extraMore = extras.length - extraShow.length
+  const accs = s.extraAccessions ?? []
+  return `
+    <tr>
+      <td class="td-id"><a href="https://www.rcsb.org/structure/${esc(s.pdbId)}" target="_blank" rel="noopener">${esc(s.pdbId)}</a></td>
+      <td>${sharedMethodBadge(s)}</td>
+      <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
+      <td><span class="csi-comps" title="${esc(s.componentNames.join(' + '))}（覆盖 ${s.componentCount} 个复合物组分）">${esc(s.componentNames.join('+'))}<i>×${s.componentCount}</i></span></td>
+      <td class="t-extras">${extraShow.length
+        ? extraShow.map((n, i) => `<span class="csi-extra" title="${esc(accs[i] ?? '')}">+ ${esc(n)}</span>`).join('') + (extraMore > 0 ? `<span class="csi-extra-more">等${extraMore}</span>` : '')
+        : '<span class="t-pmid-none">—</span>'}</td>
+      <td class="t-title">${esc(s.title)}</td>
+      <td class="num">${esc(s.releaseDate || '—')}</td>
+      <td class="t-journal">${esc(s.journal || '—')}</td>
+      <td class="td-id">${pmidLink(s.pubmedId)}</td>
+    </tr>`
+}
+
+/** 单独结构行（组分独立解析 — 次要参考） */
+function soloRowHtml(p: PdbEntry): string {
+  return `
+    <tr>
+      <td class="td-id"><a href="https://www.rcsb.org/structure/${esc(p.pdbId)}" target="_blank" rel="noopener">${esc(p.pdbId)}</a></td>
+      <td>${sharedMethodBadge(p)}</td>
+      <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
+      <td class="t-title">${esc(p.title)}</td>
+      <td class="num">${esc(p.releaseDate || '—')}</td>
+      <td class="t-journal">${esc(p.journal || '—')}</td>
+      <td class="td-id">${pmidLink(p.pubmedId)}</td>
+    </tr>`
+}
+
+/** 共有/单独结构表壳（共有/单独复用 — 折叠区内外同款表头） */
+function cxTableHtml(rows: string, colgroup: string, thead: string): string {
+  return `<div class="tbl-wrap"><table class="tbl-data tbl-cx-pdb">${colgroup}${thead}<tbody>${rows}</tbody></table></div>`
+}
+
+/** 共有结构直出条数（其余折叠 — 折叠区展开后仍全量可见） */
+const CX_SHARED_PREVIEW = 12
+/** 单组分单独结构直出条数（其余折叠） */
+const CX_SOLO_PREVIEW = 6
+
+/**
+ * v1.30/v1.31 单个 curated 复合物卡片：
+ *  - 头部：CPX 编号 + 名称 + 装配/分子量/组分结构 chips
+ *  - 组分构成表（靶点行高亮；共有/单独结构数分列）
+ *  - 共有结构全量表（同一 PDB 含 ≥2 组分 — 组装先例，绿色面板突出；前 12 条直出、
+ *    其余折叠展开可见；含其他组分标注（如 FBXO22）与 PubMed 文献直跳）
+ *  - 单独结构全量表（各组分独立解析 — 次要参考，默认折叠；按组分分组，每组前 6 条
+ *    直出、其余折叠展开可见）
+ */
+function complexCardHtml(c: InteractionComplexInfo): string {
+  const others = c.components.filter(x => !x.isTarget)
+  const shared = c.sharedPdbs ?? []
+  const sharedTotal = c.sharedPdbTotal ?? 0
+  const sharedOmitted = c.sharedPdbOmitted ?? Math.max(0, sharedTotal - shared.length)
+  const soloTotal = c.soloPdbTotal ?? others.reduce((s, x) => s + (x.soloPdbCount ?? 0), 0)
+
+  const sharedHeadRows = shared.slice(0, CX_SHARED_PREVIEW)
+  const sharedRest = shared.slice(CX_SHARED_PREVIEW)
+  const sharedListHtml = shared.length ? `
+    <div class="cx-shared">
+      <div class="cx-shared-head"><span class="cx-shared-ico" aria-hidden="true">◈</span>共有结构 <b>${sharedTotal}</b> 个<span class="cx-shared-sub">同一 PDB 条目含 ≥2 个复合物组分 — 共组装先例，复合物路线最直接的结构证据；「其他组分」列为该 PDB 中复合物组分之外的蛋白（如 F-box 家族底物受体），提示更大装配语境</span></div>
+      ${cxTableHtml(sharedHeadRows.map(sharedRowHtml).join(''), CX_SHARED_COLGROUP, CX_SHARED_THEAD)}
+      ${sharedRest.length ? `
+      <details class="fold">
+        <summary>展开其余 ${sharedRest.length} 个共有结构（共 ${sharedTotal} 个，打印时自动展开）</summary>
+        ${cxTableHtml(sharedRest.map(sharedRowHtml).join(''), CX_SHARED_COLGROUP, CX_SHARED_THEAD)}
+      </details>` : ''}
+      ${sharedOmitted > 0 ? `<p class="note">另有 ${sharedOmitted} 个共有结构超出详情拉取上限未列出（总数已计入）。</p>` : ''}
+    </div>` : ''
+
+  const soloComps = others
+    .map(x => ({ comp: x, list: x.soloPdbs ?? x.soloRepresentativePdbs ?? [], omitted: x.soloPdbOmitted ?? Math.max(0, (x.soloPdbCount ?? 0) - (x.soloPdbs ?? x.soloRepresentativePdbs ?? []).length) }))
+    .filter(g => g.list.length > 0 || (g.comp.soloPdbCount ?? 0) > 0)
+  const soloFoldHtml = soloComps.length ? `
+    <details class="fold cx-solo-fold">
+      <summary>单独结构（各组分独立解析，共 ${soloTotal} 个 — 次要参考：边界借鉴/构象对照，默认折叠）</summary>
+      ${soloComps.map(({ comp, list, omitted }) => {
+        const head = list.slice(0, CX_SOLO_PREVIEW)
+        const rest = list.slice(CX_SOLO_PREVIEW)
+        return `
+      <div class="cx-solo-comp">
+        <div class="cx-solo-head"><b>${esc(comp.name)}</b> <span class="mono">${esc(comp.accession)}</span> — ${comp.soloPdbCount ?? list.length} 个单独结构<span class="cx-solo-sub">（不含复合物其他组分）</span></div>
+        ${list.length ? cxTableHtml(head.map(soloRowHtml).join(''), CX_SOLO_COLGROUP, CX_SOLO_THEAD) : ''}
+        ${rest.length ? `
+        <details class="fold">
+          <summary>展开 ${esc(comp.name)} 其余 ${rest.length} 个单独结构（打印时自动展开）</summary>
+          ${cxTableHtml(rest.map(soloRowHtml).join(''), CX_SOLO_COLGROUP, CX_SOLO_THEAD)}
+        </details>` : ''}
+        ${omitted > 0 ? `<p class="note">另有 ${omitted} 个单独结构超出详情拉取上限未列出（总数已计入）。</p>` : ''}
+      </div>`
+      }).join('')}
+      <p class="note">单独结构仅含单一组分（不含复合物其他组分）— 可用于组分域边界设计与构象状态对照，但不能证明复合物组装形式。</p>
+    </details>` : ''
+
+  return `
+  <div class="cx-card">
+    <div class="cx-head">
+      <span class="cx-badge">Complex Portal</span>
+      <b class="cx-name"><a href="https://www.ebi.ac.uk/complexportal/complex/${esc(c.complexAc)}" target="_blank" rel="noopener">${esc(c.complexAc)}</a>${c.name ? ` ${esc(c.name)}` : ''}</b>
+      ${c.assembly ? `<span class="cx-chip">${esc(c.assembly)}</span>` : ''}
+      ${c.assemblyKda != null ? `<span class="cx-chip">装配 ~${c.assemblyKda} kDa</span>` : ''}
+      <span class="cx-chip ${c.componentsWithStructure > 0 ? 'cx-ok' : ''}">${c.componentsWithStructure}/${others.length} 其他组分有结构</span>
+      ${sharedTotal ? `<span class="cx-chip cx-chip-shared">共有结构 ${sharedTotal}</span>` : ''}
+    </div>
+    <div class="tbl-wrap"><table class="tbl-data tbl-cx">
+      <thead><tr><th>组分</th><th style="width:88px">UniProt</th><th style="width:56px">计量</th><th style="width:82px" class="num">分子量</th><th style="width:60px" class="num">共有</th><th style="width:60px" class="num">单独</th></tr></thead>
+      <tbody>${c.components.map(x => `
+        <tr${x.isTarget ? ' class="cx-target"' : ''}>
+          <td class="t-title">${x.isTarget ? '<b>【靶点】</b>' : ''}${esc(x.name)}${x.description ? `<span class="cx-desc"> · ${esc(x.description.slice(0, 44))}</span>` : ''}</td>
+          <td class="td-id"><a href="https://www.uniprot.org/uniprotkb/${esc(x.accession)}" target="_blank" rel="noopener">${esc(x.accession)}</a></td>
+          <td class="num">${esc(stochShort(x.stoichiometryText) || '—')}</td>
+          <td class="num">${x.kda != null ? `~${x.kda}` : '—'}</td>
+          <td class="num">${x.isTarget ? '—' : String(x.sharedPdbIds?.length ?? 0)}</td>
+          <td class="num" ${x.isTarget ? 'title="评估对象 — 无直接结构（本分析前提）"' : ''}>${x.isTarget ? '—' : String(x.soloPdbCount ?? 0)}</td>
+        </tr>`).join('')}</tbody>
+    </table></div>
+    ${sharedListHtml}
+    ${soloFoldHtml}
+  </div>`
+}
+
+/** 互作复合物证据全景（v1.30 接入 PDB 章节）：curated 复合物卡片（共有突出/单独折叠）+ binary 伙伴 */
+export function interactionEvidenceHtml(itx: InteractionAnalysis | null | undefined): string {
+  if (!itx || !itx.applicable || !itx.hasEvidence) return ''
+  const complexes = itx.complexes.map(complexCardHtml).join('')
+  const binaries = itx.binaryPartners.length ? `
+  <details class="fold">
+    <summary>IntAct binary 互作伙伴（复合物之外，${itx.binaryPartners.length} 个有结构 — 互作界面参考，默认折叠）</summary>
+    <ul class="mw-list">${itx.binaryPartners.map(b => `<li><b>${esc(b.geneName ?? b.accession)}</b> <span class="mono">${esc(b.accession)}</span> — ${b.pdbCount} 个结构${b.representativePdbs.length ? `（${b.representativePdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}）` : ''}</li>`).join('')}</ul>
+    <p class="note">binary 互作（IntAct 实验证据）伙伴有结构 — 互作界面建模与 pull-down/SPR 验证设计可参考，非 curated 复合物，化学计量需实验确认。</p>
+  </details>` : ''
+  return `
+  <h3 class="itx-h3">互作复合物组分结构 <span class="itx-h3-sub">Complex Portal curated · ${itx.complexes.length} 个复合物</span></h3>
+  <p class="note">靶点无直接结构 — 以下为其所在复合物其他组分的结构清单，按「共有 / 单独」分类：<b>共有结构</b>（同一 PDB 含 ≥2 个组分）是复合物共组装的直接先例，重点展示；<b>单独结构</b>（组分独立解析）为次要参考，默认折叠。</p>
+  ${complexes}
+  ${binaries}`
+}
+
+function blastRowsHtml(hits: BlastHit[]): string {
+  return hits.map(h => {
+    const range = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
+      ? `${h.queryFrom}-${h.queryTo}`
+      : (h.queryCoverage != null && h.queryCoverage > 0 ? `${h.queryCoverage} aa` : '—')
+    return `
+    <tr>
+      <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
+      <td class="t-desc">${esc(h.description)}</td>
+      <td class="num">${h.identity.toFixed(1)}%</td>
+      <td class="num">${esc(h.evalueRaw)}</td>
+      <td class="num">${esc(range)}</td>
+      <td class="t-nowrap">${esc(h.method || '—')}</td>
+      <td class="num">${h.resolution != null ? h.resolution.toFixed(2) : '—'}</td>
+      <td class="td-id">${pmidLink(h.pubmedId)}</td>
+    </tr>`
+  }).join('')
+}
+
+/** 文献条目（附关联 PDB chips） */
+function litItemsHtml(lits: LiteratureItem[], pdbByPmid: Map<string, PdbEntry[]>, preview: number): string {
+  const shown = lits.slice(0, preview)
+  const rest = lits.slice(preview)
+  const item = (l: LiteratureItem, i: number) => {
+    const linked = (pdbByPmid.get(String(l.pmid).trim()) ?? []).slice(0, 6)
+    return `
+    <li class="lit-item">
+      <div class="lit-no">${String(i + 1).padStart(2, '0')}</div>
+      <div class="lit-body">
+        <div class="lit-title"><a href="https://pubmed.ncbi.nlm.nih.gov/${l.pmid}/" target="_blank" rel="noopener">${esc(l.title)}</a>${l.fromPdb ? '<span class="lit-src">结构解析文献</span>' : ''}</div>
+        <div class="lit-meta">${esc(l.journal)}${l.year ? ` · ${esc(l.year)}` : ''}${l.doi ? ` · DOI: <a href="https://doi.org/${esc(l.doi)}" target="_blank" rel="noopener">${esc(l.doi)}</a>` : ''} · PMID ${esc(l.pmid)}</div>
+        ${l.abstractExcerpt ? `<div class="lit-abs">${esc(l.abstractExcerpt)}</div>` : ''}
+        ${linked.length ? `<div class="lit-pdbs"><span class="lit-pdbs-label">关联结构</span>${linked.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener" title="${esc(p.title)}">${p.pdbId}</a>`).join('')}</div>` : ''}
+      </div>
+    </li>`
+  }
+  const headHtml = shown.map((l, i) => item(l, i)).join('')
+  if (rest.length === 0) return `<ol class="lit-list">${headHtml}</ol>`
+  return `<ol class="lit-list">${headHtml}</ol>
+  <details class="fold">
+    <summary>展开其余 ${rest.length} 篇文献（共 ${lits.length} 篇，打印时自动展开）</summary>
+    <ol class="lit-list" start="${preview + 1}">${rest.map((l, i) => item(l, preview + i)).join('')}</ol>
+  </details>`
+}
+
+// ─── 图片内嵌（预算控制）──────────────────────────────────────────────────────
+// 与 docx 提取上限（12 张）对齐：任意张数/任意类型组合（仅胶图、仅 SEC、多张混合）全部内嵌；
+// 体积预算超出时按 gel > sec > other 优先级截断（每张落盘前已软压 ≤800KB，典型总量 2-5MB）
+const EMBED_MAX_COUNT = 12
+const EMBED_MAX_TOTAL = 9 * 1024 * 1024
+
+export interface EmbeddedImage {
+  meta: ParsedImage
+  dataUri: string | null // null = 超预算未嵌入
+}
+
+export async function embedImages(
+  images: ParsedImage[],
+  resolvePath: (meta: ParsedImage) => string,
+): Promise<EmbeddedImage[]> {
+  // gel/sec 优先，同 kind 内按原顺序
+  const ordered = [...images].sort((a, b) => rank(b) - rank(a))
+  const result: EmbeddedImage[] = []
+  let total = 0
+  let embeddedCount = 0
+  for (const meta of ordered) {
+    let dataUri: string | null = null
+    if (embeddedCount < EMBED_MAX_COUNT) {
+      if (meta.dataUri) {
+        // v2.4 无状态模式：图片已随请求内联携带（data URI），直接嵌入（估算解码后大小计入预算）
+        const approxBytes = Math.floor((meta.dataUri.length * 3) / 4)
+        if (total + approxBytes <= EMBED_MAX_TOTAL) {
+          dataUri = meta.dataUri
+          total += approxBytes
+          embeddedCount++
+        }
+      } else {
+        try {
+          const buf = await fs.readFile(resolvePath(meta))
+          if (buf.length > 0 && total + buf.length <= EMBED_MAX_TOTAL) {
+            dataUri = `data:${meta.mime};base64,${buf.toString('base64')}`
+            total += buf.length
+            embeddedCount++
+          }
+        } catch { /* 文件缺失 → 不嵌入 */ }
+      }
+    }
+    result.push({ meta, dataUri })
+  }
+  // 恢复原顺序
+  result.sort((a, b) => images.indexOf(a.meta) - images.indexOf(b.meta))
+  return result
+}
+
+function rank(i: ParsedImage): number {
+  return i.kind === 'gel' ? 3 : i.kind === 'sec' ? 2 : 1
+}
+
+// ─── 报告组装 ────────────────────────────────────────────────────────────────
+
+export interface ReportRenderInput {
+  ctx: ReportContext
+  methodStats: MethodStats
+  llmMarkdown: string
+  llmOk: boolean
+  llmErrors: string[]
+  jobId: string
+  durationMs: number
+  totalPdbFound: number
+  /** 分析引擎摘要（如 “Z.ai GLM-4.6（内置）” / “OpenAI · gpt-4o”） */
+  engineSummary: string
+  /** 图片文件路径解析（由 pipeline 提供，图片存于 db/reports/{id}/assets/） */
+  /** v2.0：AlphaFold 预测结构图（base64 data URI + 元数据；报告头右侧展示） */
+  alphafoldFigure?: {
+    dataUri: string
+    modelId: string
+    globalPlddt: number | null
+    version: number
+    fracVeryHigh: number | null
+  }
+  /** v2.7.2：AlphaFold 模型 PDB 文本 — 报告头内嵌 3Dmol 交互式 3D 视图
+   *  （拖拽旋转/滚轮缩放/pLDDT 四段着色；无服务端浏览器依赖，离线单文件可交互） */
+  alphafoldStructure?: {
+    pdbText: string
+    uniprotId: string
+    modelId: string
+    globalPlddt: number | null
+    version: number
+    fracVeryHigh: number | null
+  }
+  resolveImagePath: (meta: ParsedImage) => string
+}
+
+/** PDB 直出条数（其余折叠） */
+const PDB_PREVIEW = 20
+/** 文献直出条数（其余折叠） */
+const LIT_PREVIEW = 10
+
+export async function renderReportHtml(input: ReportRenderInput): Promise<string> {
+  const { ctx, methodStats, llmMarkdown } = input
+  const u = ctx.uniprot
+  const dateStr = new Date().toISOString().slice(0, 10)
+  // v1.23：题目体现评估范围（UniProt 残基编号区间）
+  const rangeSuffix = ctx.range ? ` · 残基 ${ctx.range[0]}-${ctx.range[1]}` : ''
+  const proteinTitle = u ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）` : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
+  const geneStr = u?.geneNames.join(', ') || '—'
+
+  // PMID ↔ PDB 双向关联
+  const pdbByPmid = new Map<string, PdbEntry[]>()
+  for (const p of ctx.directPdbs) {
+    const key = (p.pubmedId ?? '').trim()
+    if (!key) continue
+    const arr = pdbByPmid.get(key)
+    if (arr) arr.push(p)
+    else pdbByPmid.set(key, [p])
+  }
+  const litByPmid = new Map<string, LiteratureItem>()
+  for (const l of ctx.literature) {
+    if (l.pmid) litByPmid.set(String(l.pmid).trim(), l)
+  }
+  const linkedLitCount = ctx.literature.filter(l => pdbByPmid.has(String(l.pmid).trim())).length
+
+  const embedded = await embedImages(ctx.images, input.resolveImagePath)
+
+  // 构建信息（合并评估：UniProt+伴随序列）
+  const cmp = ctx.providedSequence?.comparison
+  const constructHtml = cmp
+    ? `${cmp.start != null && cmp.end != null ? `${cmp.start}–${cmp.end} 位 / 全长 ${cmp.fullLength} aa` : `${cmp.providedLength} / ${cmp.fullLength} aa`}${cmp.sameTarget ? ` · 一致性 ${cmp.identity}%` : ` · 相似度 ${cmp.identity}% 疑似不同靶点`}`
+    : ''
+
+  // 动态章节编号（v1.28：结构分明 — 全部章节统一编号与视觉锚点）：
+  // 一 评估分析 / 二 客户评估表要点（如存在）/ 三 可行性评分 / 四 PDB 结构清单 / 后续按存在性编号
+  // v1.25：聚集形式不再单独成章 — 融入评分卡（调整明细 + 证据链折叠）与 LLM 叙事
+  const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八']
+  const hasInsights = Boolean(ctx.insights && (
+    ctx.insights.goals?.length || ctx.insights.scientificQuestions?.length
+    || ctx.insights.experimentalSummary || ctx.insights.sequenceNotes
+    || ctx.insights.homologs || ctx.insights.keyConcerns?.length))
+  let secIdx = 0
+  const nextNo = () => cnNums[secIdx++]
+  const llmNo = nextNo()
+  const insightsNo = hasInsights ? nextNo() : ''
+  const scoresNo = nextNo()
+  const pdbsNo = nextNo()
+  // v1.7+：BLAST 章节在 0 命中/跳过/失败时也渲染状态说明（不再凭空消失）
+  const blastRan = ctx.blastStatus && (ctx.blastStatus.status === 'ok' || ctx.blastStatus.status === 'no-hits')
+  const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus)
+  const ligNo = (ctx.ligands?.length ?? 0) > 0 ? nextNo() : ''
+  // v2.7/v2.7.6 配体卡展示构件（ligDetailProps / ligStructFig / ligIdentFold / strategyZh）
+  // 已提升为模块级共享导出 —— 单靶点与合并报告单源同版
+  const ligandSecHtml = (ctx.ligands?.length ?? 0) > 0 ? `
+  <section class="sec" id="ligands">
+    <h2><span class="sec-no">${ligNo}</span><span class="sec-title">配体研究数据</span><span class="sec-en">Ligands · ${ctx.ligands!.filter(l => l.ok).length}/${ctx.ligands!.length}</span></h2>
+    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / PubChem / AI 兜底）映射为 RCSB 化学组分 ID；PDB 无对应组分时以 PubChem 详情（CID / 分子式 / MW / IUPAC 名）成卡。结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为本靶点直接结构的条目；计算性质与 2D 化学结构式来自 PubChem。</p>
+    <div class="lig-grid">
+    ${ctx.ligands!.map(l => {
+      if (!l.ok) return `
+      <div class="lig-card lig-fail">
+        <div class="lig-head"><span class="lig-id lig-id-fail">?</span><span class="lig-name">${esc(l.raw.length > 40 ? l.raw.slice(0, 39) + '…' : l.raw)}</span></div>
+        <div class="lig-meta"><span>未能归一 — ${esc(l.error ?? '未知原因')}</span></div>
+      </div>`
+      const d = l.detail
+      const propsHtml = d ? ligDetailProps(d) : ''
+      const structFig = ligStructFig(l)
+      const identFold = ligIdentFold(l)
+      // v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡（v2.7 + 性质/结构式）
+      if (!l.compId) {
+        const pc = l.pubchem
+        const cid = d?.cid ?? pc?.cid
+        return `
+      <div class="lig-card">
+        <div class="lig-main">
+        ${structFig}
+        <div class="lig-info">
+        <div class="lig-head">
+          ${cid
+            ? `<a class="lig-id lig-id-pc" href="https://pubchem.ncbi.nlm.nih.gov/compound/${cid}" target="_blank" rel="noopener" title="在 PubChem 查看化合物详情">CID ${cid}</a>`
+            : `<span class="lig-id lig-id-pc">已识别</span>`}
+          <span class="lig-name">${esc(l.name || l.raw)}</span>
+          <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(strategyZh(l.strategy))}${l.source === 'eval-table' ? ' · 评估表' : l.source === 'file' ? ' · 文件' : ''}</span>
+        </div>
+        <div class="lig-meta">
+          <span>分子式 <b>${esc(l.formula || '—')}</b></span>
+          ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
+        </div>
+        ${propsHtml ? `<div class="lig-props">${propsHtml}</div>` : ''}
+        ${(d?.iupacName ?? pc?.iupacName) ? `<div class="lig-iupac">IUPAC 名 ${esc((d?.iupacName ?? pc?.iupacName) ?? '')}</div>` : ''}
+        ${identFold}
+        </div>
+        </div>
+        <div class="lig-pdbs lig-none">PDB 化学组分库无对应条目 — 已通过 PubChem 识别，点击 CID 查看化合物详情</div>
+      </div>`
+      }
+      const best = l.structures.find(s => s.resolution != null)?.resolution
+      const chips = l.structures.slice(0, 12).map(s =>
+        `<a class="${s.alsoTarget ? 'lig-also' : ''}" href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener" title="${esc(s.title)}${s.resolution != null ? ` · ${s.resolution}Å` : ''}${s.method ? ` · ${s.method}` : ''}${s.alsoTarget ? ' · 本靶点直接结构' : ''}">${s.pdbId}${s.resolution != null ? ` <i>${s.resolution.toFixed(1)}</i>` : ''}</a>`,
+      ).join('')
+      return `
+      <div class="lig-card">
+        <div class="lig-main">
+        ${structFig}
+        <div class="lig-info">
+        <div class="lig-head">
+          <span class="lig-id">${esc(l.compId)}</span>
+          <span class="lig-name">${esc(l.name || l.raw)}</span>
+          <span class="lig-src">输入「${esc(l.raw.length > 24 ? l.raw.slice(0, 23) + '…' : l.raw)}」· ${esc(strategyZh(l.strategy))}${l.source === 'eval-table' ? ' · 评估表' : l.source === 'file' ? ' · 文件' : ''}</span>
+        </div>
+        <div class="lig-meta">
+          <span>分子式 <b>${esc(l.formula || '—')}</b></span>
+          ${l.weight != null ? `<span>MW <b>${l.weight.toFixed(1)}</b></span>` : ''}
+          <span>含该配体结构 <b>${l.totalStructures}</b> 个</span>
+          ${best != null ? `<span>最佳分辨率 <b>${best.toFixed(2)} Å</b></span>` : ''}
+        </div>
+        ${propsHtml ? `<div class="lig-props">${propsHtml}</div>` : ''}
+        ${(d?.iupacName ?? l.pubchem?.iupacName) ? `<div class="lig-iupac">IUPAC 名 ${esc((d?.iupacName ?? l.pubchem?.iupacName) ?? '')}</div>` : ''}
+        ${identFold}
+        </div>
+        </div>
+        ${l.structures.length ? `
+        <div class="lig-pdbs">${chips}${l.totalStructures > 12 ? `<span class="lig-more">+${l.totalStructures - 12}</span>` : ''}</div>` : `<div class="lig-pdbs lig-none">暂无含该配体的 PDB 结构记录</div>`}
+      </div>`
+    }).join('')}
+    </div>
+  </section>` : ''
+  const blastNo = showBlastSec ? nextNo() : ''
+  const litNo = ctx.literature.length ? nextNo() : ''
+  const assetsNo = embedded.length ? nextNo() : ''
+  /** v1.28 章节头：编号方块 + 标题 + 英文标签（结构分明、便于导航） */
+  const secHead = (no: string, title: string, en: string) =>
+    `<span class="sec-no">${no}</span><span class="sec-title">${esc(title)}</span><span class="sec-en">${esc(en)}</span>`
+
+  const scoreColor = (n: number) => (n >= 7 ? '#047857' : n >= 5 ? '#b45309' : '#b91c1c')
+
+  // v1.25：聚集形式（寡聚态）— 评分卡内嵌调整明细 + 证据链折叠（不单独成章）
+  const oligo = ctx.oligomer
+  const adj = ctx.scores.oligomerAdjust
+  const oligoConfZh = oligo ? describeOligoConfidence(oligo.confidence) : ''
+  const oligoBadgeColor = oligo?.category === 'monomer' ? '#047857' : oligo?.category === 'hetero-complex' ? '#b45309' : oligo?.category === 'homo-oligomer' ? '#065f46' : '#78716c'
+  const oligoCategoryZh = oligo?.category === 'monomer' ? '单体' : oligo?.category === 'homo-oligomer' ? '同源寡聚体' : oligo?.category === 'hetero-complex' ? '异源复合物' : '未知'
+  const adjChip = (label: string, v: number) =>
+    `<span class="adj-chip ${v > 0 ? 'adj-pos' : v < 0 ? 'adj-neg' : 'adj-zero'}">${label} ${v > 0 ? '+' : v < 0 ? '−' : '±'}${Math.abs(v)}</span>`
+  const oligoStripHtml = oligo ? `
+    <div class="oligo-strip">
+      <div class="oligo-strip-head">
+        <span class="oligo-badge" style="background:${oligoBadgeColor}">${esc(oligoCategoryZh)}</span>
+        <span class="oligo-strip-label">聚集形式<b>${esc(oligo.label || oligo.summary.split('—')[0].split('（')[0].trim())}</b></span>
+        ${oligo.stoichiometry ? `<span class="oligo-stoich">${esc(oligo.stoichiometry)}</span>` : ''}
+        <span class="oligo-conf">置信度：${esc(oligoConfZh)}</span>
+        ${adj ? `<span class="oligo-chips">${adjChip('X-ray', adj.xray)}${adjChip('Cryo-EM', adj.cryoem)}${adjChip('NMR', adj.nmr)}</span>` : ''}
+      </div>
+      ${adj ? `<p class="oligo-strip-note">${esc(adj.note)}（上述调整已计入三方法分数与综合评分）</p>` : `<p class="oligo-strip-note">${esc(oligo.summary)}</p>`}
+      ${oligo.evidence.length ? `
+      <details class="fold"><summary>聚集形式判定证据链（${oligo.evidence.length} 条 · 按优先级：已有结构 → 同源结构 → UniProt interaction → 文献）</summary>
+      <div class="tbl-wrap"><table class="tbl-data">
+        <thead><tr><th style="width:150px">来源</th><th style="width:110px">引用</th><th>证据</th></tr></thead>
+        <tbody>${oligo.evidence.map(e => `
+          <tr>
+            <td>${esc(describeEvidenceSource(e.source))}</td>
+            <td class="td-id">${/^[0-9A-Z]{4}$/.test(e.ref) ? `<a href="https://www.rcsb.org/structure/${e.ref}" target="_blank" rel="noopener">${e.ref}</a>` : /^PMID /.test(e.ref) ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${e.ref.slice(5)}/" target="_blank" rel="noopener">${e.ref}</a>` : esc(e.ref)}</td>
+            <td class="t-title">${esc(e.text)}</td>
+          </tr>`).join('')}</tbody>
+      </table></div></details>` : ''}
+    </div>` : ''
+
+  // v1.26/v1.27：分子量增重策略（小分子量靶点）— 评分卡内嵌（不单独成章，与聚集形式同区呈现）
+  const mwA = ctx.mwAugment
+  const mwAdj = ctx.scores.mwAugmentAdjust
+  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwBadgeColor = mwA?.assemblyPath === 'homolog-complex'
+    ? (mwA.assemblyKda != null && mwA.assemblyKda >= 100 ? '#0f766e' : '#b45309')
+    : mwA?.assemblyKda != null && mwA.assemblyKda >= 100 ? '#065f46' : mwA?.assemblyKda != null && mwA.assemblyKda >= 50 ? '#b45309' : '#78716c'
+  const mwHomologs = mwA?.homologComplexes ?? []
+  const mwStripHtml = mwA?.applicable ? `
+    <div class="oligo-strip mw-strip">
+      <div class="oligo-strip-head">
+        <span class="oligo-badge" style="background:${mwBadgeColor}">小分子量靶点</span>
+        <span class="oligo-strip-label">分子量<b>单体 ~${mwA.monomerKda} kDa${mwA.assemblyKda != null ? ` → 装配 ~${mwA.assemblyKda} kDa${mwA.assemblyPath === 'homolog-complex' ? '（同源推断）' : ''}` : ''}</b></span>
+        <span class="oligo-stoich">${esc(mwPathZh)}</span>
+        ${mwAdj ? `<span class="oligo-chips">${adjChip('X-ray', mwAdj.xray)}${adjChip('Cryo-EM', mwAdj.cryoem)}${adjChip('NMR', mwAdj.nmr)}</span>` : ''}
+      </div>
+      ${mwAdj ? `<p class="oligo-strip-note">${esc(mwAdj.note)}（分子量调整已计入 Cryo-EM 分数与综合评分；X-ray/NMR 不受增重影响${mwA.assemblyKda != null ? '；装配分子量已知时，聚集形式维度的 Cryo-EM 分量并入本维度计分（避免双重加分）' : ''}）</p>` : ''}
+      ${mwA.homologSearchNote ? `<p class="oligo-strip-note">${esc(mwA.homologSearchNote)}</p>` : ''}
+      ${mwA.complexes.length || mwHomologs.length || mwA.partners.some(p => p.kda != null) || mwA.conflicts.length ? `
+      <details class="fold"><summary>增重路径明细（复合物结构 ${mwA.complexes.length} · 同源复合物 ${mwHomologs.length} · 互作伙伴 ${mwA.partners.filter(p => p.kda != null).length} · 目的比对 ${mwA.conflicts.length} 条）</summary>
+        ${mwA.complexes.length ? `
+        <p class="note"><b>已有复合物结构 — 组分总分子量统计</b>（RCSB 实体/装配口径）</p>
+        <div class="tbl-wrap"><table class="tbl-data">
+          <thead><tr><th style="width:86px">PDB</th><th style="width:150px">方法 · 分辨率</th><th>组分（+ 总分子量）</th><th style="width:110px">装配总 MW</th></tr></thead>
+          <tbody>${mwA.complexes.map(c => `
+            <tr>
+              <td class="td-id"><a href="https://www.rcsb.org/structure/${c.pdbId}" target="_blank" rel="noopener">${c.pdbId}</a></td>
+              <td>${esc(c.method.slice(0, 18))}${c.resolution != null ? ` · ${c.resolution}Å` : ''}</td>
+              <td class="t-title">${c.components.map(x => `<span class="${x.isTarget ? 'mw-target' : 'mw-partner'}">${esc(x.name.slice(0, 34))} ~${x.kda} kDa</span>`).join(' + ')}<br><span class="mw-basis">${esc(c.note)}</span></td>
+              <td><b>~${c.totalKda} kDa</b></td>
+            </tr>`).join('')}</tbody>
+        </table></div>` : ''}
+        ${mwHomologs.length ? `
+        <p class="note"><b>同源结构形成的大复合物（BLAST 扩展检索）</b>— 直接装配路径不足 50 kDa 时检索；同源亚基按靶点单体换算</p>
+        <div class="tbl-wrap"><table class="tbl-data">
+          <thead><tr><th style="width:86px">PDB</th><th style="width:64px">Identity</th><th style="width:132px">方法 · 分辨率</th><th>组分（同源装配口径）</th><th style="width:96px">同源装配</th><th style="width:96px">靶点换算</th></tr></thead>
+          <tbody>${mwHomologs.map(h => `
+            <tr>
+              <td class="td-id"><a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a></td>
+              <td><b>${Math.round(h.identity)}%</b></td>
+              <td>${esc(h.method.slice(0, 16))}${h.resolution != null ? ` · ${h.resolution}Å` : ''}</td>
+              <td class="t-title">${esc(h.componentSummary)}<br><span class="mw-basis">${esc(h.note)}</span></td>
+              <td>~${h.totalKda} kDa</td>
+              <td><b>~${h.estimatedKda} kDa</b></td>
+            </tr>`).join('')}</tbody>
+        </table></div>` : ''}
+        ${(() => { const ps = mwA.partners.filter(p => p.kda != null); return ps.length ? `
+        <p class="note"><b>UniProt 互作伙伴</b>（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
+        <ul class="mw-list">${ps.slice(0, 8).map(p => `<li><span class="mw-partner">${esc((p.geneName ?? p.proteinName ?? p.accession).slice(0, 40))}</span> <span class="mono">${esc(p.accession)}</span> — ${p.lengthAa} aa，~${p.kda} kDa${mwA.assemblyPath === 'partner' ? '（已按最大伙伴计入装配估计）' : ''}</li>`).join('')}</ul>` : '' })()}
+        <p class="note"><b>技术增重工具箱</b>（无生物装配路径时的兜底策略；需评估开发周期）</p>
+        <ul class="mw-list">${mwA.options.map(o => `<li><b>${esc(o.name)}</b>（${esc(o.addKda)}）— ${esc(o.note)}</li>`).join('')}</ul>
+        ${mwA.conflicts.length ? `
+        <p class="note"><b>与客户目的的比对</b>（加入的蛋白是否与目的冲突 — 契合 / 需注意 / 冲突）</p>
+        <ul class="mw-list">${mwA.conflicts.map(c => `<li><span class="mw-conf-tag mw-${c.level}">${c.level === 'aligned' ? '契合' : c.level === 'caution' ? '需注意' : '冲突'}</span> ${esc(c.text)}</li>`).join('')}</ul>` : ''}
+      </details>` : ''}
+    </div>` : ''
+
+  // v1.29：互作复合物证据条（无直接结构时；评分卡内嵌，不单独成章）
+  const itxA = ctx.interaction
+  const itxAdj = ctx.scores.interactionAdjust
+  const itxBest = itxA?.complexes[0]
+  const interactionStripHtml = itxA?.applicable && itxA.hasEvidence ? `
+    <div class="oligo-strip itx-strip">
+      <div class="oligo-strip-head">
+        <span class="oligo-badge" style="background:${itxAdj?.level === 'curated' ? '#0f766e' : '#b45309'}">${itxAdj?.level === 'curated' ? 'Complex Portal' : 'IntAct 互作'}</span>
+        <span class="oligo-strip-label">互作证据<b>${esc(itxBest ? `${itxBest.complexAc}${itxBest.assembly ? ` · ${itxBest.assembly}` : ''}` : 'binary 伙伴')}</b></span>
+        ${itxAdj ? `<span class="oligo-chips">${adjChip('X-ray', itxAdj.xray)}${adjChip('Cryo-EM', itxAdj.cryoem)}${adjChip('NMR', itxAdj.nmr)}</span>` : ''}
+      </div>
+      <p class="oligo-strip-note">${esc(itxA.summary)}${itxAdj ? '（上述调整已计入对应方法分数与综合评分；curated 复合物接管 Cryo-EM 分子量分量时，分子量增重与聚集形式维度的 Cryo-EM 分量不再重复计分）' : ''}${itxA.complexes.length ? ' — 组分结构清单（共有结构/单独结构分类）见「PDB 结构清单」章节。' : ''}</p>
+      ${itxA.notes.length ? `<details class="fold"><summary>互作证据要点与策略影响（${itxA.notes.length} 条）</summary><ul class="mw-list">${itxA.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul></details>` : ''}
+    </div>` : ''
+
+  const scoreHtml = `
+  <div class="score-card">
+    ${scoreBar('X-ray 结晶', ctx.scores.xray, scoreColor(ctx.scores.xray.score))}
+    ${scoreBar('Cryo-EM', ctx.scores.cryoem, scoreColor(ctx.scores.cryoem.score))}
+    ${scoreBar('NMR', ctx.scores.nmr, scoreColor(ctx.scores.nmr.score))}
+    ${scoreBar('综合评估', ctx.scores.overall, scoreColor(ctx.scores.overall.score), 'row-overall')}
+    <div class="score-rationale">
+      <div>· X-ray：${esc(ctx.scores.rationale.xray)}</div>
+      <div>· Cryo-EM：${esc(ctx.scores.rationale.cryoem)}</div>
+      <div>· NMR：${esc(ctx.scores.rationale.nmr)}</div>
+      <div>· 综合：${esc(ctx.scores.rationale.overall)}</div>
+    </div>
+    ${oligoStripHtml}
+    ${mwStripHtml}
+    ${interactionStripHtml}
+  </div>`
+
+  // ─── v1.28 核心结论速览（At a Glance）：关键结论前置，10 秒抓住要点 ──────
+  const methodsRanked = [
+    { label: 'X-ray 结晶', s: ctx.scores.xray },
+    { label: 'Cryo-EM', s: ctx.scores.cryoem },
+    { label: 'NMR', s: ctx.scores.nmr },
+  ].sort((a, b) => b.s.score - a.s.score)
+  const topM = methodsRanked[0]
+  const secondM = methodsRanked[1]
+  const methodTie = topM.s.score === secondM.s.score
+  const recommendVal = methodTie ? `${topM.label} / ${secondM.label}` : topM.label
+  const recommendSub = methodTie
+    ? `两方法并列 ${topM.s.score}/10 — 按靶点特点与周期取舍`
+    : `${topM.s.score}/10 · 备选 ${secondM.label} ${secondM.s.score}/10`
+
+  const bestIdentity = ctx.blastHits.length ? Math.max(...ctx.blastHits.map(h => h.identity)) : null
+  let blastTileVal: string
+  let blastTileSub: string
+  let blastTileWarn = false
+  if (ctx.blastHits.length) {
+    blastTileVal = `${ctx.blastHits.length} 个同源结构`
+    blastTileSub = `最高 identity ${bestIdentity!.toFixed(0)}%${ctx.blastStatus?.provider === 'rcsb' ? ' · RCSB 检索' : ''}`
+  } else if (ctx.blastStatus?.status === 'no-hits') {
+    blastTileVal = '无显著同源命中'
+    blastTileSub = '检索已完成 — 全新靶点，无先例可借鉴'
+  } else if (ctx.blastStatus?.status === 'failed') {
+    blastTileVal = '同源检索失败'
+    blastTileSub = '本报告不含同源证据 — 建议重新评估'
+    blastTileWarn = true
+  } else if (ctx.blastStatus) {
+    blastTileVal = '未单独检索'
+    blastTileSub = describeBlastStatus(ctx.blastStatus).split('（')[0].slice(0, 30)
+  } else {
+    blastTileVal = '—'
+    blastTileSub = '未记录检索状态'
+  }
+
+  const mwA2 = ctx.mwAugment
+  let mwTileVal: string
+  let mwTileSub: string
+  if (mwA2?.applicable) {
+    mwTileVal = mwA2.assemblyKda != null
+      ? `单体 ~${mwA2.monomerKda} kDa → 装配 ~${mwA2.assemblyKda} kDa`
+      : `单体 ~${mwA2.monomerKda} kDa（小分子量）`
+    mwTileSub = mwA2.assemblyKda != null
+      ? `${mwPathZh}${mwA2.assemblyPath === 'homolog-complex' ? ' — 需实验验证' : ''}`
+      : '无生物装配增重路径 — 需技术增重'
+  } else {
+    mwTileVal = mwA2 ? `单体 ~${mwA2.monomerKda} kDa` : `${ctx.uniprot?.sequenceLength ?? ctx.sequence.length} aa`
+    mwTileSub = '分子量处于常规适配区间'
+  }
+
+  // v1.29：互作复合物 tile（无直接结构且有证据时）
+  const itxTile = ctx.interaction?.applicable && ctx.interaction.hasEvidence
+    ? (() => {
+        const best = ctx.interaction!.complexes[0]
+        const val = best ? best.complexAc : 'binary 伙伴'
+        const sub = best
+          ? `${best.componentsWithStructure}/${best.components.length - 1} 组分有结构${best.sharedPdbTotal ? ` · 共有 ${best.sharedPdbTotal}` : ''}${best.assemblyKda != null ? ` · 装配 ~${best.assemblyKda} kDa` : ''}`
+          : `${ctx.interaction!.binaryPartners.length} 个伙伴有结构`
+        return `<div class="glance-tile"><div class="gt-label">互作复合物</div><div class="gt-value">${esc(val)}</div><div class="gt-sub">${esc(sub)} · ${best ? 'Complex Portal' : 'IntAct'}</div></div>`
+      })()
+    : ''
+
+  const glanceHtml = `
+  <section class="glance" id="glance" aria-label="核心结论速览">
+    <div class="glance-kicker">Key Findings · 核心结论速览</div>
+    <div class="glance-grid">
+      <div class="glance-hero">
+        <div class="glance-score" style="color:${scoreColor(ctx.scores.overall.score)}">${ctx.scores.overall.score}<span>/10</span></div>
+        <div class="glance-hero-label">综合可行性 · ${esc(ctx.scores.overall.rating)}</div>
+        <span class="glance-rating" style="background:${scoreColor(ctx.scores.overall.score)}">${esc(ctx.scores.overall.rating.split('·')[1] ?? ctx.scores.overall.rating)}</span>
+      </div>
+      <div class="glance-tiles">
+        <div class="glance-tile"><div class="gt-label">推荐方法</div><div class="gt-value">${esc(recommendVal)}</div><div class="gt-sub">${esc(recommendSub)}</div></div>
+        <div class="glance-tile ${ctx.directPdbs.length === 0 ? 'gt-warn' : ''}"><div class="gt-label">已有结构</div><div class="gt-value">${ctx.directPdbs.length > 0 ? `${ctx.directPdbs.length} 个` : '无（全新靶点）'}</div><div class="gt-sub">${ctx.directPdbs.length > 0 ? `X-ray ${methodStats.xrayCount} · Cryo-EM ${methodStats.cryoemCount} · NMR ${methodStats.nmrCount}${methodStats.bestResolution != null ? ` · 最佳 ${methodStats.bestResolution.toFixed(2)}Å` : ''}` : ctx.interaction?.hasEvidence ? '结构证据来自互作复合物组分（见互作复合物 tile）' : 'RCSB 无直接关联结构 — 依据同源与文献判断'}</div></div>
+        ${itxTile}
+        <div class="glance-tile ${blastTileWarn ? 'gt-warn' : ''}"><div class="gt-label">同源参考</div><div class="gt-value">${esc(blastTileVal)}</div><div class="gt-sub">${esc(blastTileSub)}</div></div>
+        ${oligo ? `<div class="glance-tile"><div class="gt-label">聚集形式</div><div class="gt-value">${esc(oligo.label || oligoCategoryZh)}</div><div class="gt-sub">${esc(oligo.stoichiometry ? oligo.stoichiometry + ' · ' : '')}置信度${esc(oligoConfZh)}</div></div>` : ''}
+        <div class="glance-tile"><div class="gt-label">分子量</div><div class="gt-value">${esc(mwTileVal)}</div><div class="gt-sub">${esc(mwTileSub)}</div></div>
+        <div class="glance-tile"><div class="gt-label">结构覆盖率</div><div class="gt-value">${ctx.coverage ? ctx.coverage.coveragePercent + '%' : '—'}</div><div class="gt-sub">${ctx.coverage ? (ctx.gapText ? '存在未覆盖区间（见评分与结构章节）' : '已有结构覆盖完整') : '无覆盖率数据（PDBe 未返回）'}</div></div>
+      </div>
+    </div>
+    <div class="glance-foot">推荐路线：${esc(topM.label)}为主${methodTie ? '' : `，${esc(secondM.label)}备选`} — 评分依据与增重/寡聚调整详见「可行性评分」章节，实验策略详见「评估分析」的推荐技术路线与实验方案建议。</div>
+  </section>`
+
+  // 实验图分组展示：gel / sec / other 各成小组，类型一目了然
+  const figGroupDefs: Array<{ kind: 'gel' | 'sec' | 'other'; title: string; en: string }> = [
+    { kind: 'gel', title: 'SDS-PAGE 胶图', en: 'SDS-PAGE' },
+    { kind: 'sec', title: 'SEC 分子筛色谱图', en: 'SEC Profile' },
+    { kind: 'other', title: '其他实验图', en: 'Others' },
+  ]
+  const vlmCount = embedded.filter(e => e.meta.vlmKind).length
+  const figGroups = figGroupDefs
+    .map(g => ({ ...g, items: embedded.filter(e => e.meta.kind === g.kind) }))
+    .filter(g => g.items.length > 0)
+  let figNo = 0
+  const imagesHtml = embedded.length ? `
+  <section class="sec" id="assets">
+    <h2>${secHead(assetsNo, `客户提供的实验数据（${embedded.length} 张）`, `${figGroups.map(g => `${g.en} × ${g.items.length}`).join(' · ')}${vlmCount ? ' · AI 识别' : ''}`)}</h2>
+    ${figGroups.map(g => `
+    <h3 class="fig-group">${g.title}<span class="fig-group-count">${g.items.length} 张</span></h3>
+    <div class="fig-grid">
+    ${g.items.map(({ meta, dataUri }) => {
+      figNo += 1
+      return `
+      <figure class="fig">
+        ${dataUri
+        ? `<img src="${dataUri}" alt="${esc(meta.caption)}" loading="lazy">`
+        : `<div class="fig-missing">图片体积超出内嵌预算，请通过系统查看</div>`}
+        <figcaption><span class="fig-tag fig-${meta.kind}">${meta.kind === 'gel' ? 'SDS-PAGE' : meta.kind === 'sec' ? 'SEC' : '图'}</span>${meta.vlmKind ? '<span class="fig-tag fig-ai">AI 视觉识别</span>' : ''}图 ${figNo}：${esc(meta.caption)}</figcaption>
+      </figure>`
+    }).join('')}
+    </div>`).join('')}
+  </section>` : ''
+
+  const pdbCountHtml = `${ctx.directPdbs.length}${input.totalPdbFound > ctx.directPdbs.length ? ` / 检索命中 ${input.totalPdbFound}` : ''}`
+
+  // v2.7.6 ④：覆盖率区段图（PDB 结构清单章节头部 — 已覆盖/未覆盖区间一目了然）
+  const covFigHtml = coverageFigureHtml(ctx.coverage, u ? u.sequenceLength : (ctx.sequence?.length ?? 0))
+
+  // v2.7.2：AlphaFold 头图 — 优先内嵌 3Dmol 交互式 3D 视图（拖拽旋转/滚轮缩放，
+  // pLDDT 四段着色；与无头截图页共用 plddtStyleApplyJs 同一着色实现）。失败降级链：
+  // 交互视图 → legacy 静态 PNG（磁盘缓存命中时）→ 仅统计信息；打印/无 WebGL 时
+  // poster 静态图兜底（viewer 初始化成功后用 pngURI 生成打印海报）。
+  const af3dBundle = input.alphafoldStructure ? await ensure3DmolBundle() : null
+  const af = input.alphafoldStructure
+  const afBlockHtml = af ? `
+      <figure class="af-fig">
+        <div class="af-stage" id="af-stage">
+          <div class="af-canvas" id="af-canvas"></div>
+          <img id="af-poster" class="af-poster"${input.alphafoldFigure ? ` src="${input.alphafoldFigure.dataUri}"` : ''} alt="AlphaFold 预测结构静态视图（pLDDT 着色）">
+        </div>
+        <div class="af-legend">
+          <span><i style="background:#0053D6"></i>pLDDT ≥ 90</span>
+          <span><i style="background:#65CBF3"></i>70–90</span>
+          <span><i style="background:#FFDB13"></i>50–70</span>
+          <span><i style="background:#FF7D45"></i>&lt; 50</span>
+        </div>
+        ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+        <script>
+        (function () {
+          var stage = document.getElementById('af-stage');
+          var cv = document.getElementById('af-canvas');
+          var poster = document.getElementById('af-poster');
+          function fail() { if (stage) stage.className = 'af-stage af-fail'; }
+          function init() {
+            try {
+              if (!window.$3Dmol || !cv) return fail();
+              var pdb = ${JSON.stringify(af.pdbText).replace(/<\//g, '<\\/')};
+              var viewer = $3Dmol.createViewer(cv, { defaultcolors: $3Dmol.rasmolElementColors });
+              viewer.setBackgroundColor(0xffffff);
+              viewer.addModel(pdb, 'pdb');
+              ${plddtStyleApplyJs()}
+              viewer.zoomTo();
+              viewer.zoom(1.2);
+              viewer.render();
+              stage.className = 'af-stage af-live';
+              window.__afViewerReady = true;
+              window.__afViewer = viewer; // v2.7.7：全屏放大后显式 resize（ResizeObserver 之外的保险）
+              try {
+                var uri = viewer.pngURI ? viewer.pngURI() : null;
+                if (uri && poster) poster.src = uri;
+              } catch (e) { /* 打印海报生成失败不影响交互 */ }
+            } catch (e) { fail(); }
+          }
+          if (window.$3Dmol) init();
+          else {
+            var s = document.createElement('script');
+            s.src = 'https://3Dmol.org/build/3Dmol-min.js';
+            s.onload = init; s.onerror = fail;
+            (document.head || document.documentElement).appendChild(s);
+          }
+        })();
+        </script>
+        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+      </figure>`
+    : (input.alphafoldFigure ? `
+      <figure class="af-fig">
+        <img src="${input.alphafoldFigure.dataUri}" alt="AlphaFold 预测结构（pLDDT 着色）">
+        <figcaption><b>AlphaFold 预测结构</b> · pLDDT 着色<br>${esc(input.alphafoldFigure.modelId)} · v${input.alphafoldFigure.version} · 平均 pLDDT ${input.alphafoldFigure.globalPlddt ?? '—'}<br><a href="https://alphafold.ebi.ac.uk/entry/${u ? u.uniprotId : ''}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+      </figure>` : '')
+
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<title>靶点结构解析可行性评估报告 — ${esc(proteinTitle)}</title>
+<style>
+  :root {
+    --ink:#1c1917; --sub:#57534e; --faint:#a8a29e; --line:#e7e5e4; --hairline:#efedeb;
+    --accent:#065f46; --accent-2:#047857; --accent-bg:#f0fdf7; --bg:#fcfcfb; --paper:#ffffff;
+    --serif:"Source Serif 4","Noto Serif SC",Georgia,"Songti SC","STSong","SimSun","Times New Roman",serif;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,"Courier New",monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { -webkit-print-color-adjust:exact; print-color-adjust:exact; scroll-behavior:smooth; }
+  [id] { scroll-margin-top:18px; }
+  body { font-family:var(--serif); color:var(--ink); background:var(--bg); line-height:1.92; font-size:15px; letter-spacing:.006em; }
+  .mono { font-family:var(--mono); }
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#d6d3d1;border-radius:99px;border:3px solid var(--paper)}
+  ::-webkit-scrollbar-thumb:hover{background:#a8a29e}
+  ::-webkit-scrollbar-track{background:transparent}
+  html{scrollbar-width:thin;scrollbar-color:#d6d3d1 transparent}
+  .page { max-width:920px; margin:0 auto; padding:56px 44px 72px; background:var(--paper); min-height:100vh; box-shadow:0 0 0 1px var(--hairline); }
+  @media print {
+    body{background:#fff} .page{padding:0;max-width:none;box-shadow:none}
+    .no-print{display:none!important} .sec{break-inside:avoid-page} .fig{break-inside:avoid}
+    .glance{break-inside:avoid}
+    table{break-inside:auto} tr{break-inside:avoid} details{display:block}
+  }
+
+  /* ── 报告封面头（期刊风双线）── */
+  .rpt-head { padding-bottom:22px; margin-bottom:30px; border-bottom:1px solid var(--ink); position:relative; }
+  .rpt-head::after { content:''; display:block; position:absolute; left:0; bottom:3px; width:100%; border-bottom:3px solid var(--ink); }
+  .rpt-eyebrow { font-family:var(--mono); color:var(--accent); font-weight:600; font-size:10.5px; letter-spacing:2.4px; text-transform:uppercase; margin-bottom:14px; }
+  h1.rpt-title { font-size:28px; line-height:1.4; margin-bottom:6px; font-weight:900; }
+  .rpt-subtitle { font-size:13px; color:var(--sub); font-style:italic; margin-bottom:18px; }
+  .meta-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:9px 22px; font-size:12.5px; color:var(--sub); }
+  .meta-grid b { color:var(--ink); font-weight:600; margin-right:2px; }
+  .meta-grid a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #a7f3d0; }
+  .meta-grid a:hover { border-bottom-color:var(--accent-2); }
+  .rpt-badges { margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; }
+  .badge { display:inline-block; padding:2px 11px; border-radius:3px; font-family:var(--mono); font-size:11px; font-weight:600; background:var(--accent-bg); color:var(--accent); border:1px solid #b8e6d2; }
+  .badge.amber { background:#fffbeb; color:#92400e; border-color:#fde68a; }
+
+  /* ── 目录 ── */
+  .toc { border:1px solid var(--line); border-radius:6px; padding:16px 22px; margin-bottom:34px; font-size:13px; background:#fdfdfc; }
+  .toc b { display:block; margin-bottom:8px; font-family:var(--mono); font-size:10px; letter-spacing:1.6px; color:var(--faint); text-transform:uppercase; }
+  .toc ol { margin-left:20px; columns:2; column-gap:36px; }
+  .toc li { margin:3px 0; break-inside:avoid; }
+  .toc a { color:var(--ink); text-decoration:none; }
+  .toc a:hover { color:var(--accent-2); }
+  @media (max-width:640px){ .toc ol{columns:1} }
+
+  /* ── v1.28 核心结论速览（At a Glance）── */
+  .glance { border:1.5px solid var(--ink); border-radius:8px; margin:0 0 34px; background:#fff; overflow:hidden; }
+  .glance-kicker { font-family:var(--mono); font-size:10px; letter-spacing:2.2px; text-transform:uppercase; color:var(--accent); padding:13px 20px 11px; font-weight:700; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#ffffff,#f7fcf9); }
+  .glance-grid { display:grid; grid-template-columns:200px 1fr; }
+  .glance-hero { padding:18px 20px; border-right:1px solid var(--line); display:flex; flex-direction:column; justify-content:center; align-items:flex-start; background:#fbfdfc; }
+  .glance-score { font-family:var(--mono); font-size:46px; font-weight:700; line-height:1; }
+  .glance-score span { font-size:15px; color:var(--faint); font-weight:400; }
+  .glance-hero-label { font-size:12px; color:var(--sub); margin-top:8px; }
+  .glance-rating { display:inline-block; margin-top:9px; padding:2px 12px; border-radius:3px; font-size:12px; font-weight:700; color:#fff; letter-spacing:1px; }
+  .glance-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); }
+  .glance-tile { padding:13px 16px 11px; border-right:1px solid var(--hairline); border-bottom:1px solid var(--hairline); min-width:0; }
+  .glance-tile:nth-child(3n) { border-right:none; }
+  .glance-tile.gt-warn { background:#fffbeb; }
+  .glance-tile.gt-warn .gt-value { color:#b45309; }
+  .gt-label { font-family:var(--mono); font-size:9.5px; letter-spacing:1.4px; text-transform:uppercase; color:var(--faint); font-weight:600; }
+  .gt-value { font-size:14px; font-weight:700; margin-top:4px; line-height:1.5; overflow-wrap:anywhere; }
+  .gt-sub { font-size:11px; color:var(--sub); margin-top:3px; line-height:1.55; }
+  .glance-foot { padding:10px 20px; border-top:1px dashed var(--line); font-size:12px; color:var(--sub); background:#fbfdfc; line-height:1.8; }
+  @media (max-width:680px){
+    .glance-grid { grid-template-columns:1fr; }
+    .glance-hero { border-right:none; border-bottom:1px solid var(--line); flex-direction:row; align-items:center; gap:16px; }
+    .glance-score { font-size:36px; }
+    .glance-tile { border-right:none; border-bottom:1px solid var(--hairline); }
+  }
+
+  /* ── v1.28 回顶部 ── */
+  .backtop { position:fixed; right:26px; bottom:26px; width:42px; height:42px; border-radius:50%; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-size:17px; text-decoration:none; box-shadow:0 4px 14px rgba(0,0,0,.2); opacity:0; pointer-events:none; transition:opacity .25s, background .2s; z-index:50; }
+  .backtop.show { opacity:1; pointer-events:auto; }
+  .backtop:hover { background:var(--accent-2); }
+
+  /* ── v1.28 空态/警示块 ── */
+  .callout { border-radius:6px; padding:14px 18px; margin:12px 0; font-size:13px; line-height:1.95; border:1px solid; text-align:justify; }
+  .callout b { display:block; margin-bottom:5px; font-size:13.5px; }
+  .callout-amber { background:#fffbeb; border-color:#fde68a; color:#92400e; }
+
+  /* ── 章节（v1.28：编号方块 + 标题 + 英文标签，结构分明）── */
+  .sec { margin-bottom:40px; }
+  .sec > h2 { font-size:19px; padding-bottom:10px; margin-bottom:16px; border-bottom:2px solid var(--ink); font-weight:700; display:flex; align-items:center; gap:12px; }
+  .sec-no { flex:none; width:32px; height:32px; background:var(--ink); color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:15px; font-weight:700; border-radius:5px; }
+  .sec-title { min-width:0; }
+  .sec > h2 .sec-en { margin-left:auto; font-family:var(--mono); font-size:10px; font-weight:500; letter-spacing:1.8px; color:var(--faint); text-transform:uppercase; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sec h3 { font-size:15.5px; margin:20px 0 8px; color:#064e3b; font-weight:700; }
+  .sec h4 { font-size:14px; margin:16px 0 6px; font-weight:700; border-left:3px solid #a7f3d0; padding-left:10px; }
+  .sec h5, .sec h6 { font-size:13.5px; margin:12px 0 5px; font-weight:700; }
+  /* v1.30：LLM 章节层次强化 — 子章节编号徽章 + 分隔线 + 摘要导语 + 强调色 */
+  #llm { counter-reset: llmch; }
+  #llm h3 { counter-increment: llmch; display:flex; align-items:center; gap:11px; margin:34px 0 12px; padding-bottom:9px; border-bottom:1px solid var(--line); }
+  #llm h3::before { content:"1." counter(llmch); flex:none; font-family:var(--mono); font-size:11px; font-weight:700; color:#fff; background:var(--accent-2); border-radius:4px; padding:2px 9px; letter-spacing:.5px; line-height:1.5; }
+  #llm h3:first-child { margin-top:6px; }
+  /* 执行摘要首段 = 全报告导语 — 大字号 + 主色竖线，突出总体结论 */
+  #llm h3:first-of-type + p { font-size:15.5px; line-height:2.05; color:var(--ink); border-left:3px solid var(--accent-2); padding:2px 0 2px 15px; margin:12px 0 14px; }
+  #llm p { margin:9px 0; }
+  #llm ul li::marker, #llm ol li::marker { color:var(--accent-2); font-family:var(--mono); font-weight:600; }
+  #llm strong { color:#064e3b; }
+  #llm blockquote { border-left:3px solid #a7f3d0; background:#f7fdfb; }
+  #llm .tbl-wrap { margin:16px 0 12px; }
+  p { margin:8px 0; text-align:justify; }
+  ul { margin:8px 0 8px 22px; }
+  li { margin:4px 0; }
+  blockquote { border-left:3px solid #d6d3d1; padding:5px 14px; margin:12px 0; color:var(--sub); background:#fafaf9; border-radius:0 4px 4px 0; font-size:13.5px; }
+  strong { font-weight:700; }
+  em { font-style:italic; }
+  code { font-family:var(--mono); background:#f5f5f4; padding:1px 5px; border-radius:3px; font-size:.88em; }
+
+  /* ── 表格 ── */
+  .tbl-wrap { overflow-x:auto; margin:12px 0 6px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; font-family:var(--serif); }
+  /* 数据表（PDB/BLAST）：固定列宽防长串挤压重叠；窄屏由 .tbl-wrap 横向滚动 */
+  table.tbl-data { table-layout:fixed; min-width:856px; }
+  table.tbl-blast { min-width:740px; }
+  th { background:#f7f7f5; text-align:left; font-size:10px; letter-spacing:1px; text-transform:uppercase; color:var(--sub); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  th.num { text-align:right; }
+  th, td { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:6px 8px; vertical-align:top; }
+  thead th { border-top:none; border-bottom:1.5px solid #d6d3d1; }
+  tbody tr:last-child td { border-bottom:none; }
+  tbody tr:nth-child(even) td { background:#fafaf8; }
+  tbody tr:hover td { background:#f5f5f4; }
+  td { overflow-wrap:anywhere; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; font-family:var(--mono); }
+  td.td-id a, .t-nowrap { white-space:nowrap; }
+  td.td-id { font-family:var(--mono); }
+  .t-title, .t-desc { font-family:var(--serif); overflow-wrap:break-word; }
+  .t-lig { font-size:11px; overflow-wrap:anywhere; }
+  .t-journal { font-size:11px; }
+  .t-rng { font-family:var(--mono); font-size:11px; color:var(--sub); overflow-wrap:anywhere; }
+  .lig-more { color:var(--faint); white-space:nowrap; }
+  table a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
+  table a:hover { border-bottom-color:var(--accent-2); }
+  .lit-dot { display:inline-block; width:4px; height:4px; border-radius:99px; background:var(--accent-2); margin-left:4px; vertical-align:2px; }
+  .mth { display:inline-block; padding:0 7px; border-radius:3px; font-size:10.5px; font-weight:600; white-space:nowrap; }
+  .mth-xray { background:#ecfdf5; color:#065f46; }
+  .mth-cryoem { background:#fef3c7; color:#92400e; }
+  .mth-nmr { background:#f5f3ff; color:#5b21b6; }
+  .mth-other { background:#f5f5f4; color:var(--sub); }
+
+  /* ── 折叠区（details）── */
+  details.fold { margin:2px 0 10px; border-top:1px dashed #d6d3d1; }
+  details.fold summary { list-style:none; cursor:pointer; padding:9px 4px; font-family:var(--mono); font-size:11px; letter-spacing:.6px; color:var(--accent-2); user-select:none; }
+  details.fold summary::-webkit-details-marker { display:none; }
+  details.fold summary::before { content:'＋ '; font-family:var(--mono); }
+  details.fold[open] summary::before { content:'－ '; }
+  details.fold summary:hover { color:var(--accent); }
+
+  /* ── 评分卡 ── */
+  .score-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:18px 22px; margin:14px 0 10px; }
+  .score-row { display:grid; grid-template-columns:96px 1fr 64px 110px; gap:14px; align-items:center; margin:10px 0; }
+  .score-label { font-weight:700; font-size:13px; }
+  .score-track { height:8px; border-radius:99px; background:#eceae6; overflow:hidden; }
+  .score-fill { height:100%; border-radius:99px; }
+  .score-num { font-family:var(--mono); font-size:16px; font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
+  .score-max { color:var(--faint); font-size:11px; font-weight:400; }
+  .score-rating { font-size:12px; color:var(--sub); text-align:right; font-family:var(--mono); }
+  @media (max-width:560px){
+    .score-card{ padding:14px 16px; }
+    .score-row{ grid-template-columns:1fr auto; gap:5px 12px; }
+    .score-label{ grid-column:1; grid-row:1; }
+    .score-num{ grid-column:2; grid-row:1; }
+    .score-track{ grid-column:1 / -1; grid-row:2; }
+    .score-rating{ grid-column:1 / -1; grid-row:3; text-align:left; }
+  }
+  .score-rationale { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--sub); line-height:2; }
+  /* v1.28：综合分行强调（突出关键信息）*/
+  .score-row.row-overall { background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:6px; padding:10px 12px; margin:16px -12px 4px; }
+  .score-row.row-overall .score-label { color:var(--accent); font-size:14px; }
+  .score-row.row-overall .score-num { font-size:19px; }
+  .score-row.row-overall .score-track { height:10px; }
+
+  /* ── 聚集形式（评分卡内嵌，v1.25）── */
+  .oligo-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:16px 20px; margin:14px 0; }
+  .oligo-head { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:10px; }
+  .oligo-badge { color:#fff; font-size:12px; font-weight:700; padding:3px 12px; border-radius:3px; letter-spacing:1px; }
+  .oligo-stoich { font-family:var(--mono); font-size:12.5px; color:var(--ink); background:#f5f5f4; border:1px solid var(--line); padding:2px 10px; border-radius:3px; }
+  .oligo-conf { font-size:12px; color:var(--sub); margin-left:auto; }
+  .oligo-summary { margin:6px 0 0; font-size:13.5px; }
+  .oligo-strip { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); }
+  .oligo-strip-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; }
+  .oligo-strip-label { font-size:12.5px; color:var(--sub); }
+  .oligo-strip-label b { color:var(--ink); font-weight:700; margin: 0 2px; }
+  .oligo-chips { display:inline-flex; flex-wrap:wrap; gap:6px; }
+  .adj-chip { font-family:var(--mono); font-size:11px; font-weight:700; padding:1px 9px; border-radius:99px; white-space:nowrap; }
+  .adj-pos { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
+  .adj-neg { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
+  .adj-zero { background:#f5f5f4; color:var(--sub); border:1px solid var(--line); }
+  .oligo-strip-note { font-size:12.5px; color:var(--sub); margin:8px 0 0; }
+  .note { font-size:12px; color:var(--sub); margin-top:6px; }
+
+  /* ── v1.26 分子量增重条（沿用聚集形式条布局，复用 .oligo-strip 类）── */
+  .mw-target { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; border-radius:3px; padding:0 5px; font-weight:600; }
+  .mw-partner { background:#fffbeb; color:#92400e; border:1px solid #fde68a; border-radius:3px; padding:0 5px; font-weight:600; }
+  .mw-basis { font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  ul.mw-list { list-style:none; margin:2px 0 10px; }
+  ul.mw-list li { position:relative; padding:5px 0 5px 16px; border-bottom:1px solid var(--hairline); font-size:12.5px; color:var(--sub); line-height:1.7; }
+  ul.mw-list li:last-child { border-bottom:none; }
+  ul.mw-list li::before { content:'·'; position:absolute; left:4px; color:var(--accent-2); font-weight:700; }
+  .mw-conf-tag { display:inline-block; min-width:44px; text-align:center; font-family:var(--mono); font-size:10.5px; font-weight:700; border-radius:3px; padding:0 6px; margin-right:6px; vertical-align:1px; }
+  .mw-aligned { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
+  .mw-caution { background:#fffbeb; color:#b45309; border:1px solid #fde68a; }
+  .mw-conflict { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
+
+  /* ── v1.30/v1.31 互作复合物结构清单（共有结构突出 / 单独结构折叠，全量表列）── */
+  .itx-h3 { margin:22px 0 6px !important; display:flex; align-items:baseline; gap:10px; }
+  .itx-h3-sub { font-family:var(--mono); font-size:10.5px; font-weight:500; letter-spacing:1px; color:var(--faint); }
+  .cx-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:16px 20px; margin:14px 0; }
+  .cx-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; margin-bottom:12px; }
+  .cx-badge { flex:none; font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:1px; color:#fff; background:#0f766e; border-radius:3px; padding:2px 10px; }
+  .cx-name { font-size:14.5px; min-width:0; overflow-wrap:anywhere; }
+  .cx-name a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
+  .cx-name a:hover { border-bottom-color:var(--accent-2); }
+  .cx-chip { font-family:var(--mono); font-size:11px; color:var(--sub); background:#f5f5f4; border:1px solid var(--line); border-radius:3px; padding:1px 9px; white-space:nowrap; }
+  .cx-chip.cx-ok { background:#ecfdf5; color:#047857; border-color:#a7f3d0; }
+  .cx-chip.cx-chip-shared { background:#065f46; color:#fff; border-color:#065f46; font-weight:700; }
+  table.tbl-cx { min-width:660px; }
+  .tbl-cx tr.cx-target td { background:#ecfdf5; border-top:1px solid #d1e9dd; border-bottom:1px solid #d1e9dd; }
+  .cx-desc { font-family:var(--serif); font-size:11px; color:var(--faint); }
+  .cx-res { font-family:var(--mono); font-size:10.5px; color:var(--faint); margin-left:2px; }
+  /* 共有结构：绿色面板突出（组装先例）— v1.31 全量表列 */
+  .cx-shared { border:1px solid #b8e6d2; background:linear-gradient(180deg,#f5fcf8,#ffffff); border-radius:6px; padding:12px 18px 10px; margin:14px 0 8px; }
+  .cx-shared-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 10px; font-size:13.5px; font-weight:700; color:#065f46; margin-bottom:4px; }
+  .cx-shared-ico { color:var(--accent-2); font-size:14px; }
+  .cx-shared-head b { font-family:var(--mono); font-size:15px; color:#047857; }
+  .cx-shared-sub { flex-basis:100%; font-size:11px; font-weight:400; color:var(--sub); line-height:1.7; }
+  .cx-shared .tbl-wrap, .cx-solo-comp .tbl-wrap { margin:6px 0 4px; }
+  /* v1.31 紧凑版式：9 列在报告页宽（.cx-card/.cx-shared 嵌套后 ~752px）内免横向滚动 */
+  table.tbl-cx-pdb { min-width:748px; font-size:11.5px; }
+  .tbl-cx-pdb th, .tbl-cx-pdb td { padding:5px 6px; }
+  .tbl-cx-pdb .t-title { font-size:11px; }
+  .tbl-cx-pdb .t-journal { font-size:10.5px; }
+  .tbl-cx-pdb td.num { font-size:10px; }
+  .tbl-cx-pdb .mth { padding:0 4px; font-size:9.5px; }
+  .csi-comps { font-size:11px; color:#065f46; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:3px; padding:0 6px; white-space:nowrap; display:inline-block; max-width:100%; }
+  .csi-comps i { font-style:normal; font-family:var(--mono); font-size:10px; color:#047857; margin-left:4px; }
+  .csi-extra { display:inline-block; font-size:10.5px; color:#92400e; background:#fffbeb; border:1px dashed #fde68a; border-radius:3px; padding:0 6px; margin:1px 3px 1px 0; white-space:nowrap; }
+  .csi-extra-more { font-family:var(--mono); font-size:10px; color:#b45309; white-space:nowrap; }
+  .t-extras { overflow-wrap:anywhere; }
+  .t-pmid { font-family:var(--mono); font-size:10.5px; white-space:nowrap; }
+  .t-pmid-none { color:var(--faint); }
+  /* 单独结构：按组分分组（默认折叠，展开全量表） */
+  .cx-solo-fold { margin-top:10px; }
+  .cx-solo-comp { margin:10px 0 14px; padding:10px 14px 8px; border:1px solid var(--hairline); border-radius:6px; background:#fdfdfc; }
+  .cx-solo-head { font-size:12.5px; color:var(--ink); margin-bottom:2px; }
+  .cx-solo-head .mono { font-size:10.5px; color:var(--faint); }
+  .cx-solo-sub { font-size:11px; color:var(--faint); }
+
+  /* ── 文献 ── */
+  ol.lit-list { list-style:none; }
+  .lit-item { display:flex; gap:14px; padding:12px 2px; border-bottom:1px solid var(--hairline); }
+  .lit-item:last-child { border-bottom:none; }
+  .lit-no { font-family:var(--mono); font-size:11px; color:var(--faint); min-width:22px; text-align:right; padding-top:3px; }
+  .lit-title a { color:var(--ink); font-weight:600; text-decoration:none; font-size:13.5px; }
+  .lit-title a:hover { color:var(--accent-2); }
+  .lit-src { display:inline-block; margin-left:8px; padding:0 7px; border-radius:3px; font-family:var(--mono); font-size:9.5px; font-weight:600; letter-spacing:1px; background:var(--accent-bg); color:var(--accent); border:1px solid #c7ece0; vertical-align:2px; }
+  .lit-meta { font-family:var(--mono); font-size:11.5px; color:var(--sub); margin:3px 0 2px; }
+  .lit-meta a { color:var(--accent-2); text-decoration:none; }
+  .lit-abs { font-size:12.5px; color:var(--sub); margin-top:4px; text-align:justify; }
+  .lit-pdbs { display:flex; flex-wrap:wrap; align-items:center; gap:5px; margin-top:6px; }
+  .lit-pdbs-label { font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; text-transform:uppercase; color:var(--faint); margin-right:2px; }
+  .lit-pdbs a { font-family:var(--mono); font-size:10.5px; font-weight:600; color:var(--accent); background:var(--accent-bg); border:1px solid #c7ece0; border-radius:3px; padding:0 6px; text-decoration:none; }
+  .lit-pdbs a:hover { background:#d9f5e8; }
+
+  /* ── 图 ── */
+  .fig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); gap:20px; margin-top:6px; }
+  .fig { text-align:center; }
+  .fig img { max-width:100%; max-height:420px; border:1px solid var(--line); border-radius:4px; background:#fff; padding:8px; }
+  .fig-missing { padding:40px; background:#fafaf9; border:1px dashed var(--line); border-radius:4px; color:var(--sub); }
+  .fig figcaption { font-size:12.5px; color:var(--sub); margin-top:8px; text-align:left; }
+  .fig-tag { display:inline-block; padding:0 7px; border-radius:3px; font-family:var(--mono); font-size:10px; font-weight:600; margin-right:6px; }
+  .fig-gel { background:#ecfdf5; color:#065f46; }
+  .fig-sec { background:#fef3c7; color:#92400e; }
+  .fig-other { background:#f5f5f4; color:var(--sub); }
+  .fig-ai { background:#f0fdfa; color:#0f766e; border:1px solid #99f6e4; }
+  .fig-group { margin:18px 0 4px !important; font-size:14.5px !important; color:#064e3b; display:flex; align-items:baseline; gap:8px; }
+  .fig-group-count { font-family:var(--mono); font-size:10.5px; font-weight:500; color:var(--faint); letter-spacing:1px; }
+
+  /* ── v2.7.6 覆盖率区段图（SVG 轨道 — 服务器渲染，零 JS，打印友好）── */
+  .cov-fig { margin: 14px 0 10px; }
+  .cov-fig svg { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; background: #fdfdfc; padding: 6px 8px; }
+  .cov-fig figcaption { font-size: 11px; color: var(--sub); margin-top: 6px; line-height: 1.8; }
+  .cov-fig figcaption b { color: var(--accent); }
+
+  /* ── 报告头图与元信息并排（v2.0 AlphaFold；v2.2 截图去白边；v2.7 图上提与标题齐平）──
+   *  头部双栏：左栏 = 眉标/标题/副标/蛋白信息/徽标，右栏 = AlphaFold 头图顶端对齐 —
+   *  图不再挂在蛋白信息下方（原来信息栏下方留出大片空白）。移动端 (<720px) 上下堆叠。 */
+  .rpt-headflex { display:flex; gap:26px; align-items:flex-start; }
+  .rpt-headtxt { flex:1 1 auto; min-width:0; }
+  .af-fig { flex:0 0 320px; margin:0; text-align:center; align-self:flex-start; }
+  .af-fig > img { display:block; width:320px; max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; padding:4px; box-shadow:0 1px 3px rgba(28,25,23,.06); }
+  /* v2.7.2 交互式 3D 视图（沿用 .af-fig 头部槽位 — 几何不变；fallback 层级：canvas 生效→poster 隐藏；异常→canvas 隐藏；打印→poster 常显） */
+  .af-stage { position:relative; width:100%; height:252px; border:1px solid var(--line); border-radius:6px; background:#fff; overflow:hidden; box-shadow:0 1px 3px rgba(28,25,23,.06); }
+  .af-canvas { position:absolute; inset:0; cursor:grab; }
+  .af-canvas:active { cursor:grabbing; }
+  .af-poster { display:block; width:100%; height:252px; object-fit:contain; background:#fff; }
+  .af-poster:not([src]) { display:none; }
+  .af-stage.af-live .af-poster { display:none; }
+  .af-stage.af-fail .af-canvas { display:none; }
+  .af-legend { display:flex; gap:10px; margin-top:6px; font-size:9.5px; font-family:var(--mono); color:var(--sub); justify-content:center; flex-wrap:wrap; }
+  .af-legend span { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+  .af-legend i { display:inline-block; width:10px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); }
+  @media print { .af-stage .af-canvas { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } }
+  .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
+  .af-fig figcaption b { color:var(--ink); font-weight:600; }
+  .af-fig figcaption a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
+  @media (max-width:720px){ .rpt-headflex{flex-direction:column} .af-fig{flex-basis:auto; width:100%; max-width:400px; margin:0 auto} .af-stage,.af-poster{height:260px} }
+
+  /* ── 配体卡（v2.0；v2.7 + 2D 结构式与计算性质双栏卡）── */
+  .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr)); gap:14px; margin-top:8px; }
+  .lig-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:14px 18px; break-inside:avoid; }
+  .lig-fail { border-style:dashed; opacity:.78; }
+  .lig-main { display:flex; gap:14px; align-items:flex-start; }
+  .lig-struct { flex:0 0 150px; margin:0; text-align:center; }
+  .lig-struct img { display:block; width:150px; height:150px; object-fit:contain; background:#fff; border:1px solid var(--line); border-radius:4px; padding:3px; box-shadow:0 1px 2px rgba(28,25,23,.05); }
+  .lig-struct figcaption { margin-top:5px; font-size:9.5px; line-height:1.5; color:var(--faint); font-family:var(--mono); }
+  .lig-info { flex:1 1 auto; min-width:0; }
+  .lig-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
+  .lig-id { font-family:var(--mono); font-size:14.5px; font-weight:700; color:#065f46; background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; }
+  .lig-id-fail { color:#92400e; background:#fffbeb; border-color:#fde68a; }
+  .lig-id-pc { color:#4c5fd7; background:#eef0fd; border-color:#c6cdf6; }
+  .lig-iupac { margin-top:7px; font-size:10.5px; line-height:1.65; color:var(--faint); overflow-wrap:anywhere; }
+  .lig-name { font-size:13px; font-weight:600; color:var(--ink); overflow-wrap:anywhere; min-width:120px; }
+  .lig-src { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--faint); letter-spacing:.4px; }
+  .lig-meta { display:flex; flex-wrap:wrap; gap:4px 16px; margin-top:9px; font-size:11.5px; color:var(--sub); }
+  .lig-meta b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .lig-props { display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:8px; padding-top:8px; border-top:1px dashed var(--hairline); font-size:11px; color:var(--sub); }
+  .lig-props b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .lig-fold { margin:8px 0 0; }
+  .lig-ident { font-size:11px; color:var(--sub); line-height:1.9; overflow-wrap:anywhere; }
+  .lig-ident b { color:var(--ink); font-weight:600; margin-right:4px; }
+  .lig-ident .mono { font-size:10px; color:var(--sub); }
+  .lig-pdbs { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; padding-top:10px; border-top:1px dashed var(--hairline); }
+  .lig-pdbs a { font-family:var(--mono); font-size:10.5px; font-weight:600; color:var(--accent); background:var(--accent-bg); border:1px solid #c7ece0; border-radius:3px; padding:1px 8px; text-decoration:none; white-space:nowrap; }
+  .lig-pdbs a i { font-style:normal; color:var(--faint); font-weight:400; margin-left:3px; }
+  .lig-pdbs a.lig-also { background:#e0faf1; border-color:#71cdb2; color:#04503c; }
+  .lig-pdbs a:hover { background:#d9f5e8; }
+  .lig-more { align-self:center; font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  .lig-none { font-size:12px; color:var(--faint); border-top:1px dashed var(--hairline); margin-top:10px; padding-top:8px; }
+  @media (max-width:560px){ .lig-main{flex-direction:column; align-items:center} .lig-info{align-self:stretch} .lig-struct{flex-basis:auto} }
+
+  /* ── 页脚 ── */
+  .rpt-foot { margin-top:48px; padding-top:18px; border-top:1px solid var(--ink); font-size:11.5px; color:var(--sub); line-height:2; font-family:var(--mono); }
+  .warn-box { background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:4px; padding:12px 16px; font-size:12.5px; margin:14px 0; }
+
+${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
+</head>
+<body>
+<div class="page" id="top">
+
+  <header class="rpt-head">
+    <div class="rpt-headflex">
+    <div class="rpt-headtxt">
+    <div class="rpt-eyebrow">TargetEval · Structure Feasibility Report</div>
+    <h1 class="rpt-title">${esc(proteinTitle)}</h1>
+    <div class="rpt-subtitle">蛋白靶点结构解析可行性评估报告</div>
+    <div class="meta-grid">
+      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : '—（序列直接输入）'}</div>
+      <div><b>蛋白名称</b> ${esc(u?.proteinName ?? '—')}</div>
+      <div><b>基因</b> ${esc(geneStr)}</div>
+      <div><b>物种</b> ${esc(u?.organism ?? '—')}</div>
+      <div><b>序列长度</b> ${u ? u.sequenceLength + ' aa' : ctx.sequence ? ctx.sequence.length + ' aa' : '—'}</div>
+      <div><b>结构证据</b> 直接结构 ${pdbCountHtml} · 同源 ${ctx.blastHits.length} 个 · 文献 ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构关联）` : ''}</div>
+      ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
+      ${ctx.batchNote ? `<div><b>批次关系</b> <span style="color:#92400e">${esc(ctx.batchNote.slice(0, 90))}${ctx.batchNote.length > 90 ? '…' : ''}</span></div>` : ''}
+      <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
+      <div><b>报告日期</b> ${dateStr}</div>
+    </div>
+    <div class="rpt-badges">
+      <span class="badge">数据源：UniProt · RCSB · PDBe${blastRan ? (ctx.blastStatus?.provider === 'rcsb' ? ' · RCSB 序列检索' : ' · BLAST') : ''}${ctx.literature.length ? ' · PubMed' : ''}</span>
+      ${input.llmOk
+        ? (input.llmErrors.length ? '<span class="badge amber">LLM 分析：部分完成（有章节缺失）</span>' : '<span class="badge">LLM 分析：已完成</span>')
+        : '<span class="badge amber">LLM 分析：失败（见数据区块）</span>'}
+    </div>
+    </div>
+    ${afBlockHtml}
+    </div>
+  </header>
+
+  ${glanceHtml}
+
+  <nav class="toc">
+    <b>Contents · 目录</b>
+    <ol>
+      <li><a href="#llm">评估分析（摘要 / 目标可行性 / 研究全景 / 实验策略）</a></li>
+      ${hasInsights ? '<li><a href="#insights">客户评估表要点</a></li>' : ''}
+      <li><a href="#scores">可行性评分（含聚集形式与分子量调整）</a></li>
+      <li><a href="#pdbs">PDB 结构清单</a></li>
+      ${ligandSecHtml ? '<li><a href="#ligands">配体研究数据</a></li>' : ''}
+      ${showBlastSec ? '<li><a href="#blast">BLAST 同源结构</a></li>' : ''}
+      ${ctx.literature.length ? '<li><a href="#literature">关键文献</a></li>' : ''}
+      ${embedded.length ? '<li><a href="#assets">客户实验数据（评估表）</a></li>' : ''}
+    </ol>
+  </nav>
+
+  ${input.llmErrors.length ? (() => {
+    const shown = input.llmErrors.slice(0, 3).map(esc).join('；')
+    const more = input.llmErrors.length > 3 ? `；等共 ${input.llmErrors.length} 章` : ''
+    return input.llmOk
+      ? `<div class="warn-box">部分 LLM 章节未能生成（${shown}${more}）— 报告相应章节缺失，其余章节正常；可重新评估补全。</div>`
+      : `<div class="warn-box">LLM 分析生成失败（${shown}${more || '；未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点，可稍后重试生成。</div>`
+  })() : ''}
+
+  <section class="sec" id="llm">
+    <h2>${secHead(llmNo, '评估分析', 'Analysis')}</h2>
+    ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 未能生成，请参考下方数据区块与评估表要点）', 1)}
+  </section>
+
+  ${ctx.insights ? (() => {
+    const i = ctx.insights!
+    if (!hasInsights) return ''
+    return `
+  <section class="sec" id="insights">
+    <h2>${secHead(insightsNo, '客户评估表要点', 'Form Insights')}</h2>
+    <p class="note">由 AI 从上传的评估表中结构化提取的关键要点 — 供比对 LLM 分析的复述是否忠于原始输入。</p>
+    ${i.goals?.length ? `<h3>客户目标</h3><ul>${i.goals.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
+    ${i.scientificQuestions?.length ? `<h3>待解决科学问题</h3><ol>${i.scientificQuestions.map(q => `<li>${esc(q)}</li>`).join('')}</ol>` : ''}
+    ${i.experimentalSummary ? `<h3>实验数据要点</h3><blockquote>${esc(i.experimentalSummary)}</blockquote>` : ''}
+    ${i.sequenceNotes ? `<h3>构建 / 序列说明</h3><blockquote>${esc(i.sequenceNotes)}</blockquote>` : ''}
+    ${i.homologs ? `<h3>同源 / 参考信息</h3><blockquote>${esc(i.homologs)}</blockquote>` : ''}
+    ${i.keyConcerns?.length ? `<h3>风险关注点</h3><ul>${i.keyConcerns.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
+  </section>`
+  })() : ''}
+
+  <section class="sec" id="scores">
+    <h2>${secHead(scoresNo, '可行性评分', 'Scores')}</h2>
+    ${scoreHtml}
+    <p class="note">评分由系统规则计算（1-10）：基础分（序列长度/跨膜特征/已有结构先例/结构域柔性）经舍入后叠加 BLAST 同源加成、蛋白聚集形式（寡聚态）与分子量增重调整（调整值见评分卡内明细）——两步调整均为整数，直接体现在最终分。评分数值仅供参考，最终可行性需结合实验条件判断；聚集形式判定的证据链与策略影响在评估分析章节中展开。</p>
+  </section>
+
+  <section class="sec" id="pdbs">
+    <h2>${secHead(pdbsNo, 'PDB 结构清单', ctx.directPdbs.length ? `Structures · ${ctx.directPdbs.length}` : (ctx.interaction?.hasEvidence ? 'Structures · 互作组分证据' : 'Structures · 0'))}</h2>
+    ${covFigHtml}
+    ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid)}` +
+      (input.totalPdbFound > 150 ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示前 150 个（按分辨率排序）。</p>`
+      : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : ''))
+    : `<div class="callout callout-amber"><b>暂无直接关联的 PDB 结构 — 全新结构靶点</b>该靶点（或该 UniProt）在 RCSB 无直接关联结构条目${ctx.interaction?.hasEvidence ? '，但存在互作复合物证据 — 下方列出其复合物其他组分的结构清单（共有结构突出显示、单独结构默认折叠），作为组装路线与构建边界设计的评估依据' : '，结构可行性判断主要依据同源结构先例（见 BLAST 章节）与文献证据'}；构建边界与实验策略需从零设计，风险与周期相应增加。</div>${interactionEvidenceHtml(ctx.interaction)}`}
+  </section>
+
+  ${ligandSecHtml}
+
+  ${showBlastSec ? `
+  <section class="sec" id="blast">
+    <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}`)}</h2>
+    ${ctx.blastHits.length ? `<p class="note">按 identity 降序排列（已排除直接结构重复项）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast">
+      <colgroup>
+        <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
+        <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
+      </colgroup>
+      <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖范围</th><th>方法</th><th class="num">分辨率 (Å)</th><th>文献</th></tr></thead>
+      <tbody>${blastRowsHtml(ctx.blastHits)}</tbody>
+    </table></div>`
+    : ctx.blastStatus?.status === 'failed'
+      ? `<div class="callout callout-amber"><b>同源检索失败 — 本报告不含同源结构证据</b>${esc(describeBlastStatus(ctx.blastStatus))}。本报告结论主要基于直接结构与文献证据；同源先例缺失可能低估或高估可行性，建议重新评估补齐同源证据。</div>`
+      : `<p class="note">${esc(describeBlastStatus(ctx.blastStatus))}。同源结构证据在本报告中缺位，结论主要基于直接结构与文献证据；如需同源检索可重新评估并勾选「强制 BLAST」。</p>`}
+  </section>` : ''}
+
+  ${ctx.literature.length ? `
+  <section class="sec" id="literature">
+    <h2>${secHead(litNo, '关键文献', `References · ${ctx.literature.length}${linkedLitCount ? ` · ${linkedLitCount} linked` : ''}`)}</h2>
+    <p class="note">结构解析文献（与 PDB 条目直接关联）置前，其余按相关性排列；点击标题跳转 PubMed。</p>
+    ${litItemsHtml(ctx.literature, pdbByPmid, LIT_PREVIEW)}
+  </section>` : ''}
+
+  ${imagesHtml}
+
+  <footer class="rpt-foot">
+    <div>SOURCES — UniProt REST · RCSB PDB · PDBe (EBI)${blastRan ? (ctx.blastStatus?.provider === 'rcsb' ? ' · RCSB 序列检索 (mmseqs2)' : ' · NCBI BLAST (pdbaa)') : ''} · PubMed eutils${ctx.images.length ? ' · 客户评估表' : ''}</div>
+    <div>本报告由 TargetEval 系统自动生成：数据区块为数据库实时检索结果；「评估分析」章节由大语言模型基于上述数据生成，可能存在解读偏差，关键决策请以原始数据库与文献为准。</div>
+    <div>JOB ${esc(input.jobId)} · GENERATED ${(input.durationMs / 1000).toFixed(1)}s · ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC</div>
+  </footer>
+</div>
+<a href="#top" class="backtop no-print" id="backtop" aria-label="回到顶部" title="回到顶部">↑</a>
+<script>
+(function(){
+  var els;
+  window.addEventListener('beforeprint', function(){
+    els = [];
+    document.querySelectorAll('details').forEach(function(d){
+      if(!d.open){ d.dataset.pc='1'; d.open = true; els.push(d); }
+    });
+  });
+  window.addEventListener('afterprint', function(){
+    (els||[]).forEach(function(d){ if(d.dataset.pc){ d.open=false; delete d.dataset.pc; } });
+    els = [];
+  });
+  var btn = document.getElementById('backtop');
+  if (btn) {
+    var onScroll = function(){ btn.classList.toggle('show', window.scrollY > 600); };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  }
+})();
+</script>
+${UX_PAGE_JS}
+${LIGHTBOX_JS}
+</body>
+</html>`
+  return html
+}

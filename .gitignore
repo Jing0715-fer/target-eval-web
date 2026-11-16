@@ -52,3 +52,16 @@ prompt
 server.log
 # Skills directory
 /skills/
+# v2.5 运行时数据与隐私保护：客户上传的评估表（含个人信息）与解析产物不入库
+/upload/
+/tool-results/
+/db/reports/u_*/
+
+# v2.6 运行时数据不入库（报告产物/DB/缓存随环境生成；客户评估表已在 /upload/ 规则下隔离）
+/db/reports/*/
+/db/custom.db
+/db/custom.db-journal
+/db/cache/alphafold/
+/db/cache/ligand2d/
+/scripts/out/
+!/db/cache/3dmol.min.js

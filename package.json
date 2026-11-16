@@ -1,9 +1,9 @@
 {
-  "name": "nextjs_tailwind_shadcn_ts",
-  "version": "0.2.1",
+  "name": "target-eval-web",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000 2>&1 | tee dev.log",
+    "dev": "MALLOC_ARENA_MAX=2 NODE_OPTIONS=\"--max-old-space-size=1400\" next dev -p 3000 2>&1 | tee dev.log",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
@@ -57,10 +57,12 @@
     "framer-motion": "^12.23.2",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.525.0",
+    "mammoth": "^1.13.0",
     "next": "^16.1.1",
     "next-auth": "^4.24.11",
     "next-intl": "^4.3.4",
     "next-themes": "^0.4.6",
+    "playwright": "1.57.0",
     "prisma": "^6.11.1",
     "react": "^19.0.0",
     "react-day-picker": "^9.8.0",
@@ -70,6 +72,7 @@
     "react-resizable-panels": "^3.0.3",
     "react-syntax-highlighter": "^15.6.1",
     "recharts": "^2.15.4",
+    "remark-gfm": "^4.0.1",
     "sharp": "^0.34.3",
     "sonner": "^2.0.6",
     "tailwind-merge": "^3.3.1",
@@ -90,5 +93,14 @@
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5"
+  },
+  "description": "蛋白靶点结构解析可行性评估平台（UniProt/RCSB/PDBe/PubMed/BLAST 数据整合 + LLM 评估报告）",
+  "trustedDependencies": [
+    "@parcel/watcher",
+    "@swc/core",
+    "es5-ext"
+  ],
+  "patchedDependencies": {
+    "next@16.4.6": "patches/next@16.4.6.patch"
   }
 }
