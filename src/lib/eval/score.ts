@@ -360,3 +360,55 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
     methodStats,
   }
 }
+
+/**
+ * v2.13：历史作业评分依据（rationale）合成 — 合并报告旧批次升级重渲染时，
+ * v2.9 前的作业摘要没有评分依据原文（Scores.rationale 当时未持久化）。
+ * 从仍留存于摘要的确定性数据（序列长度/方法统计/BLAST/覆盖率/调整明细，
+ * 调整 note 为评估时原文）重建各方法一句话依据，口吻与 computeScores 一致，
+ * 供各靶点单独评估页的评分卡展示 — 内容不虚构，缺失信号（跨膜区等）不臆测。
+ */
+export function synthesizeScoreRationale(input: {
+  sequenceLength: number
+  methodStats: Pick<MethodStats, 'xrayCount' | 'cryoemCount' | 'nmrCount' | 'bestResolution'>
+  directPdbCount: number
+  coveragePercent: number
+  bestIdentity: number | null
+  scores: Scores
+}): { xray: string; cryoem: string; nmr: string; overall: string } {
+  const L = input.sequenceLength
+  const ms = input.methodStats
+  const fmtAdj = (n: number) => (n > 0 ? `+${n}` : `${n}`)
+  const bestRes = ms.bestResolution != null ? `（最佳分辨率 ${ms.bestResolution}Å）` : ''
+  const idPart = input.bestIdentity != null && input.bestIdentity > 0 ? `BLAST 最高同源 identity ${Math.round(input.bestIdentity)}%` : ''
+  const oligo = input.scores.oligomerAdjust
+  const mwAdj = input.scores.mwAugmentAdjust
+  const intAdj = input.scores.interactionAdjust
+  const ms0: Pick<MethodStats, 'xrayCount' | 'cryoemCount' | 'nmrCount' | 'bestResolution'> =
+    ms ?? { xrayCount: 0, cryoemCount: 0, nmrCount: 0, bestResolution: null }
+  return {
+    xray: [
+      `${L} aa ${L < 500 ? '（适合结晶的长度区间）' : '（长于典型可结晶片段，需截短构建）'}`,
+      ms0.xrayCount > 0 ? `已有 ${ms0.xrayCount} 个 X-ray 结构先例${bestRes}` : '暂无 X-ray 结构先例',
+      idPart,
+      oligo && oligo.xray < 0 ? `聚集形式调整 ${fmtAdj(oligo.xray)}：${oligo.note}` : '',
+      intAdj && intAdj.xray > 0 ? `互作复合物加成 ${fmtAdj(intAdj.xray)}：${intAdj.note}` : '',
+    ].filter(Boolean).join('；'),
+    cryoem: [
+      L > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间' : L >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）' : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
+      ms0.cryoemCount > 0 ? `已有 ${ms0.cryoemCount} 个 Cryo-EM 结构${bestRes}` : '',
+      oligo && oligo.cryoem > 0 ? `聚集形式加成 ${fmtAdj(oligo.cryoem)}：${oligo.note}` : '',
+      mwAdj ? `分子量维度（${mwAdj.note}）` : '',
+      intAdj ? `互作复合物维度：${intAdj.note}` : '',
+    ].filter(Boolean).join('；'),
+    nmr: [
+      L < 300 ? '小分子量（<300 aa），NMR 适合' : L < 500 ? '中等偏大，NMR 周期较长' : '分子量过大（>500 aa），超出 NMR 常规范围',
+      ms0.nmrCount > 0 ? `已有 ${ms0.nmrCount} 个 NMR 结构` : '',
+      oligo && oligo.nmr < 0 ? `聚集形式扣分 ${fmtAdj(oligo.nmr)}：${oligo.note}` : '',
+    ].filter(Boolean).join('；'),
+    overall: `序列覆盖率 ${Math.round(input.coveragePercent)}%；已有结构 ${input.directPdbCount} 个（X-ray ${ms0.xrayCount} / Cryo-EM ${ms0.cryoemCount} / NMR ${ms0.nmrCount}）${bestRes}${idPart ? `；${idPart}` : ''}` +
+      (oligo ? `；聚集形式调整（${oligo.label}${oligo.stoichiometry ? ` · ${oligo.stoichiometry}` : ''}）：X-ray ${fmtAdj(oligo.xray)} / Cryo-EM ${fmtAdj(oligo.cryoem)} / NMR ${fmtAdj(oligo.nmr)}` : '') +
+      (mwAdj ? `；分子量增重调整：Cryo-EM ${fmtAdj(mwAdj.cryoem)} — ${mwAdj.note}` : '') +
+      (intAdj ? `；互作复合物证据${intAdj.level === 'curated' ? `（${intAdj.complexAc}）` : '（binary 伙伴）'}：X-ray ${fmtAdj(intAdj.xray)} / Cryo-EM ${fmtAdj(intAdj.cryoem)} / NMR ${fmtAdj(intAdj.nmr)}` : ''),
+  }
+}

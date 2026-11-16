@@ -37,6 +37,7 @@ import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, t
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
+import { synthesizeScoreRationale } from './score'
 import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
 import { splitQaChapter, parseInsightQa, QA_CHAPTER_TITLE } from './qa-chapter'
 
@@ -172,6 +173,20 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
     try { blastHits = job.blastHits ? JSON.parse(job.blastHits) : [] } catch { /* ignore */ }
     try { literature = job.literature ? JSON.parse(job.literature) : [] } catch { /* ignore */ }
     if (!summary?.scores) continue
+    // v2.13：历史作业（v2.9 前摘要未持久化 rationale）评分依据合成 — 各靶点单独
+    // 评估页评分卡需要；从留存的确定性数据重建，不虚构缺失信号
+    const legacyScores = summary.scores as Scores & { rationale?: { xray: string; cryoem: string; nmr: string; overall: string } }
+    const scoresNorm: Scores & { rationale: { xray: string; cryoem: string; nmr: string; overall: string } } = {
+      ...legacyScores,
+      rationale: legacyScores.rationale ?? synthesizeScoreRationale({
+        sequenceLength: summary.uniprot?.sequenceLength ?? 0,
+        methodStats: summary.methodStats ?? { xrayCount: 0, cryoemCount: 0, nmrCount: 0, bestResolution: null },
+        directPdbCount: pdbs.length,
+        coveragePercent: summary.coverage ?? 0,
+        bestIdentity: blastHits.length ? Math.max(...blastHits.map(h => h.identity)) : null,
+        scores: legacyScores,
+      }),
+    }
     targets.push({
       jobId: job.id,
       label: job.uniprotId ?? summary.uniprot?.proteinName ?? '未知靶点',
@@ -180,7 +195,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       geneNames: summary.uniprot?.geneNames ?? [],
       organism: summary.uniprot?.organism ?? '',
       sequenceLength: summary.uniprot?.sequenceLength ?? 0,
-      scores: summary.scores,
+      scores: scoresNorm,
       methodStats: summary.methodStats ?? { xrayCount: 0, cryoemCount: 0, nmrCount: 0, bestResolution: null },
       directPdbs: pdbs,
       blastHits,
