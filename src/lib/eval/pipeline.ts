@@ -1314,12 +1314,12 @@ class SegmentRunner {
     const st = this.st
     const deferReport = this.input.options.reportMode === 'deferred'
     if (deferReport) {
-      // 关联靶点批量：跳过单靶点报告 — 全部靶点完成后由合并报告统一生成
-      this.report('report', '报告并入合并评估报告（本靶点数据已就绪）…', 1)
-      this.log('跳过单靶点 LLM 报告：本批次判定为关联靶点，将合并生成一份含关系分析的报告')
-      st.reportDone = true
-      this.advance('render')
-      return null
+      // v2.13：批次各靶点不再因「复合物组分」跳过单独评估 — 按单靶点流程生成
+      // 完整独立 LLM 报告（章节与单独评估完全一致），由合并报告的各靶点单独
+      // 评估页内嵌全文（reportMarkdown 持久化）；本作业的 HTML 不单独落盘
+      // （展示并入合并报告，避免同一批次两份报告文件）。
+      this.report('report', '生成该靶点的单独评估报告（并入合并报告的靶点单独评估页展示）…', 0.05)
+      this.log('批次评估：本靶点按单靶点流程生成完整独立报告 — 展示于合并报告的单独评估页')
     }
     if (!st.reportDone) {
       this.report('report', '整理数据上下文…', 0.05)
@@ -1362,6 +1362,9 @@ class SegmentRunner {
       }
       st.reportDone = true
     }
+    // v2.13：独立报告全文持久化（deferred 批次同样生成 — 合并报告各靶点单独
+    // 评估页内嵌该全文；旧批次无此字段的报告回退合并综述）
+    st.reportMarkdown = st.reportParts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n') || null
     this.advance('render')
     return null
   }
@@ -1456,6 +1459,8 @@ class SegmentRunner {
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,
+      /** v2.13：覆盖区间（合并报告各靶点单独评估页的覆盖率区段图用） */
+      coveredRanges: st.coverage?.coveredRanges,
       oligomer: st.oligomer!,
       ligands: st.ligandResolved.length ? st.ligandResolved : undefined,
       alphafold: st.afSummary ?? undefined,
@@ -1463,7 +1468,8 @@ class SegmentRunner {
       interaction: st.interaction ?? undefined,
       /** v1.26：分子量增重策略分析（小分子量靶点；applicable=false 时亦存档） */
       mwAugment: st.mwAugment!,
-      reportLlmOk: deferReport ? undefined : st.reportParts.some(p => p.llmOk),
+      /** v2.13：deferred 批次同样生成完整独立报告 — 状态如实记录（合并报告各靶点页引用） */
+      reportLlmOk: st.reportParts.some(p => p.llmOk) || undefined,
       reportDeferred: deferReport || undefined,
       batchNote: this.input.batchNote,
       construct: st.comparison
@@ -1492,7 +1498,8 @@ class SegmentRunner {
           blastHits: JSON.stringify(st.blastHits),
           literature: JSON.stringify(st.literature),
           reportPath,
-          reportMarkdown: !deferReport && st.reportMarkdown ? st.reportMarkdown : null,
+          // v2.13：deferred 批次也持久化独立报告全文（合并报告靶点单独评估页内嵌）
+          reportMarkdown: st.reportMarkdown || null,
           error: null,
           updatedAt: new Date(),
         },
@@ -1517,7 +1524,7 @@ class SegmentRunner {
       }
     }
 
-    this.log(`评估完成：总耗时 ${(durationMs / 1000).toFixed(1)}s${deferReport ? '（报告已并入合并评估报告）' : '，报告已生成'}`)
+    this.log(`评估完成：总耗时 ${(durationMs / 1000).toFixed(1)}s${deferReport ? '（单独评估报告已生成 — 展示并入合并评估报告的靶点单独评估页）' : '，报告已生成'}`)
 
     // v2.4：同步评估模式 — 直接把最终数据交给调用方（不依赖 DB 读回）
     const result: PipelineResult = {

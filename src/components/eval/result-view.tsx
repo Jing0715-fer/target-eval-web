@@ -1027,7 +1027,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             no={reportNo}
             title="AI 评估报告"
             en="LLM Analysis"
-            count={reportMd ? `${reportMd.length.toLocaleString()} 字` : undefined}
+            count={!reportDeferred && reportMd ? `${reportMd.length.toLocaleString()} 字` : undefined}
           />
         </div>
         {reportLlmFailed && (
@@ -1042,7 +1042,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <Layers className="size-5 text-violet-500 dark:text-violet-400" aria-hidden />
               <p className="text-sm text-foreground/80">
                 本靶点与批次内其他靶点经分析判定为<span className="font-semibold text-violet-600 dark:text-violet-400">关联靶点</span>，
-                分析章节（执行摘要 / 靶点关系分析 / 各靶点综述 / 整合策略）已合并至本批次的合并评估报告
+                已按单靶点流程生成完整独立评估报告，展示于合并报告的该靶点单独评估页（与单独评估同格式：评估分析 / 可行性评分 / PDB 结构与文献全量展开 / 同源 / 客户实验数据）
               </p>
               <p className="text-xs text-muted-foreground/70">
                 下方数据区块（评分 / PDB / BLAST / 文献）为该靶点的独立数据；合并报告可经上方切换栏查看
