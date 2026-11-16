@@ -25,17 +25,17 @@
 
 | 单靶点评估结果 | 多靶点合并报告 |
 |:---:|:---:|
-| **结果页** — 可行性评分格栅 + 关键指标 + 编号章节 | **合并报告** — 靶点关系判定 + 家族级执行摘要 |
+| **结果页** — 摘要头 + 内嵌完整报告（3D 视图 · 配体卡 · 数据章节） | **合并报告** — 靶点关系判定（含同源证据）+ 家族级执行摘要 |
 | <img src="docs/screenshots/result-top.png" width="440"> | <img src="docs/screenshots/merged-view.png" width="440"> |
 
 <details>
 <summary><b>📄 完整结果页 / 合并报告长图</b>（点击展开）</summary>
 
-**单靶点评估结果**（P00533 · EGFR）— LLM 分析内联渲染 + PDB / 同源 / 文献数据章节：
+**单靶点评估结果**（P00533 · EGFR + 配体 erlotinib/ATP）— 内嵌完整 HTML 报告：AlphaFold 预测结构 3D 视图（pLDDT 着色）、配体 2D 结构式卡（计算性质 + 标识符一键复制）、覆盖率区段图、PDB / BLAST / 文献章节：
 
 <img src="docs/screenshots/result.png" alt="单靶点完整结果页" width="860">
 
-**合并评估报告**（P69905 + P68871 血红蛋白 α/β 家族）— 关系分析 + 各靶点综述 + 跨靶点对比矩阵：
+**合并评估报告**（P69905 + P68871 血红蛋白 α/β 家族）— 关系分析（确定性同源证据 44%）+ 各靶点综述 + 跨靶点对比矩阵：
 
 <img src="docs/screenshots/merged.png" alt="合并报告完整长图" width="860">
 
@@ -273,6 +273,7 @@ scripts/                         # E2E（报告 UX / 灯箱 / 响应式 / 部署
 | **v2.7.6** | **报告六项优化**：① **A4 打印分页**（`@page` 边距 + 标题不孤行/卡片不腰斩 + 数据表打印自动布局防右截断 + 表头跨页重复 + 复制按钮/角标打印隐藏）；② **配体 2D 结构式 SVG 矢量版**（RCSB CCD 矢量描述 `cdn.rcsb.org/images/ccd/unlabeled/{首字母}/{compId}.svg`，OpenEye 渲染；`rcsbCcdDepictionSvg` 规范化去 xml/DOCTYPE/固定宽高 + 磁盘缓存 `db/cache/ligand2d/{compId}.svg`，灯箱无限缩放不失真；PubChem PNG 保留为无 compId 配体回落；**PubChem PUG REST 无 `/SVG` 端点** — 实测 400，勿再尝试）；③ **InChIKey/SMILES 一键复制**（页级 JS 扫描 `.lig-ident` 行自动挂「复制」按钮，clipboard API + execCommand 降级，成功 ✓/失败状态反馈 — 新旧报告同路径无需服务端改 HTML）；④ **覆盖率区段可视化图**（`coverageFigureHtml` 服务端 SVG 轨道：已覆盖绿/未覆盖琥珀 + 段悬停区间明细 + 残基刻度 1/25/50/75%，零 JS 打印友好，置于 PDB 结构清单章节头）；⑤ **合并报告配体卡补 2D 图**（`ensureLigand2dVector` 渲染前兜底充实：v2.7 前旧作业 detail 缺失补全 + PNG-only 回补 SVG，磁盘缓存命中零网络；配体卡与单靶点报告同版双栏布局）；⑥ **移动端表格横滚指示**（`.tbl-wrap` 可滚动时左右缘渐变亮起、滚到头熄灭，打印隐藏）。**旧报告兼容**：`applyUxUpgrade`（marker `rpt-ux-v1` 幂等）注入 ①③⑥ 于 `/api/jobs/[id]/report` 与 `/api/evaluate/batch-report`（inline/download）；④⑤ 需服务端数据仅新报告渲染。E2E：`scripts/render-ux-fixtures.ts`（30 断言 fixture/注入对照/合并回补）+ `scripts/e2e-report-ux.mjs`（24 断言：复制点击/横滚状态/打印仿真/矢量灯箱）+ `scripts/test-ligand-svg-v276.ts`（真实网络冒烟 23 断言） |
 | **v2.7.7** | **灯箱嵌入自适应 + AlphaFold 3D 视图一键全屏（两项用户反馈修复）**：① **预测结构不能放大** — 内嵌 3D 画布仅 320×252 看不清细节，新增 `af-expand`「放大」按钮（悬停角标同款淡入）：canvas 节点迁入全屏遮罩（WebGL 上下文保留，3Dmol 内置 ResizeObserver 按新尺寸自动重渲染，`window.__afViewer.resize()` 双保险），pLDDT 四桶图例随行、标题栏提示「拖拽旋转 · 滚轮缩放 · 双指捏合」，Esc/×/背景点击退出后 canvas 归位自动缩回；放大期间内嵌槽位以静态海报 + 幽灵提示占位防布局跳动；嵌入形态遮罩同样走可视切片定位；新报告模板与旧报告注入同路径（`document.querySelectorAll('.af-stage')` 幂等挂载）；② **灯箱在应用内嵌预览中「高度按全文算」** — 根因：结果页 `ReportFrame` 为自动高度 iframe（iframe 高 = 报告全文高、父页滚动），iframe 内 `position:fixed` 相对的是 iframe 全文档高而非屏幕可视区 → 中部图片点击后灯箱居中于全文中点跑出屏幕、需回滚查找、图片限高失效；修复 = `window.__rptEmb` 嵌入环境感知（`frameElement` + 内容高 vs iframe 高判内部可滚）→ 自动高度形态改「可视切片」文档坐标绝对定位（屏幕∩iframe 文档交集），父页滚动 rAF 节流实时贴屏重跟，遮罩全域 wheel/touchmove 预防默认阻断滚动链（防事件链至父页滚动）；iframe 内部可滚（预览 Dialog `h-full`）或独立打开维持 fixed 原行为；键盘缩放锚点改遮罩中心（原 `innerHeight` 在嵌入形态下为全文高不可用）。**旧报告兼容**：marker 升 `rpt-zoom-v2`，v2.7.5/2.7.6 baked v1 报告 serve 注入 v2 时自动清理 v1（v1 根 `remove()` + `img.cloneNode` 剥离旧句柄 + 角标幂等复用）—— 根除 v1/v2 双开与滚动锁错乱。E2E：`scripts/e2e-ligand-zoom.mjs`（63 断言：新增 AF 全屏独立/嵌入 + 嵌入宿主可视切片回归（ReportFrame 同构：自动高度 iframe + ResizeObserver 高度同步 + 父页滚动——遮罩贴屏 top≈0/h≈视口高、图片严格限高居中、父页滚动重定位、滚轮阻断滚动链）+ v1 共存清理）+ `scripts/render-zoom-fixtures.ts`（29 断言，新增 v2.7.6 baked 模拟 + 嵌入宿主 fixture） |
 | **v2.7.8** | **预览放大三项修复（用户反馈）**：⑨ **AF 卡「双放大按钮」根除** — `figure.af-fig` 内 `af-poster` img 命中灯箱选择器被挂图片角标（top:6/right:6），与运行时注入的 `.af-expand` 3D 放大钮（top:8/right:8）重叠成两个「放大」；修复 = `MutationObserver` 跟随 `.af-stage` 类名同步 `figure.af-zoom-off`（CSS `figure.rpt-zoomable.af-zoom-off .rpt-zoom-badge{display:none}`）—— af-live（交互 3D 可用）时图片角标隐藏、3D 全屏为唯一放大入口，af-fail/legacy 静态图时角标恢复（图片灯箱为唯一入口），全屏期间 `af-expand` 同样让位幽灵提示；⑩ **嵌入灯箱避让应用吸顶栏（「看不到关闭按钮」根因）** — 结果页 `ReportFrame` 嵌入形态灯箱贴合屏幕顶 top=0，而 AppShell 吸顶栏 `sticky top-0 z-40 h-12/14` 覆盖屏幕顶部 → 关闭钮 y≈14 被顶栏遮挡；修复 = `__rptEmb.headerH()`（同源探测父页 sticky/fixed header 高度）可视切片 top 由屏幕顶下移至栏下沿（关闭钮/控制条不再被遮挡，AF 全屏遮罩同路径）；⑪ **父页滚动锁（「放大后仍能滚动」根因）** — 灯箱只覆盖 iframe 可视切片，滚轮落在 iframe 之外（应用顶栏等）父页照旧滚动；修复 = `__rptEmb.lockParent()`（同源写父页 `body overflow:hidden` + 滚动条宽度 paddingRight 补偿防横跳，仅可视切片形态调用）开启期间父页锁定、关闭/退出全屏解锁，Dialog 形态（宿主 Radix 已锁）与独立打开不接管。**旧报告兼容**：marker 升 `rpt-zoom-v3`，v2.7.5–2.7.7 baked v1/v2 报告 serve 注入 v3 时自动清理旧根 + `img.cloneNode` 剥离旧句柄 + **旧 af-expand 移除重挂**（旧闭包不再残留）。E2E：`scripts/e2e-ligand-zoom.mjs` 94 断言（新增双按钮互斥 + af-fail 回退、嵌入宿主吸顶栏避让 + 父页锁/解锁、v2.7.7 baked v2 + 注入 v3 共存清理、Dialog 宿主 h-full 内部可滚 fixed 形态回归）+ `scripts/render-zoom-fixtures.ts` 35 断言（新增 Dialog 宿主 + v277 注入 fixture + 吸顶栏宿主）+ `scripts/diag-realapp-zoom.mjs` 真实 App 20 断言（dev server + DB 真实 job 全链路：嵌入/Dialog/AF 卡实测） |
+| **v2.7.9** | **同源检测漏检修复（短序列 × 中低一致性区间）+ README 截图全套重制**：① 根因一 — 固定 ±2 对角带预滤把分布式小 indel 漂移的真种子切成碎片（血红蛋白 α/β 55% 一致性、142/147 aa 实测判 0% → 关系判断降级 independent、家族合并失效）→ 改为贪心链直接携带对角漂移约束（`DRIFT_CAP=30`，链本身跟随真实比对路径的 indel 漂移）；② 根因二 — k=4 种子存活率仅 2.6%（40% 一致性时 142 aa 仅 ~3.7 个种子，低于下限 4）→ k 自适应：证据不足时降 k=3 复扫（存活率 9.1%；随机噪声 ~2.5 命中不足以过链下限，无假阳性风险）；③ 精修链首尾外推到全长（仅锚点局部覆盖时杜绝 `support^(1/k)` 兜底被偶发命中污染 — GFP 案例）；修复后血红蛋白 α/β → 44% ≥ 40 确定性家族判定，合并报告关系卡恢复同源证据；回归 `scripts/test-homology.ts` 增血红蛋白对与无关短蛋白对照（胰蛋白酶原×细胞色素c → 0）共 8/8 通过。README 截图 9 张全部实机重制（Playwright 全链路驱动：首页/上传/进度/深色/结果（含配体卡 + 3D + 内嵌报告）/合并报告），脚本沉淀 `scripts/shot-*.mjs` 可复用 |
 
 ## 说明
 
