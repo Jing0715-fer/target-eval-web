@@ -7,7 +7,7 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
+import type { BlastHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, TargetIdentityInfo, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
 import type { AlphafoldSummaryInfo, EsmfoldSummaryInfo } from './types'
 import type { LigandResolution } from './ligand'
@@ -19,10 +19,14 @@ import { elideSequenceRuns } from './seq-elide'
 export interface ReportContext {
   uniprot: UniprotInfo | null
   sequence: string
+  /** v2.16：序列标签头（FASTA 头 / 评估表序列标签 — 靶点命名证据） */
+  sequenceHeader?: string
   goal?: string
   goalHints: string[]
   /** 评估表 LLM 智能解析要点（目标/科学问题/实验数据摘要等） */
   insights?: FormInsights
+  /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链 — 评估表名/nr 识别/同源推断） */
+  targetIdentity?: TargetIdentityInfo
   /** 批次关系说明（v1.8+ 非关联批量：LLM 在执行摘要中说明独立/复合物项目定位） */
   batchNote?: string
   /** 客户提供的伴随序列（合并评估：UniProt 为主 + 构建边界分析） */
@@ -132,9 +136,23 @@ function buildDigest(ctx: ReportContext): string {
     if (u.keywords?.length) lines.push(`关键词: ${u.keywords.join(', ')}`)
     if (domainFeat.length) lines.push(`关键特征: ${domainFeat.join(' | ')}`)
   } else {
-    lines.push(`未知 UniProt（序列直接输入），序列长度 ${ctx.sequence.length} aa`)
+    lines.push(`序列直接输入（无 UniProt 归属），序列长度 ${ctx.sequence.length} aa`)
+    // v2.16：靶点身份识别证据链（评估表名 / nr 识别 / 同源推断）— LLM 用该名称称呼靶点
+    if (ctx.targetIdentity) {
+      const ti = ctx.targetIdentity
+      lines.push(`靶点身份（${ti.sourceLabel}）: ${ti.name}`)
+      const parts: string[] = []
+      if (ti.identity != null) parts.push(`一致性 ${ti.identity}%`)
+      if (ti.uniprotId) parts.push(`最近 UniProt 条目 ${ti.uniprotId}${ti.uniprotEntry ? `（${ti.uniprotEntry}）` : ''}`)
+      if (ti.geneName) parts.push(`基因 ${ti.geneName}`)
+      if (ti.organism) parts.push(ti.organism)
+      lines.push(`识别证据: ${ti.note}${parts.length ? `；${parts.join('；')}` : ''}`)
+      lines.push(`（靶点命名指引：题目与正文用「${ti.name.slice(0, 40)}」称呼该靶点并标注「序列靶点」；身份为${ti.source === 'eval-table' ? '评估表客户提供' : '推断'}（${ti.sourceLabel}）时须注明依据与强度，不得当作已确认的 UniProt 条目）`)
+    } else if (ctx.sequenceHeader) {
+      lines.push(`序列标签: ${ctx.sequenceHeader.slice(0, 60)}`)
+    }
     const topHit = ctx.blastHits[0]
-    if (topHit) lines.push(`BLAST 首命中: ${topHit.description}`)
+    if (topHit) lines.push(`BLAST 首命中: ${topHit.description}（identity ${topHit.identity}%）`)
   }
 
   lines.push('')

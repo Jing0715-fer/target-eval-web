@@ -160,6 +160,8 @@ export interface BlastCollectOpts {
   deadline?: number
   /** 上段保存的轮询状态（续跑） */
   resume?: BlastPollState
+  /** v2.16：nr 识别的墙钟覆写（短预算尝试；缺省用 MAX_NR_WALL_MS） */
+  maxWallMs?: number
 }
 
 /** 收集返回：终态 outcome 或「仍在运行（预算到点）」的续跑状态 */
@@ -482,6 +484,239 @@ export async function runBlastWithRetry(
     }
   }
   throw new Error(`同源检索 ${attempts} 轮重试均失败 — ${errors.join('；').slice(0, 300)}`)
+}
+
+// ─── v2.16 BLAST nr 靶点身份识别（纯序列输入无 UniProt 归属时的兜底）──────────────
+
+export interface BlastNrHit {
+  /** UniProt accession（sp/tr 形态命中时）；其他来源为原始 accession */
+  accession: string
+  /** UniProt 条目名（如 P53_HUMAN — sp|ACC|ENTRY 的第三段） */
+  entryName?: string
+  /** 蛋白描述（OS=/GN= 等字段前的主体描述文本） */
+  description: string
+  organism?: string
+  geneName?: string
+  /** 0-100 一致性（identity / align-len，与 parseBlastXml 同口径） */
+  identity: number
+  evalue: number
+  evalueRaw: string
+  queryCoverage: number
+  /** sp = SwissProt（已审校条目，UniProt 归属可信度高）；tr = TrEMBL；其他（gb/ref/pdb/无前缀） */
+  db: 'sp' | 'tr' | 'other'
+}
+
+/** nr defline 的 UniProt 前缀形态：sp|P04637|P53_HUMAN / tr|A0A8G0KJC2|...
+ *  注：10 位 accession（A0A8G0KJC2）的 4 位扩展段必须在捕获组内（否则只捕到前 6 位） */
+const NR_UNIPROT_DEF_RE = /^(?:sp|tr)\|((?:[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]|[OPQ][0-9][A-Z0-9]{3}[0-9])(?:[A-Z0-9]{3}[0-9])?)\|([^|()\s]+)\s*(.*)$/
+/** defline 中的 OS= 物种与 GN= 基因字段 */
+const OS_FIELD_RE = /\bOS=([^=]+?)(?=\s+(?:OX|GN|PE|SV|LH|LS)=|$)/
+const GN_FIELD_RE = /\bGN=([^\s=]+)/
+
+/** 从 nr Hit_def 描述提取 UniProt 形态字段（无 sp/tr 前缀时 db='other'，仍提取 OS/GN） */
+export function parseNrDefline(def: string): { accession: string; entryName?: string; description: string; organism?: string; geneName?: string; db: 'sp' | 'tr' | 'other' } {
+  const raw = def.replace(/<[^>]+>/g, '').trim()
+  const uni = raw.match(NR_UNIPROT_DEF_RE)
+  const body = uni ? uni[3].trim() : raw
+  const os = body.match(OS_FIELD_RE)?.[1]?.trim()
+  const gn = body.match(GN_FIELD_RE)?.[1]?.trim()
+  // 主体描述 = 去掉 OS=/GN= 等元数据字段后的正文
+  const desc = body
+    .replace(/\b(?:OS|OX|GN|PE|SV|LH|LS)=[^=]*(?=\s+(?:OS|OX|GN|PE|SV|LH|LS)=|$)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (uni) {
+    return {
+      accession: uni[1],
+      entryName: uni[2],
+      description: desc.slice(0, 160),
+      organism: os?.slice(0, 60),
+      geneName: gn,
+      db: raw.startsWith('sp|') ? 'sp' : 'tr',
+    }
+  }
+  // 非 UniProt 形态（gb|/ref|/pdb|/裸描述）：accession 取 Hit_accession 由调用方补
+  return { accession: '', description: raw.slice(0, 160), organism: os?.slice(0, 60), geneName: gn, db: 'other' }
+}
+
+/** 解析 BLAST nr XML → 命中列表（按 XML 显著性顺序保留；同 accession 去重取最高 identity） */
+export function parseBlastNrXml(xml: string): BlastNrHit[] {
+  const hits: BlastNrHit[] = []
+  const hitRe = /<Hit>([\s\S]*?)<\/Hit>/g
+  let m: RegExpExecArray | null
+  while ((m = hitRe.exec(xml))) {
+    const h = m[1]
+    const def = h.match(/<Hit_def>([\s\S]*?)<\/Hit_def>/)?.[1]?.trim() ?? ''
+    const acc = h.match(/<Hit_accession>([\s\S]*?)<\/Hit_accession>/)?.[1]?.trim() ?? ''
+    if (!def && !acc) continue
+    const firstHsp = /<Hsp>([\s\S]*?)<\/Hsp>/.exec(h)
+    if (!firstHsp) continue
+    const hsp = firstHsp[1]
+    const identityRaw = parseFloat(hsp.match(/<Hsp_identity>([\s\S]*?)<\/Hsp_identity>/)?.[1] ?? '0')
+    const alignLen = parseInt(hsp.match(/<Hsp_align-len>([\s\S]*?)<\/Hsp_align-len>/)?.[1] ?? '0', 10)
+    const identity = alignLen > 0 ? Math.round((identityRaw / alignLen) * 1000) / 10 : 0
+    const evalueRaw = hsp.match(/<Hsp_evalue>([\s\S]*?)<\/Hsp_evalue>/)?.[1]?.trim() ?? '0'
+    const queryFrom = parseInt(hsp.match(/<Hsp_query-from>([\s\S]*?)<\/Hsp_query-from>/)?.[1] ?? '0', 10)
+    const queryTo = parseInt(hsp.match(/<Hsp_query-to>([\s\S]*?)<\/Hsp_query-to>/)?.[1] ?? '0', 10)
+    const queryCoverage = queryTo > queryFrom ? queryTo - queryFrom + 1 : 0
+    const parsed = parseNrDefline(def)
+    const accession = parsed.accession || acc
+    if (!accession) continue
+    hits.push({
+      accession,
+      entryName: parsed.entryName,
+      description: parsed.description || parsed.entryName || accession,
+      organism: parsed.organism,
+      geneName: parsed.geneName,
+      identity,
+      evalue: parseFloat(evalueRaw) || 0,
+      evalueRaw,
+      queryCoverage,
+      db: parsed.db,
+    })
+    if (hits.length >= 20) break
+  }
+  // 同 accession 去重取最高 identity（isoform/重复条目）
+  const seen = new Map<string, BlastNrHit>()
+  for (const h of hits) {
+    const existing = seen.get(h.accession)
+    if (!existing || h.identity > existing.identity) seen.set(h.accession, h)
+  }
+  return [...seen.values()]
+}
+
+/** 提交 BLASTp 任务到 nr 库（v2.16 靶点身份识别；HITLIST 20 — 只需最佳命中定位身份） */
+export async function submitBlastNr(
+  sequence: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+): Promise<BlastSubmitResult> {
+  if (!sequence || sequence.length < 30) throw new Error('序列过短（<30 aa），无法 BLAST nr')
+
+  onProgress?.('提交 BLASTp 任务到 NCBI (nr)…')
+  const submitBody = new URLSearchParams({
+    CMD: 'Put',
+    PROGRAM: 'blastp',
+    DATABASE: 'nr',
+    QUERY: sequence,
+    HITLIST_SIZE: '20',
+    EXPECT: '1e-5',
+    FILTER: 'F',
+  })
+  let submitText: string | null = null
+  let lastSubmitErr: unknown = null
+  for (let attempt = 0; attempt < 3 && submitText === null; attempt++) {
+    try {
+      const res = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: AbortSignal.timeout(30_000) })
+      if (!res.ok) throw new Error(`BLAST nr 提交失败 HTTP ${res.status}`)
+      submitText = await res.text()
+    } catch (e) {
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      lastSubmitErr = e
+      if (attempt < 2) {
+        onProgress?.(`BLAST nr 提交失败（第 ${attempt + 1} 次），${2 + attempt * 3}s 后重试…`)
+        await sleep(2000 + attempt * 3000, signal)
+      }
+    }
+  }
+  if (submitText === null) {
+    throw lastSubmitErr instanceof Error ? lastSubmitErr : new Error('BLAST nr 提交失败（已重试 3 次）')
+  }
+  const rid = submitText.match(/RID\s*=\s*(\S+)/)?.[1]
+  const rtoe = parseInt(submitText.match(/RTOE\s*=\s*(\d+)/)?.[1] ?? '15', 10)
+  if (!rid) throw new Error('BLAST nr 未返回 RID')
+  onProgress?.(`BLAST nr 已提交 (RID=${rid}，预计 ${rtoe}s)`)
+  return { rid, rtoe }
+}
+
+/** nr 识别的墙钟上限（best-effort 通道：超时优雅放弃，不阻塞评估）。
+ *  10 分钟 — NCBI 队列患病日常态（实测 WAITING 30+ 分钟），识别是增强能力，
+ *  等待过长会拖垮批量队列；超时记 warn 后继续（pdbaa 主通道仍走 30 分钟僵尸保险 + RCSB 兜底） */
+const MAX_NR_WALL_MS = 10 * 60_000
+
+export type BlastNrCollectResult = { hits: BlastNrHit[] } | { stillRunning: true; pollState: BlastPollState }
+
+/**
+ * 收集 BLAST nr 结果（v2.16）：
+ *  - 与 pdbaa 轮询同构（RTOE 首等 + 6s 常规轮询 + 段预算续跑），但**无 RCSB 兜底**
+ *   （RCSB 序列搜索返回的是 PDB 同源，对「这是哪个蛋白」的身份识别无增量价值）
+ *  - FAILED / RID 过期 / 长期不可达 / 5 分钟墙钟 → 抛错（调用方记 warn 后继续评估，
+ *    身份识别是 best-effort 增强，失败不影响主流程）
+ */
+export async function collectBlastNr(
+  rid: string,
+  rtoe: number,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+  opts: BlastCollectOpts = {},
+): Promise<BlastNrCollectResult> {
+  const wallMs = opts.maxWallMs ?? MAX_NR_WALL_MS
+  const startedAt = opts.resume?.startedAt ?? Date.now()
+  let attempts = opts.resume?.attempts ?? 0
+  let netFails = opts.resume?.netFails ?? 0
+  const snapshot = (): BlastPollState => ({ rid, rtoe, startedAt, waitingSince: startedAt, searchingSince: null, attempts, netFails, rescueFails: 0, rescueNextAt: 0 })
+  const budgetLeft = () => (opts.deadline != null && opts.deadline > 0 ? opts.deadline - Date.now() : Infinity)
+
+  while (true) {
+    if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+    if (budgetLeft() < 6_000) return { stillRunning: true, pollState: snapshot() }
+    const clampedSleep = (ms: number): number => {
+      const bl = budgetLeft()
+      return bl === Infinity ? ms : Math.max(2_000, Math.min(ms, bl - 4_000))
+    }
+    await sleep(clampedSleep(attempts === 0 ? Math.min(Math.max(3000, rtoe * 1000), 30_000) : 6000), signal)
+    attempts++
+    const elapsed = Math.round((Date.now() - startedAt) / 1000)
+    let pollRes: Response
+    try {
+      pollRes = await fetch(`${BLAST_URL}?CMD=Get&FORMAT_TYPE=XML&RID=${rid}`, { signal: AbortSignal.timeout(30_000) })
+      netFails = 0
+    } catch (e) {
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      netFails++
+      if (netFails >= MAX_CONSECUTIVE_NET_FAILS) {
+        throw new Error(`BLAST nr 轮询网络不可达（连续 ${netFails} 次失败，已等 ${Math.round(elapsed / 60)} 分钟）`)
+      }
+      onProgress?.(`网络抖动，继续轮询 nr（已等 ${elapsed}s）`)
+      continue
+    }
+    if (!pollRes.ok) {
+      onProgress?.(`HTTP ${pollRes.status}，继续轮询 nr（已等 ${elapsed}s）`)
+      continue
+    }
+    const xml = await pollRes.text()
+    if (xml.includes('<BlastOutput>') || xml.includes('<BlastOutput_iterations>')) {
+      onProgress?.(`BLAST nr 完成（等待 ${Math.round((Date.now() - startedAt) / 1000)}s）`)
+      return { hits: parseBlastNrXml(xml) }
+    }
+    if (xml.includes('Status=FAILED') || xml.includes('Status=UNKNOWN')) {
+      throw new Error(xml.includes('Status=FAILED') ? 'BLAST nr 任务在 NCBI 侧失败' : `BLAST nr RID ${rid} 已过期`)
+    }
+    if (Date.now() - startedAt > wallMs) {
+      throw new Error(`BLAST nr 已提交 ${Math.round(wallMs / 60000)} 分钟仍无结果（NCBI 队列异常）`)
+    }
+    onProgress?.(xml.includes('Status=SEARCHING')
+      ? `NCBI nr 计算中（第 ${attempts} 次，已 ${elapsed}s）`
+      : `NCBI nr 排队中（第 ${attempts} 次，已 ${elapsed}s）`)
+    if (budgetLeft() <= 0) {
+      return { stillRunning: true, pollState: snapshot() }
+    }
+  }
+}
+
+/**
+ * 同步运行 BLAST nr 识别（提交 + 收集，无分段预算路径使用）。
+ * 抛错 = 识别失败（调用方降级继续）；空命中 = 「确无同源」（有效结论）。
+ */
+export async function runBlastNr(
+  sequence: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+): Promise<BlastNrHit[]> {
+  const { rid, rtoe } = await submitBlastNr(sequence, onProgress, signal)
+  const outcome = await collectBlastNr(rid, rtoe, onProgress, signal)
+  if ('hits' in outcome) return outcome.hits
+  throw new Error('BLAST nr 轮询被中断（未预期）')
 }
 
 /** 用 RCSB GraphQL 批量接口补齐 BLAST 命中的方法/分辨率/结构标题/主引文（每批 25 条）。

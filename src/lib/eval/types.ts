@@ -159,6 +159,9 @@ export interface BlastHit {
   evalueRaw: string
   /** v1.31：主引文 PubMed ID（RCSB GraphQL 批量补齐；无引文时缺失） */
   pubmedId?: string
+  /** v2.16：RCSB 序列检索命中的聚合物实体序号（标识 3QWQ_1 的尾段 — 复合物结构
+   *  中准确归属 UniProt 需按命中实体而非条目主实体；NCBI pdbaa 命中缺失） */
+  entityId?: number
 }
 
 // ─── PubMed ───────────────────────────────────────────────────────────────────
@@ -545,6 +548,52 @@ export function describeBlastStatus(info: BlastStatusInfo | undefined | null): s
   }
 }
 
+// ─── 序列靶点身份识别（v2.16）──────────────────────────────────────────
+
+/**
+ * 纯序列输入（无 UniProt ID）时的靶点身份识别结果。
+ * 识别级联（按名称优先级）：
+ *  1. 评估表蛋白名（LLM 提取 insights.proteinName / 序列标签头）
+ *  2. BLAST nr 最佳命中（sp|ACC|ENTRY 描述 — 含真实蛋白名/物种/基因名）
+ *  3. PDB 同源最佳命中描述（Chain A, XXX kinase domain → 同源推断）
+ * UniProt accession 定位（peptide 精确检索 / PDB BLAST ≥85% / nr ≥85%）成功时
+ * 走完整回填（uniprotInfo 置位），本结构仅保留识别来源注记。
+ */
+export interface TargetIdentityInfo {
+  /** 展示名（评估表蛋白名 / nr 命中蛋白名 / PDB 同源描述清洗结果） */
+  name: string
+  /** 识别来源 */
+  source: 'eval-table' | 'blast-nr' | 'blast-homolog'
+  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断） */
+  sourceLabel: string
+  /** 命中一致性 %（blast-nr / blast-homolog 时存在） */
+  identity?: number
+  /** 定位到的 UniProt accession（nr 命中 sp|ACC| / tr|ACC| 形态；回填未达阈值时为近似条目） */
+  uniprotId?: string
+  /** UniProt 条目名（如 P53_HUMAN） */
+  uniprotEntry?: string
+  organism?: string
+  geneName?: string
+  /** 识别证据注记（报告/日志中呈现） */
+  note?: string
+}
+
+/** 识别来源 → 中文标签 */
+export function describeTargetIdentitySource(source: TargetIdentityInfo['source']): string {
+  switch (source) {
+    case 'eval-table': return '评估表'
+    case 'blast-nr': return 'BLAST nr 识别'
+    case 'blast-homolog': return 'PDB 同源推断'
+  }
+}
+
+/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」；评估表来源为空） */
+export function targetIdentityTitleSuffix(ti: TargetIdentityInfo): string {
+  if (ti.source === 'eval-table') return ''
+  const tag = ti.source === 'blast-nr' ? 'nr 识别' : '同源'
+  return ti.identity != null ? ` · ${tag} ${Math.round(ti.identity)}%` : ` · ${tag}`
+}
+
 export interface JobSummary {
   uniprot: {
     uniprotId: string
@@ -592,6 +641,8 @@ export interface JobSummary {
   reportDeferred?: boolean
   /** 批次关系说明（v1.8+ 非关联批量时 LLM 在报告中说明独立/复合物定位） */
   batchNote?: string
+  /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链；历史作业缺省） */
+  targetIdentity?: TargetIdentityInfo
 }
 
 // ─── AlphaFold 预测结构（v2.0 报告头图）────────────────────────────

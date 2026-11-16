@@ -24,7 +24,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { BlastHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats, UniprotInfo } from './types'
-import { describeBlastStatus } from './types'
+import { describeBlastStatus, targetIdentityTitleSuffix } from './types'
 import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb } from './types'
 import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
@@ -1367,8 +1367,15 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const dateStr = new Date().toISOString().slice(0, 10)
   // v1.23：题目体现评估范围（UniProt 残基编号区间）
   const rangeSuffix = ctx.range ? ` · 残基 ${ctx.range[0]}-${ctx.range[1]}` : ''
-  const proteinTitle = u ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）` : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
-  const geneStr = u?.geneNames.join(', ') || '—'
+  // v2.16：序列靶点有身份识别（评估表名/nr 识别/同源推断）时题目用识别名 —
+  // 不再笼统写「序列靶点评估」；后缀注明识别来源与一致性（评估表来源无后缀）
+  const ti = ctx.targetIdentity
+  const proteinTitle = u
+    ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）`
+    : ti
+      ? `${ti.name}（序列靶点${targetIdentityTitleSuffix(ti)}${rangeSuffix}）`
+      : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
+  const geneStr = u?.geneNames.join(', ') || ctx.targetIdentity?.geneName || '—'
 
   // PMID ↔ PDB 双向关联
   const pdbByPmid = new Map<string, PdbEntry[]>()
@@ -1894,11 +1901,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <h1 class="rpt-title">${esc(proteinTitle)}</h1>
     <div class="rpt-subtitle">蛋白靶点结构解析可行性评估报告</div>
     <div class="meta-grid">
-      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : '—（序列直接输入）'}</div>
-      <div><b>蛋白名称</b> ${esc(u?.proteinName ?? '—')}</div>
+      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
+      <div><b>蛋白名称</b> ${esc(u?.proteinName ?? ctx.targetIdentity?.name ?? '—')}</div>
       <div><b>基因</b> ${esc(geneStr)}</div>
-      <div><b>物种</b> ${esc(u?.organism ?? '—')}</div>
+      <div><b>物种</b> ${esc(u?.organism ?? ctx.targetIdentity?.organism ?? '—')}</div>
       <div><b>序列长度</b> ${u ? u.sequenceLength + ' aa' : ctx.sequence ? ctx.sequence.length + ' aa' : '—'}</div>
+      ${!u && ctx.targetIdentity ? `<div><b>靶点身份</b> <span class="id-src">${esc(ctx.targetIdentity.sourceLabel)}${ctx.targetIdentity.identity != null ? ` · 一致性 ${Math.round(ctx.targetIdentity.identity)}%` : ''}${ctx.targetIdentity.note ? ` · ${esc(ctx.targetIdentity.note.slice(0, 80))}` : ''}</span></div>` : ''}
       <div><b>结构证据</b> 直接结构 ${pdbCountHtml} · 同源 ${ctx.blastHits.length} 个 · 文献 ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构关联）` : ''}</div>
       ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
       ${ctx.batchNote ? `<div><b>批次关系</b> <span style="color:#92400e">${esc(ctx.batchNote.slice(0, 90))}${ctx.batchNote.length > 90 ? '…' : ''}</span></div>` : ''}
@@ -2046,6 +2054,8 @@ export const SINGLE_REPORT_CSS = `  :root {
   h1.rpt-title { font-size:28px; line-height:1.4; margin-bottom:6px; font-weight:900; }
   .rpt-subtitle { font-size:13px; color:var(--sub); font-style:italic; margin-bottom:18px; }
   .meta-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:9px 22px; font-size:12.5px; color:var(--sub); }
+  /* v2.16：靶点身份行（序列靶点的识别证据 — 来源/一致性） */
+  .id-src { color:#92400e; }
   .meta-grid b { color:var(--ink); font-weight:600; margin-right:2px; }
   .meta-grid a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #a7f3d0; }
   .meta-grid a:hover { border-bottom-color:var(--accent-2); }
@@ -2371,7 +2381,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const body = await renderSingleReportBody({ ...input, af3dBundle })
   const u = input.ctx.uniprot
   const rangeSuffix = input.ctx.range ? ` · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : ''
-  const proteinTitle = u ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）` : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')
+  const proteinTitle = u
+    ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）`
+    : input.ctx.targetIdentity
+      ? `${input.ctx.targetIdentity.name}（序列靶点${targetIdentityTitleSuffix(input.ctx.targetIdentity)}${rangeSuffix}）`
+      : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>

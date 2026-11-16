@@ -498,10 +498,11 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <ArrowLeft className="size-3.5" />
           新建评估
         </Button>
-        {/* 当前靶点徽标：批量切换/同蛋白家族场景下让「正在看哪个靶点」一目了然 */}
+        {/* 当前靶点徽标：批量切换/同蛋白家族场景下让「正在看哪个靶点」一目了然；
+            v2.16：序列靶点（无 UniProt）显示身份识别来源 */}
         <span className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-primary/30 bg-primary/[0.06] px-2.5 font-mono text-[11px] font-semibold text-primary">
           <Crosshair className="size-3 shrink-0" aria-hidden />
-          当前靶点 {u.uniprotId}
+          {u.uniprotId ? `当前靶点 ${u.uniprotId}` : `序列靶点${summary.targetIdentity ? ` · ${summary.targetIdentity.sourceLabel}` : ''}`}
         </span>
         <span className="font-mono text-[11px] text-muted-foreground/70">
           作业 {job.id.slice(0, 8)} · 耗时 {formatDuration(Math.round((summary.durationMs ?? 0) / 1000))}
@@ -523,15 +524,38 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </h1>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-xs text-muted-foreground">
           {u.entryName && <span className="font-semibold">{u.entryName}</span>}
-          <a
-            href={`https://www.uniprot.org/uniprotkb/${u.uniprotId}/entry`}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-semibold text-primary transition-colors hover:bg-primary/[0.12]"
-          >
-            {u.uniprotId}
-            <Database className="size-3" />
-          </a>
+          {u.uniprotId ? (
+            <a
+              href={`https://www.uniprot.org/uniprotkb/${u.uniprotId}/entry`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-semibold text-primary transition-colors hover:bg-primary/[0.12]"
+            >
+              {u.uniprotId}
+              <Database className="size-3" />
+            </a>
+          ) : summary.targetIdentity ? (
+            /* v2.16：序列靶点身份徽标（评估表/nr 识别/同源推断 — 含近似 UniProt 条目时外链） */
+            <span
+              className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-700 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+              title={summary.targetIdentity.note ?? summary.targetIdentity.sourceLabel}
+            >
+              {summary.targetIdentity.sourceLabel}
+              {summary.targetIdentity.identity != null ? ` ${Math.round(summary.targetIdentity.identity)}%` : ''}
+              {summary.targetIdentity.uniprotId && (
+                <a
+                  href={`https://www.uniprot.org/uniprotkb/${summary.targetIdentity.uniprotId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-0.5 inline-flex items-center gap-0.5 hover:underline"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {summary.targetIdentity.uniprotId}
+                  <Database className="size-3" />
+                </a>
+              )}
+            </span>
+          ) : null}
           {(u.geneNames ?? []).slice(0, 6).map((g) => (
             <span key={g} className="rounded-md border border-border px-1.5 py-0.5">
               {g}

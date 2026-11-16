@@ -162,6 +162,16 @@ function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }
         {t.uniprotId ?? '—'}
       </span>
       <span className="text-sm font-semibold text-foreground">{t.proteinName}</span>
+      {/* v2.16：序列靶点身份徽标（无 UniProt 归属 — 识别来源与一致性） */}
+      {!t.uniprotId && t.targetIdentity && (
+        <span
+          className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+          title={t.targetIdentity.note ?? t.targetIdentity.sourceLabel}
+        >
+          {t.targetIdentity.sourceLabel}
+          {t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}
+        </span>
+      )}
       <span className="truncate font-mono text-[11px] text-muted-foreground/70" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
         {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'}
       </span>

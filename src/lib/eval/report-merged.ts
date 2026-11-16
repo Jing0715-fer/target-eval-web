@@ -33,7 +33,7 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
-import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure } from './types'
+import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
@@ -87,6 +87,8 @@ export interface MergedTargetData {
   interaction?: InteractionAnalysis | null
   /** UniProt 条目名（单独评估页 meta-grid 展示） */
   entryName?: string
+  /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 单独评估页题目/刊头消费） */
+  targetIdentity?: TargetIdentityInfo | null
 }
 
 /** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属）
@@ -122,6 +124,8 @@ export interface MergedTargetLite {
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
   esmfold?: EsmfoldSummaryInfo | null
+  /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 分组头/简报卡展示） */
+  targetIdentity?: TargetIdentityInfo | null
 }
 
 /** 轻量化：网页合并视图（v1.24 起全部携带 — PDB/BLAST/文献不再截断，全部展示） */
@@ -151,6 +155,8 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     construct: t.construct,
     alphafold: t.alphafold,
     esmfold: t.esmfold ?? null,
+    // v2.16：靶点身份（前端展示与单独评估页题目用）
+    targetIdentity: t.targetIdentity ?? null,
   }
 }
 
@@ -172,6 +178,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       esmfold?: EsmfoldSummaryInfo
       interaction?: InteractionAnalysis | null
       coveredRanges?: Array<[number, number]>
+      targetIdentity?: TargetIdentityInfo
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -229,6 +236,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
         : null,
       interaction: summary.interaction ?? null,
       entryName: summary.uniprot?.entryName,
+      // v2.16：序列靶点身份识别链（题目/刊头不再「未知靶点」）
+      targetIdentity: summary.targetIdentity ?? null,
     })
   }
   return targets
@@ -247,6 +256,11 @@ const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目
 function targetDigest(t: MergedTargetData): string {
   const lines: string[] = []
   lines.push(`### ${t.label}${t.proteinName && t.proteinName !== t.label ? `（${t.proteinName}）` : ''}`)
+  // v2.16：序列靶点身份证据（无 UniProt 归属时 — LLM 用识别名称呼靶点并注明推断性质）
+  if (!t.uniprotId && t.targetIdentity) {
+    const ti = t.targetIdentity
+    lines.push(`靶点身份（${ti.sourceLabel}${ti.identity != null ? ` · 一致性 ${Math.round(ti.identity)}%` : ''}${ti.uniprotId ? ` · 最近条目 ${ti.uniprotId}` : ''}）: ${ti.name}${ti.note ? `（${ti.note.slice(0, 90)}）` : ''} — 用该名称称呼靶点并标注「序列靶点」；推断身份须注明依据，不得当作已确认 UniProt 条目`)
+  }
   if (t.geneNames.length) lines.push(`基因: ${t.geneNames.slice(0, 5).join(', ')} · 物种: ${t.organism || '—'} · 长度: ${t.sequenceLength} aa`)
   lines.push(`评分: X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10 · 总体 ${t.scores.overall.score}/10（${t.scores.overall.rating}）`)
   const ms = t.methodStats
@@ -1010,7 +1024,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const ms = t.methodStats
     return `
     <div class="tgt-card" data-goto="target-${targetKeyOf(t)}" title="查看 ${esc(t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
-      <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : ''}</div>
+      <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : t.targetIdentity ? ` <span class="tgt-idsrc" title="${esc(t.targetIdentity.note ?? t.targetIdentity.sourceLabel)}">${esc(t.targetIdentity.sourceLabel)}${t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}</span>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
       <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
@@ -1267,6 +1281,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         geneNames: t.geneNames, organism: t.organism, sequenceLength: t.sequenceLength,
       } : null,
       sequence: '',
+      // v2.16：序列靶点身份（题目/刊头用识别名，不再「序列靶点评估」笼统命名）
+      targetIdentity: t.targetIdentity ?? undefined,
       goal: input.goal,
       goalHints: [],
       insights: input.insights ?? undefined,
@@ -1401,7 +1417,7 @@ ${SINGLE_REPORT_CSS}
   .tgt-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; margin:14px 0; }
   .tgt-card { border:1px solid var(--line); border-radius:5px; padding:12px 14px; background:#fff; cursor:pointer; transition:border-color .15s, box-shadow .15s; }
   .tgt-card:hover { border-color:#a7f3d0; box-shadow:0 2px 10px rgba(4,120,87,.10); }
-  .tgt-name { font-weight:600; font-size:14px; color:var(--ink); } .tgt-name a { color:var(--accent-2); text-decoration:none; }
+  .tgt-name { font-weight:600; font-size:14px; color:var(--ink); } .tgt-name a { color:var(--accent-2); text-decoration:none; } .tgt-idsrc { font-size:10.5px; font-weight:500; color:#92400e; background:#fef3c7; border-radius:3px; padding:1px 6px; margin-left:4px; vertical-align:1px; }
   .tgt-meta { font-size:11.5px; color:var(--sub); margin-top:3px; }
   .tgt-score { font-size:12px; color:var(--accent-2); margin-top:5px; }
   .tgt-open { margin-top:7px; padding-top:7px; border-top:1px dashed var(--line); font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.5px; color:var(--accent-2); }

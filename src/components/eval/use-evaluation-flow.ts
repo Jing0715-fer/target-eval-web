@@ -60,6 +60,13 @@ const BATCH_WINDOW = 2
 function requestLabel(req: EvaluateRequest): string {
   const u = (req.uniprotFromDocx ?? req.uniprot ?? '').trim().toUpperCase()
   if (u) return u
+  // v2.16：序列靶点用标签头/FASTA 头命名（比「序列靶点」可识别；含 sp|ACC| 时取条目名段）
+  const header = (req.sequenceHeader ?? '').trim()
+  if (header) {
+    const entry = header.match(/^[a-z]{2}\|[^|]+\|([^|\s]+)/)
+    const label = entry ? entry[1] : header
+    return label.length > 18 ? `${label.slice(0, 18)}…` : label
+  }
   if (req.mode === 'docx' && req.docxJobId) return '序列靶点'
   if (req.mode === 'sequence') return '序列靶点'
   return '评估靶点'
