@@ -7,6 +7,7 @@ import remarkGfm from 'remark-gfm'
 import {
   AlertTriangle,
   ArrowLeft,
+  Atom,
   BookOpenText,
   Dna,
   Download,
@@ -100,6 +101,118 @@ function BlastNote({ t }: { t: MergedTargetLite }) {
     )}>
       {shared ? <Dna className="mt-0.5 size-3.5 shrink-0" aria-hidden /> : <SearchX className="mt-0.5 size-3.5 shrink-0" aria-hidden />}
       <span>{st.note ?? '未执行同源检索'}</span>
+    </div>
+  )
+}
+
+/** v2.9：各靶点单独简报卡（基本信息 + 预测结构 — 简版；交互 3D 视图见 HTML 报告） */
+function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) {
+  const af = t.alphafold
+  const afOk = af?.available === true
+  const overall = t.scores?.overall
+  const scoreTone = overall
+    ? overall.score >= 7
+      ? 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-700 dark:text-emerald-300'
+      : overall.score >= 4
+        ? 'border-amber-500/40 bg-amber-500/[0.08] text-amber-700 dark:text-amber-300'
+        : 'border-rose-500/40 bg-rose-500/[0.08] text-rose-700 dark:text-rose-300'
+    : 'border-border bg-muted text-muted-foreground'
+  const ms = t.methodStats
+  const oligoZh = t.oligomer
+    ? t.oligomer.category === 'monomer'
+      ? '单体'
+      : t.oligomer.category === 'homo-oligomer'
+        ? '同源寡聚体'
+        : t.oligomer.category === 'hetero-complex'
+          ? '异源复合物'
+          : '未知'
+    : ''
+  const rows: Array<{ k: string; v: string }> = [
+    { k: '方法评分', v: t.scores ? `X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10${t.scores.oligomerAdjust ? '（含聚集形式调整）' : ''}` : '—（历史报告）' },
+    { k: '总体可行性', v: overall ? `${overall.score}/10（${overall.rating}）` : '—' },
+    { k: '实验结构', v: `${t.directPdbCount} 个${ms ? `（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）` : ''}${ms?.bestResolution != null ? ` · 最佳 ${ms.bestResolution.toFixed(2)} Å` : ''}` },
+    { k: '序列覆盖', v: `${t.coveragePercent}%${t.coverageText ? `（已覆盖 ${t.coverageText.slice(0, 80)}）` : ''}${t.gapText ? ` · 空白 ${t.gapText.slice(0, 80)}` : ''}` },
+    { k: '同源结构', v: `${t.blastHitCount} 个` },
+    { k: '文献 / 配体', v: `${t.literatureCount ?? t.literature.length} 篇 · ${t.ligandCount ?? 0} 种` },
+    ...(t.oligomer ? [{ k: '聚集形式', v: `${oligoZh}${t.oligomer.stoichiometry ? `（${t.oligomer.stoichiometry}）` : ''}` }] : []),
+    ...(t.mwAugment?.applicable ? [{ k: '分子量', v: `单体 ~${t.mwAugment.monomerKda} kDa${t.mwAugment.assemblyKda != null ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa` : '（无生物装配增重路径）'}` }] : []),
+    ...(t.construct ? [{ k: '客户构建', v: `${t.construct.providedLength} aa（与全长一致性 ${t.construct.identity}%${t.construct.start != null && t.construct.end != null ? `，区间 ${t.construct.start}-${t.construct.end}` : ''}）` }] : []),
+  ]
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 border-b border-border/70 bg-muted/30 px-4 py-3">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-foreground font-mono text-[11px] font-bold text-background">{index + 1}</span>
+        <span className="text-sm font-semibold text-foreground">{t.proteinName}</span>
+        {t.uniprotId ? (
+          <a
+            href={`https://www.uniprot.org/uniprotkb/${t.uniprotId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary hover:bg-primary/[0.12]"
+          >
+            {t.uniprotId}
+          </a>
+        ) : (
+          <span className="rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">无 UniProt</span>
+        )}
+        <span
+          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
+          title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}
+        >
+          {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'} · {t.sequenceLength} aa
+        </span>
+        {overall && (
+          <span className={cn('ml-auto rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums', scoreTone)}>
+            总体 {overall.score}/10 · {overall.rating}
+          </span>
+        )}
+      </div>
+      <div className="grid gap-0 sm:grid-cols-[minmax(0,1fr)_240px]">
+        <div className="px-4 py-3 sm:border-r sm:border-border/60">
+          <div className="mb-2 flex items-center gap-1.5 text-muted-foreground/80">
+            <Dna className="size-3.5" aria-hidden />
+            <span className="lin-eyebrow">基本信息</span>
+          </div>
+          <dl className="flex flex-col">
+            {rows.map(r => (
+              <div key={r.k} className="flex gap-3 border-b border-border/40 py-1.5 text-[12.5px] leading-relaxed last:border-0">
+                <dt className="w-20 shrink-0 text-[11px] text-muted-foreground/80">{r.k}</dt>
+                <dd className="min-w-0 flex-1 text-foreground/90">{r.v}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+        <div className="px-4 py-3">
+          <div className="mb-2 flex items-center gap-1.5 text-muted-foreground/80">
+            <Atom className="size-3.5" aria-hidden />
+            <span className="lin-eyebrow">预测结构（AlphaFold）</span>
+          </div>
+          {afOk ? (
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+              <div className="font-mono text-[11px] leading-relaxed text-foreground/85">
+                {af.modelId ?? 'AF 模型'} · v{af.version ?? '?'} · 平均 pLDDT {af.globalPlddt ?? '—'}{af.fracVeryHigh != null ? ` · ≥90 区段 ${Math.round(af.fracVeryHigh * 100)}%` : ''}
+              </div>
+              {t.uniprotId && (
+                <a
+                  href={`https://alphafold.ebi.ac.uk/entry/${t.uniprotId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 font-mono text-[11px] text-primary hover:underline"
+                >
+                  alphafold.ebi.ac.uk <ExternalLink className="size-3" aria-hidden />
+                </a>
+              )}
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                交互式 3D 预测结构视图（pLDDT 置信着色 · 拖拽旋转 / 滚轮缩放 / 全屏放大）内嵌于可下载的 HTML 报告中。
+              </p>
+            </div>
+          ) : (
+            <p className="rounded-lg border border-dashed border-border bg-muted/40 px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
+              {af?.note ?? (t.uniprotId ? '该靶点在 AlphaFold DB 无预测模型' : '序列输入未归属 UniProt — 无 AlphaFold 预测')}
+            </p>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -387,6 +500,30 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </CardContent>
         </Card>
       </motion.section>
+
+      {/* 3.2 各靶点单独报告（v2.9 — 简版：基本信息 + 预测结构；交互 3D 视图见 HTML 报告） */}
+      {targets.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.2, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+          aria-labelledby="sec-merged-mini"
+        >
+          <div id="sec-merged-mini" className="lin-eyebrow text-muted-foreground">
+            Per-Target Reports · 各靶点单独报告（{targets.length} · 基本信息 + 预测结构）
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            批次内每个靶点的独立简报（精简版，不重复单独评估的全部明细）— 完整数据见下方 PDB 结构 / 同源结构 / 文献章节；
+            交互式 3D 预测结构视图（pLDDT 置信着色 · 拖拽旋转 / 滚轮缩放 / 全屏放大）内嵌于可下载的 HTML 报告中。
+          </p>
+          <div className="flex flex-col gap-4">
+            {targets.map((t, i) => (
+              <TargetMiniReport key={t.jobId} t={t} index={i} />
+            ))}
+          </div>
+        </motion.section>
+      )}
 
       {/* 3.5 共有结构（v1.22 — 同一 PDB 覆盖多个输入 UniProt） */}
       {sharedStructures.length > 0 && (

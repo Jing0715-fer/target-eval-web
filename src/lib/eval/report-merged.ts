@@ -12,10 +12,11 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS } from './report-html'
-import { describeRelationType, describeBlastStatus, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution, type SharedStructure } from './types'
+import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type RelationJudgment, type Scores, type SequenceAttribution, type SharedStructure } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
+import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
 
@@ -48,9 +49,12 @@ export interface MergedTargetData {
   ligands?: LigandResolution[]
   /** v1.26：分子量增重策略分析（v1.26+ 作业存在；历史作业缺省） */
   mwAugment?: MwAugmentAnalysis | null
+  /** v2.9：AlphaFold 预测结构信息（v2.0+ 作业存于摘要；旧作业在渲染时按需补齐） */
+  alphafold?: AlphafoldSummaryInfo
 }
 
-/** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属） */
+/** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属）
+ *  v2.9：补齐各靶点单独简报所需字段（scores/methodStats/alphafold/construct/覆盖区间） */
 export interface MergedTargetLite {
   jobId: string
   uniprotId?: string
@@ -70,6 +74,16 @@ export interface MergedTargetLite {
   ligands?: LigandResolution[]
   /** v1.26：分子量增重策略分析（仅 applicable 时携带） */
   mwAugment?: MwAugmentAnalysis | null
+  /** v2.9：各靶点单独简报 — 评分/方法统计/配体与文献计数/覆盖区间/构建信息 */
+  scores?: Scores
+  methodStats?: MethodStats
+  ligandCount?: number
+  literatureCount?: number
+  coverageText?: string
+  gapText?: string
+  construct?: ConstructInfo
+  /** v2.9：AlphaFold 预测结构元数据（前端简报卡展示；交互 3D 视图见 HTML 报告） */
+  alphafold?: AlphafoldSummaryInfo
 }
 
 /** 轻量化：网页合并视图（v1.24 起全部携带 — PDB/BLAST/文献不再截断，全部展示） */
@@ -90,6 +104,14 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     literature: t.literature,
     oligomer: t.oligomer,
     mwAugment: t.mwAugment ?? null,
+    scores: t.scores,
+    methodStats: t.methodStats,
+    ligandCount: t.ligandCount,
+    literatureCount: t.literatureCount,
+    coverageText: t.coverageText,
+    gapText: t.gapText,
+    construct: t.construct,
+    alphafold: t.alphafold,
   }
 }
 
@@ -106,6 +128,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       oligomer?: OligomerAnalysis
   ligands?: LigandResolution[]
       mwAugment?: MwAugmentAnalysis | null
+      alphafold?: AlphafoldSummaryInfo
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -139,6 +162,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       oligomer: summary.oligomer,
       ligands: summary.ligands,
       mwAugment: summary.mwAugment ?? null,
+      alphafold: summary.alphafold,
     })
   }
   return targets
@@ -200,6 +224,12 @@ function targetDigest(t: MergedTargetData): string {
     if (mw.conflicts.length) {
       lines.push(`增重与目的比对: ${mw.conflicts.map(c => `[${c.level === 'aligned' ? '契合' : c.level === 'caution' ? '需注意' : '冲突'}] ${c.text}`).join('；')}`)
     }
+  }
+  // v2.9：AlphaFold 预测结构（各靶点简报维度 — pLDDT 置信水平影响无实验结构区间的可用性判断）
+  if (t.alphafold?.available) {
+    lines.push(`AlphaFold 预测: ${t.alphafold.modelId ?? 'AF 模型'}（v${t.alphafold.version ?? '?'}）平均 pLDDT ${t.alphafold.globalPlddt ?? '—'}${t.alphafold.fracVeryHigh != null ? `，pLDDT ≥90 区段占 ${Math.round(t.alphafold.fracVeryHigh * 100)}%` : ''} — 交互 3D 视图见各靶点单独报告章节`)
+  } else if (t.alphafold?.note) {
+    lines.push(`AlphaFold 预测: 不可用（${t.alphafold.note}）`)
   }
   if (t.directPdbs.length) {
     // 代表性结构表（方法/分辨率/主要配体/年份 — 与单靶点报告 digest 同等粒度）
@@ -472,6 +502,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   let noSeq = 0
   const nextNo = () => { noSeq += 1; return String(noSeq).padStart(2, '0') }
   const noLlm = nextNo()
+  // v2.9：各靶点单独报告（始终存在 — 每个靶点一张简报卡，紧跟合并分析便于逐靶点阅读）
+  const noMini = nextNo()
   const noInsights = hasInsightsSec ? nextNo() : ''
   const noLigands = hasLigands ? nextNo() : ''
   const noMatrix = nextNo()
@@ -489,6 +521,171 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const foldOpen = targets.length <= 3
   // ③ 每靶点锚点：目录「靶点速览」直达对应结构折叠块
   const anchorOf = (t: MergedTargetData) => `struct-${(t.uniprotId ?? t.label).replace(/[^A-Za-z0-9]/g, '')}`
+
+  // ── v2.9：各靶点单独报告 — AlphaFold 预测结构数据源（每靶点交互 3D 视图）────
+  // 磁盘优先（db/cache/alphafold — sidecar 7 天新鲜窗口零网络，断网回退本地缓存）；
+  // 单模型 ≤2.5MB（与单靶点报告一致）、批次总预算 12MB：超限/无模型的靶点降级为
+  // 统计信息呈现（元数据 + AFDB 链接），获取失败永不阻塞报告生成。
+  // 旧作业（summary 无 alphafold 字段）经 alphafoldMetaFor 补齐元数据。
+  const AF_MINI_BATCH_BUDGET = 12 * 1024 * 1024
+  interface AfMiniView { pdbText: string; modelId: string; version: number; globalPlddt: number | null; fracVeryHigh: number | null }
+  const afViews = new Map<string, AfMiniView>()
+  const afMetaFill = new Map<string, AlphafoldSummaryInfo>()
+  let afBudgetLeft = AF_MINI_BATCH_BUDGET
+  const afBudgetWarns: string[] = []
+  await Promise.all(targets.map(async t => {
+    if (!t.uniprotId) return
+    if (!t.alphafold) {
+      try {
+        const m = await alphafoldMetaFor(t.uniprotId)
+        if (m) afMetaFill.set(t.uniprotId, { available: true, modelId: m.modelId, globalPlddt: m.globalPlddt, version: m.latestVersion, fracVeryHigh: m.fracVeryHigh })
+      } catch { /* 元数据降级 */ }
+    }
+    try {
+      const st = await alphafoldStructureFor(t.uniprotId)
+      if (!st) return
+      if (!st.embeddable) {
+        afBudgetWarns.push(`${t.uniprotId} 模型过大（${Math.round(st.pdbText.length / 1024)}KB > 单模型 2560KB 上限）`)
+        return
+      }
+      if (st.pdbText.length > afBudgetLeft) {
+        afBudgetWarns.push(`${t.uniprotId} 超出批次内嵌总预算（剩余 ${Math.round(afBudgetLeft / 1024)}KB）`)
+        return
+      }
+      afViews.set(t.uniprotId, { pdbText: st.pdbText, modelId: st.meta.modelId, version: st.meta.latestVersion, globalPlddt: st.meta.globalPlddt, fracVeryHigh: st.meta.fracVeryHigh })
+      afBudgetLeft -= st.pdbText.length
+    } catch { /* 视图降级 — 统计信息 */ }
+  }))
+  const af3dBundle = afViews.size > 0 ? await ensure3DmolBundle() : null
+
+  // ── v2.9：各靶点单独报告（简报卡 — 基本信息 + 预测结构）──────────────────
+  // 每个靶点独立一张简报：基本信息（方法评分/总体可行性/实验结构/序列覆盖/同源/
+  // 文献配体/聚集形式/分子量/客户构建）+ AlphaFold 预测结构（元数据 + 交互 3D
+  // 视图）。展示优先级：本次新获取的模型/元数据 > 作业摘要（作业时获取失败的
+  // 靶点，本次获取成功时仍能展示完整预测结构）。
+  const mtrCards = targets.map((t, i) => {
+    const ms = t.methodStats
+    const view = t.uniprotId ? afViews.get(t.uniprotId) : undefined
+    // 展示优先级：本次新获取的模型/元数据（新鲜）优先于作业摘要（作业时断网获取
+    // 失败、本次成功的靶点仍能展示完整预测结构）；摘要 available 时以摘要为准
+    const af = (t.alphafold?.available ? t.alphafold : (t.uniprotId ? afMetaFill.get(t.uniprotId) : undefined)) ?? t.alphafold
+    const o = t.oligomer
+    const oligoCatZh = o ? (o.category === 'monomer' ? '单体' : o.category === 'homo-oligomer' ? '同源寡聚体' : o.category === 'hetero-complex' ? '异源复合物' : '未知') : ''
+    const sharedBlast = t.blastStatus?.status === 'ok' && /共享自家族代表/.test(t.blastStatus.note ?? '')
+    const scoreTone = t.scores.overall.score >= 7 ? '#047857' : t.scores.overall.score >= 4 ? '#b45309' : '#92400e'
+    // 预测结构（AlphaFold）区块：本次获取到可内嵌模型 → 交互 3D 视图；
+    // 仅元数据（模型超限/下载失败但摘要可用）→ 统计卡；无预测 → 说明行
+    const afStatsLine = view
+      ? `${esc(view.modelId)} · v${view.version} · 平均 pLDDT ${view.globalPlddt ?? '—'}${view.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(view.fracVeryHigh * 100)}%` : ''}`
+      : af?.available
+        ? `${esc(af.modelId ?? 'AF 模型')} · v${af.version ?? '?'} · 平均 pLDDT ${af.globalPlddt ?? '—'}${af.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(af.fracVeryHigh * 100)}%` : ''}`
+        : ''
+    const afHtml = view
+        ? `<figure class="af-fig mtr-fig">
+          <div class="af-stage" data-maf="${esc(t.uniprotId ?? '')}">
+            <div class="af-canvas"></div>
+            <img class="af-poster" alt="AlphaFold 预测结构（pLDDT 着色）">
+          </div>
+          <div class="af-legend">
+            <span><i style="background:#0053D6"></i>pLDDT ≥ 90</span>
+            <span><i style="background:#65CBF3"></i>70–90</span>
+            <span><i style="background:#FFDB13"></i>50–70</span>
+            <span><i style="background:#FF7D45"></i>&lt; 50</span>
+          </div>
+          <figcaption><b>预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大<br>${afStatsLine} · ${Math.round(view.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(t.uniprotId ?? '')}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+        </figure>`
+      : af?.available
+        ? `<div class="mtr-af-stat">
+          <div class="mtr-af-stat-line">${afStatsLine}</div>
+          <div class="mtr-af-stat-note">模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 AlphaFold DB（下方链接）或该靶点的单独评估报告</div>
+          <a class="mtr-af-link" href="https://alphafold.ebi.ac.uk/entry/${esc(t.uniprotId ?? '')}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>
+        </div>`
+        : `<p class="mtr-af-none">${af?.note ? esc(af.note) : t.uniprotId ? '该靶点在 AlphaFold DB 无预测模型' : '（序列输入未归属 UniProt — 无 AlphaFold 预测）'}</p>`
+    return `
+    <article class="mtr-card" id="mtr-${esc((t.uniprotId ?? t.label).replace(/[^A-Za-z0-9]/g, ''))}">
+      <div class="mtr-head">
+        <span class="mtr-no">${i + 1}</span>
+        <span class="mtr-name">${esc(t.proteinName)}</span>
+        ${t.uniprotId ? `<a class="mtr-id" href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : '<span class="mtr-id mtr-id-na">无 UniProt</span>'}
+        <span class="mtr-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</span>
+        <span class="mtr-score" style="color:${scoreTone}">总体 ${t.scores.overall.score}/10 · ${esc(t.scores.overall.rating)}</span>
+      </div>
+      <div class="mtr-body">
+        <div class="mtr-info">
+          <h4>基本信息</h4>
+          <dl class="mtr-dl">
+            <div><dt>方法评分</dt><dd>X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10${t.scores.oligomerAdjust ? '（含聚集形式调整）' : ''}</dd></div>
+            <div><dt>总体可行性</dt><dd><b style="color:${scoreTone}">${t.scores.overall.score}/10</b>（${esc(t.scores.overall.rating)}）</dd></div>
+            <div><dt>实验结构</dt><dd>${t.directPdbs.length ? `${t.directPdbs.length} 个（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）${ms.bestResolution != null ? ` · 最佳 ${ms.bestResolution.toFixed(2)}Å` : ''}` : '无直接关联 PDB 结构'}</dd></div>
+            <div><dt>序列覆盖</dt><dd>${t.coveragePercent}%${t.coverageText ? `（已覆盖 ${esc(t.coverageText.slice(0, 120))}）` : ''}${t.gapText ? ` · 空白 ${esc(t.gapText.slice(0, 120))}` : ''}</dd></div>
+            <div><dt>同源结构</dt><dd>${t.blastHits.length} 个${sharedBlast ? '（共享自家族代表，未单独检索）' : ''}${!sharedBlast && t.blastStatus?.note ? `（${esc(t.blastStatus.note.slice(0, 60))}）` : ''}</dd></div>
+            <div><dt>文献 / 配体</dt><dd>${t.literatureCount} 篇 · ${t.ligandCount} 种</dd></div>
+            ${o ? `<div><dt>聚集形式</dt><dd>${oligoCatZh}${o.stoichiometry ? `（${esc(o.stoichiometry)}）` : ''} · 置信度${esc(describeOligoConfidence(o.confidence))}</dd></div>` : ''}
+            ${t.mwAugment?.applicable ? `<div><dt>分子量</dt><dd>单体 ~${t.mwAugment.monomerKda} kDa${t.mwAugment.assemblyKda != null ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa` : '（无生物装配增重路径）'}</dd></div>` : ''}
+            ${t.construct ? `<div><dt>客户构建</dt><dd>${t.construct.providedLength} aa（与全长一致性 ${t.construct.identity}%${t.construct.start != null && t.construct.end != null ? `，区间 ${t.construct.start}-${t.construct.end}` : ''}）</dd></div>` : ''}
+          </dl>
+        </div>
+        <div class="mtr-af">
+          <h4>预测结构（AlphaFold）</h4>
+          ${afHtml}
+        </div>
+      </div>
+    </article>`
+  }).join('')
+
+  // 3Dmol bundle 一次内嵌 + 多视图初始化（所有 data-maf 阶段共用同一实现与 pLDDT 着色）
+  // 无可内嵌模型（全部靶点无预测/超预算）时整段省略 — 报告不携带死脚本
+  // MODELS 映射为 UniProt → 模型 PDB 文本（纯字符串 — plddtStyleApplyJs 直接消费）
+  const afModelsJson = JSON.stringify(Object.fromEntries([...afViews].map(([k, v]) => [k, v.pdbText]))).replace(/<\//g, '<\\/')
+  const mtrViewerJs = afViews.size > 0 ? `
+    ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+    <script>
+    (function () {
+      var MODELS = ${afModelsJson};
+      function initStage(stage) {
+        var key = stage.getAttribute('data-maf');
+        var cv = stage.querySelector('.af-canvas');
+        var poster = stage.querySelector('.af-poster');
+        var pdb = MODELS[key];
+        if (!pdb || !cv) { if (stage) stage.className = 'af-stage af-fail'; return; }
+        try {
+          if (!window.$3Dmol) throw new Error('3Dmol unavailable');
+          var viewer = $3Dmol.createViewer(cv, { defaultcolors: $3Dmol.rasmolElementColors });
+          viewer.setBackgroundColor(0xffffff);
+          viewer.addModel(pdb, 'pdb');
+          ${plddtStyleApplyJs()}
+          viewer.zoomTo();
+          viewer.zoom(1.2);
+          viewer.render();
+          stage.className = 'af-stage af-live';
+          try {
+            var uri = viewer.pngURI ? viewer.pngURI() : null;
+            if (uri && poster) poster.src = uri;
+          } catch (e) { /* 打印海报生成失败不影响交互 */ }
+        } catch (e) { stage.className = 'af-stage af-fail'; try { stage.setAttribute('data-maf-err', String((e && e.message) || e).slice(0, 200)); } catch (er) { /* ignore */ } }
+      }
+      function initAll() {
+        Array.prototype.forEach.call(document.querySelectorAll('.af-stage[data-maf]'), initStage);
+      }
+      function failAll() {
+        Array.prototype.forEach.call(document.querySelectorAll('.af-stage[data-maf]'), function (st) { st.className = 'af-stage af-fail'; });
+      }
+      if (window.$3Dmol) initAll();
+      else {
+        var s = document.createElement('script');
+        s.src = 'https://3Dmol.org/build/3Dmol-min.js';
+        s.onload = initAll; s.onerror = failAll;
+        (document.head || document.documentElement).appendChild(s);
+      }
+    })();
+    </script>` : ''
+  const miniReportsHtml = `
+  <section class="sec" id="mini-reports">
+    <h2>${secHead(noMini, `各靶点单独报告（${targets.length}）`, 'Per-Target Reports')}</h2>
+    <p class="note">批次内每个靶点的独立简报 — 基本信息（方法评分 / 实验结构 / 序列覆盖 / 同源与文献 / 聚集形式）与 AlphaFold 预测结构（pLDDT 置信着色，可拖拽旋转 / 滚轮缩放 / 全屏放大）。简报为精简版，完整数据明细见后续章节（对比矩阵 / 各靶点 PDB 结构 / 同源结构 / 文献 / 配体）。${afBudgetWarns.length ? `<br>内嵌模型预算提示：${esc(afBudgetWarns.join('；'))} — 对应靶点仅展示统计信息。` : ''}</p>
+    <div class="mtr-list">${mtrCards}</div>
+    ${mtrViewerJs}
+  </section>`
 
   // v1.10 同源证据：一致性矩阵（下三角）与序列归属表（确定性数据，模板直出）
   const pairMap = new Map<string, number>()
@@ -888,6 +1085,46 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   /* v2.8：对比矩阵扩列 — 评级副文本与寡聚态列占位 */
   .mtx-rating { display:block; font-size:10px; color:var(--sub); font-weight:400; line-height:1.4; }
   .mtx-dash { color:var(--faint); }
+  /* ── v2.9：各靶点单独报告（简报卡 — 基本信息 + AlphaFold 预测结构）── */
+  .mtr-list { display:flex; flex-direction:column; gap:14px; margin-top:8px; }
+  .mtr-card { border:1px solid var(--line); border-radius:6px; background:#fff; padding:16px 20px 14px; break-inside:avoid-page; }
+  .mtr-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 10px; border-bottom:1px dashed var(--line); padding-bottom:9px; }
+  .mtr-no { flex:none; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; background:var(--ink); color:#fff; border-radius:4px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; font-weight:700; }
+  .mtr-name { font-weight:700; font-size:15px; color:var(--ink); }
+  .mtr-id { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; font-weight:700; color:#065f46; background:#f0fdf7; border:1px solid #b8e6d2; border-radius:4px; padding:1px 9px; letter-spacing:.5px; text-decoration:none; white-space:nowrap; }
+  .mtr-id:hover { background:#d9f5e8; }
+  .mtr-id-na { color:var(--faint); background:#f5f5f4; border-color:var(--line); }
+  .mtr-meta { font-size:11.5px; color:var(--sub); min-width:0; overflow-wrap:anywhere; }
+  .mtr-score { margin-left:auto; font-size:12px; font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .mtr-body { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:18px; margin-top:12px; }
+  @media (max-width:760px){ .mtr-body { grid-template-columns:1fr; } }
+  .mtr-info h4, .mtr-af h4 { font-size:13px; color:#064e3b; margin:0 0 8px; }
+  .mtr-dl > div { display:flex; gap:12px; padding:4.5px 0; border-bottom:1px dashed #f0efec; font-size:12.5px; }
+  .mtr-dl > div:last-child { border-bottom:0; }
+  .mtr-dl dt { flex:0 0 88px; color:var(--faint); font-size:11px; padding-top:1px; white-space:nowrap; }
+  .mtr-dl dd { flex:1; min-width:0; color:var(--ink); line-height:1.75; font-variant-numeric:tabular-nums; }
+  .mtr-dl b { font-weight:600; }
+  .mtr-af-none { font-size:12.5px; color:var(--sub); background:#f7f6f3; border:1px dashed var(--line); border-radius:5px; padding:10px 14px; margin:0; }
+  .mtr-af-stat { display:flex; flex-direction:column; gap:6px; border:1px solid var(--line); border-radius:5px; background:#fdfdfc; padding:12px 14px; }
+  .mtr-af-stat-line { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink); line-height:1.8; }
+  .mtr-af-stat-note { font-size:11px; color:var(--sub); line-height:1.7; }
+  .mtr-af-link { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--accent-2); text-decoration:none; }
+  /* v2.9：AlphaFold 交互 3D 视图（与单靶点报告同版几何 — 交互成功→poster 隐藏；异常→canvas 隐藏；打印→poster 常显） */
+  .af-fig { margin:0; text-align:center; }
+  .af-stage { position:relative; width:100%; height:236px; border:1px solid var(--line); border-radius:6px; background:#fff; overflow:hidden; box-shadow:0 1px 3px rgba(28,25,23,.06); }
+  .af-canvas { position:absolute; inset:0; cursor:grab; }
+  .af-canvas:active { cursor:grabbing; }
+  .af-poster { display:block; width:100%; height:236px; object-fit:contain; background:#fff; }
+  .af-poster:not([src]) { display:none; }
+  .af-stage.af-live .af-poster { display:none; }
+  .af-stage.af-fail .af-canvas { display:none; }
+  .af-legend { display:flex; gap:10px; margin-top:6px; font-size:9.5px; font-family:ui-monospace,Menlo,monospace; color:var(--sub); justify-content:center; flex-wrap:wrap; }
+  .af-legend span { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+  .af-legend i { display:inline-block; width:10px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); }
+  .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:ui-monospace,Menlo,monospace; text-align:left; }
+  .af-fig figcaption b { color:var(--ink); font-weight:600; }
+  .af-fig figcaption a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
+  @media print { .af-stage .af-canvas { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } .mtr-card { break-inside:avoid; } }
   .sec { margin:34px 0; } .sec h2 { font-size:19px; padding-bottom:8px; border-bottom:1px solid var(--ink); margin-bottom:14px; display:flex; align-items:center; gap:10px; }
   .sec-en { font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--faint); font-weight:400; letter-spacing:1.5px; margin-left:auto; }
   .sec h3 { font-size:15.5px; margin:18px 0 8px; color:#064e3b; }
@@ -981,6 +1218,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
     <b>Contents · 目录</b>
     <ol>
       <li><a href="#llm">${noLlm} · 合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
+      <li><a href="#mini-reports">${noMini} · 各靶点单独报告（基本信息 + 预测结构）</a></li>
       ${insightsHtml ? `<li><a href="#insights">${noInsights} · 客户评估表要点</a></li>` : ''}
       ${ligandsHtml ? `<li><a href="#ligands">${noLigands} · 配体研究数据</a></li>` : ''}
       <li><a href="#matrix">${noMatrix} · 跨靶点对比矩阵</a></li>
@@ -1004,6 +1242,8 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
     <h2>${secHead(noLlm, '合并评估分析', 'Merged Analysis')}</h2>
     ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 请参考下方数据区块与评估表要点）', 1)}
   </section>
+
+  ${miniReportsHtml}
 
   ${insightsHtml}
   ${ligandsHtml}
@@ -1043,7 +1283,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
   ${figHtml}
 
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v2.8 格式：全章节连续编号 · 靶点速览导航 · 扩展对比矩阵 · 大批次智能折叠）<br>
+    Generated by TargetEval · 多靶点合并评估（v2.9 格式：各靶点单独报告（基本信息 + AlphaFold 预测结构交互视图） · 全章节连续编号 · 靶点速览导航 · 扩展对比矩阵 · 大批次智能折叠）<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
   </footer>
