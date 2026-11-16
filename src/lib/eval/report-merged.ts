@@ -5,6 +5,8 @@
  *  - 核心新增章节「靶点关系分析」：关系类型/证据/生物学意义/对结构解析策略的影响
  *    （复合物共表达、抗体-抗原复合物组装、融合构建边界等）
  *  - 三段式生成（摘要+关系 / 各靶点综述 / 整合策略），确定性数据由模板直出
+ *  - v2.10 ②：段D「客户评估表问题回应」— 对评估表目标/待解决科学问题逐条回应，
+ *    渲染时内嵌到「客户评估表要点」章节对应条目下方（此前只列问题不回答）
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
@@ -17,6 +19,7 @@ import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
 import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { splitQaChapter, parseInsightQa, QA_CHAPTER_TITLE } from './qa-chapter'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
 
@@ -297,10 +300,10 @@ export interface GeneratedMergedReport {
   errors: string[]
 }
 
-export async function generateMergedReport(input: MergedReportInput, signal?: AbortSignal): Promise<GeneratedMergedReport> {
+/** 数据上下文（供 LLM 各段共用的确定性摘要）— v2.10 ②从 generateMergedReport 抽出，供单独生成段D 复用 */
+function buildMergedDigest(input: MergedReportInput): string {
   const { targets, relation } = input
   const relName = describeRelationType(relation.relationType)
-
   const digestLines: string[] = []
   digestLines.push('【批次与关系判定】')
   digestLines.push(`靶点数: ${targets.length} 个（${targets.map(t => t.label).join('、')}）`)
@@ -358,8 +361,55 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
       return `- ${s.pdbId} [${s.method}${s.resolution != null ? ` ${s.resolution.toFixed(2)}Å` : ''}] 覆盖 ${s.targetCount} 个靶点：${cov} — ${s.title.slice(0, 80)}`
     }).join('\n'))
   }
+  return digestLines.join('\n')
+}
 
-  const digest = digestLines.join('\n')
+/** v2.10 ②：段D 指令（客户评估表目标/问题逐条回应 — 严格 G/Q 编号格式供渲染端逐条内嵌） */
+function insightQaInstruction(qaGoals: string[], qaQuestions: string[]): string {
+  const goalList = qaGoals.map((g, i) => `G${i + 1}：${g}`).join('\n')
+  const qList = qaQuestions.map((q, i) => `Q${i + 1}：${q}`).join('\n')
+  return `撰写「${QA_CHAPTER_TITLE}」章节（以 ## 开头）— 客户最关心的部分：对评估表提取的目标与问题逐条回应。客户原话如下（编号一一对应，回应时原文逐字复制，不得改写或省略）：
+
+【客户目标】
+${goalList}
+
+【待解决的科学问题】
+${qList}
+
+回应要求：
+- G 条（目标回应）：先一句话判断该目标在本批次数据下能否达成（能/部分能/取决于××/数据不足），再用 2-3 句给依据与建议路径（引用具体数字：PDB 数量/分辨率/覆盖率/同源命中/寡聚态/分子量）
+- Q 条（问题回答）：先给明确结论（能/不能/部分能/取决于××），再用 2-4 句给依据（PDB ID / 共有结构 / 同源命中 / 寡聚态 / 分子量 / 文献 PMID）；数据未覆盖处如实标注「（本次数据未覆盖）」，并给建议的实验验证路径
+- 严格按以下格式输出（### 标记，冒号后为条目原文；按 G1…Gn、Q1…Qn 顺序逐条全部输出，不得遗漏、不得新增条目、不要输出其他章节）：
+
+## ${QA_CHAPTER_TITLE}
+### G1：{G1 目标原文}
+**回应**：{…}
+
+### Q1：{Q1 问题原文}
+**回答**：{…}
+
+- 篇幅：每条 80-180 字`
+}
+
+/** v2.10 ②：单独生成「客户评估表问题回应」章节 — 旧合并报告补答升级用
+ * （旧记录 markdown 无段D 时追加该章节并重渲染 HTML，即可在客户端看到逐条回答）。
+ * 返回 markdown 含 `## 客户评估表问题回应` 章节；无 goals/questions 时返回空。 */
+export async function generateInsightQa(input: MergedReportInput, signal?: AbortSignal): Promise<{ markdown: string; ok: boolean; error?: string }> {
+  const qaGoals = (input.insights?.goals ?? []).slice(0, 6).map(elideSequenceRuns).filter(Boolean)
+  const qaQuestions = (input.insights?.scientificQuestions ?? []).slice(0, 6).map(elideSequenceRuns).filter(Boolean)
+  if (qaGoals.length + qaQuestions.length === 0) return { markdown: '', ok: true, error: '（评估表无目标/待解决问题 — 无需回应）' }
+  const digest = buildMergedDigest(input)
+  const r = await llmChat(`${digest}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n基于以上数据上下文，${insightQaInstruction(qaGoals, qaQuestions)}`, SYSTEM, signal)
+  return { markdown: r.ok ? r.text.trim() : '', ok: r.ok, error: r.error }
+}
+
+export async function generateMergedReport(input: MergedReportInput, signal?: AbortSignal): Promise<GeneratedMergedReport> {
+  const { targets, relation } = input
+  const relName = describeRelationType(relation.relationType)
+  const ins = input.insights
+  const pairs = relation.homologPairs?.filter(p => p.identity > 0) ?? []
+
+  const digest = buildMergedDigest(input)
 
   const callPart = async (name: string, instruction: string): Promise<{ key: string; markdown: string; llmOk: boolean; error?: string }> => {
     const r = await llmChat(`${digest}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n基于以上数据上下文，${instruction}`, SYSTEM, signal)
@@ -416,7 +466,18 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 - 3 段以内：批次核心结论重申 + 给客户的 3 条最重要建议 + 明确的 go/no-go 倾向性意见
 - 篇幅 200-300 字`)
 
-  const parts = [partA, partB, partC]
+  // ── v2.10 ②：段D「客户评估表问题回应」— 客户评估表要点中的目标与待解决科学问题逐条回应。
+  // 仅有评估表提取数据时生成（无 goals/questions 时跳过 — 无问题可答）；输出为独立
+  // 章节（## 客户评估表问题回应），渲染时拆出并内嵌到「客户评估表要点」章节条目下方。
+  const qaGoals = (ins?.goals ?? []).slice(0, 6).map(elideSequenceRuns).filter(Boolean)
+  const qaQuestions = (ins?.scientificQuestions ?? []).slice(0, 6).map(elideSequenceRuns).filter(Boolean)
+  let partD: { key: string; markdown: string; llmOk: boolean; error?: string } | null = null
+  if (qaGoals.length + qaQuestions.length > 0) {
+    await new Promise(r => setTimeout(r, 5000))
+    partD = await callPart('D', insightQaInstruction(qaGoals, qaQuestions))
+  }
+
+  const parts = [partA, partB, partC, ...(partD ? [partD] : [])]
   const fullMarkdown = parts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n')
   const errors = parts.filter(p => !p.llmOk).map(p => `段${p.key}: ${p.error}`)
   // v1.14：从 partA 首行提取 LLM 生成的描述性标题（# 开头）
@@ -478,8 +539,18 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const relName = describeRelationType(relation.relationType)
   // v1.14：LLM 生成的描述性标题（fallback 通用标题）
   const reportTitle = input.title?.trim() || '多靶点合并评估报告'
-  // 剥离 markdown 首行 # 标题（已用作 HTML <h1>，避免重复渲染）
-  const llmMarkdown = input.markdown ? input.markdown.replace(/^#\s+.+\r?\n?/, '') : ''
+  // 剥离 markdown 首行 # 标题（已用作 HTML <h1>，避免重复渲染）；
+  // v2.10 ②：拆出「客户评估表问题回应」章节 — 不在合并分析章节渲染，而是逐条内嵌到
+  // 「客户评估表要点」章节对应目标/问题条目下方（回答紧跟问题，客户可逐条阅读）
+  const mdNoTitle = input.markdown ? input.markdown.replace(/^#\s+.+\r?\n?/, '') : ''
+  const { qaMd, rest: llmMarkdown } = splitQaChapter(mdNoTitle)
+  const qa = parseInsightQa(qaMd)
+  const qaTotal = (input.insights?.goals?.length ?? 0) + (input.insights?.scientificQuestions?.length ?? 0)
+  // 段D 生成了但逐条解析失败（LLM 偏离格式）→ 整块降级渲染；未生成（失败/无评估表）→ 提示行
+  const qaRawFallback = qaMd && qa.parsedCount === 0 ? qaMd : ''
+  const qaMissingNote = qaTotal > 0 && qa.parsedCount === 0 ? (qaMd
+    ? '（评估表逐条回应解析失败 — 已整块呈现于下方）'
+    : '（逐条回应本次生成失败 — 相关策略论述见合并评估分析章节）') : ''
   const dateStr = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
   const embedded = await embedImages(input.images, input.assetDir)
 
@@ -996,10 +1067,17 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const ins = input.insights
   const insightsHtml = ins && (ins.goals?.length || ins.scientificQuestions?.length || ins.experimentalSummary || ins.sequenceNotes || ins.homologs || ins.keyConcerns?.length) ? `
   <section class="sec" id="insights">
-    <h2>${secHead(noInsights, '客户评估表要点', 'Form Insights')}</h2>
-    <p class="note">由 AI 从上传的评估表中结构化提取的关键要点 — 供比对 LLM 分析的复述是否忠于原始输入。</p>
-    ${ins.goals?.length ? `<h3>客户目标</h3><ul>${ins.goals.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
-    ${ins.scientificQuestions?.length ? `<h3>待解决科学问题</h3><ol>${ins.scientificQuestions.map(q => `<li>${esc(q)}</li>`).join('')}</ol>` : ''}
+    <h2>${secHead(noInsights, '客户评估表要点与回应', 'Form Insights &amp; Q/A')}</h2>
+    <p class="note">由 AI 从上传的评估表中结构化提取的关键要点（忠实原文），并由 LLM 基于批次数据逐条回应 — 客户目标逐条附「评估回应」，待解决科学问题逐条附「评估回答」。</p>
+    ${ins.goals?.length ? `<h3>客户目标（含评估回应）</h3><ul>${ins.goals.map((g, i) => {
+      const a = qa.goals[i + 1]
+      return `<li>${esc(g)}${a ? `<div class="qa-ans"><span class="qa-tag">评估回应</span>${renderMarkdown(a, 2)}</div>` : ''}</li>`
+    }).join('')}</ul>` : ''}
+    ${ins.scientificQuestions?.length ? `<h3>待解决科学问题（含评估回答）</h3><ol>${ins.scientificQuestions.map((q, i) => {
+      const a = qa.questions[i + 1]
+      return `<li>${esc(q)}${a ? `<div class="qa-ans"><span class="qa-tag qa-tag-q">评估回答</span>${renderMarkdown(a, 2)}</div>` : ''}</li>`
+    }).join('')}</ol>${qaMissingNote ? `<p class="note">${esc(qaMissingNote)}</p>` : ''}` : ''}
+    ${qaRawFallback ? `<h3>评估表问题回应</h3>${renderMarkdown(qaRawFallback, 1)}` : ''}
     ${ins.experimentalSummary ? `<h3>实验数据要点</h3><blockquote>${esc(ins.experimentalSummary)}</blockquote>` : ''}
     ${ins.sequenceNotes ? `<h3>构建 / 序列说明</h3><blockquote>${esc(ins.sequenceNotes)}</blockquote>` : ''}
     ${ins.homologs ? `<h3>同源 / 参考信息</h3><blockquote>${esc(ins.homologs)}</blockquote>` : ''}
@@ -1085,6 +1163,15 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   /* v2.8：对比矩阵扩列 — 评级副文本与寡聚态列占位 */
   .mtx-rating { display:block; font-size:10px; color:var(--sub); font-weight:400; line-height:1.4; }
   .mtx-dash { color:var(--faint); }
+  /* v2.10 ②：评估表问题回应卡（LLM 逐条回答 — 内嵌于「客户评估表要点」的目标/问题条目内） */
+  .qa-ans { margin:7px 0 3px; padding:9px 14px 7px; background:#ecfdf5; border:1px solid #a7f3d0; border-left:3px solid var(--accent); border-radius:4px; font-size:13px; line-height:1.9; text-align:justify; }
+  .qa-ans .qa-tag { display:inline-block; font-family:ui-monospace,Menlo,monospace; font-size:9.5px; font-weight:700; letter-spacing:1.5px; color:#047857; text-transform:uppercase; margin-bottom:4px; }
+  .qa-ans .qa-tag-q { color:#065f46; }
+  .qa-ans p { font-size:13px; margin:4px 0; }
+  .qa-ans ul { margin:4px 0 4px 18px; font-size:12.5px; } .qa-ans li { margin:2px 0; }
+  .qa-ans blockquote { margin:6px 0; font-size:12px; }
+  .qa-ans table { font-size:11.5px; } .qa-ans th, .qa-ans td { padding:4px 8px; }
+  @media print { .qa-ans { break-inside:avoid-page; } }
   /* ── v2.9：各靶点单独报告（简报卡 — 基本信息 + AlphaFold 预测结构）── */
   .mtr-list { display:flex; flex-direction:column; gap:14px; margin-top:8px; }
   .mtr-card { border:1px solid var(--line); border-radius:6px; background:#fff; padding:16px 20px 14px; break-inside:avoid-page; }
@@ -1219,7 +1306,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
     <ol>
       <li><a href="#llm">${noLlm} · 合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
       <li><a href="#mini-reports">${noMini} · 各靶点单独报告（基本信息 + 预测结构）</a></li>
-      ${insightsHtml ? `<li><a href="#insights">${noInsights} · 客户评估表要点</a></li>` : ''}
+      ${insightsHtml ? `<li><a href="#insights">${noInsights} · 客户评估表要点与回应</a></li>` : ''}
       ${ligandsHtml ? `<li><a href="#ligands">${noLigands} · 配体研究数据</a></li>` : ''}
       <li><a href="#matrix">${noMatrix} · 跨靶点对比矩阵</a></li>
       ${matrixHtml ? `<li><a href="#homolog">${noIdentity} · ${isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性'}</a></li>` : ''}
@@ -1283,7 +1370,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
   ${figHtml}
 
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v2.9 格式：各靶点单独报告（基本信息 + AlphaFold 预测结构交互视图） · 全章节连续编号 · 靶点速览导航 · 扩展对比矩阵 · 大批次智能折叠）<br>
+    Generated by TargetEval · 多靶点合并评估（v2.10 格式：评估表目标/问题逐条回应 · 各靶点单独报告（基本信息 + AlphaFold 预测结构交互视图） · 全章节连续编号 · 靶点速览导航 · 扩展对比矩阵 · 大批次智能折叠）<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
   </footer>

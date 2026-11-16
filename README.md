@@ -25,7 +25,7 @@
 
 | 单靶点评估结果 | 多靶点合并报告 |
 |:---:|:---:|
-| **结果页** — 摘要头 + 内嵌完整报告（3D 视图 · 配体卡 · 数据章节） | **合并报告** — 靶点关系判定（含同源证据）+ 家族级执行摘要 |
+| **结果页** — 摘要头 + 内嵌完整报告（3D 视图 · 配体卡 · 数据章节） | **合并报告** — web 内嵌完整 HTML 报告（与下载同一份）· 靶点关系判定 + 评估表逐条回应 |
 | <img src="docs/screenshots/result-top.png" width="440"> | <img src="docs/screenshots/merged-view.png" width="440"> |
 
 <details>
@@ -73,6 +73,9 @@
 - 合并视图附**三个带 UniProt 归属的数据章节**：各靶点 PDB 结构、同源结构（BLAST/序列检索）、各靶点文献
 - **合并报告格式（v2.8）**：全章节连续编号方块（目录同号）· 刊头靶点卡 mini 仪表盘（PDB/最佳分辨率/覆盖率/同源/文献）· 对比矩阵扩列（寡聚态 / 同源结构 / 文献 / 总体评级）· 目录「靶点速览」锚点直达各靶点结构折叠块 · 靶点 ≥4 时数据折叠块智能收起防长报告失控
 - **各靶点单独报告（v2.9）**：合并报告内嵌每个靶点的独立简报卡（简版，不重复单独评估的全部明细）— 基本信息栏（方法评分 / 总体可行性 / 实验结构统计 / 序列覆盖区间 / 同源 / 文献配体 / 聚集形式 / 分子量 / 客户构建）+ **AlphaFold 预测结构交互 3D 视图**（pLDDT 置信着色 · 拖拽旋转 / 滚轮缩放 / 全屏放大，每靶点独立内嵌；模型磁盘优先获取，单模型 ≤2.5MB / 批次总预算 12MB，超限降级统计卡 + AFDB 链接）；网页合并视图同步展示简报卡（评分徽标 + AF 元数据 + 外链）
+- **客户评估表要点逐条回应（v2.10）**：LLM 第四段「客户评估表问题回应」— 每条**客户目标**附「评估回应」（能否达成 + 依据与建议路径）、每条**待解决科学问题**附「评估回答」（结论先行 + PDB / 共有结构 / 寡聚态 / 文献证据，数据未覆盖处如实标注并给实验验证建议）；渲染端把该章节逐条内嵌到「客户评估表要点与回应」章节对应条目下方（回答紧跟问题，不再只列问题不回答；LLM 偏离格式时整块降级呈现，旧报告可经 `scripts/upgrade-merged-qa.ts` 补答升级）
+- **Web 合并视图内嵌完整 HTML 报告（v2.10，与单独评估同构）**：结果页 iframe 直接嵌同一份 HTML（`?inline=1` 与下载共用文件，展示 100% 一致；自动高度同步 + 加载失败降级旧 React 数据视图）— 根除 React 重绘与离线 HTML 双版本漂移
+- **报告文件名 = 报告题目（v2.10）**：合并报告下载文件名改用 LLM 生成的描述性标题（如「BTN-TCR 复合物结构解析可行性评估.html」，RFC 5987 `filename*` 携带中文 + ASCII 回退名），前端自动下载同步优先解析 `filename*`
 
 ### 🧪 配体归一与结构式卡
 
@@ -89,7 +92,7 @@
 评估作业        POST /api/evaluate           → 毫秒级返回 jobId，进度 2s 轮询
 无状态评估      POST /api/evaluate/sync      → NDJSON 流（心跳 + 14s 段 checkpoint 续跑）
 评估表上传      init → chunk×N → complete    → 分块 2MB，后台队列解析
-合并报告 v1.12  POST /api/evaluate/batch-report → 立即返回 running，LLM 三段式后台生成
+合并报告 v1.12  POST /api/evaluate/batch-report → 立即返回 running，LLM 四段式（含评估表问题回应）后台生成
 ```
 
 - **BLAST 双通道**：NCBI blastp（提交前置，与 RCSB/PDBe/PubMed 并行推进）+ **RCSB mmseqs2 序列检索兜底**（NCBI 队列拥堵 >90s / FAILED / 网络不可达时自动切换，1-3s 返回）
@@ -194,7 +197,7 @@ Next.js 16（App Router）· TypeScript · Tailwind CSS 4 · shadcn/ui · Prisma
 | GET | `/api/evaluate/upload/status?uploadId` | 分块上传④：轮询解析状态 |
 | POST | `/api/evaluate/insights` | 评估表 LLM 智能解析（结果缓存，25s 兜底） |
 | POST | `/api/evaluate/relation` | 靶点关系判断（确定性同源 ≥40% 优先，失败降级独立不阻塞） |
-| POST | `/api/evaluate/batch-report` | **v1.12 异步**：立即返回 running，LLM 三段式后台生成合并报告 |
+| POST | `/api/evaluate/batch-report` | **v1.12 异步**：立即返回 running，LLM 四段式后台生成合并报告（含客户评估表逐条回应） |
 | GET | `/api/evaluate/batch-report?id=` | 查询合并报告状态 / 内容（`&download=1` 下载 HTML） |
 | GET | `/api/jobs` · `/api/jobs/{id}` | 本人作业列表 · 详情 / 进度轮询 |
 | DELETE | `/api/jobs/{id}` | 取消 / 删除作业（含磁盘产物） |
@@ -279,6 +282,7 @@ scripts/                         # E2E（报告 UX / 灯箱 / 响应式 / 部署
 | **v2.7.9** | **同源检测漏检修复（短序列 × 中低一致性区间）+ README 截图全套重制**：① 根因一 — 固定 ±2 对角带预滤把分布式小 indel 漂移的真种子切成碎片（血红蛋白 α/β 55% 一致性、142/147 aa 实测判 0% → 关系判断降级 independent、家族合并失效）→ 改为贪心链直接携带对角漂移约束（`DRIFT_CAP=30`，链本身跟随真实比对路径的 indel 漂移）；② 根因二 — k=4 种子存活率仅 2.6%（40% 一致性时 142 aa 仅 ~3.7 个种子，低于下限 4）→ k 自适应：证据不足时降 k=3 复扫（存活率 9.1%；随机噪声 ~2.5 命中不足以过链下限，无假阳性风险）；③ 精修链首尾外推到全长（仅锚点局部覆盖时杜绝 `support^(1/k)` 兜底被偶发命中污染 — GFP 案例）；修复后血红蛋白 α/β → 44% ≥ 40 确定性家族判定，合并报告关系卡恢复同源证据；回归 `scripts/test-homology.ts` 增血红蛋白对与无关短蛋白对照（胰蛋白酶原×细胞色素c → 0）共 8/8 通过。README 截图 9 张全部实机重制（Playwright 全链路驱动：首页/上传/进度/深色/结果（含配体卡 + 3D + 内嵌报告）/合并报告），脚本沉淀 `scripts/shot-*.mjs` 可复用 |
 | **v2.8.0** | **靶点数上限取消 + 抗体误判配体根除 + 合并报告格式重制（三项用户反馈）**：① **取消 5 靶点上限** — 前端 `MAX_BATCH_UNIPROT` 5→30（防御性，不再构成日常约束；>20 个给串行耗时提示），后端三处静默截断同步根除：关系判断路由 `uniprots.slice(0,6)` 全量参与（超 30 明确 400 错误而非静默丢靶点）、合并报告 `jobIds.slice(0,6)` 同步、docx 提取 10→30；② **「027 scFv」抗体克隆误判为配体根除** — 新增共享纯函数 `isBiologicMention`/`isLikelyCloneNumber`（ligand-parse）：抗体片段/克隆/Ig/重轻链拉丁 token + CJK 抗体词三道防线（提示词约束 → 提名硬过滤（pipeline/客户端芯片回填）→ 归一入口拦截 `resolveLigandInput` 明确排除报错），**关键设计：拦截置于 direct-ID 校验之后** — RCSB 实测 FAB/VHH/VHL/IGM/CDR 本身是合法化学组分 ID（真实组分直通、防误拦），SCFV/IGG/FC 不存在（拦在 LLM 兜底幻觉之前）；③ **合并报告格式 v2.8** — 全章节连续编号方块（01-11 动态编号替代断续的「一/二/三」硬编码，目录同号）、刊头靶点卡 mini 仪表盘（PDB/最佳分辨率/覆盖率/同源/文献）、对比矩阵扩列（寡聚态徽标/同源结构/文献/总体评级副文本 + 数值表头右对齐）、目录「靶点速览 N/M」锚点芯片直达各靶点结构折叠块、靶点 ≥4 折叠块智能收起（≤3 展开）。回归：`scripts/test-ligand-biologic-guard.ts` 49 断言（含 FAB 直通/SCFV 拦截/真实配体不误伤）+ `scripts/test-merged-format.ts` 14 断言 + 既有 test-form-extraction 16/16 与 test-ligand-chain 复跑通过；VLM 截图复查靶点速览计数与表头对齐两处修复确认 |
 | **v2.9.0** | **合并报告内嵌各靶点单独简报（用户需求：批量报告内嵌每靶点简单报告，含基本信息与预测结构，无需单独评估的全部明细）**：① **数据层** — `loadMergedTargets` 携带作业摘要 `alphafold`，`MergedTargetLite`（前后端同步）补齐 scores / methodStats / ligandCount / literatureCount / coverageText / gapText / construct / alphafold 八字段；LLM 数据摘要同步增 AlphaFold 行；② **HTML 合并报告新章节「02 · 各靶点单独报告」（紧随合并分析）** — 每靶点一张简报卡：头部（序号方块 + 蛋白名 + UniProt 链接 + 基因·物种·长度 + 总体评分徽标）+ 基本信息定义列表（方法评分 / 总体 / 实验结构统计 / 序列覆盖区间 / 同源 / 文献配体 / 聚集形式 / 分子量 / 客户构建）+ AlphaFold 预测结构（交互 3Dmol 视图：pLDDT 四段着色 + 打印海报 + 全屏放大，无模型降级统计卡/说明行）；**多视图同页** — 3Dmol bundle 仅内嵌一次 + `data-maf` 阶段循环初始化（共享 plddtStyleApplyJs 着色实现），失败根因沉淀：MODELS 必须映射为纯 PDB 文本字符串（对象传入 → pdb.split 崩溃 → af-fail）；**预算闸门** — 单模型 2.5MB / 批次 12MB，超限提示 + 统计卡降级，断网回退本地缓存；**新鲜度优先** — 本次获取的模型/元数据 > 作业摘要（作业时断网获取失败的靶点，渲染时重试成功仍展示完整预测结构）；旧作业（无 alphafold 摘要）经磁盘优先元数据补齐；③ **网页合并视图同步** — MergedReportView 新章节（每靶点简报卡：基本信息 dl + 评分徽标 + AF 元数据 + AFDB 外链 + 3D 视图见 HTML 报告提示）。回归：`scripts/test-merged-format.ts` 重制 24 断言（章节编号 01-09 / 简报卡结构 / 三条 AF 降级路径 / 无模型零死脚本）+ 新增 `scripts/test-merged-af.ts` 8 断言（真实 AFDB 联网拉取 3 模型 + Playwright 实机 `af-live×3` 多视图初始化验证）+ `scripts/test-merged-ui.ts` 6 断言（生产服务器真实 DB 合并报告 → 历史对话框 → 前端简报卡渲染全链路）；生产构建通过 |
+| **v2.10.0** | **三项用户反馈（合并报告文件名 / 评估表问题逐条回应 / web 与离线显示一致）**：① **报告文件名 = 报告题目** — 合并报告下载（`GET batch-report?download=1`）文件名从 `merged-report-{id8}.html` 改为 LLM 描述性标题（非法字符清洗 + 80 字限长，RFC 5987 `filename*` 携带中文 + `TargetEval_Merged_{date}` ASCII 回退），前端自动下载 `autoDownloadHtmlReport` 同步优先解析 `filename*`（旧正则只取第一个 `filename=`，中文题名被 ASCII 回退吞没）；② **客户评估表要点逐条回应** — 此前该章节只列 AI 提取的目标/问题原文、无任何回答；新增 LLM **段D**「客户评估表问题回应」（G/Q 编号严格格式，原文逐字复制，结论先行 + 数据证据 + 数据未覆盖处给实验验证建议），纯函数模块 `qa-chapter.ts`（`splitQaChapter` 章节拆分 + `parseInsightQa` 宽松解析）把段D 从合并分析 markdown 拆出、逐条内嵌到「客户评估表要点与回应」章节对应条目下方（`.qa-ans` 回应卡，回答紧跟问题）；LLM 偏离格式整块降级、段D 失败时如实提示；`generateInsightQa` 独立导出 + `scripts/upgrade-merged-qa.ts` 旧报告补答升级（实测 BTN-TCR 记录补答 6 卡，引用 PDB ID 经数据区核对全部真实）；③ **Web 合并视图 = 离线 HTML** — MergedReportView 复刻单靶点 ReportFrame：同源 iframe 内嵌完整 HTML（`?inline=1`，与「下载 HTML」共用同一文件，样式 100% 一致），自动高度同步（embed-tweaks 注入 + ResizeObserver + rAF）+ 加载失败降级旧 React 数据区块，操作条改「大窗预览 / 下载 HTML（题目）/ 打印」；回归：`scripts/test-qa-render.ts`（真实 BTN-TCR 记录端到端 10 断言）+ `scripts/shot-merged-embed.mjs`（Playwright 实机历史入口全链路：iframe 1374×18922 全量高度 / 旧区块正确降级）+ README 合并截图重制（merged-view / merged.png 整页长图 2160×39705） |
 
 ## 说明
 

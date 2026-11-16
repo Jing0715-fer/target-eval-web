@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -38,6 +38,90 @@ export interface MergedReportViewProps {
   /** 参与批次的靶点展示标签（chips 用） */
   targetLabels: string[]
   onNewEvaluation: () => void
+}
+
+/* ---------------- v2.10 ③：内嵌完整 HTML 合并报告（与下载同一份文件） ---------------- */
+
+/**
+ * 同源 iframe 内嵌完整合并报告：web 展示与「下载 HTML」共用同一文件（GET ?inline=1），
+ * 样式 100% 一致 — 与单靶点结果页的 ReportFrame 同构（此前合并报告 web 端用 React
+ * 重绘、与离线 HTML 双版本渐漂移；现与单独评估一致：直接嵌同一份 HTML）。
+ * - 自动高度：注入内嵌适配样式（取消 .page 100vh 最小高 / 隐藏回顶部钮）后按内容同步；
+ *   ResizeObserver 监听 body（details 折叠展开 / 图片懒加载引起的高度变化）
+ * - 加载失败（报告文件丢失 404）→ onFail 降级为旧版 React 数据区块
+ */
+function MergedReportFrame({
+  url,
+  iframeRef,
+  onFail,
+}: {
+  url: string
+  iframeRef: React.RefObject<HTMLIFrameElement | null>
+  onFail: () => void
+}) {
+  const [height, setHeight] = useState(1600)
+  const [loaded, setLoaded] = useState(false)
+
+  const syncHeight = useCallback(() => {
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
+    try {
+      if (!doc.getElementById('embed-tweaks')) {
+        const st = doc.createElement('style')
+        st.id = 'embed-tweaks'
+        st.textContent = '.page{min-height:auto!important}.backtop{display:none!important}'
+        doc.head.appendChild(st)
+      }
+      const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight)
+      if (Number.isFinite(h) && h > 100) setHeight(h + 16)
+    } catch { /* 跨域异常不应发生（同源）；忽略 */ }
+  }, [iframeRef])
+
+  useEffect(() => {
+    if (!loaded) return
+    let ro: ResizeObserver | null = null
+    try {
+      const doc = iframeRef.current?.contentDocument
+      if (doc?.body) {
+        ro = new ResizeObserver(() => syncHeight())
+        ro.observe(doc.body)
+      }
+    } catch { /* ignore */ }
+    // rAF 延迟一帧再同步高度（避免 effect 内同步 setState 触发级联渲染）
+    const raf = requestAnimationFrame(() => syncHeight())
+    return () => {
+      cancelAnimationFrame(raf)
+      ro?.disconnect()
+    }
+  }, [loaded, syncHeight])
+
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-border bg-card shadow-none">
+      {!loaded && (
+        <div className="absolute inset-0 z-10 flex min-h-72 flex-col items-center justify-center gap-3 bg-card">
+          <Loader2 className="size-6 animate-spin text-primary" aria-hidden />
+          <p className="font-mono text-xs text-muted-foreground">正在加载完整合并报告（与下载 HTML 同一份）…</p>
+        </div>
+      )}
+      <iframe
+        ref={iframeRef}
+        src={url}
+        title="合并评估报告（与下载 HTML 一致）"
+        aria-label="合并评估报告（与下载 HTML 一致）"
+        onLoad={() => {
+          setLoaded(true)
+          syncHeight()
+          // 报告丢失（404 JSON）→ 降级旧版数据区块
+          try {
+            const doc = iframeRef.current?.contentDocument
+            if (doc && !doc.querySelector('.rpt-head')) onFail()
+          } catch { /* ignore */ }
+        }}
+        style={{ height }}
+        className="block w-full bg-white transition-[height] duration-200 ease-out"
+      />
+    </div>
+  )
 }
 
 /** 关系类型 → 视觉色调（关联=紫罗兰系；同源家族=青色系；独立批次的合并报告不会走到此视图） */
@@ -219,7 +303,9 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
 
 /**
  * 合并评估报告视图（v1.8 关联靶点批量）：
- * 返回栏 → 刊头（关系判定卡）→ 报告操作条（下载 HTML）→ LLM 合并分析全文
+ * 返回栏 → 刊头（关系判定卡）→ 报告操作条（下载 HTML / 打印 / 新窗口）→ 内嵌完整
+ * HTML 报告（v2.10 ③：与下载文件同一份，web 展示与离线 100% 一致 — 像单独评估那样）；
+ * 报告文件丢失时降级为旧版 React 数据区块（合并分析全文 / 各靶点数据列表）。
  * v1.11：新增各靶点 PDB / 同源结构 / 文献三组数据列表（带 UniProt 归属分组头）
  */
 export function MergedReportView({ report, targetLabels, onNewEvaluation }: MergedReportViewProps) {
@@ -245,6 +331,9 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const [previewLoaded, setPreviewLoaded] = useState(false)
   const [previewSlow, setPreviewSlow] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  /** v2.10 ③：内嵌完整报告加载失败（文件丢失/未生成）→ 降级旧版 React 数据区块 */
+  const [embedFailed, setEmbedFailed] = useState(false)
+  const reportFrameRef = useRef<HTMLIFrameElement>(null)
 
   const openPreview = () => {
     setPreviewLoaded(false)
@@ -354,53 +443,76 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         </div>
       </motion.header>
 
-      {/* 2. 报告操作条 */}
+      {/* 2. 报告操作条 + 内嵌完整 HTML 报告（v2.10 ③：与下载文件同一份，展示 100% 一致） */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.14, ease: 'easeOut' }}
-        className={cn(
-          'flex flex-col gap-4 rounded-xl border px-5 py-4 sm:flex-row sm:items-center',
-          llmOk
-            ? 'border-violet-500/30 bg-violet-500/[0.06]'
-            : 'border-amber-500/30 bg-amber-500/[0.06]'
-        )}
+        className="flex flex-col gap-4"
       >
-        <div className="flex items-center gap-3">
-          <div className={cn(
-            'flex size-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground',
-            llmOk ? 'bg-violet-600 dark:bg-violet-700' : 'bg-amber-600 dark:bg-amber-700'
-          )}>
-            {llmOk ? <Layers className="size-4.5" /> : <AlertTriangle className="size-4.5" />}
+        <div
+          className={cn(
+            'flex flex-col gap-4 rounded-xl border px-5 py-4 sm:flex-row sm:items-center',
+            llmOk
+              ? 'border-violet-500/30 bg-violet-500/[0.06]'
+              : 'border-amber-500/30 bg-amber-500/[0.06]'
+          )}
+        >
+          <div className="flex items-center gap-3">
+            <div className={cn(
+              'flex size-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground',
+              llmOk ? 'bg-violet-600 dark:bg-violet-700' : 'bg-amber-600 dark:bg-amber-700'
+            )}>
+              {llmOk ? <Layers className="size-4.5" /> : <AlertTriangle className="size-4.5" />}
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-foreground">
+                {llmOk ? '合并评估报告已生成' : '合并报告（LLM 部分失败）'}
+              </div>
+              <div className="font-mono text-[11px] text-muted-foreground">
+                完整 HTML 报告 · 在线展示与下载文件一致{md.length > 0 ? ` · ${md.length.toLocaleString()} 字分析` : ''} · 可独立分享
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-semibold text-foreground">
-              {llmOk ? '合并评估报告已生成' : '合并报告（LLM 部分失败）'}
-            </div>
-            <div className="font-mono text-[11px] text-muted-foreground">
-              HTML · {md.length > 0 ? `${md.length.toLocaleString()} 字分析` : '分析缺失'} · 可独立下载分享
-            </div>
+          <div className="flex flex-wrap gap-2 sm:ml-auto">
+            <Button
+              onClick={openPreview}
+              className="h-10 gap-2 rounded-lg bg-primary px-4 font-medium text-primary-foreground hover:bg-[#7a84dc] dark:hover:bg-[#828fff]"
+            >
+              <Eye className="size-4" />
+              大窗预览
+            </Button>
+            <Button
+              onClick={downloadReport}
+              className="h-10 gap-2 rounded-lg bg-violet-600 px-4 font-medium text-white hover:bg-violet-700 dark:bg-violet-700"
+            >
+              <Download className="size-4" />
+              下载 HTML（{reportTitle.slice(0, 12)}{reportTitle.length > 12 ? '…' : ''}）
+            </Button>
+            {!embedFailed && (
+              <Button
+                onClick={() => reportFrameRef.current?.contentWindow?.print()}
+                variant="outline"
+                className="h-10 gap-2 rounded-lg border-violet-500/40 bg-card px-4 font-medium text-violet-700 hover:bg-violet-500/[0.06] dark:text-violet-300"
+              >
+                <Printer className="size-4" />
+                打印
+              </Button>
+            )}
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 sm:ml-auto">
-          <Button
-            onClick={openPreview}
-            className="h-10 gap-2 rounded-lg bg-primary px-4 font-medium text-primary-foreground hover:bg-[#7a84dc] dark:hover:bg-[#828fff]"
-          >
-            <Eye className="size-4" />
-            在线预览报告
-          </Button>
-          <Button
-            onClick={downloadReport}
-            variant="outline"
-            className="h-10 gap-2 rounded-lg border-violet-500/40 bg-card px-4 font-medium text-violet-700 hover:bg-violet-500/[0.06] dark:text-violet-300"
-          >
-            <Download className="size-4" />
-            下载 HTML
-          </Button>
-        </div>
+        {!embedFailed ? (
+          <MergedReportFrame url={inlineUrl} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} />
+        ) : (
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            完整 HTML 报告加载失败（文件可能已被服务器清理）— 已切换为在线数据视图；可尝试「大窗预览 / 下载 HTML」或重新发起评估。
+          </div>
+        )}
       </motion.section>
 
+      {/* 3-6 旧版 React 数据区块：仅内嵌报告不可用时降级展示（与单靶点结果页同构） */}
+      {embedFailed && <>
       {/* 2.5 评估表序列归属（v1.10 — 每条序列的去向，不再静默丢弃） */}
       {attribution.length > 0 && (
         <motion.section
@@ -712,6 +824,9 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </div>
         </motion.section>
       )}
+
+      </>
+      /* 内嵌报告正常时以上数据区块不渲染（HTML 报告内已含同等数据，避免双版本漂移） */}
 
       {/* 报告在线预览（大窗口 iframe + 加载态 + 新窗口/打印） */}
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>

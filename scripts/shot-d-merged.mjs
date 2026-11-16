@@ -31,10 +31,22 @@ const run = async () => {
   log('找到合并报告行，派发点击…')
   await row.evaluate((el) => el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })))
 
-  // ── 等合并视图 ──
+  // ── 等合并视图 ──（v2.10 ③：web 端内嵌完整 HTML 报告 iframe — 与下载同一份文件）
   await page.waitForSelector('text=Merged Evaluation Report', { timeout: 120_000 })
   log('合并视图已出现')
-  await page.waitForTimeout(5000) // markdown/图表/图片就绪
+  const frameLoc = page.locator('iframe[title="合并评估报告（与下载 HTML 一致）"]')
+  await frameLoc.waitFor({ state: 'attached', timeout: 120_000 })
+  const frame = page.frames().find(f => f.url().includes('inline=1'))
+  if (frame) {
+    await frame.waitForSelector('.rpt-head', { timeout: 120_000 })
+    log('内嵌报告 .rpt-head 已就绪')
+  }
+  // 自动高度同步（ResizeObserver + rAF）稳定
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(1000)
+    const box = await frameLoc.first().boundingBox().catch(() => null)
+    if (box && box.height > 2500) break
+  }
 
   // 关闭历史弹窗
   await page.keyboard.press('Escape')

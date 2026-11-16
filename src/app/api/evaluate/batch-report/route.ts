@@ -315,10 +315,22 @@ export async function GET(req: Request) {
     if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
     try {
       const html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(await fs.readFile(record.htmlPath, 'utf-8'))))
+      // v2.10 ①：文件名改用报告题目（LLM 生成的描述性标题，如「BTN-TCR 复合物结构解析可行性评估」）
+      // — 清洗文件系统非法字符并限长；RFC 5987 filename* 携带中文原题（现代浏览器优先采用），
+      // ASCII 回退名仅供不支持 filename* 的旧解析器（前端自动下载已同步优先解析 filename*）
+      const titleBase = (record.title ?? '')
+        .replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[.\s]+$/, '')
+        .slice(0, 80)
+      const date = new Date().toISOString().slice(0, 10)
+      const asciiBase = titleBase && /^[\x20-\x7e]+$/.test(titleBase) ? titleBase : `TargetEval_Merged_${date}`
+      const finalBase = titleBase || `merged-report-${record.id.slice(0, 8)}`
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
-          'Content-Disposition': `attachment; filename="merged-report-${record.id.slice(0, 8)}.html"`,
+          'Content-Disposition': `attachment; filename="${asciiBase}.html"; filename*=UTF-8''${encodeURIComponent(finalBase)}.html`,
         },
       })
     } catch {
