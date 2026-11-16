@@ -23,7 +23,7 @@
  */
 import { llmChat } from './llm'
 import { apiCache } from './cache'
-import { LIGAND_JUNK_IDS } from './ligand-parse'
+import { LIGAND_JUNK_IDS, isBiologicMention } from './ligand-parse'
 import { cutFormTemplateTail } from './types'
 import { pubchemLookupName, rcsbChemicalCandidates, pubchemDetailByCid, pubchemDetailByInchiKey, pubchem2dStructure, type PubChemCompound, type PubChemDetail } from './pubchem'
 
@@ -455,6 +455,8 @@ export async function resolveLigandInput(input: LigandInput, signal?: AbortSigna
   const norm = normalizeLigandRaw(raw)
 
   // 1) 直接 ID（1-5 位，历史三位 + 新式更长 ID）
+  //    v2.8 注意：抗体缩写与真实化学组分 ID 存在巧合重叠（实测 FAB/VHH/VHL/IGM/CDR
+  //    均为合法 chemcomp ID）— 抗体拦截必须在本步之后，确保真实组分 ID 仍可直通。
   if (ID_RE.test(norm) && /[a-z0-9]/i.test(norm) && norm.length <= 5) {
     const upper = norm.toUpperCase()
     if (!LIGAND_JUNK_IDS.has(upper)) {
@@ -466,6 +468,14 @@ export async function resolveLigandInput(input: LigandInput, signal?: AbortSigna
         }
       }
     }
+  }
+
+  // 1b) v2.8 抗体/蛋白类试剂拦截（客户反馈：评估表中「027 scFv」抗体克隆被误判为配体）。
+  //     放在 direct-id 之后：合法组分 ID（如 FAB）已放行；未命中组分的抗体缩写与
+  //     多词抗体描述（"027 scFv" / "anti-PD-L1 nanobody" / "鼠源抗体"）在此明确排除，
+  //     防止后续 PDBe/PubChem/LLM 链路 hallucination 出错卡。
+  if (isBiologicMention(raw)) {
+    return { ...base, error: '抗体/蛋白类试剂（scFv/Fab/nanobody/抗体克隆等）不属于小分子配体 — 已排除' }
   }
 
   // 2) 别名表
@@ -812,6 +822,8 @@ function trimMentionTail(v: string): string {
 function isJunkMention(v: string, acronymOk = false): boolean {
   const key = v.toLowerCase()
   if (LIGAND_MENTION_JUNK.has(key)) return true
+  // v2.8：抗体/蛋白类试剂（"027 scFv" / nanobody / 抗体片段…）不是小分子配体
+  if (isBiologicMention(v)) return true
   // 纯大写短缩写（≤4 位）多为技术缩写而非配体名：NAD/FAD 等已在别名表精确处理；
   // 但「配体：」字段值里显式写出的 ATP/GTP 是真实配体 → acronymOk 放行
   if (!acronymOk && /^[A-Z]{1,4}$/.test(v)) return true

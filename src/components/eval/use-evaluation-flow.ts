@@ -141,11 +141,15 @@ function autoDownloadHtmlReport(url: string, key: string, label: string) {
       const blob = await res.blob()
       const blobUrl = URL.createObjectURL(blob)
       // 文件名：优先服务端 Content-Disposition，回退默认名
-      let filename = 'TargetEval_Report.html'
+      // v2.10 ①：优先解析 filename*（RFC 5987，携带中文报告标题），回退 filename=
       const cd = res.headers.get('content-disposition') ?? ''
-      const m = /filename\*?=(?:UTF-8'')?"?([^";\n]+)/i.exec(cd)
-      if (m && m[1]) {
-        try { filename = decodeURIComponent(m[1].trim()) } catch { filename = m[1].trim() }
+      const star = /filename\*=UTF-8''([^;"\n]+)/i.exec(cd)
+      const plain = /filename="?([^";\n]+)/i.exec(cd)
+      let filename = 'TargetEval_Report.html'
+      if (star?.[1]) {
+        try { filename = decodeURIComponent(star[1].trim()) } catch { filename = star[1].trim() }
+      } else if (plain?.[1]) {
+        try { filename = decodeURIComponent(plain[1].trim()) } catch { filename = plain[1].trim() }
       }
       const a = document.createElement('a')
       a.href = blobUrl

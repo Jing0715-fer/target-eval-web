@@ -11,6 +11,7 @@
 import { llmChat } from './llm'
 import { extractGoalHints } from './docx'
 import { extractLigandCandidatesFromText } from './ligand'
+import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
 import { elideSequenceRuns } from './seq-elide'
 import type { FormInsights } from './types'
 
@@ -26,7 +27,7 @@ const SYSTEM = `你是一位结构生物学 CRO 项目的评估分析师。用�
   "sequenceNotes": "构建/序列说明：截短边界、突变位点、标签、linker 等（无则省略，≤200 字）",
   "homologs": "文档中提及的同源蛋白/参考蛋白/已有结构信息（无则省略，≤200 字）",
   "keyConcerns": ["风险与关注点：样品量不足、蛋白不稳定、翻译后修饰等（最多 5 条，无则省略）"],
-  "ligands": ["文档中提及的配体/化合物/辅因子/药物（中英文俗名均可，如 ATP、血红素、伊马替尼、staurosporine；只提取文档真实提及的，最多 8 条，未提及则省略）"],
+  "ligands": ["文档中提及的小分子配体/化合物/辅因子/药物（中英文俗名均可，如 ATP、血红素、伊马替尼、staurosporine；只提取文档真实提及的，最多 8 条，未提及则省略）。注意：只收小分子化学实体 — 抗体及其片段/克隆（scFv、Fab、Fc、nanobody、VHH、抗体克隆号如「027 scFv」）、蛋白标签（GST/MBP/His）、缓冲液与纯化试剂均不是配体，禁止提取"],
 }
 注意：goals 和 scientificQuestions 是两个不同维度——goals 是客户想要达成什么（如"解析 apo 与复合物结构"），scientificQuestions 是科学上待回答的问题（如"抑制活性氧还依赖的二聚化界面是否保守"）。只提取文档中真实存在的信息，禁止推测编造。
 任何字段都不要原样复述完整氨基酸/核苷酸序列（≥40 个连续字母的片段会被系统自动省略为占位标记）：序列相关内容只写边界（如 33-308）、截短、突变位点、标签、linker 与长度等要点。`
@@ -118,7 +119,10 @@ ${trimmed.slice(0, 14000)}
   if (homologs) insights.homologs = homologs
   const concerns = sanitizeStrArray(obj.keyConcerns, 5, 120)
   if (concerns.length) insights.keyConcerns = concerns
+  // v2.8：抗体/蛋白类试剂硬过滤（提示词约束之外的确定性防线 — LLM 偶发把
+  // 「027 scFv」类抗体克隆当配体提取时在此拦截；克隆编号弱信号一并过滤）
   const ligandMentions = sanitizeStrArray(obj.ligands, 8, 60)
+    .filter(name => !isBiologicMention(name) && !isLikelyCloneNumber(name))
   if (ligandMentions.length) insights.ligands = ligandMentions
 
   // LLM 提取为空时回退规则结果，保证 goals 至少有 goalHints

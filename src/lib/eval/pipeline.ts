@@ -41,6 +41,7 @@ import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
+import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
 import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
 import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
@@ -756,16 +757,32 @@ class SegmentRunner {
     const candidates: LigandInput[] = [...(this.input.ligands ?? [])]
     // 评估表识别（v2.5 三通道）：字典扫描（保守长 key）+ 模式提名（「与 X 配体」等行文）
     // + LLM/规则提取结果（insights.ligands，若有）。有 uploadId 或内联 evalTable 全文均可。
+    // v2.8：抗体/蛋白类试剂（"027 scFv" 抗体克隆等）在进入归一链前先行剔除 —
+    // 既是解析准确度修复，也避免归一链浪费外部调用。
+    const biologicBlocked = new Set<string>()
+    const isBlockedMention = (raw: string): boolean => {
+      const v = raw.trim()
+      if (!v) return false
+      if (isBiologicMention(v) || isLikelyCloneNumber(v)) {
+        biologicBlocked.add(v)
+        return true
+      }
+      return false
+    }
     if (st.uploadFullText) {
       for (const m of extractLigandsFromText(st.uploadFullText)) {
         candidates.push({ raw: m.compId, source: 'eval-table' })
       }
       for (const name of extractLigandCandidatesFromText(st.uploadFullText)) {
-        candidates.push({ raw: name, source: 'eval-table' })
+        if (!isBlockedMention(name)) candidates.push({ raw: name, source: 'eval-table' })
       }
     }
     for (const name of st.insights?.ligands ?? []) {
-      if (name.trim()) candidates.push({ raw: name.trim().slice(0, 160), source: 'eval-table' })
+      if (!name.trim()) continue
+      if (!isBlockedMention(name)) candidates.push({ raw: name.trim().slice(0, 160), source: 'eval-table' })
+    }
+    if (biologicBlocked.size) {
+      this.log(`排除非小分子配体提名 ${biologicBlocked.size} 项（抗体/蛋白类试剂：${[...biologicBlocked].slice(0, 6).join('、')}）— 抗体序列按背景证据处理，不进入配体归一`, 'warn')
     }
     // 归一去重（同 raw 不重复解析；同批次多靶点由 LRU 缓存共享外部调用）
     const seen = new Map<string, LigandInput>()
@@ -1297,12 +1314,12 @@ class SegmentRunner {
     const st = this.st
     const deferReport = this.input.options.reportMode === 'deferred'
     if (deferReport) {
-      // 关联靶点批量：跳过单靶点报告 — 全部靶点完成后由合并报告统一生成
-      this.report('report', '报告并入合并评估报告（本靶点数据已就绪）…', 1)
-      this.log('跳过单靶点 LLM 报告：本批次判定为关联靶点，将合并生成一份含关系分析的报告')
-      st.reportDone = true
-      this.advance('render')
-      return null
+      // v2.13：批次各靶点不再因「复合物组分」跳过单独评估 — 按单靶点流程生成
+      // 完整独立 LLM 报告（章节与单独评估完全一致），由合并报告的各靶点单独
+      // 评估页内嵌全文（reportMarkdown 持久化）；本作业的 HTML 不单独落盘
+      // （展示并入合并报告，避免同一批次两份报告文件）。
+      this.report('report', '生成该靶点的单独评估报告（并入合并报告的靶点单独评估页展示）…', 0.05)
+      this.log('批次评估：本靶点按单靶点流程生成完整独立报告 — 展示于合并报告的单独评估页')
     }
     if (!st.reportDone) {
       this.report('report', '整理数据上下文…', 0.05)
@@ -1345,6 +1362,9 @@ class SegmentRunner {
       }
       st.reportDone = true
     }
+    // v2.13：独立报告全文持久化（deferred 批次同样生成 — 合并报告各靶点单独
+    // 评估页内嵌该全文；旧批次无此字段的报告回退合并综述）
+    st.reportMarkdown = st.reportParts.map(p => p.markdown.trim()).filter(Boolean).join('\n\n') || null
     this.advance('render')
     return null
   }
@@ -1439,6 +1459,8 @@ class SegmentRunner {
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,
+      /** v2.13：覆盖区间（合并报告各靶点单独评估页的覆盖率区段图用） */
+      coveredRanges: st.coverage?.coveredRanges,
       oligomer: st.oligomer!,
       ligands: st.ligandResolved.length ? st.ligandResolved : undefined,
       alphafold: st.afSummary ?? undefined,
@@ -1446,7 +1468,8 @@ class SegmentRunner {
       interaction: st.interaction ?? undefined,
       /** v1.26：分子量增重策略分析（小分子量靶点；applicable=false 时亦存档） */
       mwAugment: st.mwAugment!,
-      reportLlmOk: deferReport ? undefined : st.reportParts.some(p => p.llmOk),
+      /** v2.13：deferred 批次同样生成完整独立报告 — 状态如实记录（合并报告各靶点页引用） */
+      reportLlmOk: st.reportParts.some(p => p.llmOk) || undefined,
       reportDeferred: deferReport || undefined,
       batchNote: this.input.batchNote,
       construct: st.comparison
@@ -1475,7 +1498,8 @@ class SegmentRunner {
           blastHits: JSON.stringify(st.blastHits),
           literature: JSON.stringify(st.literature),
           reportPath,
-          reportMarkdown: !deferReport && st.reportMarkdown ? st.reportMarkdown : null,
+          // v2.13：deferred 批次也持久化独立报告全文（合并报告靶点单独评估页内嵌）
+          reportMarkdown: st.reportMarkdown || null,
           error: null,
           updatedAt: new Date(),
         },
@@ -1500,7 +1524,7 @@ class SegmentRunner {
       }
     }
 
-    this.log(`评估完成：总耗时 ${(durationMs / 1000).toFixed(1)}s${deferReport ? '（报告已并入合并评估报告）' : '，报告已生成'}`)
+    this.log(`评估完成：总耗时 ${(durationMs / 1000).toFixed(1)}s${deferReport ? '（单独评估报告已生成 — 展示并入合并评估报告的靶点单独评估页）' : '，报告已生成'}`)
 
     // v2.4：同步评估模式 — 直接把最终数据交给调用方（不依赖 DB 读回）
     const result: PipelineResult = {

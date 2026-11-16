@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   AlertTriangle,
   ArrowLeft,
+  Atom,
   BookOpenText,
   Dna,
   Download,
@@ -37,6 +38,90 @@ export interface MergedReportViewProps {
   /** 参与批次的靶点展示标签（chips 用） */
   targetLabels: string[]
   onNewEvaluation: () => void
+}
+
+/* ---------------- v2.10 ③：内嵌完整 HTML 合并报告（与下载同一份文件） ---------------- */
+
+/**
+ * 同源 iframe 内嵌完整合并报告：web 展示与「下载 HTML」共用同一文件（GET ?inline=1），
+ * 样式 100% 一致 — 与单靶点结果页的 ReportFrame 同构（此前合并报告 web 端用 React
+ * 重绘、与离线 HTML 双版本渐漂移；现与单独评估一致：直接嵌同一份 HTML）。
+ * - 自动高度：注入内嵌适配样式（取消 .page 100vh 最小高 / 隐藏回顶部钮）后按内容同步；
+ *   ResizeObserver 监听 body（details 折叠展开 / 图片懒加载引起的高度变化）
+ * - 加载失败（报告文件丢失 404）→ onFail 降级为旧版 React 数据区块
+ */
+function MergedReportFrame({
+  url,
+  iframeRef,
+  onFail,
+}: {
+  url: string
+  iframeRef: React.RefObject<HTMLIFrameElement | null>
+  onFail: () => void
+}) {
+  const [height, setHeight] = useState(1600)
+  const [loaded, setLoaded] = useState(false)
+
+  const syncHeight = useCallback(() => {
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
+    try {
+      if (!doc.getElementById('embed-tweaks')) {
+        const st = doc.createElement('style')
+        st.id = 'embed-tweaks'
+        st.textContent = '.page{min-height:auto!important}.backtop{display:none!important}'
+        doc.head.appendChild(st)
+      }
+      const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight)
+      if (Number.isFinite(h) && h > 100) setHeight(h + 16)
+    } catch { /* 跨域异常不应发生（同源）；忽略 */ }
+  }, [iframeRef])
+
+  useEffect(() => {
+    if (!loaded) return
+    let ro: ResizeObserver | null = null
+    try {
+      const doc = iframeRef.current?.contentDocument
+      if (doc?.body) {
+        ro = new ResizeObserver(() => syncHeight())
+        ro.observe(doc.body)
+      }
+    } catch { /* ignore */ }
+    // rAF 延迟一帧再同步高度（避免 effect 内同步 setState 触发级联渲染）
+    const raf = requestAnimationFrame(() => syncHeight())
+    return () => {
+      cancelAnimationFrame(raf)
+      ro?.disconnect()
+    }
+  }, [loaded, syncHeight])
+
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-border bg-card shadow-none">
+      {!loaded && (
+        <div className="absolute inset-0 z-10 flex min-h-72 flex-col items-center justify-center gap-3 bg-card">
+          <Loader2 className="size-6 animate-spin text-primary" aria-hidden />
+          <p className="font-mono text-xs text-muted-foreground">正在加载完整合并报告（与下载 HTML 同一份）…</p>
+        </div>
+      )}
+      <iframe
+        ref={iframeRef}
+        src={url}
+        title="合并评估报告（与下载 HTML 一致）"
+        aria-label="合并评估报告（与下载 HTML 一致）"
+        onLoad={() => {
+          setLoaded(true)
+          syncHeight()
+          // 报告丢失（404 JSON）→ 降级旧版数据区块
+          try {
+            const doc = iframeRef.current?.contentDocument
+            if (doc && !doc.querySelector('.rpt-head')) onFail()
+          } catch { /* ignore */ }
+        }}
+        style={{ height }}
+        className="block w-full bg-white transition-[height] duration-200 ease-out"
+      />
+    </div>
+  )
 }
 
 /** 关系类型 → 视觉色调（关联=紫罗兰系；同源家族=青色系；独立批次的合并报告不会走到此视图） */
@@ -104,9 +189,123 @@ function BlastNote({ t }: { t: MergedTargetLite }) {
   )
 }
 
+/** v2.9：各靶点单独简报卡（基本信息 + 预测结构 — 简版；交互 3D 视图见 HTML 报告） */
+function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) {
+  const af = t.alphafold
+  const afOk = af?.available === true
+  const overall = t.scores?.overall
+  const scoreTone = overall
+    ? overall.score >= 7
+      ? 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-700 dark:text-emerald-300'
+      : overall.score >= 4
+        ? 'border-amber-500/40 bg-amber-500/[0.08] text-amber-700 dark:text-amber-300'
+        : 'border-rose-500/40 bg-rose-500/[0.08] text-rose-700 dark:text-rose-300'
+    : 'border-border bg-muted text-muted-foreground'
+  const ms = t.methodStats
+  const oligoZh = t.oligomer
+    ? t.oligomer.category === 'monomer'
+      ? '单体'
+      : t.oligomer.category === 'homo-oligomer'
+        ? '同源寡聚体'
+        : t.oligomer.category === 'hetero-complex'
+          ? '异源复合物'
+          : '未知'
+    : ''
+  const rows: Array<{ k: string; v: string }> = [
+    { k: '方法评分', v: t.scores ? `X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10${t.scores.oligomerAdjust ? '（含聚集形式调整）' : ''}` : '—（历史报告）' },
+    { k: '总体可行性', v: overall ? `${overall.score}/10（${overall.rating}）` : '—' },
+    { k: '实验结构', v: `${t.directPdbCount} 个${ms ? `（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）` : ''}${ms?.bestResolution != null ? ` · 最佳 ${ms.bestResolution.toFixed(2)} Å` : ''}` },
+    { k: '序列覆盖', v: `${t.coveragePercent}%${t.coverageText ? `（已覆盖 ${t.coverageText.slice(0, 80)}）` : ''}${t.gapText ? ` · 空白 ${t.gapText.slice(0, 80)}` : ''}` },
+    { k: '同源结构', v: `${t.blastHitCount} 个` },
+    { k: '文献 / 配体', v: `${t.literatureCount ?? t.literature.length} 篇 · ${t.ligandCount ?? 0} 种` },
+    ...(t.oligomer ? [{ k: '聚集形式', v: `${oligoZh}${t.oligomer.stoichiometry ? `（${t.oligomer.stoichiometry}）` : ''}` }] : []),
+    ...(t.mwAugment?.applicable ? [{ k: '分子量', v: `单体 ~${t.mwAugment.monomerKda} kDa${t.mwAugment.assemblyKda != null ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa` : '（无生物装配增重路径）'}` }] : []),
+    ...(t.construct ? [{ k: '客户构建', v: `${t.construct.providedLength} aa（与全长一致性 ${t.construct.identity}%${t.construct.start != null && t.construct.end != null ? `，区间 ${t.construct.start}-${t.construct.end}` : ''}）` }] : []),
+  ]
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 border-b border-border/70 bg-muted/30 px-4 py-3">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-foreground font-mono text-[11px] font-bold text-background">{index + 1}</span>
+        <span className="text-sm font-semibold text-foreground">{t.proteinName}</span>
+        {t.uniprotId ? (
+          <a
+            href={`https://www.uniprot.org/uniprotkb/${t.uniprotId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary hover:bg-primary/[0.12]"
+          >
+            {t.uniprotId}
+          </a>
+        ) : (
+          <span className="rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">无 UniProt</span>
+        )}
+        <span
+          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
+          title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}
+        >
+          {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'} · {t.sequenceLength} aa
+        </span>
+        {overall && (
+          <span className={cn('ml-auto rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums', scoreTone)}>
+            总体 {overall.score}/10 · {overall.rating}
+          </span>
+        )}
+      </div>
+      <div className="grid gap-0 sm:grid-cols-[minmax(0,1fr)_240px]">
+        <div className="px-4 py-3 sm:border-r sm:border-border/60">
+          <div className="mb-2 flex items-center gap-1.5 text-muted-foreground/80">
+            <Dna className="size-3.5" aria-hidden />
+            <span className="lin-eyebrow">基本信息</span>
+          </div>
+          <dl className="flex flex-col">
+            {rows.map(r => (
+              <div key={r.k} className="flex gap-3 border-b border-border/40 py-1.5 text-[12.5px] leading-relaxed last:border-0">
+                <dt className="w-20 shrink-0 text-[11px] text-muted-foreground/80">{r.k}</dt>
+                <dd className="min-w-0 flex-1 text-foreground/90">{r.v}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+        <div className="px-4 py-3">
+          <div className="mb-2 flex items-center gap-1.5 text-muted-foreground/80">
+            <Atom className="size-3.5" aria-hidden />
+            <span className="lin-eyebrow">预测结构（AlphaFold）</span>
+          </div>
+          {afOk ? (
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+              <div className="font-mono text-[11px] leading-relaxed text-foreground/85">
+                {af.modelId ?? 'AF 模型'} · v{af.version ?? '?'} · 平均 pLDDT {af.globalPlddt ?? '—'}{af.fracVeryHigh != null ? ` · ≥90 区段 ${Math.round(af.fracVeryHigh * 100)}%` : ''}
+              </div>
+              {t.uniprotId && (
+                <a
+                  href={`https://alphafold.ebi.ac.uk/entry/${t.uniprotId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 font-mono text-[11px] text-primary hover:underline"
+                >
+                  alphafold.ebi.ac.uk <ExternalLink className="size-3" aria-hidden />
+                </a>
+              )}
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                交互式 3D 预测结构视图（pLDDT 置信着色 · 拖拽旋转 / 滚轮缩放 / 全屏放大）内嵌于可下载的 HTML 报告中。
+              </p>
+            </div>
+          ) : (
+            <p className="rounded-lg border border-dashed border-border bg-muted/40 px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
+              {af?.note ?? (t.uniprotId ? '该靶点在 AlphaFold DB 无预测模型' : '序列输入未归属 UniProt — 无 AlphaFold 预测')}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /**
  * 合并评估报告视图（v1.8 关联靶点批量）：
- * 返回栏 → 刊头（关系判定卡）→ 报告操作条（下载 HTML）→ LLM 合并分析全文
+ * 返回栏 → 刊头（关系判定卡）→ 报告操作条（下载 HTML / 打印 / 新窗口）→ 内嵌完整
+ * HTML 报告（v2.10 ③：与下载文件同一份，web 展示与离线 100% 一致 — 像单独评估那样）；
+ * 报告文件丢失时降级为旧版 React 数据区块（合并分析全文 / 各靶点数据列表）。
  * v1.11：新增各靶点 PDB / 同源结构 / 文献三组数据列表（带 UniProt 归属分组头）
  */
 export function MergedReportView({ report, targetLabels, onNewEvaluation }: MergedReportViewProps) {
@@ -132,6 +331,9 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const [previewLoaded, setPreviewLoaded] = useState(false)
   const [previewSlow, setPreviewSlow] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  /** v2.10 ③：内嵌完整报告加载失败（文件丢失/未生成）→ 降级旧版 React 数据区块 */
+  const [embedFailed, setEmbedFailed] = useState(false)
+  const reportFrameRef = useRef<HTMLIFrameElement>(null)
 
   const openPreview = () => {
     setPreviewLoaded(false)
@@ -241,53 +443,76 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         </div>
       </motion.header>
 
-      {/* 2. 报告操作条 */}
+      {/* 2. 报告操作条 + 内嵌完整 HTML 报告（v2.10 ③：与下载文件同一份，展示 100% 一致） */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.14, ease: 'easeOut' }}
-        className={cn(
-          'flex flex-col gap-4 rounded-xl border px-5 py-4 sm:flex-row sm:items-center',
-          llmOk
-            ? 'border-violet-500/30 bg-violet-500/[0.06]'
-            : 'border-amber-500/30 bg-amber-500/[0.06]'
-        )}
+        className="flex flex-col gap-4"
       >
-        <div className="flex items-center gap-3">
-          <div className={cn(
-            'flex size-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground',
-            llmOk ? 'bg-violet-600 dark:bg-violet-700' : 'bg-amber-600 dark:bg-amber-700'
-          )}>
-            {llmOk ? <Layers className="size-4.5" /> : <AlertTriangle className="size-4.5" />}
+        <div
+          className={cn(
+            'flex flex-col gap-4 rounded-xl border px-5 py-4 sm:flex-row sm:items-center',
+            llmOk
+              ? 'border-violet-500/30 bg-violet-500/[0.06]'
+              : 'border-amber-500/30 bg-amber-500/[0.06]'
+          )}
+        >
+          <div className="flex items-center gap-3">
+            <div className={cn(
+              'flex size-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground',
+              llmOk ? 'bg-violet-600 dark:bg-violet-700' : 'bg-amber-600 dark:bg-amber-700'
+            )}>
+              {llmOk ? <Layers className="size-4.5" /> : <AlertTriangle className="size-4.5" />}
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-foreground">
+                {llmOk ? '合并评估报告已生成' : '合并报告（LLM 部分失败）'}
+              </div>
+              <div className="font-mono text-[11px] text-muted-foreground">
+                完整 HTML 报告 · 在线展示与下载文件一致{md.length > 0 ? ` · ${md.length.toLocaleString()} 字分析` : ''} · 可独立分享
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-semibold text-foreground">
-              {llmOk ? '合并评估报告已生成' : '合并报告（LLM 部分失败）'}
-            </div>
-            <div className="font-mono text-[11px] text-muted-foreground">
-              HTML · {md.length > 0 ? `${md.length.toLocaleString()} 字分析` : '分析缺失'} · 可独立下载分享
-            </div>
+          <div className="flex flex-wrap gap-2 sm:ml-auto">
+            <Button
+              onClick={openPreview}
+              className="h-10 gap-2 rounded-lg bg-primary px-4 font-medium text-primary-foreground hover:bg-[#7a84dc] dark:hover:bg-[#828fff]"
+            >
+              <Eye className="size-4" />
+              大窗预览
+            </Button>
+            <Button
+              onClick={downloadReport}
+              className="h-10 gap-2 rounded-lg bg-violet-600 px-4 font-medium text-white hover:bg-violet-700 dark:bg-violet-700"
+            >
+              <Download className="size-4" />
+              下载 HTML（{reportTitle.slice(0, 12)}{reportTitle.length > 12 ? '…' : ''}）
+            </Button>
+            {!embedFailed && (
+              <Button
+                onClick={() => reportFrameRef.current?.contentWindow?.print()}
+                variant="outline"
+                className="h-10 gap-2 rounded-lg border-violet-500/40 bg-card px-4 font-medium text-violet-700 hover:bg-violet-500/[0.06] dark:text-violet-300"
+              >
+                <Printer className="size-4" />
+                打印
+              </Button>
+            )}
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 sm:ml-auto">
-          <Button
-            onClick={openPreview}
-            className="h-10 gap-2 rounded-lg bg-primary px-4 font-medium text-primary-foreground hover:bg-[#7a84dc] dark:hover:bg-[#828fff]"
-          >
-            <Eye className="size-4" />
-            在线预览报告
-          </Button>
-          <Button
-            onClick={downloadReport}
-            variant="outline"
-            className="h-10 gap-2 rounded-lg border-violet-500/40 bg-card px-4 font-medium text-violet-700 hover:bg-violet-500/[0.06] dark:text-violet-300"
-          >
-            <Download className="size-4" />
-            下载 HTML
-          </Button>
-        </div>
+        {!embedFailed ? (
+          <MergedReportFrame url={inlineUrl} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} />
+        ) : (
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            完整 HTML 报告加载失败（文件可能已被服务器清理）— 已切换为在线数据视图；可尝试「大窗预览 / 下载 HTML」或重新发起评估。
+          </div>
+        )}
       </motion.section>
 
+      {/* 3-6 旧版 React 数据区块：仅内嵌报告不可用时降级展示（与单靶点结果页同构） */}
+      {embedFailed && <>
       {/* 2.5 评估表序列归属（v1.10 — 每条序列的去向，不再静默丢弃） */}
       {attribution.length > 0 && (
         <motion.section
@@ -387,6 +612,30 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </CardContent>
         </Card>
       </motion.section>
+
+      {/* 3.2 各靶点单独报告（v2.9 — 简版：基本信息 + 预测结构；交互 3D 视图见 HTML 报告） */}
+      {targets.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.2, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+          aria-labelledby="sec-merged-mini"
+        >
+          <div id="sec-merged-mini" className="lin-eyebrow text-muted-foreground">
+            Per-Target Reports · 各靶点单独报告（{targets.length} · 基本信息 + 预测结构）
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            批次内每个靶点的独立简报（精简版，不重复单独评估的全部明细）— 完整数据见下方 PDB 结构 / 同源结构 / 文献章节；
+            交互式 3D 预测结构视图（pLDDT 置信着色 · 拖拽旋转 / 滚轮缩放 / 全屏放大）内嵌于可下载的 HTML 报告中。
+          </p>
+          <div className="flex flex-col gap-4">
+            {targets.map((t, i) => (
+              <TargetMiniReport key={t.jobId} t={t} index={i} />
+            ))}
+          </div>
+        </motion.section>
+      )}
 
       {/* 3.5 共有结构（v1.22 — 同一 PDB 覆盖多个输入 UniProt） */}
       {sharedStructures.length > 0 && (
@@ -575,6 +824,9 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </div>
         </motion.section>
       )}
+
+      </>
+      /* 内嵌报告正常时以上数据区块不渲染（HTML 报告内已含同等数据，避免双版本漂移） */}
 
       {/* 报告在线预览（大窗口 iframe + 加载态 + 新窗口/打印） */}
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>

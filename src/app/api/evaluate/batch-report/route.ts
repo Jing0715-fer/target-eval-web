@@ -21,6 +21,7 @@ import { fetchUniprotInfo } from '@/lib/eval/uniprot'
 import { attributeSequences } from '@/lib/eval/homology'
 import { computeSharedStructures } from '@/lib/eval/shared-structures'
 import type { FormInsights, ParsedImage, ParsedSequence, RelationJudgment, SequenceAttribution, SharedStructure } from '@/lib/eval/types'
+import type { BatchReport } from '@prisma/client'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -63,6 +64,92 @@ function isRelationJudgment(v: unknown): v is RelationJudgment {
   return typeof j.related === 'boolean' && typeof j.relationType === 'string' && typeof j.rationale === 'string'
 }
 
+// ── v2.13 旧版合并报告自动升级（格式重渲染）────────────────────────────
+// 落盘 HTML 无 `mrg-fmt-v2.13` 标记的历史报告：GET inline/download 时从 DB 数据
+// （markdown/relation/insights/序列归属/共有结构）+ 作业库重加载 targets，用当前模板
+// 重渲染并回写同一 htmlPath — 旧报告无需重新评估即可获得新格式（首页标题/字体同步
+// 单独评估 + 每靶点完整单独评估报告页 + PDB/文献全量展开；旧批次无独立报告时靶
+// 点页回退合并综述并附说明）。作业被 TTL 清理（targets 不可加载）→ 返回 null，
+// 调用方继续服务旧 HTML（叠加既有 CSS/UX 升级注入）。
+// 并发去重：同 id 在途请求共享同一 Promise（iframe 预览 + 下载同时到达只渲染一次）。
+const upgradeInflight = new Map<string, Promise<string | null>>()
+const MERGED_FMT_MARKER = 'mrg-fmt-v2.13'
+
+async function upgradeLegacyHtml(record: BatchReport): Promise<string | null> {
+  let jobIds: string[] = []
+  try { jobIds = JSON.parse(record.jobIds) } catch { return null }
+  if (jobIds.length < 2) return null
+  let relation: RelationJudgment | null = null
+  try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
+  if (!isRelationJudgment(relation)) return null
+
+  // 作业可能已被 TTL 清理 — 数据不可完整重建时保留旧 HTML
+  let targets: Awaited<ReturnType<typeof loadMergedTargets>> = []
+  try { targets = await loadMergedTargets(jobIds) } catch { return null }
+  if (targets.length < 2) return null
+
+  // 上传共享数据（评估表要点 / 图片 / 资产目录）
+  let insights: FormInsights | null = null
+  let images: ParsedImage[] = []
+  let assetDir = ''
+  const uploadId = record.uploadId ?? ''
+  if (uploadId) {
+    const uploadDir = path.join(process.cwd(), 'db', 'reports', uploadId)
+    assetDir = path.join(uploadDir, 'assets')
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(uploadDir, 'parsed.json'), 'utf-8')) as { images?: ParsedImage[] }
+      images = parsed.images ?? []
+    } catch { /* 图片缺失容错 */ }
+    try {
+      const data = JSON.parse(await fs.readFile(path.join(uploadDir, 'insights.json'), 'utf-8')) as FormInsights
+      if (Array.isArray(data.goals)) insights = data
+    } catch { /* insights 可选 */ }
+  }
+
+  let sequenceAttribution: SequenceAttribution[] | undefined
+  try { sequenceAttribution = record.sequenceAttribution ? JSON.parse(record.sequenceAttribution) : undefined } catch { /* ignore */ }
+  let sharedStructures: SharedStructure[] | undefined
+  try { sharedStructures = record.sharedStructures ? JSON.parse(record.sharedStructures) : undefined } catch { /* ignore */ }
+  if (!sharedStructures) sharedStructures = computeSharedStructures(targets)
+
+  const llmErrors = record.error ? [record.error] : []
+  const html = await renderMergedReportHtml({
+    targets,
+    relation: relation!,
+    markdown: record.markdown ?? '',
+    title: record.title ?? undefined,
+    llmOk: !record.error,
+    llmErrors,
+    images,
+    assetDir,
+    batchReportId: record.id,
+    engineSummary: record.engine ?? '—',
+    sequenceAttribution,
+    sharedStructures,
+    insights,
+  })
+
+  // 回写同一 htmlPath — 后续请求直接命中新格式（不再触发本分支）
+  const htmlPath = path.join(process.cwd(), 'db', 'reports', record.id, 'report.html')
+  try {
+    await fs.mkdir(path.dirname(htmlPath), { recursive: true })
+    await fs.writeFile(htmlPath, html, 'utf-8')
+    await db.batchReport.update({ where: { id: record.id }, data: { htmlPath } }).catch(() => undefined)
+  } catch { /* 回写失败（磁盘只读等）→ 本次直接返回新 HTML，不落盘 */ }
+  return html
+}
+
+/** 旧报告升级入口（含并发去重 + 失败静默降级 — 任何异常都退回旧 HTML） */
+async function upgradedMergedHtml(record: BatchReport): Promise<string | null> {
+  const existing = upgradeInflight.get(record.id)
+  if (existing) return existing
+  const p = (async () => {
+    try { return await upgradeLegacyHtml(record) } catch { return null }
+  })().finally(() => { upgradeInflight.delete(record.id) })
+  upgradeInflight.set(record.id, p)
+  return p
+}
+
 export async function POST(req: Request) {
   const owner = getOwner(req)
   let body: BatchReportBody
@@ -72,10 +159,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '请求体不是合法 JSON' }, { status: 400 })
   }
 
-  const jobIds = (body.jobIds ?? []).filter(Boolean).slice(0, 6)
+  // v2.8：取消 6 作业截断 → 全量合并；防御性上限（与关系判断路由/前端一致）超限明确告知
+  const MAX_BATCH_JOBS = 30
+  const jobIds = (body.jobIds ?? []).filter(Boolean)
   const relation = body.relation
   if (jobIds.length < 2) {
     return NextResponse.json({ ok: false, error: '合并报告至少需要 2 个评估作业' }, { status: 400 })
+  }
+  if (jobIds.length > MAX_BATCH_JOBS) {
+    return NextResponse.json({ ok: false, error: `一次最多合并 ${MAX_BATCH_JOBS} 个评估作业` }, { status: 400 })
   }
   if (!isRelationJudgment(relation)) {
     return NextResponse.json({ ok: false, error: '缺少有效的关系判定结果（relation）' }, { status: 400 })
@@ -292,7 +384,12 @@ export async function GET(req: Request) {
   if (url.searchParams.get('inline') === '1') {
     if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
     try {
-      const html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(await fs.readFile(record.htmlPath, 'utf-8'))))
+      let html = await fs.readFile(record.htmlPath, 'utf-8')
+      // v2.13：旧版报告自动升级重渲染（首页同单独评估字体版式 + 每靶点完整单独评估页）
+      if (!html.includes(MERGED_FMT_MARKER)) {
+        html = (await upgradedMergedHtml(record)) ?? html
+      }
+      html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
@@ -309,11 +406,28 @@ export async function GET(req: Request) {
   if (url.searchParams.get('download') === '1') {
     if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
     try {
-      const html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(await fs.readFile(record.htmlPath, 'utf-8'))))
+      let html = await fs.readFile(record.htmlPath, 'utf-8')
+      // v2.13：旧版报告自动升级重渲染（与 inline 预览同一份文件 — web 展示与下载一致）
+      if (!html.includes(MERGED_FMT_MARKER)) {
+        html = (await upgradedMergedHtml(record)) ?? html
+      }
+      html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
+      // v2.10 ①：文件名改用报告题目（LLM 生成的描述性标题，如「BTN-TCR 复合物结构解析可行性评估」）
+      // — 清洗文件系统非法字符并限长；RFC 5987 filename* 携带中文原题（现代浏览器优先采用），
+      // ASCII 回退名仅供不支持 filename* 的旧解析器（前端自动下载已同步优先解析 filename*）
+      const titleBase = (record.title ?? '')
+        .replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[.\s]+$/, '')
+        .slice(0, 80)
+      const date = new Date().toISOString().slice(0, 10)
+      const asciiBase = titleBase && /^[\x20-\x7e]+$/.test(titleBase) ? titleBase : `TargetEval_Merged_${date}`
+      const finalBase = titleBase || `merged-report-${record.id.slice(0, 8)}`
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
-          'Content-Disposition': `attachment; filename="merged-report-${record.id.slice(0, 8)}.html"`,
+          'Content-Disposition': `attachment; filename="${asciiBase}.html"; filename*=UTF-8''${encodeURIComponent(finalBase)}.html`,
         },
       })
     } catch {

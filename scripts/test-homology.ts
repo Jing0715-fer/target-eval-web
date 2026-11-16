@@ -4,7 +4,10 @@
  * 覆盖: 直系同源（人/小鼠 EGFR ≈97%）/ 近缘旁系（EGFR/HER2 ≈75%）/
  *  无关对照（EGFR×p53 → 0，种子数下限拒绝）/ 自身比对 / 家族聚类 / 序列归属
  * （构建→construct 精确区间 / 抗体 Fc→antibody / GFP→unmatched）。
- * 算法参数调整（K/阈值/种子下限）后应重跑本脚本。
+ * v2.7.9 增：短序列 × 中低一致性区间（血红蛋白 α/β ≈55%，142/147 aa —
+ * 固定 ±2 对角带 + k=4 的旧算法在此实测漏检）；无关短蛋白对照（胰蛋白酶原×
+ * 细胞色素c — 防假阳性）。
+ * 算法参数调整（K/阈值/种子下限/漂移上限）后应重跑本脚本。
  */
 import { estimateHomology, clusterHomologs, attributeSequences } from '../src/lib/eval/homology'
 
@@ -15,13 +18,17 @@ async function fetchSeq(acc: string): Promise<string> {
   return (j.sequence?.value ?? '').toUpperCase()
 }
 
-const [egfrHuman, egfrMouse, her2, p53] = await Promise.all([
+const [egfrHuman, egfrMouse, her2, p53, hba, hbb, tryp, cytc] = await Promise.all([
   fetchSeq('P00533'), // 人 EGFR 1210aa
   fetchSeq('Q01279'), // 小鼠 Egfr（直系同源）
   fetchSeq('P04626'), // 人 ERBB2/HER2（近缘旁系同源）
   fetchSeq('P04637'), // 人 p53（无关对照）
+  fetchSeq('P69905'), // 血红蛋白 α（短序列 × 中低一致性区间）
+  fetchSeq('P68871'), // 血红蛋白 β（同上）
+  fetchSeq('P07478'), // 胰蛋白酶原（无关短蛋白对照）
+  fetchSeq('P00004'), // 细胞色素c（同上）
 ])
-console.log(`_lengths: EGFR=${egfrHuman.length} mouseEgfr=${egfrMouse.length} HER2=${her2.length} p53=${p53.length}`)
+console.log(`_lengths: EGFR=${egfrHuman.length} mouseEgfr=${egfrMouse.length} HER2=${her2.length} p53=${p53.length} HBA=${hba.length} HBB=${hbb.length}`)
 
 const t0 = Date.now()
 const cases: Array<[string, string, string, number | null, boolean]> = [
@@ -29,6 +36,8 @@ const cases: Array<[string, string, string, number | null, boolean]> = [
   ['人EGFR × 人HER2（旁系同源）', egfrHuman, her2, 35, true],
   ['人EGFR × 人p53（无关对照）', egfrHuman, p53, null, false],
   ['人EGFR × 自身', egfrHuman, egfrHuman, 99, true],
+  ['血红蛋白 α × β（短×中一致性，55%）', hba, hbb, 40, true],
+  ['胰蛋白酶原 × 细胞色素c（无关短蛋白对照）', tryp, cytc, null, false],
 ]
 let pass = 0
 for (const [name, a, b, minId, expectHomolog] of cases) {
@@ -71,6 +80,6 @@ const attrOk = attrs[0].kind === 'construct' && attrs[0].uniprotId === 'P00533' 
 console.log(attrOk ? '✓ 归属正确（激酶域→construct EGFR；Fc→antibody；无关→非 construct）' : '✗ 归属异常')
 if (attrOk) pass++
 
-console.log(`\n耗时 ${Date.now() - t0}ms（含网络）；PASS ${pass}/6`)
-if (pass < 6) process.exit(1)
+console.log(`\n耗时 ${Date.now() - t0}ms（含网络）；PASS ${pass}/${cases.length + 2}`)
+if (pass < cases.length + 2) process.exit(1)
 console.log('HOMOLOGY TEST PASSED')

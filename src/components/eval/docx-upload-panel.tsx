@@ -31,10 +31,8 @@ export interface DocxUploadPanelProps {
   uploadProgress: UploadProgress | null
   uploadError: string | null
   selectionReady: boolean
-  /** 已选 UniProt 靶点（多选，每个靶点一份独立报告） */
+  /** 已选 UniProt 靶点（多选，每个靶点一份独立报告；v2.8 不再设前端上限） */
   selectedUniprots: string[]
-  /** 可选靶点数上限 */
-  maxBatchUniprot: number
   selectedSequenceIndex: number | null
   /** LLM 智能解析结果（null = 尚未解析） */
   insights: FormInsights | null
@@ -60,7 +58,6 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
     uploadError,
     selectionReady,
     selectedUniprots,
-    maxBatchUniprot,
     selectedSequenceIndex,
     insights,
     insightsLoading,
@@ -376,25 +373,23 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             <span className="rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary">
               已选 {selectedUniprots.length}/{parsed.uniprotIds.length}
             </span>
-            {selectedUniprots.length >= maxBatchUniprot && (
-              <span className="text-[11px] font-normal text-amber-600 dark:text-amber-400">（一次最多评估 {maxBatchUniprot} 个靶点）</span>
+            {selectedUniprots.length > 5 && (
+              <span className="text-[11px] font-normal text-muted-foreground">（靶点将串行评估，预计总耗时随数量增长，全部完成后自动分析关系并生成合并报告）</span>
             )}
           </div>
           <div className="flex flex-wrap gap-2">
             {parsed.uniprotIds.map((id) => {
               const selected = selectedUniprots.includes(id)
-              const disabled = !selected && selectedUniprots.length >= maxBatchUniprot
               return (
                 <button
                   key={id}
                   type="button"
-                  disabled={disabled}
                   onClick={() => {
                     onToggleUniprot(id)
                   }}
-                  title={disabled ? `已达一次 ${maxBatchUniprot} 个靶点上限` : selected ? '点击取消选择该靶点' : '点击选中该靶点'}
+                  title={selected ? '点击取消选择该靶点' : '点击选中该靶点'}
                   className={cn(
-                    'min-h-9 rounded-lg border px-3 font-mono text-[13px] transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-40',
+                    'min-h-9 rounded-lg border px-3 font-mono text-[13px] transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30',
                     selected
                       ? 'border-primary bg-primary font-semibold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.15)]'
                       : 'border-border bg-card text-foreground/80 hover:border-ring hover:text-primary'

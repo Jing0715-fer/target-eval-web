@@ -7,25 +7,29 @@
  *    长精确锚点不存在、8-mer Jaccard 信号过弱，需要专门的种子-对角链算法
  *
  * 算法（minimap 思路的蛋白版，零依赖）：
- *  1) 4-mer 种子索引（k=4：40% 一致性时单种子存活率 2.6%，随机序列 ~0.3%，信噪比充分；
- *     重复种子（出现 >8 次）跳过，避免低复杂度区污染）
+ *  1) k-mer 种子索引，k 自适应：k=4 优先（40% 一致性时单种子存活率 2.6%，随机序列 ~0.3%，
+ *     信噪比充分）；种子证据不足时（短序列 × 中低一致性区间 — 40% 时 142 aa 仅 ~3.7 个种子，
+ *     达不到下限 4；血红蛋白 α/β 实测漏检）降 k=3 复扫（存活率 9.1%，随机噪声 ~2.5 命中
+ *     不足以通过对角带聚集下限）；重复种子（出现 >8 次）跳过，避免低复杂度区污染
  *  2) 种子命中按对角线 d=i-j 分桶 — 真同源的命中聚集在同一对角带（±2 容忍小 indel），
  *     随机命中均匀散布
- *  3) 支持度 support = 命中带覆盖的 B 位点比例 ≈ identity^k（无 gap 近似）
+ *  3) 支持度 support = 命中带覆盖的 B 位点比例 ≈ identity^k（无 gap 近似；k 取实际使用值）
  *  4) 一致性精修：贪心链锚点 → 相邻锚点间沿对角线逐位比较（锚点间对角差 = indel），
  *     matches/compared 得到真实一致性估计（不受锚点定义偏置 — 锚点本身也是真实比对位置）
  *
- * 内存：4-mer 索引 ≤ len(A) 条目、对角桶为 Map — 5000+ aa 毫秒级，无 DP 矩阵。
+ * 内存：k-mer 索引 ≤ len(A) 条目、对角桶为 Map — 5000+ aa 毫秒级，无 DP 矩阵。
  */
 import { compareSequences } from './seq-compare'
 import { detectAntibody } from './antibody'
 import type { BlastGroup, HomologPair, SequenceAttribution } from './types'
 
 const K = 4
+/** 自适应降级复扫的短种子长度（短序列 × 中低一致性区间专用） */
+const K_FALLBACK = 3
 /** 单个 k-mer 在 A 中出现超过该次数视为重复，跳过（低复杂度区） */
 const MAX_KMER_REPEAT = 8
-/** 对角带半宽（容忍小 indel） */
-const BAND = 2
+/** 链上相邻锚点间允许的对角漂移（容小 indel 累积；带宽概念改由链携带） */
+const DRIFT_CAP = 30
 /** 判定同源的支持度阈值（≈ 一致性 39%） */
 const SUPPORT_THRESHOLD = 0.015
 /** 判定同源的（精修后）一致性下限 */
@@ -42,76 +46,56 @@ export interface HomologyEstimate {
   method: 'seed-diagonal' | 'same-target' | 'no-shared-seeds' | 'too-short'
 }
 
-/** 两条已清洗（大写无空格）蛋白序列的同源性估计 */
-export function estimateHomology(a: string, b: string): HomologyEstimate {
-  if (a.length < 40 || b.length < 40) return { isHomolog: false, identity: 0, support: 0, method: 'too-short' }
-
-  // 0) 先走 compareSequences 的快路径：精确子串/锚定 ≥85% 即同一靶点（同源的特例）
-  const cmp = compareSequences(a, b)
-  if (cmp.sameTarget && cmp.identity >= 85) {
-    return { isHomolog: true, identity: cmp.identity, support: 1, method: 'same-target' }
-  }
-
-  // 1) A 的 4-mer 索引（跳过高频重复种子）
+/** 种子-对角链核心（k 参数化；sparse=true 表示种子证据不足以精修） */
+function seedDiagonalEstimate(a: string, b: string, k: number): HomologyEstimate & { sparse?: boolean } {
+  // 1) A 的 k-mer 索引（跳过高频重复种子）
   const idx = new Map<string, number[]>()
-  for (let i = 0; i + K <= a.length; i++) {
-    const k = a.slice(i, i + K)
-    let arr = idx.get(k)
+  for (let i = 0; i + k <= a.length; i++) {
+    const key = a.slice(i, i + k)
+    let arr = idx.get(key)
     if (!arr) {
       arr = []
-      idx.set(k, arr)
+      idx.set(key, arr)
     }
     arr.push(i)
   }
 
-  // 2) 扫描 B，命中记入对角桶
-  const diagCount = new Map<number, number>()
+  // 2) 扫描 B，命中收集（不做固定对角带预滤 — 分布式小 indel 会让真实命中
+  //    沿对角线持续漂移，固定 ±2 带会把真信号切成碎片，短序列 × 中低
+  //    一致性区间实测漏检；对角漂移约束改由链条携带）
   const hits: Array<{ i: number; j: number }> = []
-  for (let j = 0; j + K <= b.length; j++) {
-    const arr = idx.get(b.slice(j, j + K))
+  for (let j = 0; j + k <= b.length; j++) {
+    const arr = idx.get(b.slice(j, j + k))
     if (!arr || arr.length > MAX_KMER_REPEAT) continue
-    for (const i of arr) {
-      hits.push({ i, j })
-      const d = i - j
-      diagCount.set(d, (diagCount.get(d) ?? 0) + 1)
-    }
+    for (const i of arr) hits.push({ i, j })
   }
-  if (!hits.length) return { isHomolog: false, identity: 0, support: 0, method: 'no-shared-seeds' }
+  if (!hits.length) return { isHomolog: false, identity: 0, support: 0, method: 'no-shared-seeds', sparse: true }
 
-  // 3) 最优对角带（±BAND 合并计分）
-  let bestD = 0
-  let bestScore = 0
-  for (const d of diagCount.keys()) {
-    let s = 0
-    for (let dd = d - BAND; dd <= d + BAND; dd++) s += diagCount.get(dd) ?? 0
-    if (s > bestScore) {
-      bestScore = s
-      bestD = d
-    }
-  }
-  const bandHits = hits.filter(h => Math.abs(h.i - h.j - bestD) <= BAND).sort((x, y) => x.j - y.j)
-
-  // 支持度：带内命中覆盖的 B 位点比例
-  const covered = new Set<number>()
-  for (const h of bandHits) for (let j = h.j; j < h.j + K; j++) covered.add(j)
-  const support = covered.size / Math.min(a.length, b.length)
-  // 种子数下限：随机序列期望仅 ~2 个 4-mer 命中（len²/20⁴），两条种子不足以
-  // 支撑同源判定（短序列的 support^(1/4) 兜底估计会被偶发命中污染 — GFP 误判案例）
-  if (bandHits.length < 4 || covered.size < 16) {
-    return { isHomolog: false, identity: 0, support, method: 'seed-diagonal' }
-  }
-
-  // 4) 一致性精修：贪心链（j 与 i 同时递增）→ 锚点间沿对角线逐位比较
+  // 3) 贪心链（j、i 同时严格递增；相邻锚点对角漂移 ≤ DRIFT_CAP）：链本身跟随
+  //    真实比对路径的 indel 漂移；随机命中均匀散布，难以链出 ≥4 锚点且漂移一致
+  const sorted = hits.slice().sort((x, y) => x.j - y.j || x.i - y.i)
   const chain: Array<{ i: number; j: number }> = []
   let lastI = -1
   let lastJ = -1
-  for (const h of bandHits) {
-    if (h.j > lastJ && h.i > lastI) {
-      chain.push(h)
-      lastI = h.i
-      lastJ = h.j
-    }
+  for (const h of sorted) {
+    if (h.j <= lastJ || h.i <= lastI) continue
+    if (chain.length && Math.abs(h.i - h.j - (lastI - lastJ)) > DRIFT_CAP) continue
+    chain.push(h)
+    lastI = h.i
+    lastJ = h.j
   }
+
+  // 支持度：链锚点覆盖的 B 位点比例
+  const covered = new Set<number>()
+  for (const h of chain) for (let j = h.j; j < h.j + k; j++) covered.add(j)
+  const support = covered.size / Math.min(a.length, b.length)
+  // 种子数下限：随机序列期望仅 ~2 个 k-mer 命中（len²/20^k），两条种子不足以
+  // 支撑同源判定（短序列的 support^(1/k) 兜底估计会被偶发命中污染 — GFP 误判案例）
+  if (chain.length < 4 || covered.size < 16) {
+    return { isHomolog: false, identity: 0, support, method: 'seed-diagonal', sparse: true }
+  }
+  // 4) 一致性精修：链首尾外推到全长（仅锚点局部覆盖时避免 support^(1/k) 兜底被
+  //    偶发命中污染）+ 锚点段 + 锚点间沿对角线逐位比较
   let matches = 0
   let compared = 0
   const compareDiag = (j0: number, j1: number, d: number) => {
@@ -122,27 +106,53 @@ export function estimateHomology(a: string, b: string): HomologyEstimate {
       if (a[i] === b[j]) matches++
     }
   }
+  // 链首外推：0 → 首锚点，沿首锚点对角
+  const first = chain[0]
+  compareDiag(0, first.j, first.i - first.j)
   for (let c = 0; c < chain.length; c++) {
     const cur = chain[c]
     const next = chain[c + 1]
-    // 锚点段本身（K 位，真实匹配位）计入 — 排除会系统性低估（锚点间插值对角
+    // 锚点段本身（k 位，真实匹配位）计入 — 排除会系统性低估（锚点间插值对角
     // 在 indel 区失准，校准实测 60% 真实一致性仅报 44%，错过 40% 合并阈值）；
     // 计入的代价是保守区富集带来的 +2~11pp 高估（对「家族判定宁可合并」的
     // 决策语义更安全），展示时标注为估计值
-    compareDiag(cur.j, cur.j + K, cur.i - cur.j)
+    compareDiag(cur.j, cur.j + k, cur.i - cur.j)
     // 锚点间段：前半用当前对角、后半用下一锚点对角（线性过渡近似 indel）
     if (next) {
-      const mid = Math.floor((cur.j + K + next.j) / 2)
-      compareDiag(cur.j + K, mid, cur.i - cur.j)
+      const mid = Math.floor((cur.j + k + next.j) / 2)
+      compareDiag(cur.j + k, mid, cur.i - cur.j)
       compareDiag(mid, next.j, next.i - next.j)
     }
   }
+  // 链尾外推：末锚点后 → minLen（B 侧到头），沿末锚点对角
+  const last = chain[chain.length - 1]
+  compareDiag(last.j + k, Math.min(b.length, a.length + 30), last.i - last.j)
   const minLen = Math.min(a.length, b.length)
   const refined = compared >= minLen * 0.5 ? Math.round((matches / compared) * 100) : 0
-  const fallbackEst = Math.round(Math.pow(support, 1 / K) * 100)
+  const fallbackEst = Math.round(Math.pow(support, 1 / k) * 100)
   const identity = refined > 0 ? refined : fallbackEst
   const isHomolog = support >= SUPPORT_THRESHOLD && identity >= IDENTITY_THRESHOLD
   return { isHomolog, identity, support, method: 'seed-diagonal' }
+}
+
+/** 两条已清洗（大写无空格）蛋白序列的同源性估计（k 自适应：4 优先 → 证据不足降 3 复扫） */
+export function estimateHomology(a: string, b: string): HomologyEstimate {
+  if (a.length < 40 || b.length < 40) return { isHomolog: false, identity: 0, support: 0, method: 'too-short' }
+
+  // 0) 先走 compareSequences 的快路径：精确子串/锚定 ≥85% 即同一靶点（同源的特例）
+  const cmp = compareSequences(a, b)
+  if (cmp.sameTarget && cmp.identity >= 85) {
+    return { isHomolog: true, identity: cmp.identity, support: 1, method: 'same-target' }
+  }
+
+  const est4 = seedDiagonalEstimate(a, b, K)
+  if (!est4.sparse) return est4
+  // k=4 证据不足（短序列 × 中低一致性区间 — 40% 时 142 aa 仅 ~3.7 个种子）：
+  // 降 k=3 复扫（存活率 9.1%；随机噪声 ~2.5 命中不足以通过对角带聚集下限，无假阳性风险）。
+  // 仍不足则以 k=4 口径返回（no-shared-seeds / sparse 的确定性阴性）。
+  const est3 = seedDiagonalEstimate(a, b, K_FALLBACK)
+  if (!est3.sparse) return est3
+  return est4
 }
 
 // ─── 家族聚类 ─────────────────────────────────────────────────────────────────

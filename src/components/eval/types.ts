@@ -200,6 +200,16 @@ export interface MergedTargetLite {
   oligomer?: OligomerAnalysis
   /** v1.26：分子量增重策略分析（仅 applicable 时有意义）；历史作业缺省 */
   mwAugment?: MwAugmentAnalysis | null
+  /** v2.9：各靶点单独简报（与后端 MergedTargetLite 同步 — 历史报告缺省降级展示） */
+  scores?: Scores
+  methodStats?: MethodStats
+  ligandCount?: number
+  literatureCount?: number
+  coverageText?: string
+  gapText?: string
+  construct?: ConstructInfo
+  /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
+  alphafold?: AlphafoldSummaryInfo
 }
 
 /** 合并评估报告（关联靶点批量生成） */

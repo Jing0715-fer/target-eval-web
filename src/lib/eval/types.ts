@@ -571,6 +571,8 @@ export interface JobSummary {
   coverageText?: string
   /** 未覆盖区间描述（同上） */
   gapText?: string
+  /** v2.13：覆盖区间（合并报告各靶点单独评估页的覆盖率区段图 SVG 用；历史作业缺省） */
+  coveredRanges?: Array<[number, number]>
   /** 聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
   /** v1.29：互作复合物证据分析（无直接结构时；有证据时报告/评分消费） */
@@ -583,7 +585,8 @@ export interface JobSummary {
   /** v2.0：AlphaFold 预测结构信息（报告头图来源；无预测/渲染失败时 available=false） */
   alphafold?: AlphafoldSummaryInfo
   reportLlmOk?: boolean
-  /** 报告已延迟：本靶点不生成独立报告，数据并入合并评估报告（v1.8+ 关联靶点批量） */
+  /** v2.13：deferred 批次同样按单靶点流程生成完整独立报告（展示并入合并报告的
+   * 靶点单独评估页）；reportDeferred 仅表示 HTML 不单独落盘 */
   reportDeferred?: boolean
   /** 批次关系说明（v1.8+ 非关联批量时 LLM 在报告中说明独立/复合物定位） */
   batchNote?: string
