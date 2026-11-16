@@ -12,6 +12,13 @@
  *    绿色突出面板重制（空态常驻 — 批次有无共同结构同样关键）；③各靶点 PDB/
  *    同源/文献明细默认折叠（共有 PDB 带 ◈ 徽标互证，打印自动展开）；④章节
  *    CSS 与单靶点报告统一（h2 双线底、版心配色）
+ *  - v2.12 报告结构分层（复合物/单独评估分离）：①「各靶点结构可行性综述」从
+ *    合并分析章节拆出，按靶点归入其单独报告页（综述 + 基本信息 + 预测结构 +
+ *    该靶点 PDB/同源/文献同页聚合 — 单独评估与单独结构放在一起）；②每个靶点
+ *    一个独立视图页：刊头靶点卡片/目录靶点速览点击进入，「返回报告首页」随时
+ *    回到复合物评估（hash 深链 #view-…，打印时全部视图依序输出、靶点页另起一页）；
+ *    ③首页（复合物评估）文献列表只列共有结构文献（PMID 去重 + 关联 PDB）；
+ *    ④序列一致性矩阵改为居中对齐 + 行标正文化（修复表头与内容错位观感）
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
@@ -497,6 +504,55 @@ function scoreCell(item: { score: number; rating: string }): string {
   return `${item.score}/10 · ${esc(item.rating)}`
 }
 
+/**
+ * v2.12：拆出 markdown 中的「各靶点结构可行性综述」章节 — 各 ### 小节按
+ * UniProt ID / 标签 / 蛋白名 / 基因名归属到对应靶点（渲染进该靶点的单独报告页，
+ * 综述与基本信息/预测结构/单独结构同页）。归属失败的小节留在首页合并分析章节
+ * （降级不丢内容 — LLM 小节标题偏离预期时不影响报告完整性）。
+ * 渲染时拆分（而非生成时）：旧报告无需重新评估，重渲染即获得新结构。
+ */
+export function splitTargetReview(md: string, targets: MergedTargetData[]): { homeMd: string; reviewByTarget: Map<string, string> } {
+  const reviewByTarget = new Map<string, string>()
+  if (!md) return { homeMd: md, reviewByTarget }
+  const lines = md.replace(/\r\n/g, '\n').split('\n')
+  const startIdx = lines.findIndex(l => /^##\s*各靶点(结构可行性)?综述\s*$/.test(l.trim()))
+  if (startIdx === -1) return { homeMd: md, reviewByTarget }
+  let endIdx = lines.length
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i].trim())) { endIdx = i; break }
+  }
+  const sectionLines = lines.slice(startIdx + 1, endIdx)
+  // ### 小节切分；小节前的导语（罕见）与无法归属的小节回首页
+  const subsections: Array<{ heading: string; body: string[] }> = []
+  const preamble: string[] = []
+  let cur: { heading: string; body: string[] } | null = null
+  for (const l of sectionLines) {
+    const m = l.match(/^###\s+(.+)$/)
+    if (m) { cur = { heading: m[1].trim(), body: [] }; subsections.push(cur) }
+    else if (cur) cur.body.push(l)
+    else preamble.push(l)
+  }
+  const matchTarget = (heading: string): MergedTargetData | undefined => targets.find(t =>
+    (t.uniprotId && heading.includes(t.uniprotId)) ||
+    (t.label && t.label.length >= 3 && heading.includes(t.label)) ||
+    (t.proteinName && t.proteinName.length >= 4 && heading.includes(t.proteinName)) ||
+    ((t.geneNames ?? []).some(g => g && g.length >= 4 && heading.includes(g)))
+  )
+  const leftover: string[] = []
+  if (preamble.some(l => l.trim())) leftover.push(...preamble)
+  for (const s of subsections) {
+    const t = matchTarget(s.heading)
+    const body = s.body.join('\n').trim()
+    if (t && body) reviewByTarget.set(t.uniprotId ?? t.label, body)
+    else leftover.push(`### ${s.heading}`, ...s.body)
+  }
+  const rest = [...lines.slice(0, startIdx), ...lines.slice(endIdx)]
+  const homeLines = leftover.length
+    ? [...rest.slice(0, startIdx), '## 各靶点结构可行性综述（以下小节未能归属到单独报告页）', ...leftover, ...rest.slice(startIdx)]
+    : rest
+  return { homeMd: homeLines.join('\n'), reviewByTarget }
+}
+
 export interface MergedHtmlInput {
   targets: MergedTargetData[]
   relation: RelationJudgment
@@ -549,6 +605,9 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // 「客户评估表要点」章节对应目标/问题条目下方（回答紧跟问题，客户可逐条阅读）
   const mdNoTitle = input.markdown ? input.markdown.replace(/^#\s+.+\r?\n?/, '') : ''
   const { qaMd, rest: llmMarkdown } = splitQaChapter(mdNoTitle)
+  // v2.12 ①：「各靶点结构可行性综述」拆出 — 各靶点小节归入其单独报告页，
+  // 首页合并分析章节只保留复合物级内容（摘要/关系/整合策略/总结）
+  const { homeMd: llmHomeMd, reviewByTarget } = splitTargetReview(llmMarkdown, targets)
   const qa = parseInsightQa(qaMd)
   const qaTotal = (input.insights?.goals?.length ?? 0) + (input.insights?.scientificQuestions?.length ?? 0)
   // 段D 生成了但逐条解析失败（LLM 偏离格式）→ 整块降级渲染；未生成（失败/无评估表）→ 提示行
@@ -562,18 +621,16 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // ── v2.11 报告格式优化（对齐单独评估）────────────────────────────
   // ① 统一动态章节编号：按目录顺序全量连续编号的编号方块风格（与单靶点报告同一
   //   设计语言）。存在性先判定、依展示顺序取号。
-  // ② 章节顺序重排：合并分析 → 共有结构（批次级核心证据，提前突出直出）→
-  //   各靶点单独报告 → 评估表要点 → 配体 → 矩阵/一致性/归属 → 各靶点明细。
-  //   共有结构章节常驻：批次内有无共同 PDB 条目同样是关键证据（空态如实说明）。
+  // ② v2.12 章节顺序（首页 = 复合物评估）：合并分析 → 共有结构（含共有文献）→
+  //   评估表要点 → 配体 → 矩阵/一致性/归属 → 客户实验数据；各靶点综述/单独报告/
+  //   单独结构（PDB/同源/文献）全部移入每靶点独立视图页（单独评估与单独结构同页）。
   const isHomologousBatch = relation.relationType === 'homologous'
   const hasIdentityMatrix = (isHomologousBatch || relation.homologPairs?.some(p => p.identity > 0)) && targets.length >= 2
   const hasAttribution = (input.sequenceAttribution?.length ?? 0) > 0
   const sharedStructures = input.sharedStructures ?? computeSharedStructures(targets)
   /** 共有结构 PDB ID 集（各靶点明细表内行加 ◈ 徽标互证） */
   const sharedIds = new Set(sharedStructures.map(s => s.pdbId))
-  const hasBlast = targets.some(t => t.blastHits.length > 0)
   const litTotal = targets.reduce((s, t) => s + t.literature.length, 0)
-  const hasLit = litTotal > 0
   const hasAssets = embedded.length > 0
   const hasLigands = targets.some(t => (t.ligands?.length ?? 0) > 0)
   const insightsSecInput = input.insights
@@ -583,16 +640,11 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const noLlm = nextNo()
   // v2.11：共有结构提前 — 合并分析后第一个数据章节（批次级共同结构证据，重点阅读）
   const noShared = nextNo()
-  // v2.9：各靶点单独报告（始终存在 — 每个靶点一张简报卡）
-  const noMini = nextNo()
   const noInsights = hasInsightsSec ? nextNo() : ''
   const noLigands = hasLigands ? nextNo() : ''
   const noMatrix = nextNo()
   const noIdentity = hasIdentityMatrix ? nextNo() : ''
   const noAttribution = hasAttribution ? nextNo() : ''
-  const noPdbs = nextNo()
-  const noBlast = hasBlast ? nextNo() : ''
-  const noLit = hasLit ? nextNo() : ''
   const noAssets = hasAssets ? nextNo() : ''
   /** v2.8 章节头：编号方块 + 标题 + 英文标签（与单靶点报告同构） */
   const secHead = (no: string, title: string, en: string) =>
@@ -612,7 +664,9 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const afViews = new Map<string, AfMiniView>()
   const afMetaFill = new Map<string, AlphafoldSummaryInfo>()
   let afBudgetLeft = AF_MINI_BATCH_BUDGET
-  const afBudgetWarns: string[] = []
+  // v2.12：预算警告按靶点分组（随简报卡展示，不再集中首页 — 独立页内直接对应）
+  const afBudgetWarnsBy = new Map<string, string[]>()
+  const afWarn = (key: string, msg: string) => { const list = afBudgetWarnsBy.get(key) ?? []; list.push(msg); afBudgetWarnsBy.set(key, list) }
   await Promise.all(targets.map(async t => {
     if (!t.uniprotId) return
     if (!t.alphafold) {
@@ -625,11 +679,11 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       const st = await alphafoldStructureFor(t.uniprotId)
       if (!st) return
       if (!st.embeddable) {
-        afBudgetWarns.push(`${t.uniprotId} 模型过大（${Math.round(st.pdbText.length / 1024)}KB > 单模型 2560KB 上限）`)
+        afWarn(t.uniprotId, `模型过大（${Math.round(st.pdbText.length / 1024)}KB > 单模型 2560KB 上限）`)
         return
       }
       if (st.pdbText.length > afBudgetLeft) {
-        afBudgetWarns.push(`${t.uniprotId} 超出批次内嵌总预算（剩余 ${Math.round(afBudgetLeft / 1024)}KB）`)
+        afWarn(t.uniprotId, `超出批次内嵌总预算（剩余 ${Math.round(afBudgetLeft / 1024)}KB）`)
         return
       }
       afViews.set(t.uniprotId, { pdbText: st.pdbText, modelId: st.meta.modelId, version: st.meta.latestVersion, globalPlddt: st.meta.globalPlddt, fracVeryHigh: st.meta.fracVeryHigh })
@@ -643,7 +697,11 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // 文献配体/聚集形式/分子量/客户构建）+ AlphaFold 预测结构（元数据 + 交互 3D
   // 视图）。展示优先级：本次新获取的模型/元数据 > 作业摘要（作业时获取失败的
   // 靶点，本次获取成功时仍能展示完整预测结构）。
-  const mtrCards = targets.map((t, i) => {
+  // v2.12：简报卡不再集中首页独立章节，而是嵌入各靶点单独报告视图页（与综述/
+  // PDB/同源/文献同页）；内嵌模型预算警告随卡展示（不再集中首页说明）。
+  const targetKeyOf = (t: MergedTargetData) => (t.uniprotId ?? t.label).replace(/[^A-Za-z0-9]/g, '')
+  const mtrCardOf = new Map<string, string>()
+  targets.forEach((t, i) => {
     const ms = t.methodStats
     const view = t.uniprotId ? afViews.get(t.uniprotId) : undefined
     // 展示优先级：本次新获取的模型/元数据（新鲜）优先于作业摘要（作业时断网获取
@@ -681,8 +739,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
           <a class="mtr-af-link" href="https://alphafold.ebi.ac.uk/entry/${esc(t.uniprotId ?? '')}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>
         </div>`
         : `<p class="mtr-af-none">${af?.note ? esc(af.note) : t.uniprotId ? '该靶点在 AlphaFold DB 无预测模型' : '（序列输入未归属 UniProt — 无 AlphaFold 预测）'}</p>`
-    return `
-    <article class="mtr-card" id="mtr-${esc((t.uniprotId ?? t.label).replace(/[^A-Za-z0-9]/g, ''))}">
+    return mtrCardOf.set(targetKeyOf(t), `
+    <article class="mtr-card" id="mtr-${esc(targetKeyOf(t))}">
       <div class="mtr-head">
         <span class="mtr-no">${i + 1}</span>
         <span class="mtr-name">${esc(t.proteinName)}</span>
@@ -708,14 +766,17 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <div class="mtr-af">
           <h4>预测结构（AlphaFold）</h4>
           ${afHtml}
+          ${(afBudgetWarnsBy.get(t.uniprotId ?? t.label) ?? []).length ? `<p class="note" style="margin-top:8px">内嵌模型预算提示：${esc((afBudgetWarnsBy.get(t.uniprotId ?? t.label) ?? []).join('；'))} — 本页仅展示统计信息。</p>` : ''}
         </div>
       </div>
-    </article>`
-  }).join('')
+    </article>`)
+  })
 
   // 3Dmol bundle 一次内嵌 + 多视图初始化（所有 data-maf 阶段共用同一实现与 pLDDT 着色）
   // 无可内嵌模型（全部靶点无预测/超预算）时整段省略 — 报告不携带死脚本
   // MODELS 映射为 UniProt → 模型 PDB 文本（纯字符串 — plddtStyleApplyJs 直接消费）
+  // v2.12：懒初始化 — 只初始化「当前可见视图」内的阶段（隐藏视图的 canvas 尺寸
+  // 为 0，盲初始化会渲染出空白）；视图切换时补初始化，打印前全量初始化（海报补齐）
   const afModelsJson = JSON.stringify(Object.fromEntries([...afViews].map(([k, v]) => [k, v.pdbText]))).replace(/<\//g, '<\\/')
   const mtrViewerJs = afViews.size > 0 ? `
     ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
@@ -723,6 +784,11 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     (function () {
       var MODELS = ${afModelsJson};
       function initStage(stage) {
+        if (stage.getAttribute('data-init')) return;
+        // 3Dmol 未就绪（CDN 加载中）— 直接返回待重试，不标记失败（加载失败由
+        // onerror → failAll 统一降级；视图切换/加载完成会再次触发 initPending）
+        if (!window.$3Dmol) return;
+        stage.setAttribute('data-init', '1');
         var key = stage.getAttribute('data-maf');
         var cv = stage.querySelector('.af-canvas');
         var poster = stage.querySelector('.af-poster');
@@ -744,44 +810,52 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
           } catch (e) { /* 打印海报生成失败不影响交互 */ }
         } catch (e) { stage.className = 'af-stage af-fail'; try { stage.setAttribute('data-maf-err', String((e && e.message) || e).slice(0, 200)); } catch (er) { /* ignore */ } }
       }
+      function visibleStages() {
+        var all = document.querySelectorAll('.af-stage[data-maf]:not([data-init])');
+        var out = [];
+        for (var i = 0; i < all.length; i++) {
+          var v = all[i].closest ? all[i].closest('.rpt-view') : null;
+          if (!v || v.classList.contains('rpt-view-on')) out.push(all[i]);
+        }
+        return out;
+      }
+      function initPending() { visibleStages().forEach(initStage); }
       function initAll() {
-        Array.prototype.forEach.call(document.querySelectorAll('.af-stage[data-maf]'), initStage);
+        Array.prototype.forEach.call(document.querySelectorAll('.af-stage[data-maf]:not([data-init])'), initStage);
       }
       function failAll() {
-        Array.prototype.forEach.call(document.querySelectorAll('.af-stage[data-maf]'), function (st) { st.className = 'af-stage af-fail'; });
+        Array.prototype.forEach.call(document.querySelectorAll('.af-stage[data-maf]:not([data-init])'), function (st) { st.className = 'af-stage af-fail'; });
       }
-      if (window.$3Dmol) initAll();
+      window.__rptInitPendingStages = initPending;
+      window.addEventListener('beforeprint', initAll);
+      if (window.$3Dmol) initPending();
       else {
         var s = document.createElement('script');
         s.src = 'https://3Dmol.org/build/3Dmol-min.js';
-        s.onload = initAll; s.onerror = failAll;
+        s.onload = initPending; s.onerror = failAll;
         (document.head || document.documentElement).appendChild(s);
       }
     })();
     </script>` : ''
-  const miniReportsHtml = `
-  <section class="sec" id="mini-reports">
-    <h2>${secHead(noMini, `各靶点单独报告（${targets.length}）`, 'Per-Target Reports')}</h2>
-    <p class="note">批次内每个靶点的独立简报 — 基本信息（方法评分 / 实验结构 / 序列覆盖 / 同源与文献 / 聚集形式）与 AlphaFold 预测结构（pLDDT 置信着色，可拖拽旋转 / 滚轮缩放 / 全屏放大）。简报为精简版，完整数据明细见后续章节（对比矩阵 / 各靶点 PDB 结构 / 同源结构 / 文献，默认折叠按需展开）。${afBudgetWarns.length ? `<br>内嵌模型预算提示：${esc(afBudgetWarns.join('；'))} — 对应靶点仅展示统计信息。` : ''}</p>
-    <div class="mtr-list">${mtrCards}</div>
-    ${mtrViewerJs}
-  </section>`
 
   // v1.10 同源证据：一致性矩阵（下三角）与序列归属表（确定性数据，模板直出）
+  // v2.12 ④：矩阵对齐修复 — 表头列/行标/数值统一居中（此前行标沿用 th 表头样式：
+  // uppercase/字距/粗底边，数值右对齐 → 表头与内容错位观感）；行标改用正文风格，
+  // 对角线单元格淡底标记，角格给出阅读方向提示
   const pairMap = new Map<string, number>()
   for (const p of relation.homologPairs ?? []) pairMap.set(`${p.a}|${p.b}`, p.identity)
   const getPair = (a: string, b: string) => pairMap.get(`${a}|${b}`) ?? pairMap.get(`${b}|${a}`)
   const matrixHtml = hasIdentityMatrix ? `
   <section class="sec" id="homolog">
     <h2>${secHead(noIdentity, isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性', 'Pairwise Identity')}</h2>
-    <p class="note">系统对全部靶点全长序列两两比对（种子-对角链算法）得到的确定性一致性估计；≥40% 判为家族级同源，任一成员的已有结构可直接指导其他成员的构建设计。</p>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th></th>${targets.map(t => `<th>${esc(t.uniprotId ?? t.label)}</th>`).join('')}</tr></thead>
-      <tbody>${targets.map((row, i) => `<tr><th style="background:#f5f5f4;color:#1c1917">${esc(row.uniprotId ?? row.label)}</th>${targets.map((col, j) => {
-        if (i === j) return '<td class="num">—</td>'
+    <p class="note">系统对全部靶点全长序列两两比对（种子-对角链算法）得到的确定性一致性估计；≥40% 判为家族级同源，任一成员的已有结构可直接指导其他成员的构建设计。行与列为同一组靶点（读法：行靶点 与 列靶点 的一致性，对角线为自身）。</p>
+    <div class="tbl-wrap"><table class="idm">
+      <thead><tr><th class="idm-corner">一致性 ↘</th>${targets.map(t => `<th>${esc(t.uniprotId ?? t.label)}</th>`).join('')}</tr></thead>
+      <tbody>${targets.map((row, i) => `<tr><th class="idm-rowhead">${esc(row.uniprotId ?? row.label)}</th>${targets.map((col, j) => {
+        if (i === j) return '<td class="num idm-diag">—</td>'
         if (j < i) {
           const v = getPair(row.uniprotId ?? row.label, col.uniprotId ?? col.label)
-          return `<td class="num">${v != null ? v + '%' : '—'}</td>`
+          return `<td class="num idm-val">${v != null ? v + '%' : '—'}</td>`
         }
         return '<td class="num" style="color:#d6d3d1">·</td>'
       }).join('')}</tr>`).join('')}</tbody>
@@ -852,6 +926,44 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     : relation.relationType === 'homologous'
       ? '同源家族批次通常以单一成员独立解析为主，属正常情况（家族证据互用见合并评估分析）。'
       : '各靶点结构解析相互独立，无共同结构先例可借用。'
+  // ── v2.12 ③：复合物评估文献列表 = 共有结构文献（PMID 去重 + 关联 PDB）────
+  // 首页（复合物评估）只呈现共有结构的文献 — 复合物级证据与复合物级文献同章节；
+  // 各靶点自身的文献明细已移至其单独报告页。元数据取自各靶点文献检索命中
+  // （PDB 主引文），未命中者以 PDB 条目行呈现（标题/期刊未知 — 如实标注）。
+  const sharedLitByPmid = new Map<string, { meta?: LiteratureItem; structures: SharedStructure[] }>()
+  for (const s of sharedStructures) {
+    if (!s.pubmedId) continue
+    const key = String(s.pubmedId)
+    const entry = sharedLitByPmid.get(key) ?? { structures: [] }
+    entry.structures.push(s)
+    sharedLitByPmid.set(key, entry)
+  }
+  for (const t of targets) {
+    for (const l of t.literature) {
+      if (!l.pmid) continue
+      const key = String(l.pmid)
+      const entry = sharedLitByPmid.get(key)
+      if (entry && !entry.meta) entry.meta = l
+    }
+  }
+  const sharedLitRows = [...sharedLitByPmid.entries()]
+    .sort((a, b) => (Number(b[1].meta?.year ?? 0) || 0) - (Number(a[1].meta?.year ?? 0) || 0) || Number(b[0]) - Number(a[0]))
+    .map(([pmid, { meta, structures }]) => `
+    <tr>
+      <td class="td-id"><a href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" rel="noopener">${esc(pmid)}</a></td>
+      <td class="t-title">${meta ? esc(meta.title.slice(0, 110)) : '（未检索到该文献元数据 — 详见关联 PDB 条目主引文）'}</td>
+      <td class="t-title">${meta ? esc(meta.journal.slice(0, 30)) : '—'}</td>
+      <td class="num">${meta ? esc(String(meta.year || '—')) : '—'}</td>
+      <td class="cov-cells">${structures.map(s => `<a class="cov-chip" style="text-decoration:none" href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener" title="${esc(s.title)}">${s.pdbId}</a>`).join(' ')}</td>
+    </tr>`).join('')
+  const sharedLitHtml = sharedLitByPmid.size ? `
+    <h3>共有结构文献（${sharedLitByPmid.size} 篇 · PMID 去重）</h3>
+    <p class="note">复合物评估引用的文献清单 — 仅列共有结构（同一 PDB 覆盖 ≥2 个输入靶点）的主引文，按年份降序；「关联共有结构」列给出该文献对应的 PDB 条目。各靶点自身的文献明细见其单独报告页。</p>
+    <div class="tbl-wrap"><table>
+      <colgroup><col style="width:76px"><col><col style="width:150px"><col style="width:52px"><col style="width:190px"></colgroup>
+      <thead><tr><th>PMID</th><th>标题</th><th>期刊</th><th>年份</th><th>关联共有结构</th></tr></thead>
+      <tbody>${sharedLitRows}</tbody>
+    </table></div>` : ''
   const sharedStructuresHtml = `
   <section class="sec" id="shared-pdbs">
     <h2>${secHead(noShared, `共有结构（${sharedStructures.length}）`, 'Shared Structures')}</h2>
@@ -860,13 +972,14 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <div class="sh-hero-head"><span class="sh-ico" aria-hidden="true">◈</span>共有结构 <b>${sharedStructures.length}</b> 个<span class="sh-hero-sub">同一 PDB 条目覆盖 ≥2 个输入靶点 — 复合物亚基共结晶 / 抗体-抗原复合物 / 融合构建等物理关联的直接结构证据；单条最多覆盖 <b>${sharedMaxTargets}</b> 个靶点</span></div>
       ${sharedCovSumChips ? `<div class="sh-cov-sum">${sharedCovSumChips}</div>` : ''}
     </div>
-    <p class="note">按覆盖靶点数降序、分辨率升序排列；「覆盖靶点」列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号），×N 为覆盖靶点数。后续各靶点明细章节中的同一 PDB 亦带 ◈ 徽标，可互相印证。</p>
+    <p class="note">按覆盖靶点数降序、分辨率升序排列；「覆盖靶点」列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号），×N 为覆盖靶点数。各靶点单独报告页中的同一 PDB 亦带 ◈ 徽标，可互相印证。</p>
     <div class="tbl-wrap"><table class="tbl-data">
       ${SHARED_PDB_COLGROUP}
       <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>覆盖靶点</th><th>标题</th><th class="num">释放日期</th><th>文献</th></tr></thead>
       <tbody>${sharedRows}</tbody>
-    </table></div>` : `
-    <div class="callout callout-amber"><b>批次内无共有结构 — 各靶点没有共同 PDB 条目</b>本批次各输入靶点未出现同一 PDB 条目同时覆盖多个 UniProt 的情况，即没有复合物共结晶 / 共组装的既有结构先例。${esc(sharedEmptyHint)}各靶点独立的 PDB 结构明细见后续章节（默认折叠，可按需展开）。</div>`}
+    </table></div>
+    ${sharedLitHtml}` : `
+    <div class="callout callout-amber"><b>批次内无共有结构 — 各靶点没有共同 PDB 条目</b>本批次各输入靶点未出现同一 PDB 条目同时覆盖多个 UniProt 的情况，即没有复合物共结晶 / 共组装的既有结构先例，复合物评估亦无共有文献可引。${esc(sharedEmptyHint)}各靶点独立的 PDB 结构明细见其单独报告页（刊头靶点卡片进入）。</div>`}
   </section>`
 
   // v1.25：聚集形式（寡聚态）— 不再单独成章：徽标融入刊头各靶点卡片，证据链以折叠形式挂在对比矩阵下方
@@ -896,11 +1009,13 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 
   // v2.8 报告格式优化：靶点卡 → mini 仪表盘（补结构/覆盖率/同源/文献关键数字，
   // 多靶点批次可不经对比矩阵直接在刊头扫读各靶点研究现状）
+  // v2.12：靶点卡整体可点 — 点击进入该靶点的单独报告页（综述/简报/单独结构同页；
+  // 卡内 UniProt 链接除外 — 点击仍跳 UniProt）；卡底「单独报告 →」为明确入口提示
   const targetMeta = targets.map(t => {
     const o = t.oligomer
     const ms = t.methodStats
     return `
-    <div class="tgt-card">
+    <div class="tgt-card" data-goto="target-${targetKeyOf(t)}" title="查看 ${esc(t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
       <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
@@ -912,6 +1027,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <span>同源 <b>${t.blastHits.length}</b></span>
         <span>文献 <b>${t.literature.length}</b></span>
       </div>
+      <div class="tgt-open">单独报告页 →</div>
     </div>`
   }).join('')
 
@@ -956,7 +1072,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         ${oligoDist ? `<div class="glance-tile"><div class="gt-label">聚集形式</div><div class="gt-value">${esc(oligoDist)}</div><div class="gt-sub">判定已计入各靶点评分 · 证据链见矩阵下折叠</div></div>` : ''}
       </div>
     </div>
-    <div class="glance-foot">阅读路径：先读「${noLlm} 合并评估分析」与「${noShared} 共有结构」（批次级结论与共同结构证据）→「${noMini} 各靶点单独报告」简报 → 各靶点 PDB/同源/文献明细默认折叠，按需展开（打印时自动展开）。</div>
+    <div class="glance-foot">阅读路径：本页（复合物评估）先读「${noLlm} 合并评估分析」与「${noShared} 共有结构」（复合物级结论与共同结构证据/文献）→ 点击刊头靶点卡片或目录「靶点单独报告」进入各靶点单独报告页（结构可行性综述 + 基本信息 + 预测结构 + 该靶点 PDB/同源/文献同页），页内「返回报告首页」随时回到本页；打印时全部页面依序输出。</div>
   </section>`
 
   // v2.8 报告格式优化：对比矩阵扩列（同源结构/文献/寡聚态）+ 总体分附评级 —
@@ -977,11 +1093,13 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <td class="num"><b>${t.scores.overall.score}</b><span class="mtx-rating">${esc(t.scores.overall.rating)}</span></td>
     </tr>`).join('')
 
-  // v2.11：每靶点折叠块带锚点（目录「靶点速览」直达）· 默认折叠（避免过多次要
-  // 信息干扰阅读，打印自动展开）；行内 ◈ 徽标与「共有结构」章节互证，摘要行给
-  // 共有/单独结构计数 — 折叠状态下即可判断该靶点与批次的关联证据量
-  const pdbBlocks = targets.map(t => {
-    if (!t.directPdbs.length) return ''
+  // v2.11：每靶点折叠块带锚点 · 默认折叠（避免过多次要信息干扰阅读，打印自动
+  // 展开）；行内 ◈ 徽标与「共有结构」章节互证，摘要行给共有/单独结构计数。
+  // v2.12：各靶点 PDB/同源/文献折叠块不再集中首页独立章节，而是嵌入该靶点的
+  // 单独报告视图页（单独评估与单独结构同页）— key → 折叠块 HTML 映射。
+  const pdbFoldOf = new Map<string, string>()
+  targets.forEach(t => {
+    if (!t.directPdbs.length) { pdbFoldOf.set(targetKeyOf(t), ''); return }
     const tShared = t.directPdbs.filter(p => sharedIds.has(p.pdbId)).length
     // v1.24：全部展示（移除前 12 截断）
     const rows = t.directPdbs.map(p => `
@@ -992,7 +1110,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <td class="t-title">${esc(p.title.slice(0, 80))}</td>
         <td class="num">${esc(p.releaseDate.slice(0, 4))}</td>
       </tr>`).join('')
-    return `
+    pdbFoldOf.set(targetKeyOf(t), `
     <details class="pdb-fold" id="${anchorOf(t)}">
       <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.directPdbs.length} 个结构（全部）${tShared ? ` · <span class="sh-sum">共有 ${tShared} / 单独 ${t.directPdbs.length - tShared}</span>` : ' · 单独结构'}</summary>
       <div class="tbl-wrap"><table>
@@ -1000,12 +1118,13 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <thead><tr><th>PDB</th><th>方法</th><th>分辨率</th><th>标题</th><th>年份</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
-    </details>`
-  }).filter(Boolean).join('')
+    </details>`)
+  })
 
   // v1.11 同源结构（BLAST/序列检索命中 — 含共享自家族代表的标注，可溯源归属靶点）
-  const blastBlocks = targets.map(t => {
-    if (!t.blastHits.length) return ''
+  const blastFoldOf = new Map<string, string>()
+  targets.forEach(t => {
+    if (!t.blastHits.length) { blastFoldOf.set(targetKeyOf(t), ''); return }
     const shared = t.blastStatus?.status === 'ok' && /共享自家族代表/.test(t.blastStatus.note ?? '')
     // v1.24：全部展示（移除前 10 截断）
     const rows = t.blastHits.map(h => `
@@ -1016,7 +1135,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <td class="num">${h.resolution != null ? h.resolution.toFixed(2) + 'Å' : '—'}</td>
         <td class="t-title">${esc((h.method || '').slice(0, 16))}</td>
       </tr>`).join('')
-    return `
+    blastFoldOf.set(targetKeyOf(t), `
     <details class="pdb-fold" id="blast-${anchorOf(t)}">
       <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.blastHits.length} 个同源结构（全部）${shared ? ' · <span style="font-weight:400;font-size:12px">共享自家族代表，未单独检索</span>' : ''}</summary>
       <div class="tbl-wrap"><table>
@@ -1024,12 +1143,14 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <thead><tr><th>PDB</th><th>描述</th><th>Identity</th><th>分辨率</th><th>方法</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
-    </details>`
-  }).filter(Boolean).join('')
+    </details>`)
+  })
 
   // v1.11 各靶点文献（PMID 可点击；结构解析文献标记；归属靶点清晰可辨）
-  const litBlocks = targets.map(t => {
-    if (!t.literature.length) return ''
+  // v2.12：移入各靶点单独报告页（首页只保留共有结构文献）
+  const litFoldOf = new Map<string, string>()
+  targets.forEach(t => {
+    if (!t.literature.length) { litFoldOf.set(targetKeyOf(t), ''); return }
     // v1.24：全部展示（移除前 10 截断）
     const rows = t.literature.map(l => `
       <tr>
@@ -1038,7 +1159,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <td class="t-title">${esc(l.journal.slice(0, 30))}</td>
         <td class="num">${esc(l.year || '—')}</td>
       </tr>`).join('')
-    return `
+    litFoldOf.set(targetKeyOf(t), `
     <details class="pdb-fold" id="lit-${anchorOf(t)}">
       <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.literature.length} 篇（全部）</summary>
       <div class="tbl-wrap"><table>
@@ -1046,8 +1167,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <thead><tr><th>PMID</th><th>标题</th><th>期刊</th><th>年份</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
-    </details>`
-  }).filter(Boolean).join('')
+    </details>`)
+  })
 
   const figHtml = embedded.length ? `
   <section class="sec" id="assets">
@@ -1159,11 +1280,131 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     ${ins.keyConcerns?.length ? `<h3>风险关注点</h3><ul>${ins.keyConcerns.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
   </section>` : ''
 
+  // ── v2.12 ②：各靶点单独报告视图页 ─────────────────────────────────────────
+  // 单独评估与单独结构同页：结构可行性综述（LLM 章节拆分归属）+ 单独报告卡（基本
+  // 信息 + AlphaFold 预测结构交互 3D）+ 该靶点 PDB/同源/文献明细（默认折叠，打印
+  // 自动展开）。页首「← 返回报告首页」+ 页脚上一/下一靶点导航；hash 深链
+  // #view-target-<ID> 可直达；打印时所有视图依序输出、靶点页另起一页。
+  const scoreToneOf = (t: MergedTargetData) => t.scores.overall.score >= 7 ? '#047857' : t.scores.overall.score >= 4 ? '#b45309' : '#92400e'
+  const targetViews = targets.map((t, i) => {
+    const key = targetKeyOf(t)
+    const reviewMd = reviewByTarget.get(t.uniprotId ?? t.label)
+    const mtrCard = mtrCardOf.get(key) ?? ''
+    const pdbFold = pdbFoldOf.get(key) ?? ''
+    const blastFold = blastFoldOf.get(key) ?? ''
+    const litFold = litFoldOf.get(key) ?? ''
+    const tShared = t.directPdbs.filter(p => sharedIds.has(p.pdbId)).length
+    const scoreTone = scoreToneOf(t)
+    const prev = i > 0 ? targets[i - 1] : null
+    const next = i < targets.length - 1 ? targets[i + 1] : null
+    let tnoSeq = 0
+    const tno = () => String(++tnoSeq).padStart(2, '0')
+    const reviewHtml = reviewMd
+      ? renderMarkdown(reviewMd, 1)
+      : input.llmOk
+        ? `<p class="note">该靶点的综述小节未能从合并分析章节中归属（LLM 小节标题偏离预期，内容未丢失）— 完整综述请「← 返回报告首页」查看「${noLlm} 合并评估分析」章节。</p>`
+        : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）— 该靶点无综述内容，以下为系统收集的确定性数据（基本信息 / 预测结构 / PDB / 同源 / 文献）。</div>`
+    const navChip = (tgt: MergedTargetData | null, dir: 'prev' | 'next') => tgt
+      ? `<a class="tgt-nav-chip" data-goto="target-${targetKeyOf(tgt)}" href="#view-target-${targetKeyOf(tgt)}" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}${dir === 'next' ? ' →' : ''}</a>`
+      : ''
+    return `
+  <div class="rpt-view" id="view-target-${key}">
+    <header class="tgt-page-head">
+      <button type="button" class="tgt-back" data-goto="home">← 返回报告首页</button>
+      <div class="tgt-page-eyebrow">TargetEval · Per-Target Report · 靶点单独报告 ${i + 1}/${targets.length}</div>
+      <h1 class="tgt-page-name">${esc(t.proteinName)}${t.uniprotId ? ` <a class="tgt-page-id" href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : ''}</h1>
+      <div class="tgt-page-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa · 总体 <b style="color:${scoreTone}">${t.scores.overall.score}/10</b>（${esc(t.scores.overall.rating)}）· PDB <b>${t.directPdbs.length}</b> 个${t.directPdbs.length ? `（共有 ${tShared} / 单独 ${t.directPdbs.length - tShared}）` : ''} · 同源 ${t.blastHits.length} · 文献 ${t.literature.length}</div>
+    </header>
+    <section class="sec">
+      <h2>${secHead(tno(), '结构可行性综述', 'Feasibility Review')}</h2>
+      ${reviewHtml}
+    </section>
+    <section class="sec">
+      <h2>${secHead(tno(), '单独报告（基本信息 + 预测结构）', 'Target Report')}</h2>
+      ${mtrCard}
+    </section>
+    <section class="sec">
+      <h2>${secHead(tno(), `PDB 结构（${t.directPdbs.length} 个${tShared ? ` · 共有 ${tShared}` : ''} · 默认折叠）`, 'Structures')}</h2>
+      <p class="note">该靶点直接关联的 PDB 结构明细（默认折叠，打印自动展开）；◈ 徽标为共有结构（同时覆盖本批次多个输入靶点，见首页「${noShared} 共有结构」章节）。</p>
+      ${pdbFold || '<p>该靶点暂无直接关联 PDB 结构 — 构建边界可参考上方 AlphaFold 预测与下方同源结构。</p>'}
+    </section>
+    ${blastFold ? `
+    <section class="sec">
+      <h2>${secHead(tno(), `同源结构（${t.blastHits.length} 个 · BLAST/序列检索 · 默认折叠）`, 'Homologous Structures')}</h2>
+      <p class="note">该靶点经 BLAST（NCBI pdbaa）或 RCSB 序列检索（NCBI 拥堵时兜底）获得的同源结构命中，已排除该靶点自身的直接结构。</p>
+      ${blastFold}
+    </section>` : ''}
+    ${litFold ? `
+    <section class="sec">
+      <h2>${secHead(tno(), `文献（${t.literature.length} 篇 · 默认折叠）`, 'Literature')}</h2>
+      <p class="note">该靶点检索的 PubMed 文献（含 PDB 结构主引文，标记「结构解析文献」）。复合物级共有结构文献见首页「${noShared} 共有结构」章节。</p>
+      ${litFold}
+    </section>` : ''}
+    <div class="tgt-page-foot">
+      <button type="button" class="tgt-back" data-goto="home">← 返回报告首页</button>
+      <div class="tgt-page-nav">
+        ${navChip(prev, 'prev')}
+        <span class="tgt-nav-pos">${i + 1} / ${targets.length}</span>
+        ${navChip(next, 'next')}
+      </div>
+    </div>
+  </div>`
+  }).join('')
+
+  // v2.12：视图切换脚本（首页 ↔ 各靶点单独报告页）— hash 深链 + 打印全展开；
+  // 点击卡片内普通链接（UniProt 等）不触发视图切换（仍走默认链接行为）；
+  // 切换后滚动复位：独立文件滚回文档顶；自动高度内嵌（无内部滚动条）时联动
+  // 宿主页面把报告顶部带回视口；固定高度内嵌（Dialog 预览，有内部滚动条）时
+  // 仅滚 iframe 内部
+  const viewSwitchJs = `
+<script>
+// v2.12：视图切换 — 复合物评估首页与各靶点单独报告页分层阅读
+(function () {
+  function resetScroll() {
+    try {
+      var internal = document.documentElement.scrollHeight > window.innerHeight + 4;
+      window.scrollTo(0, 0);
+      if (!internal && window.parent && window.parent !== window && window.frameElement) {
+        var rect = window.frameElement.getBoundingClientRect();
+        var pv = window.parent.innerHeight || 800;
+        if (rect.top < -8 || rect.top > pv - 120) window.parent.scrollBy({ top: rect.top - 12 });
+      }
+    } catch (e) { /* ignore */ }
+  }
+  function show(id, scroll) {
+    var el = document.getElementById('view-' + id);
+    if (!el) return;
+    var views = document.querySelectorAll('.rpt-view');
+    for (var i = 0; i < views.length; i++) views[i].classList.toggle('rpt-view-on', views[i] === el);
+    if (scroll !== false) resetScroll();
+    try { history.replaceState(null, '', '#view-' + id); } catch (e) { /* ignore */ }
+    if (window.__rptInitPendingStages) { try { window.__rptInitPendingStages(); } catch (e) { /* ignore */ } }
+  }
+  window.__rptShowView = show;
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var gotoEl = t.closest('[data-goto]');
+    if (!gotoEl) return;
+    var a = t.closest('a[href]');
+    if (a && a !== gotoEl) return;
+    if (gotoEl.tagName === 'A') e.preventDefault();
+    show(gotoEl.getAttribute('data-goto'));
+  });
+  window.addEventListener('hashchange', function () {
+    var h = (location.hash || '').replace(/^#/, '');
+    if (/^view-/.test(h)) show(h.slice(5), false);
+  });
+  var initial = (location.hash || '').replace(/^#/, '');
+  if (/^view-/.test(initial)) show(initial.slice(5), false);
+})();
+</script>`
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<!-- mrg-fmt-v2.11 合并报告格式版本标记：旧版落盘 HTML 无此标记时由报告路由自动升级重渲染 -->
+<!-- mrg-fmt-v2.12 合并报告格式版本标记：旧版落盘 HTML 无此标记时由报告路由自动升级重渲染 -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1233,6 +1474,45 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .toc-targets b { font-size:11px; }
   .toc-targets a { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--accent-2); background:#f0fdf7; border:1px solid #c7ece0; border-radius:3px; padding:1px 9px; text-decoration:none; white-space:nowrap; }
   .toc-targets a:hover { background:#d9f5e8; }
+  /* ── v2.12：视图分层（首页 = 复合物评估；每靶点单独报告独立视图页）── */
+  .rpt-view { display:none; }
+  .rpt-view.rpt-view-on { display:block; }
+  .tgt-card[data-goto] { cursor:pointer; transition:border-color .15s, box-shadow .15s; }
+  .tgt-card[data-goto]:hover { border-color:#a7f3d0; box-shadow:0 2px 10px rgba(4,120,87,.10); }
+  .tgt-open { margin-top:7px; padding-top:7px; border-top:1px dashed var(--line); font-family:ui-monospace,Menlo,monospace; font-size:10.5px; font-weight:600; letter-spacing:.5px; color:var(--accent-2); }
+  .tgt-card[data-goto]:hover .tgt-open { color:#047857; }
+  .tgt-page-head { position:relative; border-bottom:1px solid var(--ink); padding-bottom:18px; margin-bottom:26px; }
+  .tgt-page-head::after { content:''; position:absolute; left:0; bottom:3px; width:100%; border-bottom:3px solid var(--ink); }
+  .tgt-back { display:inline-flex; align-items:center; gap:5px; font-family:ui-monospace,Menlo,monospace; font-size:11px; font-weight:600; letter-spacing:.5px; color:var(--accent-2); background:#f0fdf7; border:1px solid #c7ece0; border-radius:5px; padding:5px 13px; cursor:pointer; }
+  .tgt-back:hover { background:#d9f5e8; color:#047857; }
+  .tgt-page-eyebrow { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:2.5px; color:var(--accent); text-transform:uppercase; margin:10px 0 8px; }
+  .tgt-page-name { font-size:24px; font-weight:700; line-height:1.35; margin:0 0 7px; }
+  .tgt-page-id { font-family:ui-monospace,Menlo,monospace; font-size:14px; font-weight:700; color:#065f46; background:#f0fdf7; border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; text-decoration:none; vertical-align:2px; margin-left:6px; white-space:nowrap; }
+  .tgt-page-id:hover { background:#d9f5e8; }
+  .tgt-page-meta { font-size:12.5px; color:var(--sub); line-height:1.9; }
+  .tgt-page-meta b { font-variant-numeric:tabular-nums; }
+  .tgt-page-foot { margin-top:38px; padding-top:16px; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; align-items:center; gap:10px 12px; }
+  .tgt-page-nav { margin-left:auto; display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+  .tgt-nav-chip { font-family:ui-monospace,Menlo,monospace; font-size:11px; font-weight:600; color:var(--accent-2); background:#f0fdf7; border:1px solid #c7ece0; border-radius:3px; padding:1px 9px; text-decoration:none; white-space:nowrap; }
+  .tgt-nav-chip:hover { background:#d9f5e8; }
+  .tgt-nav-pos { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--faint); }
+  /* v2.12 ④：序列一致性矩阵 — 表头/行标/数值全部居中（列内容与表头严格对齐）；
+  行标改用正文风格（此前沿用 th 表头样式 uppercase/字距/粗底边，观感错位） */
+  table.idm { margin:12px auto; max-width:100%; }
+  table.idm thead th { text-align:center; }
+  table.idm tbody th { font-family:ui-monospace,Menlo,monospace; font-size:12px; font-weight:600; color:#1c1917; background:#fafaf8; text-transform:none; letter-spacing:0; padding:6px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  table.idm th, table.idm td, table.idm td.num { text-align:center; }
+  table.idm td.num { font-size:12.5px; }
+  table.idm .idm-corner { font-size:10px; color:var(--faint); letter-spacing:1px; }
+  table.idm .idm-diag { background:#f7f7f5; color:#a8a29e; }
+  table.idm .idm-val { font-weight:600; }
+  @media print {
+    .rpt-view { display:block !important; }
+    .rpt-view + .rpt-view { break-before:page; }
+    .tgt-back, .tgt-open, .tgt-page-nav, .tgt-nav-pos { display:none !important; }
+  }
+  /* 打印前临时全展开（beforeprint JS 挂载 — 隐藏视图中的 3D 阶段先拿到真实尺寸再初始化） */
+  .rpt-print-all .rpt-view { display:block !important; }
   /* v2.8：章节编号方块（与单靶点报告同构 — 连续编号替代原断续的「一/二/三」） */
   .sec h2 .sec-no { flex:none; width:30px; height:30px; background:var(--ink); color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:14px; font-weight:700; border-radius:5px; font-family:ui-monospace,Menlo,monospace; }
   .sec h2 .sec-title { min-width:0; }
@@ -1401,6 +1681,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 <body>
 <div class="page">
 
+  <div class="rpt-view rpt-view-on" id="view-home">
   <header class="rpt-head">
     <div class="rpt-eyebrow">TargetEval · Merged Structure Feasibility Report</div>
     <h1 class="rpt-title">${esc(reportTitle)}</h1>
@@ -1429,35 +1710,29 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
   <nav class="toc">
     <b>Contents · 目录</b>
     <ol>
-      <li><a href="#llm">${noLlm} · 合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
-      <li><a href="#shared-pdbs" class="toc-shared">${noShared} · 共有结构（${sharedStructures.length}）</a></li>
-      <li><a href="#mini-reports">${noMini} · 各靶点单独报告（基本信息 + 预测结构）</a></li>
+      <li><a href="#llm">${noLlm} · 合并评估分析（摘要 / 关系分析 / 整合策略 / 总结）</a></li>
+      <li><a href="#shared-pdbs" class="toc-shared">${noShared} · 共有结构（${sharedStructures.length}${sharedLitByPmid.size ? ' · 含共有文献' : ''}）</a></li>
       ${insightsHtml ? `<li><a href="#insights">${noInsights} · 客户评估表要点与回应</a></li>` : ''}
       ${ligandsHtml ? `<li><a href="#ligands">${noLigands} · 配体研究数据</a></li>` : ''}
       <li><a href="#matrix">${noMatrix} · 跨靶点对比矩阵</a></li>
       ${matrixHtml ? `<li><a href="#homolog">${noIdentity} · ${isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性'}</a></li>` : ''}
       ${attributionHtml ? `<li><a href="#attribution">${noAttribution} · 评估表序列归属</a></li>` : ''}
-      <li><a href="#pdbs">${noPdbs} · 各靶点 PDB 结构（默认折叠）</a></li>
-      ${blastBlocks ? `<li><a href="#blast-hits">${noBlast} · 同源结构（BLAST/序列检索，默认折叠）</a></li>` : ''}
-      ${litBlocks ? `<li><a href="#literature">${noLit} · 各靶点文献（默认折叠）</a></li>` : ''}
       ${embedded.length ? `<li><a href="#assets">${noAssets} · 客户实验数据</a></li>` : ''}
     </ol>
-    ${pdbBlocks ? `<div class="toc-targets">
-      <b>靶点速览 · ${targets.filter(t => t.directPdbs.length).length}/${targets.length}</b>
-      ${targets.filter(t => t.directPdbs.length).map(t => `<a href="#${anchorOf(t)}" title="${esc(t.proteinName)} — PDB ${t.directPdbs.length} · 总体 ${t.scores.overall.score}/10">${esc(t.uniprotId ?? t.label)}</a>`).join('')}
-    </div>` : ''}
+    <div class="toc-targets">
+      <b>靶点单独报告 · ${targets.length}</b>
+      ${targets.map(t => `<a data-goto="target-${targetKeyOf(t)}" href="#view-target-${targetKeyOf(t)}" title="${esc(t.proteinName)} — PDB ${t.directPdbs.length} · 总体 ${t.scores.overall.score}/10 · 综述/基本信息/预测结构/单独结构同页">${esc(t.uniprotId ?? t.label)}</a>`).join('')}
+    </div>
   </nav>
 
   ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点。</div>`}
 
   <section class="sec" id="llm">
     <h2>${secHead(noLlm, '合并评估分析', 'Merged Analysis')}</h2>
-    ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 请参考下方数据区块与评估表要点）', 1)}
+    ${renderMarkdown(llmHomeMd || '（LLM 分析不可用 — 请参考下方数据区块与评估表要点）', 1)}
   </section>
 
   ${sharedStructuresHtml}
-
-  ${miniReportsHtml}
 
   ${insightsHtml}
   ${ligandsHtml}
@@ -1468,50 +1743,45 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
       <thead><tr><th>UniProt</th><th>靶点</th><th class="num">PDB</th><th class="num">最佳分辨率</th><th class="num">覆盖率</th><th>寡聚态</th><th class="num">同源结构</th><th class="num">文献</th><th class="num">X-ray</th><th class="num">Cryo-EM</th><th class="num">NMR</th><th class="num">总体</th></tr></thead>
       <tbody>${matrixRows}</tbody>
     </table></div>
-    ${oligoTargets.length ? `<p class="note">各靶点评分已包含蛋白聚集形式（寡聚态）调整（判定徽标见刊头靶点卡片与矩阵寡聚态列，调整明细与证据链见下方折叠，分析已融入「${noLlm} · 合并评估分析」各靶点小节）。</p>${oligoFoldHtml}` : ''}
+    ${oligoTargets.length ? `<p class="note">各靶点评分已包含蛋白聚集形式（寡聚态）调整（判定徽标见刊头靶点卡片与矩阵寡聚态列，调整明细与证据链见下方折叠；各靶点结合寡聚态的具体建议已融入其单独报告页的结构可行性综述）。</p>${oligoFoldHtml}` : ''}
   </section>
 
   ${matrixHtml}
   ${attributionHtml}
 
-  <section class="sec" id="pdbs">
-    <h2>${secHead(noPdbs, `各靶点 PDB 结构（${pdbTotal} 个 · 默认折叠）`, 'Structures by Target')}</h2>
-    <p class="note">各靶点直接关联的 PDB 结构明细 — 次级参考信息，默认折叠以免干扰阅读（点击展开 / 打印时自动展开）；◈ 徽标为共有结构（同时覆盖本批次多个输入靶点，见「${noShared} 共有结构」章节）。</p>
-    ${pdbBlocks || '<p>本批次靶点暂无直接关联 PDB 结构。</p>'}
-  </section>
-
-  ${blastBlocks ? `
-  <section class="sec" id="blast-hits">
-    <h2>${secHead(noBlast, '同源结构（BLAST / 序列检索）', 'Homologous Structures')}</h2>
-    <p class="note">各靶点经 BLAST（NCBI pdbaa）或 RCSB 序列检索（NCBI 拥堵时兜底）获得的同源结构命中，已排除该靶点自身的直接结构。≥90% 序列一致性的家族成员共享家族代表的同一次检索结果（标注「共享自家族代表」）。</p>
-    ${blastBlocks}
-  </section>` : ''}
-
-  ${litBlocks ? `
-  <section class="sec" id="literature">
-    <h2>${secHead(noLit, '各靶点文献', `Literature by Target · ${litTotal}`)}</h2>
-    <p class="note">各靶点分别检索的 PubMed 文献（含 PDB 结构主引文，标记「结构解析文献」）— 按靶点分组，每条文献的归属 UniProt 见分组标题。同一文献可能同时关联多个靶点。</p>
-    ${litBlocks}
-  </section>` : ''}
-
   ${figHtml}
 
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v2.11 格式：批次核心结论速览 · 共有结构提前突出直出 · 各靶点 PDB/同源/文献明细默认折叠 · 评估表目标/问题逐条回应 · 各靶点单独报告（基本信息 + AlphaFold 预测结构交互视图） · 全章节连续编号）<br>
+    Generated by TargetEval · 多靶点合并评估（v2.12 格式：复合物评估与单独评估分层 — 首页为复合物级分析 + 共有结构与共有文献，每靶点独立单独报告页[综述 + 基本信息 + AlphaFold 预测结构交互视图 + 该靶点 PDB/同源/文献明细，刊头靶点卡片进入] · 打印时全部页面依序输出）<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
   </footer>
+  </div>
+
+  ${targetViews}
 </div>
 <script>
-// 打印时自动展开所有 <details> 折叠块，打印后恢复原状
+// v2.12：打印准备 — 先展开全部 details 折叠块并临时显示全部视图（强制回流让隐藏
+// 视图中的 3D 阶段拿到真实尺寸，随后 mtrViewerJs 的 beforeprint 监听再全量初始化）
 (function(){
   var memo=[];
-  function expand(){ memo=[]; document.querySelectorAll('details').forEach(function(d){ if(!d.open){ memo.push(d); d.open=true; } }); }
-  function restore(){ memo.forEach(function(d){ d.open=false; }); memo=[]; }
+  var root=document.documentElement;
+  function expand(){
+    memo=[];
+    document.querySelectorAll('details').forEach(function(d){ if(!d.open){ memo.push(d); d.open=true; } });
+    root.classList.add('rpt-print-all');
+    void document.body.offsetWidth;
+  }
+  function restore(){
+    memo.forEach(function(d){ d.open=false; }); memo=[];
+    root.classList.remove('rpt-print-all');
+  }
   window.addEventListener('beforeprint', expand);
   window.addEventListener('afterprint', restore);
 })();
 </script>
+${mtrViewerJs}
+${viewSwitchJs}
 ${UX_PAGE_JS}
 ${LIGHTBOX_JS}
 </body>
