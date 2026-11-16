@@ -241,6 +241,11 @@ function targetDigest(t: MergedTargetData): string {
   lines.push(`评分: X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10 · 总体 ${t.scores.overall.score}/10（${t.scores.overall.rating}）`)
   const ms = t.methodStats
   lines.push(`PDB 结构: ${t.directPdbs.length} 个（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）${ms.bestResolution != null ? `，最佳 ${ms.bestResolution}Å` : ''} · 覆盖率 ${t.coveragePercent}%${t.coverageText ? `（已覆盖: ${t.coverageText.slice(0, 160)}）` : ''}${t.gapText ? ` · 未覆盖区间: ${t.gapText.slice(0, 160)}` : ''} · 配体 ${t.ligandCount} 种 · 文献 ${t.literatureCount} 篇`)
+  // v2.14：方法先例分布 — Cryo-EM 占主导时显性提示（小靶点的已有 EM 结构必然为复合物/增重形式，
+  // 推荐方法不得仅因单体分子量小而排除 Cryo-EM）
+  if (t.directPdbs.length > 0 && ms.cryoemCount > 0 && ms.cryoemCount >= ms.xrayCount + ms.nmrCount) {
+    lines.push(`方法先例: ${ms.cryoemCount}/${t.directPdbs.length} 个已有结构为 Cryo-EM${ms.cryoemCount === t.directPdbs.length ? '（全部）' : ''} — 该靶点以复合物/装配形式被 Cryo-EM 解析已有直接先例，方法推荐应以此为主要依据（不得仅因单体分子量小而将 Cryo-EM 排除或降为末选）`)
+  }
   // v2.0：配体归一数据（批次内共享 — 输入相同，结果一致）
   if (t.ligands?.length) {
     const okLig = t.ligands.filter(l => l.ok)
@@ -494,7 +499,7 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 
 ## 各靶点结构可行性综述
 对批次中每个靶点输出一个小节（### 靶点名），每节包含（详细程度不低于独立单靶点报告）：
-- **一句话结论**：该靶点结构解析可行性如何、推荐方法
+- **一句话结论**：该靶点结构解析可行性如何、推荐方法（方法先例行为「Cryo-EM 占主导/全部」时，推荐方法必须优先论证沿已有 Cryo-EM 复合物/装配路线 — 禁止仅因单体分子量小而推荐 X-ray/NMR 并将 Cryo-EM 降为末选；引用具体 PDB 与分辨率作先例依据）
 - **已有结构研究概况**：引用 PDB 数量/方法分布/最佳分辨率/覆盖率（含覆盖区间与空白区间）/高频配体/结构释放年份分布（研究热度变化）
 - **同源结构证据**：BLAST/序列检索命中概况（最高一致性/命中数）；命中为共享自家族代表时必须如实说明（未单独检索、共享来源），不得虚构
 - **文献证据**：引用 1-2 篇代表性文献（PMID + 一句话贡献，优先结构解析文献）

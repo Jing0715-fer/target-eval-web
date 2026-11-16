@@ -472,10 +472,19 @@ ${ctx.images.map(i => {
 
 /** C2 结构解析可行性评估 */
 function chC2(ctx: ReportContext): string {
+  // v2.14：已有结构方法先例分布 — Cryo-EM 先例占主导（或全部）时的推荐路线约束
+  const directCount = ctx.directPdbs.length
+  const cryoemCount = ctx.directPdbs.filter(p => p.isCryoem).length
+  const xrayCount = ctx.directPdbs.filter(p => p.isXray).length
+  const nmrCount = ctx.directPdbs.filter(p => p.isNmr).length
+  const cryoemDominant = directCount > 0 && cryoemCount > 0 && cryoemCount >= xrayCount + nmrCount
+  const precedentNote = cryoemDominant
+    ? `\n- 方法先例约束（关键）：该靶点已有 ${directCount} 个结构中 ${cryoemCount} 个为 Cryo-EM${cryoemCount === directCount ? '（全部）' : ''} — 靶点以复合物/装配形式被 Cryo-EM 解析已被反复验证（小分子量靶点的已有 EM 结构必然为复合物或含技术组分）。三方法对比矩阵与推荐技术路线必须以「沿已有 Cryo-EM 复合物/装配路线」为首要先例路径论证，明确引用具体 PDB 与分辨率；禁止仅因单体分子量小而将 Cryo-EM 排除或降为末选（不符合科学事实）；X-ray/NMR 仅作为单体/分段路线的备选论述，并如实说明其先例相对不足（X-ray ${xrayCount} 个 / NMR ${nmrCount} 个先例）`
+    : ''
   return `撰写报告的「结构解析可行性评估」一章（以 ## 结构解析可行性评估 开头，仅输出这一章，不要输出其他章节）：
 
 ## 结构解析可行性评估
-- ### 三方法对比矩阵：用 Markdown 表格对比 X-ray / Cryo-EM / NMR 在本靶点上的适配性，行维度至少包括：分子量适配、可结晶性/成象条件、已有成功先例、构象异质性处理、预计周期、综合评分（引用系统评分）${ctx.mwAugment?.applicable ? '\n- 分子量维度（小分子量靶点）：Cryo-EM 的「分子量适配」按装配有效分子量（~' + (ctx.mwAugment.assemblyKda ?? ctx.mwAugment.monomerKda) + ' kDa' + (ctx.mwAugment.assemblyPath === 'homolog-complex' ? '，同源复合物推断 — 需组装验证' : ctx.mwAugment.assemblyKda == null ? '，无生物装配路径 — 需技术增重' : '') + '）评估而非单体分子量；X-ray/NMR 行说明分子量对其影响的差异（增重对 NMR 无益、对 X-ray 非瓶颈）' : ''}
+- ### 三方法对比矩阵：用 Markdown 表格对比 X-ray / Cryo-EM / NMR 在本靶点上的适配性，行维度至少包括：分子量适配、可结晶性/成象条件、已有成功先例、构象异质性处理、预计周期、综合评分（引用系统评分）${ctx.mwAugment?.applicable ? '\n- 分子量维度（小分子量靶点）：Cryo-EM 的「分子量适配」按装配有效分子量（~' + (ctx.mwAugment.assemblyKda ?? ctx.mwAugment.monomerKda) + ' kDa' + (ctx.mwAugment.assemblyPath === 'homolog-complex' ? '，同源复合物推断 — 需组装验证' : ctx.mwAugment.assemblyKda == null ? '，无生物装配路径 — 需技术增重' : '') + '）评估而非单体分子量；X-ray/NMR 行说明分子量对其影响的差异（增重对 NMR 无益、对 X-ray 非瓶颈）' : ''}${precedentNote}
 - ### 评分依据解读：逐方法解释系统评分的含义（引用评分依据文本），哪些因素是加分项/减分项${ctx.mwAugment?.applicable ? '；Cryo-EM 评分中的「分子量维度」调整（' + (ctx.scores.mwAugmentAdjust ? ctx.scores.mwAugmentAdjust.note : '无') + '）需明确解读' : ''}
 - ### 推荐技术路线：明确给出第一推荐方法与理由、备选方法与触发条件（如 X-ray 失败多少轮后转 Cryo-EM）${ctx.mwAugment?.applicable ? '\n- 增重路径优先级：生理装配（寡聚/复合物，已有结构先例）→ 同源复合物（BLAST 推断，identity 按高低取舍，共表达/体外组装前需 pull-down/SPR 验证互作）→ 互作伙伴复合物（无结构先例，需共表达/体外组装与 SEC-MALS 验证）→ 技术组分（Fab/nanobody/MBP/ferritin 支架）；逐条回应「与客户目的的比对」中的契合/需注意/冲突条目（加入的蛋白是否改变研究对象/锁定构象/遮蔽界面）' : ''}
 - 篇幅 400-600 字（宁精炼勿超长）`
