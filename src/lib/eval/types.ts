@@ -584,6 +584,8 @@ export interface JobSummary {
   ligands?: LigandResolution[]
   /** v2.0：AlphaFold 预测结构信息（报告头图来源；无预测/渲染失败时 available=false） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 预测结构信息（AFDB 无收录时的兜底；失败/超限 available=false） */
+  esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
   /** v2.13：deferred 批次同样按单靶点流程生成完整独立报告（展示并入合并报告的
    * 靶点单独评估页）；reportDeferred 仅表示 HTML 不单独落盘 */
@@ -606,6 +608,26 @@ export interface AlphafoldSummaryInfo {
   /** pLDDT ≥90 区段占比（0-1） */
   fracVeryHigh?: number | null
   /** 渲染失败/无预测原因（available=false 时） */
+  note?: string
+}
+
+// ─── ESMFold 公共预测结构（v2.15 AFDB 兜底）──────────────────────
+
+/** 作业摘要中的 ESMFold 信息（ESM Atlas 公共 API — 无 UniProt 归属 / AFDB 无
+ *  收录的靶点兜底；模型文本存 db/cache/esmfold/{cacheKey}.pdb，摘要只存元数据） */
+export interface EsmfoldSummaryInfo {
+  available: boolean
+  /** 模型标识（固定 'ESMFold v1'） */
+  modelId?: string
+  /** 平均 pLDDT（0-100，已从 0-1 标度归一） */
+  globalPlddt?: number | null
+  /** pLDDT ≥90 区段占比（0-1） */
+  fracVeryHigh?: number | null
+  /** 预测序列长度（清洗后标准字符数） */
+  sequenceLength?: number
+  /** 磁盘缓存键（序列 sha1 前 20 位）— 合并报告据此直读模型文本 */
+  cacheKey?: string
+  /** 不可用原因（available=false 时：超限/超时/服务退化） */
   note?: string
 }
 

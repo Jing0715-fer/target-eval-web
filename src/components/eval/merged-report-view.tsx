@@ -189,10 +189,13 @@ function BlastNote({ t }: { t: MergedTargetLite }) {
   )
 }
 
-/** v2.9：各靶点单独简报卡（基本信息 + 预测结构 — 简版；交互 3D 视图见 HTML 报告） */
+/** v2.9：各靶点单独简报卡（基本信息 + 预测结构 — 简版；交互 3D 视图见 HTML 报告）
+ *  v2.15：AFDB 无收录的靶点展示 ESMFold 兜底预测（公共 ESM Atlas API）卡 */
 function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) {
   const af = t.alphafold
+  const ef = t.esmfold
   const afOk = af?.available === true
+  const efOk = !afOk && ef?.available === true
   const overall = t.scores?.overall
   const scoreTone = overall
     ? overall.score >= 7
@@ -269,7 +272,7 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
         <div className="px-4 py-3">
           <div className="mb-2 flex items-center gap-1.5 text-muted-foreground/80">
             <Atom className="size-3.5" aria-hidden />
-            <span className="lin-eyebrow">预测结构（AlphaFold）</span>
+            <span className="lin-eyebrow">预测结构{afOk ? '（AlphaFold）' : efOk ? '（ESMFold 兜底）' : ''}</span>
           </div>
           {afOk ? (
             <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
@@ -290,9 +293,26 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
                 交互式 3D 预测结构视图（pLDDT 置信着色 · 拖拽旋转 / 滚轮缩放 / 全屏放大）内嵌于可下载的 HTML 报告中。
               </p>
             </div>
+          ) : efOk ? (
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+              <div className="font-mono text-[11px] leading-relaxed text-foreground/85">
+                {ef.modelId ?? 'ESMFold v1'}（ESM Atlas 公共 API）· {ef.sequenceLength ?? '—'} aa · 平均 pLDDT {ef.globalPlddt ?? '—'}{ef.fracVeryHigh != null ? ` · ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''}
+              </div>
+              <a
+                href="https://esmatlas.com/resources?action=fold"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-mono text-[11px] text-primary hover:underline"
+              >
+                esmatlas.com <ExternalLink className="size-3" aria-hidden />
+              </a>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）。交互式 3D 预测结构视图（pLDDT 置信着色）内嵌于可下载的 HTML 报告中。
+              </p>
+            </div>
           ) : (
             <p className="rounded-lg border border-dashed border-border bg-muted/40 px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
-              {af?.note ?? (t.uniprotId ? '该靶点在 AlphaFold DB 无预测模型' : '序列输入未归属 UniProt — 无 AlphaFold 预测')}
+              {af?.note ?? ef?.note ?? (t.uniprotId ? '该靶点在 AlphaFold DB 无预测模型，ESMFold 公共接口亦未获取到预测' : '序列输入未归属 UniProt — 无 AlphaFold 预测；≤400 aa 序列将自动尝试 ESMFold 公共预测')}
             </p>
           )}
         </div>

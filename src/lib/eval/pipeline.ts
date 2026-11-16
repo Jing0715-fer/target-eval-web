@@ -43,7 +43,8 @@ import { filterPdbsByRange, filterBlastByRange } from './range-filter'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
 import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
 import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
-import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
+import { cleanEsmfoldSequence, esmfoldStructureFor, esmfoldFailNote, loadCachedEsmfoldModel, ESMFOLD_MAX_AA, ESMFOLD_EMBED_MAX_BYTES } from './esmfold'
+import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
 /** v2.4 无状态（函数计算）部署：评估表数据由前端内联携带（服务器磁盘不跨请求保留） */
 export interface InlineEvalTable {
@@ -169,9 +170,11 @@ interface PipelineState {
   oligomer: OligomerAnalysis | null
   mwAugment: MwAugmentAnalysis | null
   scores: ScoresResult | null
-  // ── AF2 / 报告 ──
+  // ── AF2 / ESMFold / 报告 ──
   afFigure: { dataUri: string; modelId: string; globalPlddt: number | null; version: number; fracVeryHigh: number | null } | null
   afSummary: AlphafoldSummaryInfo | null
+  /** v2.15：ESMFold 公共 API 兜底预测（AFDB 无收录/纯序列输入时）元数据 */
+  esmSummary: EsmfoldSummaryInfo | null
   reportParts: ReportPart[]
   reportDone: boolean
   /** v2.6.3/v2.7：各报告章 LLM 失败累计（同键 ≥3 → 放弃重试接受缺章，防慢引擎无限段循环） */
@@ -240,6 +243,7 @@ function freshState(): PipelineState {
     scores: null,
     afFigure: null,
     afSummary: null,
+    esmSummary: null,
     reportParts: [],
     reportDone: false,
     reportPartFails: {},
@@ -1273,6 +1277,45 @@ class SegmentRunner {
         st.afSummary = { available: false, note: 'AlphaFold 预测获取失败' }
       }
     }
+    // ── v2.15：ESMFold 公共 API 兜底 ──
+    // 仅在 AFDB 无可用预测时执行（含两类：纯序列输入无 UniProt 归属 / UniProt
+    // 在 AFDB 无模型或获取失败）— 有 AFDB 模型的靶点不浪费公共服务配额（AF2
+    // 有 MSA 精度也更优）。通道实测：健康时短序列（≤80 aa）~3.5s；中长序列
+    // 高峰期常被他们网关 504 切断（~30s 上限）— 失败如实记入摘要，本次作业不
+    // 重试；磁盘缓存（db/cache/esmfold/{sha1}.pdb）保证重新评估时零成本命中。
+    if (!st.esmSummary) {
+      const afOk = st.afSummary?.available === true
+      if (!afOk && st.sequence) {
+        const clean = cleanEsmfoldSequence(st.sequence)
+        if (clean.length === 0) {
+          st.esmSummary = { available: false, note: '序列无效（无标准氨基酸字符）— 未执行 ESMFold 预测' }
+        } else if (clean.length > ESMFOLD_MAX_AA) {
+          st.esmSummary = { available: false, sequenceLength: clean.length, note: `序列 ${clean.length} aa 超过 ESMFold 公共接口上限（${ESMFOLD_MAX_AA} aa）— 如需计算预测建议改用需登录的 ColabFold 或 AlphaFold Server` }
+          this.log(`ESMFold 兜底未执行：序列 ${clean.length} aa 超过公共接口上限（${ESMFOLD_MAX_AA} aa）`, 'warn')
+        } else {
+          this.report('report', '该靶点无 AlphaFold DB 预测 — 获取 ESMFold 公共预测结构…', 0.08)
+          // 段预算闸门：预算不足 8s 时交还下段重入（磁盘缓存使重入零成本）；
+          // 超时钳到段内（min 6s / max 预算-1.5s）— 不越过段边界/checkpoint 纪律
+          const budget = budgetLeft(this.cb)
+          if (budget < 8_000) return this.handoff()
+          const timeoutMs = Math.max(6_000, Math.min(35_000, budget - 1_500))
+          const out = await esmfoldStructureFor(st.sequence, { timeoutMs })
+          if (out.ok) {
+            st.esmSummary = {
+              available: true, modelId: 'ESMFold v1',
+              globalPlddt: out.stats.meanPlddt, fracVeryHigh: out.stats.fracVeryHigh,
+              sequenceLength: out.stats.length, cacheKey: out.cacheKey,
+            }
+            this.log(`ESMFold 预测获取成功：${out.stats.length} aa · 平均 pLDDT ${out.stats.meanPlddt}${out.fromCache ? '（磁盘缓存命中）' : '（ESM Atlas 公共 API — 免登录）'}— 报告将内嵌可交互 3D 视图（pLDDT 着色）`)
+          } else {
+            st.esmSummary = { available: false, sequenceLength: clean.length, note: esmfoldFailNote(out) }
+            this.log(`ESMFold 预测未获取：${esmfoldFailNote(out)}`, 'warn')
+          }
+        }
+      } else if (!afOk && !st.sequence) {
+        st.esmSummary = { available: false, note: '无可用序列 — 未执行 ESMFold 预测' }
+      }
+    }
     this.advance('report')
     return null
   }
@@ -1305,6 +1348,7 @@ class SegmentRunner {
       oligomer: st.oligomer!,
       ligands: st.ligandResolved.length ? st.ligandResolved : undefined,
       alphafold: st.afSummary ?? undefined,
+      esmfold: st.esmSummary ?? undefined,
       mwAugment: st.mwAugment!,
       interaction: st.interaction ?? undefined,
     }
@@ -1401,6 +1445,36 @@ class SegmentRunner {
           }
         } catch { /* 视图降级，不阻塞报告 */ }
       }
+      // v2.15：ESMFold 交互视图 — af2 相位已把模型写入磁盘缓存，此处直读（毫秒级，
+      // 零网络）；缓存丢失（跨实例/清缓存等极端情形）且预算充裕时才重取一次，
+      // 同 AF 模式降级永不阻塞报告。
+      let esmfoldStructure: { pdbText: string; modelId: string; globalPlddt: number | null; fracVeryHigh: number | null; sequenceLength: number } | undefined
+      if (st.esmSummary?.available && st.esmSummary.cacheKey && !st.afSummary?.available) {
+        try {
+          const cached = await loadCachedEsmfoldModel(st.esmSummary.cacheKey)
+          if (cached && cached.pdbText.length <= ESMFOLD_EMBED_MAX_BYTES) {
+            esmfoldStructure = {
+              pdbText: cached.pdbText, modelId: 'ESMFold v1',
+              globalPlddt: st.esmSummary.globalPlddt ?? null,
+              fracVeryHigh: st.esmSummary.fracVeryHigh ?? null,
+              sequenceLength: st.esmSummary.sequenceLength ?? cached.meta.sequenceLength,
+            }
+          } else if (cached) {
+            this.log(`ESMFold 模型过大（${Math.round(cached.pdbText.length / 1024)}KB > 内嵌预算 2560KB）— 报告仅展示结构统计信息`, 'warn')
+          } else {
+            if (budgetLeft(this.cb) < 12_000) return this.handoff()
+            const out = await esmfoldStructureFor(st.sequence, { timeoutMs: 12_000 })
+            if (out.ok && out.embeddable) {
+              esmfoldStructure = {
+                pdbText: out.pdbText, modelId: 'ESMFold v1',
+                globalPlddt: out.stats.meanPlddt, fracVeryHigh: out.stats.fracVeryHigh, sequenceLength: out.stats.length,
+              }
+            } else if (!out.ok) {
+              this.log(`ESMFold 模型 PDB 获取失败：${esmfoldFailNote(out)} — 报告仅展示结构统计信息`, 'warn')
+            }
+          }
+        } catch { /* 视图降级，不阻塞报告 */ }
+      }
       const html = await renderReportHtml({
         ctx: this.reportContext(),
         methodStats: st.scores!.methodStats,
@@ -1413,6 +1487,7 @@ class SegmentRunner {
         engineSummary,
         alphafoldFigure: st.afFigure ?? undefined,
         alphafoldStructure,
+        esmfoldStructure,
         resolveImagePath: (meta) => {
           const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
           // turbopackIgnore：st.assetDir 为运行时上传目录（db/reports/<id>/assets），
@@ -1464,6 +1539,9 @@ class SegmentRunner {
       oligomer: st.oligomer!,
       ligands: st.ligandResolved.length ? st.ligandResolved : undefined,
       alphafold: st.afSummary ?? undefined,
+      /** v2.15：ESMFold 公共 API 兜底预测元数据（AFDB 无收录/纯序列输入时；
+       *  模型文本存 db/cache/esmfold/{cacheKey}.pdb，合并报告据此直读） */
+      esmfold: st.esmSummary ?? undefined,
       /** v1.29：互作复合物证据分析（无直接结构时；无证据时 hasEvidence=false 亦存档） */
       interaction: st.interaction ?? undefined,
       /** v1.26：分子量增重策略分析（小分子量靶点；applicable=false 时亦存档） */

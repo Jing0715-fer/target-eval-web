@@ -33,12 +33,13 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
-import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure } from './types'
+import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
 import { synthesizeScoreRationale } from './score'
 import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { loadCachedEsmfoldModel } from './esmfold'
 import { splitQaChapter, parseInsightQa, QA_CHAPTER_TITLE } from './qa-chapter'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
@@ -74,6 +75,9 @@ export interface MergedTargetData {
   mwAugment?: MwAugmentAnalysis | null
   /** v2.9：AlphaFold 预测结构信息（v2.0+ 作业存于摘要；旧作业在渲染时按需补齐） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入靶点；
+   *  模型文本按 cacheKey 从 db/cache/esmfold 直读入公共 MODELS 池） */
+  esmfold?: EsmfoldSummaryInfo | null
   /** v2.13：该靶点独立 LLM 报告全文（批次评估时按单靶点流程生成并持久化；
    *  旧批次作业无此字段 — 单独评估页回退合并报告的各靶点综述） */
   reportMarkdown?: string | null
@@ -116,6 +120,8 @@ export interface MergedTargetLite {
   construct?: ConstructInfo
   /** v2.9：AlphaFold 预测结构元数据（前端简报卡展示；交互 3D 视图见 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
+  esmfold?: EsmfoldSummaryInfo | null
 }
 
 /** 轻量化：网页合并视图（v1.24 起全部携带 — PDB/BLAST/文献不再截断，全部展示） */
@@ -144,6 +150,7 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     gapText: t.gapText,
     construct: t.construct,
     alphafold: t.alphafold,
+    esmfold: t.esmfold ?? null,
   }
 }
 
@@ -162,6 +169,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       ligands?: LigandResolution[]
       mwAugment?: MwAugmentAnalysis | null
       alphafold?: AlphafoldSummaryInfo
+      esmfold?: EsmfoldSummaryInfo
       interaction?: InteractionAnalysis | null
       coveredRanges?: Array<[number, number]>
     } | null = null
@@ -212,6 +220,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       ligands: summary.ligands,
       mwAugment: summary.mwAugment ?? null,
       alphafold: summary.alphafold,
+      // v2.15：ESMFold 兜底预测（AFDB 无收录/纯序列输入靶点）
+      esmfold: summary.esmfold ?? null,
       // v2.13：单独评估页所需 — 独立 LLM 报告 / 覆盖区间 / 互作证据 / 条目名
       reportMarkdown: job.reportMarkdown,
       coverage: summary.coveredRanges
@@ -725,7 +735,24 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       afBudgetLeft -= st.pdbText.length
     } catch { /* 视图降级 — 统计信息 */ }
   }))
-  const af3dBundle = afViews.size > 0 ? await ensure3DmolBundle() : null
+  // v2.15：ESMFold 兜底模型入公共 MODELS 池（键 esm:{cacheKey} — 与 AF 模型键空间
+  // 不碰撞）。AFDB 有模型的靶点不会有 esmfold 摘要（管线引擎互斥），此处仅对
+  // 无 AFDB 收录的靶点补充。纯磁盘直读（毫秒级 — 单独评估作业 af2 相位已写缓存），
+  // 超出批次预算/缓存缺失时降级统计卡。不联网重取（合并报告生成走低频后台任务，
+  // 公共服务配额宝贵；重新评估该靶点即可回填）。
+  interface EsmMiniView { pdbText: string; sequenceLength: number; globalPlddt: number | null; fracVeryHigh: number | null }
+  const esmViews = new Map<string, EsmMiniView>()
+  await Promise.all(targets.map(async t => {
+    if (t.alphafold?.available || !t.esmfold?.available || !t.esmfold.cacheKey) return
+    try {
+      const cached = await loadCachedEsmfoldModel(t.esmfold.cacheKey)
+      if (!cached) return
+      if (cached.pdbText.length > afBudgetLeft) return
+      esmViews.set(t.esmfold.cacheKey, { pdbText: cached.pdbText, sequenceLength: cached.meta.sequenceLength, globalPlddt: t.esmfold.globalPlddt ?? cached.meta.meanPlddt, fracVeryHigh: t.esmfold.fracVeryHigh ?? cached.meta.fracVeryHigh })
+      afBudgetLeft -= cached.pdbText.length
+    } catch { /* 视图降级 — 统计信息 */ }
+  }))
+  const af3dBundle = afViews.size > 0 || esmViews.size > 0 ? await ensure3DmolBundle() : null
 
   // ── v2.13：各靶点单独评估页 — 直接渲染完整单靶点报告主体 ───────────────
   // v2.9「简报卡」退役：每靶点页复用 renderSingleReportBody（单靶点报告同款
@@ -738,8 +765,14 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // MODELS 映射为 UniProt → 模型 PDB 文本（纯字符串 — plddtStyleApplyJs 直接消费）
   // v2.12：懒初始化 — 只初始化「当前可见视图」内的阶段（隐藏视图的 canvas 尺寸
   // 为 0，盲初始化会渲染出空白）；视图切换时补初始化，打印前全量初始化（海报补齐）
-  const afModelsJson = JSON.stringify(Object.fromEntries([...afViews].map(([k, v]) => [k, v.pdbText]))).replace(/<\//g, '<\\/')
-  const mtrViewerJs = afViews.size > 0 ? `
+  // v2.15：ESMFold 模型并入同一 MODELS 池（键 esm:{cacheKey} — 与 AF 模型键空间
+  // 不碰撞；值统一为 PDB 文本字符串，mtrViewerJs 的 addModel(pdb,'pdb') 直接消费）
+  const afModelEntries: Array<[string, string]> = [
+    ...[...afViews].map(([k, v]) => [k, v.pdbText] as [string, string]),
+    ...[...esmViews].map(([k, v]) => [`esm:${k}`, v.pdbText] as [string, string]),
+  ]
+  const afModelsJson = JSON.stringify(Object.fromEntries(afModelEntries)).replace(/<\//g, '<\\/')
+  const mtrViewerJs = afViews.size > 0 || esmViews.size > 0 ? `
     ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
     <script>
     (function () {
@@ -1202,13 +1235,21 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const prev = i > 0 ? targets[i - 1] : null
     const next = i < targets.length - 1 ? targets[i + 1] : null
     // AF 交互视图（公共 MODELS 池）：本次获取的可内嵌模型 > 作业摘要元数据（降级统计卡）
+    // v2.15：AFDB 无收录的靶点（esmfold 摘要 available）→ ESMFold 兜底视图（池键
+    // esm:{cacheKey}，engine='esmfold' — 卡片标注/外链切换 ESM Atlas 口径）；
+    // 缓存缺失/超预算时降级统计卡（元数据 + esmatlas 链接）。
     const view = t.uniprotId ? afViews.get(t.uniprotId) : undefined
+    const esmView = t.esmfold?.cacheKey ? esmViews.get(t.esmfold.cacheKey) : undefined
     const afSummary = (t.alphafold?.available ? t.alphafold : (t.uniprotId ? afMetaFill.get(t.uniprotId) : undefined)) ?? t.alphafold
     const afPooled = view && t.uniprotId
       ? { mafKey: t.uniprotId, modelId: view.modelId, version: view.version, globalPlddt: view.globalPlddt, fracVeryHigh: view.fracVeryHigh, pdbKb: Math.max(1, Math.round(view.pdbText.length / 1024)) }
       : afSummary?.available && t.uniprotId
         ? { mafKey: t.uniprotId, modelId: afSummary.modelId ?? 'AF 模型', version: afSummary.version ?? 1, globalPlddt: afSummary.globalPlddt ?? null, fracVeryHigh: afSummary.fracVeryHigh ?? null, pdbKb: 0, metaOnly: true }
-        : undefined
+        : esmView && t.esmfold?.available && t.esmfold.cacheKey
+          ? { mafKey: `esm:${t.esmfold.cacheKey}`, modelId: 'ESMFold v1', version: 1, globalPlddt: esmView.globalPlddt, fracVeryHigh: esmView.fracVeryHigh, pdbKb: Math.max(1, Math.round(esmView.pdbText.length / 1024)), engine: 'esmfold' as const, sequenceLength: esmView.sequenceLength }
+          : t.esmfold?.available
+            ? { mafKey: `esm:${t.esmfold.cacheKey ?? ''}`, modelId: 'ESMFold v1', version: 1, globalPlddt: t.esmfold.globalPlddt ?? null, fracVeryHigh: t.esmfold.fracVeryHigh ?? null, pdbKb: 0, metaOnly: true, engine: 'esmfold' as const, sequenceLength: t.esmfold.sequenceLength }
+            : undefined
     // LLM 章节来源：独立报告（新批次）→ 合并综述（旧批次回退）→ 说明占位
     const ownMd = t.reportMarkdown?.trim() || ''
     const reviewMd = reviewByTarget.get(t.uniprotId ?? t.label) || ''
@@ -1243,6 +1284,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       oligomer: t.oligomer,
       ligands: t.ligands,
       alphafold: t.alphafold,
+      esmfold: t.esmfold ?? undefined,
       mwAugment: t.mwAugment ?? undefined,
       interaction: t.interaction ?? undefined,
     }

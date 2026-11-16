@@ -469,14 +469,22 @@ export const LIGHTBOX_JS = `<script>
     var cv = stageEl.querySelector('.af-canvas');
     if (!cv) return;
     var prevFocus = document.activeElement;
+    // v2.15：全屏标题引擎自适应 — 取所在 figure figcaption 首个 <b>（AlphaFold /
+    // ESMFold 预测结构）；取不到时退化为通用「预测结构」（旧注入报告兼容）。
+    var ttl = '预测结构';
+    try {
+      var figEl = stageEl.closest('figure');
+      var ttlB = figEl ? figEl.querySelector('figcaption b') : null;
+      if (ttlB && ttlB.textContent) ttl = ttlB.textContent.trim().slice(0, 24) || '预测结构';
+    } catch (e) { /* 保持通用标题 */ }
     var wrap = document.createElement('div');
     wrap.className = 'af-fullwrap';
     wrap.setAttribute('role', 'dialog');
     wrap.setAttribute('aria-modal', 'true');
-    wrap.setAttribute('aria-label', 'AlphaFold 预测结构放大视图');
+    wrap.setAttribute('aria-label', ttl + '放大视图');
     wrap.innerHTML =
       '<div class="af-fullbar">' +
-        '<div class="af-fullttl"><b>AlphaFold 预测结构</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合</span></div>' +
+        '<div class="af-fullttl"><b>' + ttl + '</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合</span></div>' +
         LEGEND_AF +
         '<button type="button" class="af-fullclose" aria-label="退出放大视图">×</button>' +
       '</div>';
@@ -1275,6 +1283,15 @@ export interface ReportRenderInput {
     version: number
     fracVeryHigh: number | null
   }
+  /** v2.15：ESMFold 预测结构（公共 ESM Atlas API — AFDB 无收录/纯序列输入时兜底）。
+   *  交互视图与 AF 同构（3Dmol + pLDDT 四段着色）；仅在无 AF 结构时呈现 */
+  esmfoldStructure?: {
+    pdbText: string
+    modelId: string
+    globalPlddt: number | null
+    fracVeryHigh: number | null
+    sequenceLength: number
+  }
   resolveImagePath: (meta: ParsedImage) => string
 }
 
@@ -1305,6 +1322,11 @@ export interface SingleBodyEmbedOptions {
     pdbKb: number
     /** 无可内嵌模型（超预算/获取失败）— 仅展示统计信息卡 */
     metaOnly?: boolean
+    /** v2.15：预测引擎标识 — 'esmfold' 时卡片标注 ESMFold（AFDB 无收录兜底）
+     *  且外链改指 esmatlas.com；缺省即 AlphaFold */
+    engine?: 'esmfold'
+    /** v2.15：ESMFold 预测序列长度（engine='esmfold' 时展示） */
+    sequenceLength?: number
   }
   /** 客户实验数据图片走首页池复用（img 不带 src，由合并报告水合脚本从首页拷贝） */
   pooledImages?: boolean
@@ -1324,6 +1346,7 @@ export interface SingleReportBodyInput {
   engineSummary: string
   alphafoldFigure?: ReportRenderInput['alphafoldFigure']
   alphafoldStructure?: ReportRenderInput['alphafoldStructure']
+  esmfoldStructure?: ReportRenderInput['esmfoldStructure']
   /** 3Dmol bundle（单靶点报告外壳预取传入；合并嵌入模式无需 — 公共池脚本负责初始化） */
   af3dBundle?: string | null
   resolveImagePath?: (meta: ParsedImage) => string
@@ -1725,19 +1748,21 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const af3dBundle = input.af3dBundle ?? (input.alphafoldStructure ? await ensure3DmolBundle() : null)
   const af = input.alphafoldStructure
   const afP = emb?.afPooled
+  /** v2.15：池化引擎为 ESMFold — 卡片标注/外链切换为 ESM Atlas 口径 */
+  const efP = afP?.engine === 'esmfold' ? afP : undefined
   // v2.13：合并报告嵌入 — AF 视图走公共 MODELS 池（data-maf stage 由合并报告统一
   // 初始化）；无可内嵌模型时降级统计卡（mtr-af-stat — 合并报告附加样式）。
   const afBlockHtml = afP ? `
       <figure class="af-fig">
         ${afP.metaOnly
         ? `<div class="mtr-af-stat">
-          <div class="mtr-af-stat-line">${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'}${afP.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(afP.fracVeryHigh * 100)}%` : ''}</div>
-          <div class="mtr-af-stat-note">模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 AlphaFold DB（下方链接）</div>
-          <a class="mtr-af-link" href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>
+          <div class="mtr-af-stat-line">${esc(afP.modelId)}${efP ? ` · ${efP.sequenceLength ?? '—'} aa` : ` · v${afP.version}`} · 平均 pLDDT ${afP.globalPlddt ?? '—'}${afP.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(afP.fracVeryHigh * 100)}%` : ''}</div>
+          <div class="mtr-af-stat-note">${efP ? 'ESMFold 模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 ESM Atlas（下方链接）' : '模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 AlphaFold DB（下方链接）'}</div>
+          <a class="mtr-af-link" href="${efP ? 'https://esmatlas.com/resources?action=fold' : `https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}`}" target="_blank" rel="noopener">${efP ? 'esmatlas.com' : 'alphafold.ebi.ac.uk'} →</a>
         </div>`
         : `<div class="af-stage" data-maf="${esc(afP.mafKey)}">
           <div class="af-canvas"></div>
-          <img class="af-poster" alt="AlphaFold 预测结构（pLDDT 着色）">
+          <img class="af-poster" alt="${efP ? 'ESMFold' : 'AlphaFold'} 预测结构（pLDDT 着色）">
         </div>
         <div class="af-legend">
           <span><i style="background:#0053D6"></i>pLDDT ≥ 90</span>
@@ -1745,7 +1770,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FFDB13"></i>50–70</span>
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>`}
-        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+        <figcaption>${efP ? `<b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(afP.modelId)}（ESM Atlas 公共 API）· ${efP.sequenceLength ?? '—'} aa · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）· <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a>` : `<b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>`}</figcaption>
       </figure>` : af ? `
       <figure class="af-fig">
         <div class="af-stage" id="af-stage">
@@ -1802,6 +1827,62 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
         <figcaption><b>AlphaFold 预测结构</b> · pLDDT 着色<br>${esc(input.alphafoldFigure.modelId)} · v${input.alphafoldFigure.version} · 平均 pLDDT ${input.alphafoldFigure.globalPlddt ?? '—'}<br><a href="https://alphafold.ebi.ac.uk/entry/${u ? u.uniprotId : ''}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
       </figure>` : '')
 
+  // v2.15：ESMFold 预测结构（公共 ESM Atlas API）— AFDB 无收录/纯序列输入靶点的
+  // 兜底预测。仅在无 AF 区块时呈现（引擎互斥：有 AFDB 模型不占用公共服务配额）；
+  // 交互视图与 AF 同构（3Dmol + pLDDT 四段着色 + 全屏放大 + 打印海报），
+  // 元素 id 经 idOf 前缀化（合并报告多靶点单文档防冲突）。
+  const ef = !afP && !af ? input.esmfoldStructure : undefined
+  const efBlockHtml = ef ? `
+      <figure class="af-fig">
+        <div class="af-stage" id="${idOf('ef-stage')}">
+          <div class="af-canvas" id="${idOf('ef-canvas')}"></div>
+          <img id="${idOf('ef-poster')}" class="af-poster" alt="ESMFold 预测结构静态视图（pLDDT 着色）">
+        </div>
+        <div class="af-legend">
+          <span><i style="background:#0053D6"></i>pLDDT ≥ 90</span>
+          <span><i style="background:#65CBF3"></i>70–90</span>
+          <span><i style="background:#FFDB13"></i>50–70</span>
+          <span><i style="background:#FF7D45"></i>&lt; 50</span>
+        </div>
+        ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+        <script>
+        (function () {
+          var stage = document.getElementById('${idOf('ef-stage')}');
+          var cv = document.getElementById('${idOf('ef-canvas')}');
+          var poster = document.getElementById('${idOf('ef-poster')}');
+          function fail() { if (stage) stage.className = 'af-stage af-fail'; }
+          function init() {
+            try {
+              if (!window.$3Dmol || !cv) return fail();
+              var pdb = ${JSON.stringify(ef.pdbText).replace(/<\//g, '<\\/')};
+              var viewer = $3Dmol.createViewer(cv, { defaultcolors: $3Dmol.rasmolElementColors });
+              viewer.setBackgroundColor(0xffffff);
+              viewer.addModel(pdb, 'pdb');
+              ${plddtStyleApplyJs()}
+              viewer.zoomTo();
+              viewer.zoom(1.2);
+              viewer.render();
+              stage.className = 'af-stage af-live';
+              window.__afViewerReady = true;
+              window.__afViewer = viewer; // 全屏放大后显式 resize（与 AF 视图同保险）
+              try {
+                var uri = viewer.pngURI ? viewer.pngURI() : null;
+                if (uri && poster) poster.src = uri;
+              } catch (e) { /* 打印海报生成失败不影响交互 */ }
+            } catch (e) { fail(); }
+          }
+          if (window.$3Dmol) init();
+          else {
+            var s = document.createElement('script');
+            s.src = 'https://3Dmol.org/build/3Dmol-min.js';
+            s.onload = init; s.onerror = fail;
+            (document.head || document.documentElement).appendChild(s);
+          }
+        })();
+        </script>
+        <figcaption><b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(ef.modelId)}（ESM Atlas 公共 API · 免登录）· ${ef.sequenceLength} aa · 平均 pLDDT ${ef.globalPlddt ?? '—'}${ef.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''} · ${Math.round(ef.pdbText.length / 1024)}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）；引用须注明计算预测而非实验结构 · <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a></figcaption>
+      </figure>` : ''
+
   // ─── 报告主体组装（header → glance → 目录 → 章节 → footer；不含外壳）──────
   // v2.13：从 renderReportHtml 抽出 — 单靶点报告与合并报告各靶点单独评估页共用，
   // embed.idPrefix 前缀化全部锚点/元素 id（多视图单文档防冲突），章节结构与样式不变。
@@ -1831,7 +1912,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
         : '<span class="badge amber">LLM 分析：失败（见数据区块）</span>'}
     </div>
     </div>
-    ${afBlockHtml}
+    ${afBlockHtml}${efBlockHtml}
     </div>
   </header>
 
@@ -2286,7 +2367,7 @@ export const SINGLE_REPORT_CSS = `  :root {
 export async function renderReportHtml(input: ReportRenderInput): Promise<string> {
   // v2.13：主体渲染抽出为 renderSingleReportBody（合并报告各靶点单独评估页复用，
   // 格式与单靶点报告一模一样）；本函数仅组装文档外壳（head/CSS/backtop/脚本）。
-  const af3dBundle = input.alphafoldStructure ? await ensure3DmolBundle() : null
+  const af3dBundle = input.alphafoldStructure || input.esmfoldStructure ? await ensure3DmolBundle() : null
   const body = await renderSingleReportBody({ ...input, af3dBundle })
   const u = input.ctx.uniprot
   const rangeSuffix = input.ctx.range ? ` · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : ''

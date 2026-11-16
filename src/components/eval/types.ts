@@ -210,6 +210,8 @@ export interface MergedTargetLite {
   construct?: ConstructInfo
   /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
+  esmfold?: EsmfoldSummaryInfo | null
 }
 
 /** 合并评估报告（关联靶点批量生成） */
@@ -618,6 +620,8 @@ export interface JobSummary {
   ligands?: LigandResolution[]
   /** v2.0：AlphaFold 预测信息（报告头图元数据） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入时） */
+  esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */
   reportDeferred?: boolean
@@ -702,6 +706,18 @@ export interface AlphafoldSummaryInfo {
   globalPlddt?: number | null
   version?: number
   fracVeryHigh?: number | null
+  note?: string
+}
+
+/** v2.15：ESMFold 公共 API 兜底预测元数据（前端镜像 — 与后端 types 同构） */
+export interface EsmfoldSummaryInfo {
+  available: boolean
+  modelId?: string
+  /** 平均 pLDDT（0-100，已从 0-1 标度归一） */
+  globalPlddt?: number | null
+  fracVeryHigh?: number | null
+  /** 预测序列长度 */
+  sequenceLength?: number
   note?: string
 }
 

@@ -9,7 +9,7 @@
  */
 import type { BlastHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
-import type { AlphafoldSummaryInfo } from './types'
+import type { AlphafoldSummaryInfo, EsmfoldSummaryInfo } from './types'
 import type { LigandResolution } from './ligand'
 import { describeBlastStatus } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
@@ -45,6 +45,8 @@ export interface ReportContext {
   ligands?: LigandResolution[]
   /** v2.0：AlphaFold 预测信息（报告头图元数据） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入时） */
+  esmfold?: EsmfoldSummaryInfo
   /** v1.26：分子量增重策略分析（mw-augment.ts 产出；小分子量靶点时 applicable=true） */
   mwAugment?: MwAugmentAnalysis
   /** v1.29：互作复合物证据分析（interaction.ts 产出；无直接结构时有证据则 hasEvidence=true） */
@@ -292,6 +294,16 @@ function buildDigest(ctx: ReportContext): string {
     lines.push('')
     lines.push(`【AlphaFold 预测】${ctx.alphafold.modelId ?? ''}（模型 v${ctx.alphafold.version ?? '?'}）：平均 pLDDT ${ctx.alphafold.globalPlddt ?? '—'}${ctx.alphafold.fracVeryHigh != null ? `，pLDDT ≥90 区段占 ${Math.round(ctx.alphafold.fracVeryHigh * 100)}%` : ''}`)
     lines.push('（报告头部已附 pLDDT 着色的 AlphaFold 预测结构图；pLDDT ≥70 区段构象可信度较高，可作为构建设计与 Cryo-EM 分子量估计的参考 — 引用时须注明其为计算预测而非实验结构）')
+  }
+  // v2.15：ESMFold 兜底（无 AFDB 收录时）— 单序列语言模型预测，无 MSA，精度低于 AF2
+  if (ctx.esmfold?.available) {
+    lines.push('')
+    lines.push(`【ESMFold 预测】ESMFold v1（ESM Atlas 公共 API）：${ctx.esmfold.sequenceLength ?? '—'} aa，平均 pLDDT ${ctx.esmfold.globalPlddt ?? '—'}${ctx.esmfold.fracVeryHigh != null ? `，pLDDT ≥90 区段占 ${Math.round(ctx.esmfold.fracVeryHigh * 100)}%` : ''}`)
+    lines.push('（该靶点在 AlphaFold DB 无收录或无 UniProt 归属 — 报告头部附 ESMFold 预测结构图（pLDDT 着色）；ESMFold 单序列预测无 MSA，可信度通常低于 AlphaFold2，pLDDT ≥70 区段构象较可信，仅作构建设计与分子量估计参考 — 引用时须注明计算预测而非实验结构）')
+  } else if (ctx.esmfold && ctx.esmfold.available === false && ctx.esmfold.note && !ctx.alphafold?.available) {
+    lines.push('')
+    lines.push(`【ESMFold 预测】不可用：${ctx.esmfold.note}`)
+    lines.push('（如业务需要计算预测结构，可在实验策略建议中说明用户可自行使用需登录的 ColabFold / AlphaFold Server 补充；报告主体仍以实验结构证据为准）')
   }
   if (ctx.coverage) {
     lines.push('')
