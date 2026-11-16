@@ -453,14 +453,50 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const dateStr = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
   const embedded = await embedImages(input.images, input.assetDir)
 
+  // ── v2.8 报告格式优化 ────────────────────────────────────────────
+  // ① 统一动态章节编号：原实现「一/二/三…」硬编码与未编号章节（评估表要点/配体/一致性
+  //   矩阵/序列归属/共有结构）交错出现，序号断续；改为按目录顺序全量连续编号的编号方块
+  //   风格（与单靶点报告同一设计语言）。存在性先判定、依展示顺序取号。
+  const isHomologousBatch = relation.relationType === 'homologous'
+  const hasIdentityMatrix = (isHomologousBatch || relation.homologPairs?.some(p => p.identity > 0)) && targets.length >= 2
+  const hasAttribution = (input.sequenceAttribution?.length ?? 0) > 0
+  const sharedCount = input.sharedStructures?.length ?? computeSharedStructures(targets).length
+  const hasShared = sharedCount > 0
+  const hasBlast = targets.some(t => t.blastHits.length > 0)
+  const litTotal = targets.reduce((s, t) => s + t.literature.length, 0)
+  const hasLit = litTotal > 0
+  const hasAssets = embedded.length > 0
+  const hasLigands = targets.some(t => (t.ligands?.length ?? 0) > 0)
+  const insightsSecInput = input.insights
+  const hasInsightsSec = !!(insightsSecInput && (insightsSecInput.goals?.length || insightsSecInput.scientificQuestions?.length || insightsSecInput.experimentalSummary || insightsSecInput.sequenceNotes || insightsSecInput.homologs || insightsSecInput.keyConcerns?.length))
+  let noSeq = 0
+  const nextNo = () => { noSeq += 1; return String(noSeq).padStart(2, '0') }
+  const noLlm = nextNo()
+  const noInsights = hasInsightsSec ? nextNo() : ''
+  const noLigands = hasLigands ? nextNo() : ''
+  const noMatrix = nextNo()
+  const noIdentity = hasIdentityMatrix ? nextNo() : ''
+  const noAttribution = hasAttribution ? nextNo() : ''
+  const noShared = hasShared ? nextNo() : ''
+  const noPdbs = nextNo()
+  const noBlast = hasBlast ? nextNo() : ''
+  const noLit = hasLit ? nextNo() : ''
+  const noAssets = hasAssets ? nextNo() : ''
+  /** v2.8 章节头：编号方块 + 标题 + 英文标签（与单靶点报告同构） */
+  const secHead = (no: string, title: string, en: string) =>
+    `<span class="sec-no">${no}</span><span class="sec-title">${esc(title)}</span><span class="sec-en">${esc(en)}</span>`
+  // ② 大批次智能折叠：靶点 ≥4 时各靶点结构/同源/文献折叠块默认收起，避免长报告失控
+  const foldOpen = targets.length <= 3
+  // ③ 每靶点锚点：目录「靶点速览」直达对应结构折叠块
+  const anchorOf = (t: MergedTargetData) => `struct-${(t.uniprotId ?? t.label).replace(/[^A-Za-z0-9]/g, '')}`
+
   // v1.10 同源证据：一致性矩阵（下三角）与序列归属表（确定性数据，模板直出）
   const pairMap = new Map<string, number>()
   for (const p of relation.homologPairs ?? []) pairMap.set(`${p.a}|${p.b}`, p.identity)
   const getPair = (a: string, b: string) => pairMap.get(`${a}|${b}`) ?? pairMap.get(`${b}|${a}`)
-  const isHomologousBatch = relation.relationType === 'homologous'
-  const matrixHtml = (isHomologousBatch || relation.homologPairs?.some(p => p.identity > 0)) && targets.length >= 2 ? `
+  const matrixHtml = hasIdentityMatrix ? `
   <section class="sec" id="homolog">
-    <h2>${isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性'}<span class="sec-en">Pairwise Identity</span></h2>
+    <h2>${secHead(noIdentity, isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性', 'Pairwise Identity')}</h2>
     <p class="note">系统对全部靶点全长序列两两比对（种子-对角链算法）得到的确定性一致性估计；≥40% 判为家族级同源，任一成员的已有结构可直接指导其他成员的构建设计。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th></th>${targets.map(t => `<th>${esc(t.uniprotId ?? t.label)}</th>`).join('')}</tr></thead>
@@ -492,7 +528,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       </tr>`).join('')
   const attributionHtml = input.sequenceAttribution?.length ? `
   <section class="sec" id="attribution">
-    <h2>评估表序列归属<span class="sec-en">Sequence Attribution</span></h2>
+    <h2>${secHead(noAttribution, '评估表序列归属', 'Sequence Attribution')}</h2>
     <p class="note">评估表中每条序列经系统比对后的去向：同一靶点（一致性 ≥85%）的序列已作为客户构建并入对应靶点的评估（构建边界分析）；同源（35–85%）标注为家族成员；抗体序列作为背景证据；其余为未匹配。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>#</th><th>序列</th><th>长度(aa)</th><th>最佳匹配</th><th>一致性</th><th>归属</th></tr></thead>
@@ -527,7 +563,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     }).join('')
     return `
   <section class="sec" id="shared-pdbs">
-    <h2>共有结构<span class="sec-en">Shared Structures</span></h2>
+    <h2>${secHead(noShared, `共有结构（${sharedStructures.length}）`, 'Shared Structures')}</h2>
     <p class="note">同一 PDB 条目同时覆盖多个输入 UniProt 的结构（复合物亚基共结晶 / 抗体-抗原复合物 / 融合构建等）。覆盖靶点列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号）。按覆盖靶点数降序、分辨率升序排列。</p>
     <div class="tbl-wrap"><table class="tbl-data">
       ${SHARED_PDB_COLGROUP}
@@ -562,17 +598,29 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       }).join('')}
     </details>` : ''
 
+  // v2.8 报告格式优化：靶点卡 → mini 仪表盘（补结构/覆盖率/同源/文献关键数字，
+  // 多靶点批次可不经对比矩阵直接在刊头扫读各靶点研究现状）
   const targetMeta = targets.map(t => {
     const o = t.oligomer
+    const ms = t.methodStats
     return `
     <div class="tgt-card">
       <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
       <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
+      <div class="tgt-stats">
+        <span>PDB <b>${t.directPdbs.length}</b></span>
+        <span>${ms.bestResolution != null ? `最佳 <b>${ms.bestResolution.toFixed(2)}Å</b>` : '无直接结构'}</span>
+        <span>覆盖 <b>${t.coveragePercent}%</b></span>
+        <span>同源 <b>${t.blastHits.length}</b></span>
+        <span>文献 <b>${t.literature.length}</b></span>
+      </div>
     </div>`
   }).join('')
 
+  // v2.8 报告格式优化：对比矩阵扩列（同源结构/文献/寡聚态）+ 总体分附评级 —
+  // 多靶点批次的一张表即可横向比较全部关键可行性指标
   const matrixRows = targets.map(t => `
     <tr>
       <td class="td-id">${t.uniprotId ? `<a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : '—'}</td>
@@ -580,12 +628,16 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <td class="num">${t.directPdbs.length}</td>
       <td class="num">${t.methodStats.bestResolution != null ? t.methodStats.bestResolution.toFixed(2) + 'Å' : '—'}</td>
       <td class="num">${t.coveragePercent}%</td>
+      <td>${t.oligomer ? `<span class="oligo-badge" style="background:${oligoBadgeOf(t.oligomer.category)}">${esc(oligoCatOf(t.oligomer.category))}</span>` : '<span class="mtx-dash">—</span>'}</td>
+      <td class="num">${t.blastHits.length}</td>
+      <td class="num">${t.literature.length}</td>
       <td class="num">${t.scores.xray.score}</td>
       <td class="num">${t.scores.cryoem.score}</td>
       <td class="num">${t.scores.nmr.score}</td>
-      <td class="num"><b>${t.scores.overall.score}</b></td>
+      <td class="num"><b>${t.scores.overall.score}</b><span class="mtx-rating">${esc(t.scores.overall.rating)}</span></td>
     </tr>`).join('')
 
+  // v2.8 报告格式优化：每靶点折叠块带锚点（目录「靶点速览」直达）+ 大批次智能折叠
   const pdbBlocks = targets.map(t => {
     if (!t.directPdbs.length) return ''
     // v1.24：全部展示（移除前 12 截断）
@@ -598,7 +650,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <td class="num">${esc(p.releaseDate.slice(0, 4))}</td>
       </tr>`).join('')
     return `
-    <details class="pdb-fold" open>
+    <details class="pdb-fold" id="${anchorOf(t)}"${foldOpen ? ' open' : ''}>
       <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.directPdbs.length} 个结构（全部）</summary>
       <div class="tbl-wrap"><table>
         <colgroup><col style="width:74px"><col style="width:70px"><col style="width:64px"><col><col style="width:56px"></colgroup>
@@ -622,7 +674,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <td class="t-title">${esc((h.method || '').slice(0, 16))}</td>
       </tr>`).join('')
     return `
-    <details class="pdb-fold">
+    <details class="pdb-fold" id="blast-${anchorOf(t)}">
       <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.blastHits.length} 个同源结构（全部）${shared ? ' · <span style="font-weight:400;font-size:12px">共享自家族代表，未单独检索</span>' : ''}</summary>
       <div class="tbl-wrap"><table>
         <colgroup><col style="width:74px"><col><col style="width:64px"><col style="width:70px"><col style="width:80px"></colgroup>
@@ -633,7 +685,6 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   }).filter(Boolean).join('')
 
   // v1.11 各靶点文献（PMID 可点击；结构解析文献标记；归属靶点清晰可辨）
-  const litTotal = targets.reduce((s, t) => s + t.literature.length, 0)
   const litBlocks = targets.map(t => {
     if (!t.literature.length) return ''
     // v1.24：全部展示（移除前 10 截断）
@@ -645,7 +696,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         <td class="num">${esc(l.year || '—')}</td>
       </tr>`).join('')
     return `
-    <details class="pdb-fold">
+    <details class="pdb-fold" id="lit-${anchorOf(t)}">
       <summary>${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''} — ${t.literature.length} 篇（全部）</summary>
       <div class="tbl-wrap"><table>
         <colgroup><col style="width:76px"><col><col style="width:150px"><col style="width:52px"></colgroup>
@@ -657,7 +708,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
 
   const figHtml = embedded.length ? `
   <section class="sec" id="assets">
-    <h2>六、客户实验数据<span class="sec-en">Experimental Data</span></h2>
+    <h2>${secHead(noAssets, `客户实验数据（${embedded.length} 张）`, 'Experimental Data')}</h2>
     ${embedded.map(({ meta, dataUri }) => `
     <figure class="fig">
       <img src="${dataUri}" alt="${esc(meta.caption)}" loading="lazy">
@@ -739,8 +790,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   }
   const ligandsHtml = batchLigands.length ? `
   <section class="sec" id="ligands">
-    <h2>配体研究数据<span class="sec-en">Ligands · ${batchLigands.filter(l => l.ok).length}/${batchLigands.length}</span></h2>
-    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / PubChem / AI 兜底）映射为 RCSB 化学组分 ID；结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为批次内靶点直接结构的条目；计算性质与 2D 化学结构式来自 PubChem（SVG 矢量优先，点击可放大）。</p>
+    <h2>${secHead(noLigands, `配体研究数据（${batchLigands.filter(l => l.ok).length}/${batchLigands.length}）`, 'Ligands')}</h2>
+    <p class="note">非标准配体输入经多策略归一（直接 ID / 别名表 / PDBe Solr 检索 / PubChem / AI 兜底）映射为 RCSB 化学组分 ID；结构列表来自 PDBe 字段化检索（含该配体的 PDB 条目，按分辨率排序），绿底标记同时为批次内靶点直接结构的条目；计算性质与 2D 化学结构式来自 PubChem（SVG 矢量优先，点击可放大）。抗体/蛋白类试剂（scFv、Fab、抗体克隆等）不属于小分子配体，已在识别阶段排除。</p>
     <div class="lig-grid">${batchLigands.map(ligandCard).join('')}
     </div>
   </section>` : ''
@@ -748,7 +799,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const ins = input.insights
   const insightsHtml = ins && (ins.goals?.length || ins.scientificQuestions?.length || ins.experimentalSummary || ins.sequenceNotes || ins.homologs || ins.keyConcerns?.length) ? `
   <section class="sec" id="insights">
-    <h2>客户评估表要点<span class="sec-en">Form Insights</span></h2>
+    <h2>${secHead(noInsights, '客户评估表要点', 'Form Insights')}</h2>
     <p class="note">由 AI 从上传的评估表中结构化提取的关键要点 — 供比对 LLM 分析的复述是否忠于原始输入。</p>
     ${ins.goals?.length ? `<h3>客户目标</h3><ul>${ins.goals.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
     ${ins.scientificQuestions?.length ? `<h3>待解决科学问题</h3><ol>${ins.scientificQuestions.map(q => `<li>${esc(q)}</li>`).join('')}</ol>` : ''}
@@ -823,7 +874,21 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   .toc { border:1px solid var(--line); border-radius:5px; padding:12px 20px; margin:20px 0; font-size:13px; }
   .toc b { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:1.5px; color:var(--sub); }
   .toc ol { margin:6px 0 0 20px; columns:2; column-gap:36px; } .toc a { color:var(--accent-2); text-decoration:none; }
-  .sec { margin:34px 0; } .sec h2 { font-size:19px; padding-bottom:8px; border-bottom:1px solid var(--ink); margin-bottom:14px; display:flex; align-items:baseline; }
+  /* v2.8：靶点速览导航（目录内 — 每靶点直达其结构折叠块锚点） */
+  .toc-targets { margin-top:10px; padding-top:10px; border-top:1px dashed var(--line); display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; }
+  .toc-targets b { font-size:11px; }
+  .toc-targets a { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--accent-2); background:#f0fdf7; border:1px solid #c7ece0; border-radius:3px; padding:1px 9px; text-decoration:none; white-space:nowrap; }
+  .toc-targets a:hover { background:#d9f5e8; }
+  /* v2.8：章节编号方块（与单靶点报告同构 — 连续编号替代原断续的「一/二/三」） */
+  .sec h2 .sec-no { flex:none; width:30px; height:30px; background:var(--ink); color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:14px; font-weight:700; border-radius:5px; font-family:ui-monospace,Menlo,monospace; }
+  .sec h2 .sec-title { min-width:0; }
+  /* v2.8：靶点卡 mini 仪表盘（结构/覆盖率/同源/文献关键数字） */
+  .tgt-stats { display:flex; flex-wrap:wrap; gap:4px 12px; margin-top:6px; padding-top:6px; border-top:1px dashed var(--line); font-size:10.5px; color:var(--sub); font-variant-numeric:tabular-nums; }
+  .tgt-stats b { color:var(--ink); font-weight:600; }
+  /* v2.8：对比矩阵扩列 — 评级副文本与寡聚态列占位 */
+  .mtx-rating { display:block; font-size:10px; color:var(--sub); font-weight:400; line-height:1.4; }
+  .mtx-dash { color:var(--faint); }
+  .sec { margin:34px 0; } .sec h2 { font-size:19px; padding-bottom:8px; border-bottom:1px solid var(--ink); margin-bottom:14px; display:flex; align-items:center; gap:10px; }
   .sec-en { font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--faint); font-weight:400; letter-spacing:1.5px; margin-left:auto; }
   .sec h3 { font-size:15.5px; margin:18px 0 8px; color:#064e3b; }
   .sec h4 { font-size:13.5px; margin:14px 0 6px; }
@@ -915,24 +980,28 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
   <nav class="toc">
     <b>Contents · 目录</b>
     <ol>
-      <li><a href="#llm">合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
-      ${insightsHtml ? '<li><a href="#insights">客户评估表要点</a></li>' : ''}
-      ${ligandsHtml ? '<li><a href="#ligands">配体研究数据</a></li>' : ''}
-      <li><a href="#matrix">跨靶点对比矩阵</a></li>
-      ${matrixHtml ? '<li><a href="#homolog">' + (isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性') + '</a></li>' : ''}
-      ${attributionHtml ? '<li><a href="#attribution">评估表序列归属</a></li>' : ''}
-      ${sharedStructuresHtml ? '<li><a href="#shared-pdbs">共有结构</a></li>' : ''}
-      <li><a href="#pdbs">各靶点 PDB 结构</a></li>
-      ${blastBlocks ? '<li><a href="#blast-hits">同源结构（BLAST/序列检索）</a></li>' : ''}
-      ${litBlocks ? '<li><a href="#literature">各靶点文献</a></li>' : ''}
-      ${embedded.length ? '<li><a href="#assets">客户实验数据</a></li>' : ''}
+      <li><a href="#llm">${noLlm} · 合并评估分析（摘要 / 关系分析 / 各靶点综述 / 整合策略）</a></li>
+      ${insightsHtml ? `<li><a href="#insights">${noInsights} · 客户评估表要点</a></li>` : ''}
+      ${ligandsHtml ? `<li><a href="#ligands">${noLigands} · 配体研究数据</a></li>` : ''}
+      <li><a href="#matrix">${noMatrix} · 跨靶点对比矩阵</a></li>
+      ${matrixHtml ? `<li><a href="#homolog">${noIdentity} · ${isHomologousBatch ? '家族序列一致性矩阵' : '序列一致性'}</a></li>` : ''}
+      ${attributionHtml ? `<li><a href="#attribution">${noAttribution} · 评估表序列归属</a></li>` : ''}
+      ${sharedStructuresHtml ? `<li><a href="#shared-pdbs">${noShared} · 共有结构</a></li>` : ''}
+      <li><a href="#pdbs">${noPdbs} · 各靶点 PDB 结构</a></li>
+      ${blastBlocks ? `<li><a href="#blast-hits">${noBlast} · 同源结构（BLAST/序列检索）</a></li>` : ''}
+      ${litBlocks ? `<li><a href="#literature">${noLit} · 各靶点文献</a></li>` : ''}
+      ${embedded.length ? `<li><a href="#assets">${noAssets} · 客户实验数据</a></li>` : ''}
     </ol>
+    ${pdbBlocks ? `<div class="toc-targets">
+      <b>靶点速览 · ${targets.filter(t => t.directPdbs.length).length}/${targets.length}</b>
+      ${targets.filter(t => t.directPdbs.length).map(t => `<a href="#${anchorOf(t)}" title="${esc(t.proteinName)} — PDB ${t.directPdbs.length} · 总体 ${t.scores.overall.score}/10">${esc(t.uniprotId ?? t.label)}</a>`).join('')}
+    </div>` : ''}
   </nav>
 
   ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点。</div>`}
 
   <section class="sec" id="llm">
-    <h2>一、合并评估分析<span class="sec-en">Merged Analysis</span></h2>
+    <h2>${secHead(noLlm, '合并评估分析', 'Merged Analysis')}</h2>
     ${renderMarkdown(llmMarkdown || '（LLM 分析不可用 — 请参考下方数据区块与评估表要点）', 1)}
   </section>
 
@@ -940,12 +1009,12 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
   ${ligandsHtml}
 
   <section class="sec" id="matrix">
-    <h2>二、跨靶点对比矩阵<span class="sec-en">Comparison Matrix</span></h2>
+    <h2>${secHead(noMatrix, `跨靶点对比矩阵（${targets.length} 个靶点）`, 'Comparison Matrix')}</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>UniProt</th><th>靶点</th><th>PDB</th><th>最佳分辨率</th><th>覆盖率</th><th>X-ray</th><th>Cryo-EM</th><th>NMR</th><th>总体</th></tr></thead>
+      <thead><tr><th>UniProt</th><th>靶点</th><th class="num">PDB</th><th class="num">最佳分辨率</th><th class="num">覆盖率</th><th>寡聚态</th><th class="num">同源结构</th><th class="num">文献</th><th class="num">X-ray</th><th class="num">Cryo-EM</th><th class="num">NMR</th><th class="num">总体</th></tr></thead>
       <tbody>${matrixRows}</tbody>
     </table></div>
-    ${oligoTargets.length ? `<p class="note">各靶点评分已包含蛋白聚集形式（寡聚态）调整（判定徽标见刊头靶点卡片，调整明细与证据链见下方折叠，分析已融入「一、合并评估分析」各靶点小节）。</p>${oligoFoldHtml}` : ''}
+    ${oligoTargets.length ? `<p class="note">各靶点评分已包含蛋白聚集形式（寡聚态）调整（判定徽标见刊头靶点卡片与矩阵寡聚态列，调整明细与证据链见下方折叠，分析已融入「${noLlm} · 合并评估分析」各靶点小节）。</p>${oligoFoldHtml}` : ''}
   </section>
 
   ${matrixHtml}
@@ -953,20 +1022,20 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
   ${sharedStructuresHtml}
 
   <section class="sec" id="pdbs">
-    <h2>三、各靶点 PDB 结构<span class="sec-en">Structures by Target</span></h2>
+    <h2>${secHead(noPdbs, `各靶点 PDB 结构（${targets.reduce((s, t) => s + t.directPdbs.length, 0)} 个）`, 'Structures by Target')}</h2>
     ${pdbBlocks || '<p>本批次靶点暂无直接关联 PDB 结构。</p>'}
   </section>
 
   ${blastBlocks ? `
   <section class="sec" id="blast-hits">
-    <h2>四、同源结构（BLAST / 序列检索）<span class="sec-en">Homologous Structures</span></h2>
+    <h2>${secHead(noBlast, '同源结构（BLAST / 序列检索）', 'Homologous Structures')}</h2>
     <p class="note">各靶点经 BLAST（NCBI pdbaa）或 RCSB 序列检索（NCBI 拥堵时兜底）获得的同源结构命中，已排除该靶点自身的直接结构。≥90% 序列一致性的家族成员共享家族代表的同一次检索结果（标注「共享自家族代表」）。</p>
     ${blastBlocks}
   </section>` : ''}
 
   ${litBlocks ? `
   <section class="sec" id="literature">
-    <h2>五、各靶点文献<span class="sec-en">Literature by Target</span></h2>
+    <h2>${secHead(noLit, '各靶点文献', `Literature by Target · ${litTotal}`)}</h2>
     <p class="note">各靶点分别检索的 PubMed 文献（含 PDB 结构主引文，标记「结构解析文献」）— 按靶点分组，每条文献的归属 UniProt 见分组标题。同一文献可能同时关联多个靶点。</p>
     ${litBlocks}
   </section>` : ''}
@@ -974,7 +1043,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
   ${figHtml}
 
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v1.25）<br>
+    Generated by TargetEval · 多靶点合并评估（v2.8 格式：全章节连续编号 · 靶点速览导航 · 扩展对比矩阵 · 大批次智能折叠）<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
   </footer>

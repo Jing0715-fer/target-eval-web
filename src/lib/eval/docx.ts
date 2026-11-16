@@ -40,7 +40,8 @@ export function extractUniprotIds(text: string): string[] {
   let m: RegExpExecArray | null
   while ((m = re.exec(text))) {
     found.add(m[0].toUpperCase())
-    if (found.size >= 10) break
+    // v2.8：10 → 30 — 取消靶点数置限后的防御性上限（正常评估表远低于此）
+    if (found.size >= 30) break
   }
   return [...found]
 }

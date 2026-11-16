@@ -72,10 +72,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '请求体不是合法 JSON' }, { status: 400 })
   }
 
-  const jobIds = (body.jobIds ?? []).filter(Boolean).slice(0, 6)
+  // v2.8：取消 6 作业截断 → 全量合并；防御性上限（与关系判断路由/前端一致）超限明确告知
+  const MAX_BATCH_JOBS = 30
+  const jobIds = (body.jobIds ?? []).filter(Boolean)
   const relation = body.relation
   if (jobIds.length < 2) {
     return NextResponse.json({ ok: false, error: '合并报告至少需要 2 个评估作业' }, { status: 400 })
+  }
+  if (jobIds.length > MAX_BATCH_JOBS) {
+    return NextResponse.json({ ok: false, error: `一次最多合并 ${MAX_BATCH_JOBS} 个评估作业` }, { status: 400 })
   }
   if (!isRelationJudgment(relation)) {
     return NextResponse.json({ ok: false, error: '缺少有效的关系判定结果（relation）' }, { status: 400 })

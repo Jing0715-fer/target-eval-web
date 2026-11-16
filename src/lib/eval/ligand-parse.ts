@@ -23,6 +23,32 @@ const ELEMENTS = new Set([
   'FR', 'RA', 'AC', 'TH', 'PA', 'U', 'NP', 'PU',
 ])
 
+/**
+ * 抗体 / 蛋白类试剂识别（v2.8 — 客户反馈「027 scFv」被误判为配体）。
+ * 评估表中常与配体同现的抗体克隆（如 "027 scFv"）、抗体片段（Fab/Fc/scFv/VHH/
+ * nanobody）、免疫球蛋白、重轻链描述 —— 属于生物大分子试剂，不是小分子配体，
+ * 在配体归一链中一律排除。
+ */
+const ANTIBODY_TOKEN_RE = /\b(?:scfv|fab|fabs|nanobod(?:y|ies)|vhh|vhl|cdr\d?|antibod(?:y|ies)|immunoglobulin\w*|ig[gmage]\d*|heavy[-\s]?chain|light[-\s]?chain)\b|\bfc\b/i
+const ANTIBODY_CJK_RE = /抗体|纳米抗体|重链|轻链|免疫球蛋白|可变区|恒定区/
+/** 抗体克隆编号形态：纯数字 2-4 位 / 编号+抗体词（"027"、"clone 12"、"027 scFv"） */
+const CLONE_NUM_RE = /^(?:clone\s*)?\d{2,4}(?:\s*[-#]?\s*(?:scfv|fab|vhh|nb|nanobody|antibody))?$/i
+
+/** 强信号：提名文本明确含抗体/蛋白试剂词汇（各环节通用 — 提取过滤 + 归一入口拦截） */
+export function isBiologicMention(name: string): boolean {
+  const v = name.trim()
+  if (!v) return false
+  // 拉丁 token 检测（\b 覆盖连字符/空格边界："anti-Fc" / "027-scFv" / "027 scFv"）
+  if (ANTIBODY_TOKEN_RE.test(v)) return true
+  if (ANTIBODY_CJK_RE.test(v)) return true
+  return false
+}
+
+/** 弱信号：裸克隆编号形态（仅用于评估表提名过滤 — 不用于拦截用户手动输入） */
+export function isLikelyCloneNumber(name: string): boolean {
+  return CLONE_NUM_RE.test(name.trim())
+}
+
 export interface LigandFileParsed {
   kind: 'sdf' | 'mol' | 'pdb' | 'smi' | 'unknown'
   /** SDF/MOL 首行名 或 PDB TITLE 或 .smi 名称部分（可空） */

@@ -12,6 +12,7 @@ import { PillBottle,
   Plus,
   Ruler,
   Settings2,
+  Info,
   Sparkles,
   Target,
   X,
@@ -32,7 +33,7 @@ import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
 import type { EvaluateOptions, EvaluateRequest, FormInsights, InputMode, UploadResponse } from './types'
 import { MAX_PDB_UNLIMITED } from './types'
 import type { StartResult } from './use-evaluation-flow'
-import { parseLigandFileText, type LigandFileParsed } from '@/lib/eval/ligand-parse'
+import { parseLigandFileText, isBiologicMention, isLikelyCloneNumber, type LigandFileParsed } from '@/lib/eval/ligand-parse'
 
 type TabMode = InputMode
 
@@ -43,8 +44,9 @@ const EXAMPLE_UNIPROTS = [
 
 const MIN_SEQUENCE_LENGTH = 10
 const MIN_COMPANION_LENGTH = 30
-/** docx 批量评估的 UniProt 靶点数上限（串行执行，防止排队过久） */
-const MAX_BATCH_UNIPROT = 5
+/** v2.8：docx 批量评估的 UniProt 靶点数不再设前端上限（后端防御性上限 30，超限返回明确错误）。
+ *  串行执行仍由每 IP 活跃数与日配额双重兜底，排队时长随靶点数线性增长属预期行为。 */
+const MAX_BATCH_UNIPROT = 30
 /** 配体输入条数上限（后端同样按 8 截断） */
 const MAX_LIGANDS = 8
 /** 配体文件格式（结构/序列文件 → 客户端解析身份线索） */
@@ -156,6 +158,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const uniprotValid = uniprotParsed.valid.length >= 1 && uniprotParsed.invalid.length === 0
   const uniprotMulti = uniprotParsed.valid.length > 1
   const uniprotOverLimit = uniprotParsed.valid.length > MAX_BATCH_UNIPROT
+  const uniprotOverHint = uniprotParsed.valid.length > 20
 
   // UniProt Tab 的可选伴随序列（合并评估）
   const [companionOpen, setCompanionOpen] = useState(false)
@@ -244,7 +247,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         setGoalAutoFilled(true)
       }
       // v2.6：评估表识别出的配体自动回填输入框芯片（用户可见/可删 — 此前仅静默随请求
-      // 提交，用户看不到“已识别”，反馈为“配体没有自动识别到输入框”）
+      // 提交，用户看不到“已识别”，反馈为“配体没有自动识别到输入框”）。
+      // v2.8：抗体/蛋白类试剂（"027 scFv" 抗体克隆等）不回填 — 非小分子配体。
       if (data.ligands?.length) {
         const normKey = (raw: string) => raw.toLowerCase().replace(/[\s-]/g, '')
         setLigandChips(prev => {
@@ -252,6 +256,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           const auto = data.ligands!
             .map(name => name.trim())
             .filter(Boolean)
+            .filter(name => !isBiologicMention(name) && !isLikelyCloneNumber(name))
             .filter(name => !have.has(normKey(name)))
             .map(name => ({ id: ligandSeqRef.current++, raw: name, source: 'eval-table' as const }))
           return auto.length ? [...prev, ...auto] : prev
@@ -278,7 +283,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     try {
       const res = await uploadEvaluateDocx(file, setUploadProgress)
       setUpload(res)
-      // 默认选中全部 UniProt（用户要求：表中的 UniProt 都要评估，不落下；上限 MAX_BATCH_UNIPROT 个）
+      // 默认选中全部 UniProt（用户要求：表中的 UniProt 都要评估，不落下；v2.8 不再截断）
       if (res.parsed.uniprotIds.length > 0) {
         setSelectedUniprots(res.parsed.uniprotIds.slice(0, MAX_BATCH_UNIPROT))
         setSelectedSequenceIndex(null)
@@ -325,7 +330,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         ? seqInfo.count >= MIN_SEQUENCE_LENGTH && !seqOverLimit
         : docxReady
 
-  /** 切换 UniProt 靶点选中态（多选，上限 MAX_BATCH_UNIPROT） */
+  /** 切换 UniProt 靶点选中态（多选；v2.8 上限提升至 30，实际不再构成日常约束） */
   const toggleUniprot = (id: string) => {
     setSelectedUniprots(prev =>
       prev.includes(id) ? prev.filter(x => x !== id) : prev.length < MAX_BATCH_UNIPROT ? [...prev, id] : prev,
@@ -381,10 +386,12 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     // v2.4 配体输入组装：手动芯片 + 评估表 AI 提取的配体（合并去重，≤8 条）。
     // 评估表配体直接随请求发送 — 不再依赖服务器从磁盘 insights.json 回读
     // （无状态部署磁盘读不到；本地部署也有「insights 未完成即提交」的竞态）。
+    // v2.8：抗体/蛋白类试剂不入列（服务端 resolveLigandInput 亦有两道防线）。
     const manualLigands = ligandChips.map(c => ({ raw: c.raw, source: c.source, fileName: c.fileName }))
     const tableLigands = (insights?.ligands ?? [])
       .map(name => name.trim())
       .filter(Boolean)
+      .filter(name => !isBiologicMention(name) && !isLikelyCloneNumber(name))
       .map(name => ({ raw: name, source: 'eval-table' as const }))
     const seenLig = new Set<string>()
     const ligands = [...manualLigands, ...tableLigands]
@@ -549,7 +556,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     aria-label="UniProt ID 输入"
                     value={uniprot}
                     onChange={(e) => setUniprot(e.target.value)}
-                    placeholder={'支持多个 UniProt ID，逗号 / 空格 / 换行分隔（最多 ' + MAX_BATCH_UNIPROT + ' 个），如 P00533、P04637'}
+                    placeholder={'支持多个 UniProt ID，逗号 / 空格 / 换行分隔，如 P00533、P04637'}
                     className={cn(inputBase, 'min-h-[92px] resize-y px-3.5 py-2.5 font-mono text-[13px] leading-[22px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[12px] placeholder:leading-[20px]')}
                     spellCheck={false}
                   />
@@ -562,7 +569,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   {uniprotOverLimit && (
                     <p className={cn(hintText, 'text-amber-600 dark:text-amber-400')}>
                       <CircleAlert className="size-3.5" />
-                      超过上限 {MAX_BATCH_UNIPROT} 个，将只评估前 {MAX_BATCH_UNIPROT} 个
+                      数量超过防御性上限 {MAX_BATCH_UNIPROT} 个，将只评估前 {MAX_BATCH_UNIPROT} 个
+                    </p>
+                  )}
+                  {!uniprotOverLimit && uniprotOverHint && (
+                    <p className={cn(hintText)}>
+                      <Info className="size-3.5" />
+                      已识别 {uniprotParsed.valid.length} 个靶点：串行评估特靶点约需几分钟，全部完成后自动分析关系并生成合并报告
                     </p>
                   )}
                   {uniprotValid && (
@@ -742,7 +755,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       aria-label="氨基酸序列输入"
                       value={sequenceText}
                       onChange={(e) => setSequenceText(e.target.value)}
-                      placeholder={'支持多条 FASTA 序列（每个 > 标题段一条，最多 ' + MAX_BATCH_UNIPROT + ' 条），如：\n>EGFR kinase domain\nMVPKPVA...\n>p53 DNA-binding domain\nSSSVPSQ...'}
+                      placeholder={'支持多条 FASTA 序列（每个 > 标题段一条），如：\n>EGFR kinase domain\nMVPKPVA...\n>p53 DNA-binding domain\nSSSVPSQ...'}
                       className={cn(inputBase, 'min-h-[168px] resize-y px-3.5 py-2.5 font-mono text-[12.5px] leading-[21px]')}
                       spellCheck={false}
                     />
@@ -755,7 +768,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   {seqOverLimit && (
                     <p className={cn(hintText, 'text-amber-600 dark:text-amber-400')}>
                       <CircleAlert className="size-3.5" />
-                      超过上限 {MAX_BATCH_UNIPROT} 条，将只评估前 {MAX_BATCH_UNIPROT} 条序列
+                      超过防御性上限 {MAX_BATCH_UNIPROT} 条，将只评估前 {MAX_BATCH_UNIPROT} 条序列
                     </p>
                   )}
                   {seqMulti ? (
@@ -790,7 +803,6 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     uploadError={uploadError}
                     selectionReady={docxReady}
                     selectedUniprots={selectedUniprots}
-                    maxBatchUniprot={MAX_BATCH_UNIPROT}
                     selectedSequenceIndex={selectedSequenceIndex}
                     insights={insights}
                     insightsLoading={insightsLoading}

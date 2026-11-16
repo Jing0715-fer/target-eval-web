@@ -41,6 +41,7 @@ import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
 import { filterPdbsByRange, filterBlastByRange } from './range-filter'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
+import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
 import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
 import { isValidUniprotId, MAX_PDB_UNLIMITED, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type SequenceComparison, type UniprotInfo } from './types'
 
@@ -756,16 +757,32 @@ class SegmentRunner {
     const candidates: LigandInput[] = [...(this.input.ligands ?? [])]
     // 评估表识别（v2.5 三通道）：字典扫描（保守长 key）+ 模式提名（「与 X 配体」等行文）
     // + LLM/规则提取结果（insights.ligands，若有）。有 uploadId 或内联 evalTable 全文均可。
+    // v2.8：抗体/蛋白类试剂（"027 scFv" 抗体克隆等）在进入归一链前先行剔除 —
+    // 既是解析准确度修复，也避免归一链浪费外部调用。
+    const biologicBlocked = new Set<string>()
+    const isBlockedMention = (raw: string): boolean => {
+      const v = raw.trim()
+      if (!v) return false
+      if (isBiologicMention(v) || isLikelyCloneNumber(v)) {
+        biologicBlocked.add(v)
+        return true
+      }
+      return false
+    }
     if (st.uploadFullText) {
       for (const m of extractLigandsFromText(st.uploadFullText)) {
         candidates.push({ raw: m.compId, source: 'eval-table' })
       }
       for (const name of extractLigandCandidatesFromText(st.uploadFullText)) {
-        candidates.push({ raw: name, source: 'eval-table' })
+        if (!isBlockedMention(name)) candidates.push({ raw: name, source: 'eval-table' })
       }
     }
     for (const name of st.insights?.ligands ?? []) {
-      if (name.trim()) candidates.push({ raw: name.trim().slice(0, 160), source: 'eval-table' })
+      if (!name.trim()) continue
+      if (!isBlockedMention(name)) candidates.push({ raw: name.trim().slice(0, 160), source: 'eval-table' })
+    }
+    if (biologicBlocked.size) {
+      this.log(`排除非小分子配体提名 ${biologicBlocked.size} 项（抗体/蛋白类试剂：${[...biologicBlocked].slice(0, 6).join('、')}）— 抗体序列按背景证据处理，不进入配体归一`, 'warn')
     }
     // 归一去重（同 raw 不重复解析；同批次多靶点由 LRU 缓存共享外部调用）
     const seen = new Map<string, LigandInput>()

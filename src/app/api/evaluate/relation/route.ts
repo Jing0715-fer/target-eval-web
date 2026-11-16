@@ -31,6 +31,9 @@ interface RelationBody {
   goalHints?: string[]
 }
 
+/** v2.8：关系判断的靶点数防御性上限（与前端 MAX_BATCH_UNIPROT 对齐；超出返回明确错误而非静默截断） */
+const MAX_RELATION_TARGETS = 30
+
 export async function POST(req: Request) {
   const owner = getOwner(req)
   let body: RelationBody
@@ -48,6 +51,10 @@ export async function POST(req: Request) {
   }
   if (uniprots.length < 2) {
     return NextResponse.json({ ok: false, error: '关系判断至少需要 2 个靶点' }, { status: 400 })
+  }
+  // v2.8：取消 6 靶点截断 → 全量参与判断；防御性上限超限时明确告知
+  if (uniprots.length > MAX_RELATION_TARGETS) {
+    return NextResponse.json({ ok: false, error: `一次最多对 ${MAX_RELATION_TARGETS} 个靶点做关系判断` }, { status: 400 })
   }
   if (uploadId && !(await uploadOwnedBy(uploadId, owner))) {
     return NextResponse.json({ ok: false, error: '无权使用该上传（仅上传者本人可用）' }, { status: 403 })
@@ -78,8 +85,8 @@ export async function POST(req: Request) {
     goalHints = Array.isArray(body.goalHints) ? body.goalHints.slice(0, 12).map(x => String(x).slice(0, 200)) : []
   }
 
-  // 各靶点拉取 UniProt 简介（并行 + 8s 超时容错 — 失败的靶点仅用 ID 判断）
-  const briefs: RelationTargetBrief[] = await Promise.all(uniprots.slice(0, 6).map(async (id) => {
+  // 各靶点拉取 UniProt 简介（并行 + 8s 超时容错 — 失败的靶点仅用 ID 判断；v2.8 全量不再截断）
+  const briefs: RelationTargetBrief[] = await Promise.all(uniprots.map(async (id) => {
     const brief: RelationTargetBrief = { label: id, uniprotId: id }
     try {
       const info = await Promise.race([
@@ -99,7 +106,7 @@ export async function POST(req: Request) {
   // v1.10 同源归并：全长序列两两比对（确定性证据）+ 评估表序列归属
   // fetchUniprotInfo 有 LRU 缓存，此处二次拉取命中缓存（拿到完整 sequence）
   const homologTargets: HomologTarget[] = []
-  for (const id of uniprots.slice(0, 6)) {
+  for (const id of uniprots) {
     try {
       const info = await fetchUniprotInfo(id)
       if (info?.sequence && info.sequence.length >= 40) {
