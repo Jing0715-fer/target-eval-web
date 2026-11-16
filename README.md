@@ -72,12 +72,19 @@
 - 关联批次 → 一份**合并报告**：执行摘要（家族级可行性结论）/ 靶点关系分析 / 各靶点综述（500-700 字/靶点）/ 跨靶点对比矩阵 / 整合实验方案 / 时间规划
 - 合并视图附**三个带 UniProt 归属的数据章节**：各靶点 PDB 结构、同源结构（BLAST/序列检索）、各靶点文献
 
-### ⚡ 异步任务架构（全程无网关超时）
+### 🧪 配体归一与结构式卡
 
-所有分钟级操作均为**后台任务 + 前端轮询**，单请求毫秒级返回，公网网关（~30s 超时）不再 502：
+- **「非标准输入 → RCSB 化学组分 ID」五策略解析链**：直接组分 ID 校验（ATP / STU / A1H2J…）→ 中英文别名表 → PDBe Solr 全文检索（名称词面验证，防共结晶噪声）→ PubChem 名称 + SMILES 结构反查（分子式硬校验）→ LLM 中文俗名兜底（候选一律经 chemcomp 分子式硬校验，绝不直接采信 — 防幻觉错配）
+- **报告配体卡**：2D 化学结构式（RCSB CCD 矢量 SVG，放大不失真；无组分 ID 回落 PubChem 600px PNG）· XLogP / TPSA / 氢供受体 / 可旋转键 / 重原子 / 精确质量等计算性质 · InChIKey / SMILES 标识符一键复制
+- **含该配体的 PDB 结构列表**（PDBe Solr 字段化检索）；2D 图与性质磁盘缓存（`db/cache/ligand2d/`），合并报告渲染前对旧作业自动回补缺失图
+
+### ⚡ 任务架构 — 异步作业 / 流式双模式（全程无网关超时）
+
+所有分钟级操作均为**后台任务 + 前端轮询**（常规部署）或 **NDJSON 流式 + 心跳 + 分段续跑**（无状态部署 — 前端探测分块上传会话跨请求不可见时自动切换并记忆），公网网关（~30s 超时）不再 502：
 
 ```
 评估作业        POST /api/evaluate           → 毫秒级返回 jobId，进度 2s 轮询
+无状态评估      POST /api/evaluate/sync      → NDJSON 流（心跳 + 14s 段 checkpoint 续跑）
 评估表上传      init → chunk×N → complete    → 分块 2MB，后台队列解析
 合并报告 v1.12  POST /api/evaluate/batch-report → 立即返回 running，LLM 三段式后台生成
 ```
@@ -93,6 +100,15 @@
   - 章节齐备：执行摘要（结论先行）/ 客户目标与可行性结论（分级+依据+风险）/ 生物学背景 / 结构研究全景（时间线/方法学分布/构象状态）/ 实验数据评估 / 构建设计 / 确定性数据区块（PDB 清单、BLAST 表、文献列表 — 模板直渲防幻觉）
   - PDB ↔ 文献关联：主引文置前标「结构解析文献」，文献下挂关联结构 chips，长列表折叠打印自动展开
 - **网页内联渲染**：LLM 报告全文落库持久化，结果页直接阅读（react-markdown），在线预览 / 下载 HTML 双入口
+
+### 🔍 报告阅读体验 — 3D 交互 · 灯箱放大 · A4 打印 · 响应式
+
+- **AlphaFold 预测结构 3D 交互视图**（v2.7.2）：报告内嵌 3Dmol + PDB 文本 — 离线单文件可交互（拖拽旋转 / 滚轮缩放 / 双指捏合 / pLDDT 四桶着色），「放大」一键全屏、退出归位；服务端零浏览器依赖。结构元数据 sidecar + PDB 磁盘缓存（7 天新鲜窗口零网络直读）— 部署节点断网时已评估靶点仍出完整区块（v2.7.4）
+- **图片点击放大 · 灯箱**（v2.7.5）：配体结构式 / 客户实验图 / AlphaFold 静态图 — 滚轮锚定光标缩放 · 双指捏合 · 拖拽平移 · 双击 2.5× 复位；应用内嵌预览自动「可视切片」贴屏定位（避让宿主吸顶栏 + 父页滚动锁，v2.7.7/2.7.8），独立打开为全屏；纯内联零依赖、打印自动隐藏
+- **A4 打印分页**（v2.7.6）：`@page` 边距 + 标题不孤行 / 卡片不腰斩 + 数据表表头跨页重复 + 控件打印隐藏 — 直接打印即归档版 PDF
+- **覆盖率区段可视化**（v2.7.6）：服务端 SVG 轨道图（已覆盖绿 / 未覆盖琥珀 + 悬停区间明细 + 残基刻度），零 JS 打印友好
+- **响应式版心**（v2.7.3）：宽屏分级放宽 920→1600px（≥1280 数据表免横向滚动、配体卡多列铺开），移动端防溢出 + 表格横滚渐变指示
+- **旧报告自动升级**：历史作业报告 serve 时注入上述能力（marker 幂等检测，已内嵌旧版本自动清理重挂 — 无需重新评估）
 
 ### 🔧 LLM 引擎可配置（多供应商）
 
@@ -129,7 +145,7 @@
 │  单靶点报告 / 关联批次合并报告（v1.12 异步生成）        │
 └──────────────────────┬──────────────────────────────┘
                        ▼
-        期刊风 HTML 报告（落盘+落库）· 网页内联渲染 · 下载
+        期刊风 HTML 报告（落盘+落库）· 网页内联渲染 · 下载 · 3D 视图 / 灯箱放大 / A4 打印
 ```
 
 ## 数据源
@@ -137,8 +153,10 @@
 | 数据源 | 用途 |
 |---|---|
 | UniProt REST | 蛋白元数据、序列、结构域 / 跨膜 / 信号肽 features |
-| RCSB PDB | 结构检索、entry 详情（方法/分辨率/配体/PMID）、GraphQL 批量配体、**mmseqs2 序列检索兜底** |
-| PDBe (EBI) | best_structures 覆盖率、覆盖区间 / 空白区分析 |
+| RCSB PDB | 结构检索、entry 详情（方法/分辨率/配体/PMID）、GraphQL 批量配体、**CCD 矢量结构式图**、**mmseqs2 序列检索兜底** |
+| PDBe (EBI) | best_structures 覆盖率、覆盖区间 / 空白区分析 · Solr 配体检索 |
+| AlphaFold DB | 预测结构 PDB + pLDDT 指标（报告内嵌 3D 视图数据源；磁盘缓存离线可用） |
+| PubChem | 配体 2D 结构式图（PNG 回落）+ XLogP/TPSA 等计算性质 + SMILES 结构反查 |
 | NCBI BLAST | blastp vs pdbaa 同源检索（提交前置 + 退避重试 + RCSB 兜底） |
 | PubMed eutils | 结构生物学文献（标题/期刊/DOI/摘要） |
 
@@ -166,6 +184,7 @@ Next.js 16（App Router）· TypeScript · Tailwind CSS 4 · shadcn/ui · Prisma
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/evaluate` | 创建评估作业（uniprot / sequence / docx；可附构建序列）→ 异步执行 |
+| POST | `/api/evaluate/sync` | 同步流式评估（NDJSON 进度 + 心跳 + 14s 段 checkpoint 续跑）— 无状态部署主路径，前端自动探测切换 |
 | POST | `/api/evaluate/upload/init` | 分块上传①：建会话 + 配额检查 → `{uploadId, chunkSize}` |
 | PUT | `/api/evaluate/upload/chunk?uploadId&offset` | 分块上传②：2MB 原始二进制块，逐块重试 |
 | POST | `/api/evaluate/upload/complete` | 分块上传③：触发**后台异步解析**（毫秒级返回） |
@@ -188,21 +207,25 @@ Next.js 16（App Router）· TypeScript · Tailwind CSS 4 · shadcn/ui · Prisma
 src/
   app/
     page.tsx                     # 单页应用（输入 → 进度 → 结果 三态视图）
-    api/                         # evaluate / jobs / assets / llm 路由
+    api/                         # evaluate（含 sync / upload / insights / relation / batch-report）· jobs · assets · llm 路由
   components/eval/               # 输入面板 / 进度面板 / 结果视图 / 合并视图 / LLM 配置等
   lib/eval/
-    pipeline.ts                  # 评估管线编排（多阶段）
-    uniprot.ts / rcsb.ts / pdbe.ts / blast.ts / pubmed.ts   # 数据源访问层
+    pipeline.ts                  # 评估管线编排（多阶段 + 分段 checkpoint）
+    uniprot.ts / rcsb.ts / rcsb-search.ts / pdbe.ts / blast.ts / pubmed.ts   # 数据源访问层（含 mmseqs2 兜底）
+    alphafold.ts                 # AlphaFold DB 预测结构（3D 视图数据源 + 磁盘缓存离线优先）
+    ligand.ts / ligand-parse.ts / pubchem.ts   # 配体五策略归一链 / 上传配体文件解析 / 2D 图与计算性质
     blast-family.ts              # ≥90% 家族组共享检索 + 命中传播
-    homology.ts                  # 种子-对角链同源检测（家族判定）
+    homology.ts / relation.ts    # 种子-对角链同源检测（家族判定） / 靶点关系判断编排
     seq-compare.ts               # 轻量序列比对（同靶点 + 构建边界）
     docx.ts / docx-llm.ts / image-process.ts   # 评估表解析 / LLM 要点提取 / 图片管线
     score.ts                     # 三方法可行性评分
     llm-provider.ts / llm.ts / report.ts / report-merged.ts / report-html.ts
-    job-manager.ts / gatekeeper.ts / request-guard.ts / upload-owner.ts
-                                 # 作业队列 / 并发配额 / IP 隔离 / 上传归属
+                                 # LLM 多供应商适配 / 编排 / 单靶点 / 合并 / HTML 模板（含响应式·灯箱·打印·旧报告注入）
+    cache.ts                     # 外部 API LRU + 磁盘缓存
+    job-manager.ts / gatekeeper.ts / request-guard.ts / upload-owner.ts / upload-session.ts
+                                 # 作业队列 / 并发配额 / IP 隔离 / 上传归属与分块会话
 prisma/schema.prisma             # EvaluationJob + BatchReport + ReportAsset + LlmConfig
-scripts/                         # BLAST 队列诊断 / 同源算法回归等运维脚本
+scripts/                         # E2E（报告 UX / 灯箱 / 响应式 / 部署全链路）· fixture 渲染 · BLAST 队列诊断等运维脚本
 ```
 
 ## 公网部署要点
