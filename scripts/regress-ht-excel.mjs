@@ -96,6 +96,21 @@ const postExcel = async (buf, fileName, extra = {}) => {
     body: fd,
     signal: AbortSignal.timeout(90_000),
   })
+  // v2.26：成功路径为 NDJSON 流（心跳 + 终态 done 行）；校验类 4xx 仍为普通 JSON。
+  // 读全流取 done 行（回归环境无网关切断，读流即等价于终态）
+  const ct = res.headers.get('content-type') || ''
+  if (ct.includes('ndjson')) {
+    const text = await res.text()
+    let done = null
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const ev = JSON.parse(line)
+        if (ev.type === 'done') done = ev
+      } catch { /* 半行/心跳 pad 噪音行丢弃 */ }
+    }
+    return { status: res.status, data: done ?? {}, ndjson: true }
+  }
   return { status: res.status, data: await res.json().catch(() => ({})) }
 }
 
@@ -274,6 +289,51 @@ const REAL_FILE = new URL('../upload/第三批自研靶点_靶点清单.xlsx', i
   ok('D4 LLM 大表通道：102 行真表（内置引擎或规则回退）识别 ≥ 80 组',
     r.status === 200 && r.data.ok === true && groups.length >= 80 && Array.isArray(seqGroups),
     `source=${r.data.source} groups=${groups.length} seqGroups=${seqGroups.length}`)
+}
+
+// ─── E. v2.26 流式协议（NDJSON 心跳保活 — 网关 ~30s 空闲切断 / HTTP 502 对策）──
+console.log('── E. 流式协议（NDJSON）──')
+{
+  const rows = [['UniProt ID'], ['P04637'], ['P00533']]
+  const r = await postExcel(buildXlsx(rows), 'stream-quick.xlsx', { quick: '1' })
+  ok('E1 quick 模式流式返回：content-type=ndjson + done 行携带完整提取结构',
+    r.ndjson === true && r.status === 200 && r.data.type === 'done' && r.data.ok === true &&
+      sameGroups(r.data.groups, [['P04637'], ['P00533']]) && r.data.meta?.rows === 3,
+    JSON.stringify(r.data).slice(0, 200))
+}
+{
+  // LLM 模式（内置引擎真跑）：读原文本统计心跳 — 12s 预算内至少有首拍 ping（1.2s）
+  // 与 3s 间隔心跳；终态 done 行 ok 且 source 可解析。LLM 若超预算回退规则也出 done。
+  const buf = fs.readFileSync(REAL_FILE)
+  const fd = new FormData()
+  fd.append('file', new File([buf], '第三批自研靶点_靶点清单.xlsx', { type: 'application/octet-stream' }))
+  const res = await fetch(`${base}/api/evaluate/ht-extract`, { method: 'POST', body: fd, signal: AbortSignal.timeout(90_000) })
+  const ct = res.headers.get('content-type') || ''
+  const text = await res.text()
+  const lines = text.split('\n').filter(l => l.trim())
+  let pings = 0
+  let done = null
+  for (const line of lines) {
+    try {
+      const ev = JSON.parse(line)
+      if (ev.type === 'ping') pings++
+      if (ev.type === 'done') done = ev
+    } catch { /* pad 噪音 */ }
+  }
+  ok('E2 LLM 模式流式：ndjson + ping 心跳（≥1）+ done 终态（ok · groups · meta）',
+    ct.includes('ndjson') && res.status === 200 && pings >= 1 && done?.ok === true &&
+      Array.isArray(done.groups) && done.groups.length >= 80 && done.meta?.rows >= 100,
+    `ct=${ct} pings=${pings} done.ok=${done?.ok} groups=${done?.groups?.length ?? '-'} meta=${JSON.stringify(done?.meta ?? {}).slice(0, 120)}`)
+}
+{
+  // 校验类错误（流建立前）：仍为普通 JSON + 正确状态码（前端先查 res.ok 分流）
+  const fd = new FormData()
+  const res = await fetch(`${base}/api/evaluate/ht-extract`, { method: 'POST', body: fd })
+  const data = await res.json().catch(() => ({}))
+  const ct = res.headers.get('content-type') || ''
+  ok('E3 缺 file 字段：流建立前的校验错误仍走 JSON 400（非流式）',
+    res.status === 400 && !ct.includes('ndjson') && /缺少 Excel 文件/.test(data.error ?? ''),
+    `ct=${ct} body=${JSON.stringify(data).slice(0, 120)}`)
 }
 
 // ─── 收尾 ────────────────────────────────────────────────────────────────────

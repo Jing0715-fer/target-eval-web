@@ -37,6 +37,7 @@ import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, t
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
+import { augmentTargetsForSharedPdbCoverage } from './rcsb'
 import { synthesizeScoreRationale } from './score'
 import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
 import { loadCachedEsmfoldModel } from './esmfold'
@@ -245,6 +246,83 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
 
 // ─── LLM 三段式生成 ───────────────────────────────────────────────────────────
 
+// ─── v2.26 GPCR 受体主导复合物识别（确定性规则 — 基因名/蛋白名，不经 LLM）──────────
+// GPCR 类项目以受体为主：下游 G 蛋白是信号转导组分，非独立结构解析对象。识别
+// 「恰 1 个非 G 蛋白靶点 + ≥1 个 G 蛋白组分」的复合物批次 → 合并报告首页切换为
+// 受体完整单独评估页（用户需求：主页只显示受体的评估页面），G 蛋白降级为伴侣
+// （chips 卡片进单独页），并新增「受体 × 该 G 蛋白类型复合物结构存在性」标注与分析。
+
+/** 人源异三聚体 G 蛋白组分基因（Gα 全家族 + Gβ1-5 + Gγ1-12） */
+const G_PROTEIN_GENE_RE = /^(GNAS|GNAL|GNAI[1-3]?|GNAO|GNAT[1-3]?|GNAQ|GNA11|GNA12|GNA13|GNAZ|GNA15|GNB[1-5]|GNG[1-9]|GNG1[0-2])$/i
+
+/** 该靶点是否为 G 蛋白异三聚体组分（基因名精确匹配或蛋白名特征词） */
+export function isGProteinComponent(t: { geneNames?: string[]; proteinName?: string }): boolean {
+  const genes = (t.geneNames ?? []).map(g => g.trim()).filter(Boolean)
+  if (genes.some(g => G_PROTEIN_GENE_RE.test(g))) return true
+  const name = (t.proteinName ?? '').toLowerCase()
+  return name.includes('guanine nucleotide-binding protein')
+    || (/\bg protein\b/.test(name) && /subunit|alpha|beta|gamma/.test(name))
+}
+
+/** G 蛋白基因 → 展示名（GNAI1 → Gαi1；GNB1 → Gβ1；GNG2 → Gγ2） */
+function gGeneDisplay(gene: string): string {
+  const g = gene.trim().toUpperCase()
+  if (g.startsWith('GNA')) return `Gα${g.slice(3).replace(/^/, '').toLowerCase()}`
+  if (g.startsWith('GNB')) return `Gβ${g.slice(3)}`
+  if (g.startsWith('GNG')) return `Gγ${g.slice(3)}`
+  return g
+}
+
+/** G 蛋白组分集合 → 偶联类型标签（按 Gα 家族归类；无 Gα 时标注 Gβ/Gγ 亚基） */
+function gCouplingLabel(gproteins: Array<{ geneNames?: string[] }>): string {
+  const genes = gproteins.flatMap(t => (t.geneNames ?? []).map(g => g.trim().toUpperCase()).filter(g => G_PROTEIN_GENE_RE.test(g)))
+  if (!genes.length) return 'G 蛋白伴侣'
+  const types = new Set<string>()
+  const parts: string[] = []
+  for (const g of genes) {
+    if (/^GNAS$|^GNAL$/.test(g)) types.add('Gs')
+    else if (/^GNAI[1-3]?$|^GNAO$|^GNAZ$|^GNAT[1-3]?$/.test(g)) types.add('Gi/o')
+    else if (/^GNAQ$|^GNA11$/.test(g)) types.add('Gq/11')
+    else if (/^GNA12$|^GNA13$/.test(g)) types.add('G12/13')
+    parts.push(gGeneDisplay(g))
+  }
+  const typeStr = types.size ? [...types].join('/') : 'Gβγ'
+  return `${typeStr} 型（${parts.slice(0, 4).join(' · ')}${parts.length > 4 ? ' …' : ''}）`
+}
+
+export interface ReceptorGproteinBatch {
+  /** 受体（本报告的主要评估对象 — GPCR 类项目的主体） */
+  receptor: MergedTargetData
+  /** G 蛋白伴侣（信号转导组分 — 复合物组装证据，非独立结构解析对象） */
+  gproteins: MergedTargetData[]
+  /** 偶联类型标签（如「Gi 型（Gαi1 · Gβ1）」） */
+  couplingLabel: string
+}
+
+/** 识别「受体主导型复合物」批次：恰 1 个非 G 蛋白靶点 + ≥1 个 G 蛋白组分。
+ *  不硬判 GPCR 家族（避免误判）— 结构性判定对受体–信号转导伴侣组合同样适用；
+ *  G 蛋白组分本身判定是确定性的（GNA、GNB、GNG 前缀基因名精确匹配）。 */
+export function detectReceptorGproteinBatch(targets: MergedTargetData[]): ReceptorGproteinBatch | null {
+  if (targets.length < 2) return null
+  const gproteins = targets.filter(t => isGProteinComponent(t))
+  const others = targets.filter(t => !isGProteinComponent(t))
+  if (gproteins.length < 1 || others.length !== 1) return null
+  return { receptor: others[0], gproteins, couplingLabel: gCouplingLabel(gproteins) }
+}
+
+/** 受体 × G 蛋白复合物结构（共有结构中同时覆盖受体与任一 G 蛋白组分的条目） */
+export function receptorGproteinStructures(
+  shared: SharedStructure[],
+  batch: ReceptorGproteinBatch,
+): SharedStructure[] {
+  const gAccs = new Set(batch.gproteins.map(g => g.uniprotId).filter(Boolean))
+  const rAcc = batch.receptor.uniprotId
+  if (!rAcc) return []
+  return shared.filter(s =>
+    s.coverage.some(c => c.uniprotId === rAcc) && s.coverage.some(c => gAccs.has(c.uniprotId)),
+  )
+}
+
 const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目负责人视角），为客户撰写多靶点合并评估报告。写作要求：
 - 全文使用简体中文（专业术语可保留英文），正式书面语，不使用表情符号
 - 结论先行：每章开头直接给结论，再展开论据
@@ -449,6 +527,18 @@ function buildMergedDigest(input: MergedReportInput): string {
       return `- ${s.pdbId} [${s.method}${s.resolution != null ? ` ${s.resolution.toFixed(2)}Å` : ''}] 覆盖 ${s.targetCount} 个靶点：${cov} — ${s.title.slice(0, 80)}`
     }).join('\n'))
   }
+  // v2.26：GPCR 受体主导复合物批次 — 撰写视角要求（以受体为主对象，G 蛋白为伴侣）
+  const gpcrBatch = detectReceptorGproteinBatch(targets)
+  if (gpcrBatch) {
+    const rxCx = receptorGproteinStructures(sharedStructures, gpcrBatch)
+    digestLines.push('')
+    digestLines.push(`【批次形态：受体主导复合物（GPCR 类 — 以受体为主对象撰写）】`)
+    digestLines.push(`受体（本报告主要对象）：${gpcrBatch.receptor.label}${gpcrBatch.receptor.proteinName && gpcrBatch.receptor.proteinName !== gpcrBatch.receptor.label ? `（${gpcrBatch.receptor.proteinName}）` : ''}；G 蛋白伴侣（信号转导组分，非独立结构解析对象）：${gpcrBatch.couplingLabel}`)
+    digestLines.push(rxCx.length
+      ? `受体 × G 蛋白复合物结构 ${rxCx.length} 个（同一 PDB 同时覆盖受体与 G 蛋白组分 — 共组装直接先例）：${rxCx.slice(0, 12).map(s => `${s.pdbId} [${s.method}${s.resolution != null ? ` ${s.resolution.toFixed(2)}Å` : ''}]`).join('、')}`
+      : '受体 × G 蛋白复合物结构：无先例（受体与该 G 蛋白类型的复合物组装需从共表达/体外组装验证起步）')
+    digestLines.push('撰写要求：以受体为主要评估对象（受体小节详细展开）；G 蛋白定位为复合物组装的伴侣/证据（在关系分析与整合实验方案中论述「复合物结构先例存在与否」及其对组装路线的指导意义），不作为独立结构解析项目展开。')
+  }
   return digestLines.join('\n')
 }
 
@@ -504,7 +594,7 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
     return { key: name, markdown: r.ok ? r.text : '', llmOk: r.ok, error: r.error }
   }
 
-  const partA = await callPart('A', `撰写合并报告的标题与首两章。首行输出 # 开头的描述性报告标题（一行，≤30 字，不要副标题，不要包含"报告"二字、日期、编号），高度概括本批次靶点与关系类型，例如「EGFR 与 p53 抗体-抗原复合物合并评估」「MAPK 家族三成员合并结构可行性评估」「血红蛋白 α/β 异源二聚体复合物评估」。然后顺序输出以下两章（以 ## 开头，不要输出其他章节）：
+  const partA = await callPart('A', `撰写合并报告的标题与首两章。首行输出 # 开头的描述性报告标题（一行，≤30 字，不要副标题，不要包含"报告"二字、日期、编号），高度概括本批次靶点与关系类型${detectReceptorGproteinBatch(input.targets) ? '（受体主导复合物批次 — 标题以受体为主体命名，如「CCR8 与 Gi 异三聚体复合物结构解析评估」，G 蛋白组分定位为伴侣而非并列主体）' : ''}，例如「EGFR 与 p53 抗体-抗原复合物合并评估」「MAPK 家族三成员合并结构可行性评估」「血红蛋白 α/β 异源二聚体复合物评估」。然后顺序输出以下两章（以 ## 开头，不要输出其他章节）：
 
 ## 执行摘要
 - 3-4 段：第一段给出批次总体结论（这些靶点作为整体项目的结构解析可行性、推荐技术路线${relation.relationType === 'homologous' ? '；同源家族批次需说明家族级结论（任一成员的结构证据对整个家族的指导意义）' : ''}）；第二段逐个靶点一句话概括其结构研究现状（引用具体数字）；第三段概括客户目标的达成路径与整体风险；第四段一句话给出下一步建议
@@ -643,7 +733,8 @@ export interface MergedHtmlInput {
   sequenceAttribution?: SequenceAttribution[]
   /** v1.15：评估表 AI 解析要点（LLM 失败时作为兜底证据展示） */
   insights?: FormInsights | null
-  /** v1.22：共有结构（同一 PDB 覆盖多个输入 UniProt）；未传时内部从 targets 计算 */
+  /** v1.22：共有结构（同一 PDB 覆盖多个输入 UniProt）；v2.26 起渲染层一律从补齐后
+   *  的 targets 重算（旧落库值基于 500 条截断的交集 — 不可信），仅保留字段兼容旧调用方 */
   sharedStructures?: SharedStructure[]
 }
 
@@ -669,7 +760,12 @@ async function embedImages(images: ParsedImage[], assetDir: string): Promise<Arr
 }
 
 export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<string> {
-  const { targets, relation } = input
+  const relation = input.relation
+  // ── v2.26 ①：共有结构覆盖补齐（全量 ID 交集在线执行 — 新旧作业通吃；与生成路径
+  //    的先前补齐经 ID 缓存幂等重入，零网络直达 added=0 分支；任何异常静默退回原数据）
+  const augmented = await augmentTargetsForSharedPdbCoverage(input.targets)
+  const targets = augmented.targets
+  const sharedAdded = augmented.added
   const relName = describeRelationType(relation.relationType)
   // v1.14：LLM 生成的描述性标题（fallback 通用标题）
   const reportTitle = input.title?.trim() || '多靶点合并评估报告'
@@ -700,7 +796,12 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const isHomologousBatch = relation.relationType === 'homologous'
   const hasIdentityMatrix = (isHomologousBatch || relation.homologPairs?.some(p => p.identity > 0)) && targets.length >= 2
   const hasAttribution = (input.sequenceAttribution?.length ?? 0) > 0
-  const sharedStructures = input.sharedStructures ?? computeSharedStructures(targets)
+  // v2.26 ②：共有结构一律从补齐后的 targets 重算 — 旧落库值基于 500 条截断的
+  // directPdbs（3 靶点复合物批次交集为空的根因），重渲染即修复；不再信任透传值。
+  const sharedStructures = computeSharedStructures(targets)
+  /** 受体 × G 蛋白复合物结构（v2.26 GPCR 受体主导批次 — 存在性标注与分析） */
+  const gpcrBatch = detectReceptorGproteinBatch(targets)
+  const receptorGComplex = gpcrBatch ? receptorGproteinStructures(sharedStructures, gpcrBatch) : []
   /** 共有结构 PDB ID 集（各靶点明细表内行加 ◈ 徽标互证） */
   const sharedIds = new Set(sharedStructures.map(s => s.pdbId))
   const litTotal = targets.reduce((s, t) => s + t.literature.length, 0)
@@ -1022,7 +1123,9 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // 多靶点批次可不经对比矩阵直接在刊头扫读各靶点研究现状）
   // v2.12：靶点卡整体可点 — 点击进入该靶点的单独报告页（综述/简报/单独结构同页；
   // 卡内 UniProt 链接除外 — 点击仍跳 UniProt）；卡底「单独报告 →」为明确入口提示
-  const targetMeta = targets.map(t => {
+  // v2.26：GPCR 受体主导批次 — 首页卡片仅列 G 蛋白伴侣（受体即首页主体，不再出卡片）；
+  // 其余批次保持全靶点卡片
+  const targetMeta = (gpcrBatch ? gpcrBatch.gproteins : targets).map(t => {
     const o = t.oligomer
     const ms = t.methodStats
     return `
@@ -1247,10 +1350,14 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // LLM 章节来源：v2.13 起批次各靶点按单靶点流程生成完整独立报告（reportMarkdown，
   // pipeline 不再因复合物组分跳过单独评估）；旧批次回退合并报告的各靶点综述。
   const engineStr = input.engineSummary || '—'
-  const targetViews = (await Promise.all(targets.map(async (t, i) => {
+  // v2.26 GPCR 受体主导批次：受体不出独立视图（其完整评估报告即报告首页主体 —
+  // 用户需求「主页只显示受体的评估页面」）；G 蛋白伴侣保留独立视图（chips 卡片进入）。
+  // 受体导航 chip 指向 home（报告首页即受体页）。
+  const targetViewList = await Promise.all(targets.map(async (t, i) => {
     const key = targetKeyOf(t)
     const prev = i > 0 ? targets[i - 1] : null
     const next = i < targets.length - 1 ? targets[i + 1] : null
+    const isReceptor = !!gpcrBatch && t === gpcrBatch.receptor
     // AF 交互视图（公共 MODELS 池）：本次获取的可内嵌模型 > 作业摘要元数据（降级统计卡）
     // v2.15：AFDB 无收录的靶点（esmfold 摘要 available）→ ESMFold 兜底视图（池键
     // esm:{cacheKey}，engine='esmfold' — 卡片标注/外链切换 ESM Atlas 口径）；
@@ -1289,7 +1396,11 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       goal: input.goal,
       goalHints: [],
       insights: input.insights ?? undefined,
-      batchNote: `关联靶点批次 · ${relName}（置信度${relConfZh}）— 本页为该靶点的单独评估报告，批次级分析与共有结构见报告首页`,
+      batchNote: isReceptor
+        ? `受体主导复合物批次 · ${relName}（置信度${relConfZh}）— 本页即该受体（主要评估对象）的完整评估报告；G 蛋白伴侣（${gpcrBatch!.couplingLabel}）与「受体 × G 蛋白复合物结构」证据见页顶标注，批次级补充分析（合并评估/共有结构/对比矩阵）见页底折叠`
+        : gpcrBatch
+          ? `受体主导复合物批次 · ${relName}（置信度${relConfZh}）— 本靶点为 G 蛋白伴侣（${gpcrBatch.couplingLabel}，信号转导组分），非批次主要评估对象；受体（${gpcrBatch.receptor.uniprotId ?? gpcrBatch.receptor.label}）的完整评估即报告首页`
+          : `关联靶点批次 · ${relName}（置信度${relConfZh}）— 本页为该靶点的单独评估报告，批次级分析与共有结构见报告首页`,
       providedSequence: t.construct ? { sequence: '', comparison: t.construct as unknown as SequenceComparison } : undefined,
       directPdbs: t.directPdbs,
       blastHits: t.blastHits,
@@ -1321,9 +1432,15 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       embed: { idPrefix: key, expandAll: true, afPooled, pooledImages: true, legacyNote },
     })
     const navChip = (tgt: MergedTargetData | null, dir: 'prev' | 'next') => tgt
-      ? `<a class="tgt-nav-chip" data-goto="target-${targetKeyOf(tgt)}" href="#view-target-${targetKeyOf(tgt)}" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}${dir === 'next' ? ' →' : ''}</a>`
+      ? (gpcrBatch && tgt === gpcrBatch.receptor
+          ? `<a class="tgt-nav-chip" data-goto="home" href="#top" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）— 报告首页即该受体的完整评估报告">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}（首页）${dir === 'next' ? ' →' : ''}</a>`
+          : `<a class="tgt-nav-chip" data-goto="target-${targetKeyOf(tgt)}" href="#view-target-${targetKeyOf(tgt)}" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}${dir === 'next' ? ' →' : ''}</a>`)
       : ''
-    return `
+    if (isReceptor) {
+      // v2.26：受体完整评估报告直接作为报告首页主体 — 不再包独立视图（避免双份大体积）
+      return { t, i, key, body, viewHtml: '' }
+    }
+    const viewHtml = `
   <div class="rpt-view" id="view-target-${key}">
     <div class="tgt-topbar">
       <button type="button" class="tgt-back" data-goto="home">← 返回报告首页</button>
@@ -1339,7 +1456,112 @@ ${body}
       </div>
     </div>
   </div>`
-  }))).join('')
+    return { t, i, key, body, viewHtml }
+  }))
+  const targetViews = targetViewList.filter(v => v.viewHtml).map(v => v.viewHtml).join('')
+  /** v2.26 GPCR 模式：受体的完整单独评估报告主体（首页用 — renderSingleReportBody 输出） */
+  const receptorBodyHtml = gpcrBatch ? (targetViewList.find(v => v.t === gpcrBatch.receptor)?.body ?? '') : ''
+
+  // ── v2.26 GPCR 受体主导复合物批次首页组件（受体主导刊头 + 复合物结构标注面板）──
+  const receptorShort = (t: MergedTargetData) => t.geneNames?.[0] || t.proteinName.replace(/\s*\(.*?\)\s*/g, '').trim() || t.label
+  /** 受体×G蛋白复合物结构的最佳分辨率（空集安全） */
+  const rxCxBestRes = receptorGComplex.map(s => s.resolution).filter((v): v is number => v != null)
+  const gpcrHeadHtml = gpcrBatch ? `
+  <header class="rpt-head">
+    <div class="rpt-eyebrow">TargetEval · Receptor-Centric Merged Report · 受体主导复合物评估</div>
+    <h1 class="rpt-title">${esc(gpcrBatch.receptor.proteinName)} 结构解析评估</h1>
+    <div class="rpt-subtitle">受体主导复合物批次 — G 蛋白伴侣（${esc(gpcrBatch.couplingLabel)}）为信号转导组分，非独立结构解析对象</div>
+    <div class="meta-grid">
+      <div><b>主要对象</b> ${esc(gpcrBatch.receptor.proteinName)}${gpcrBatch.receptor.uniprotId ? `（<a href="https://www.uniprot.org/uniprotkb/${gpcrBatch.receptor.uniprotId}" target="_blank" rel="noopener">${gpcrBatch.receptor.uniprotId}</a>）` : ''}</div>
+      <div><b>G 蛋白伴侣</b> ${esc(gpcrBatch.couplingLabel)}</div>
+      <div><b>受体×G蛋白复合物结构</b> ${receptorGComplex.length} 个${rxCxBestRes.length ? ` · 最佳 ${Math.min(...rxCxBestRes).toFixed(2)}Å` : ''}</div>
+      <div><b>PDB 结构合计</b> ${pdbTotal} 个${bestRes != null ? ` · 最佳 ${bestRes.toFixed(2)}Å` : ''}（X-ray ${msAgg.xray} · Cryo-EM ${msAgg.cryoem} · NMR ${msAgg.nmr}）</div>
+      <div><b>共有结构</b> ${sharedStructures.length} 个（同一 PDB 覆盖 ≥2 个靶点${sharedAdded ? ` · 含评估后补齐 ${sharedAdded} 条` : ''}）</div>
+      <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
+      <div><b>报告日期</b> ${dateStr} · 编号 ${esc(input.batchReportId.slice(0, 10))}</div>
+      ${input.goal ? `<div><b>客户目标</b> <span style="color:#92400e">${esc(input.goal.length > 120 ? input.goal.slice(0, 119) + '…' : input.goal)}</span></div>` : ''}
+    </div>
+    <div class="rpt-badges">
+      <span class="badge">${esc(relName)} · 受体主导</span>
+      <span class="badge">G 蛋白伴侣：${esc(gpcrBatch.couplingLabel)}</span>
+      <span class="badge ${receptorGComplex.length ? '' : 'amber'}">受体×G 蛋白复合物结构：${receptorGComplex.length ? receptorGComplex.length + ' 个' : '无先例'}</span>
+      <span class="badge">数据源：UniProt · RCSB · PDBe${targets.some(t => t.blastHits.length > 0) ? (targets.some(t => t.blastStatus?.provider === 'rcsb') ? ' · 序列检索（RCSB 兜底）' : ' · BLAST') : ''}${litTotal ? ' · PubMed' : ''}</span>
+      ${input.llmOk ? '<span class="badge">LLM 分析：已完成</span>' : '<span class="badge amber">LLM 分析：失败（见补充分析）</span>'}
+    </div>
+    <div class="rel-box">
+      <b>靶点关系：${esc(relName)}（受体 ${esc(receptorShort(gpcrBatch.receptor))} + G 蛋白伴侣）</b>（置信度：${relation.confidence === 'high' ? '高' : relation.confidence === 'medium' ? '中' : '低'}）<br>
+      ${esc(relation.rationale)}<br>
+      <b>策略要点：</b>${esc(relation.strategy)}
+    </div>
+    ${targetMeta ? `<div class="tgt-grid">${targetMeta}</div>` : ''}
+  </header>` : ''
+
+  // v2.26：受体 × G 蛋白类型复合物结构存在性标注与分析（用户需求核心面板）
+  const rxCxRows = receptorGComplex.map(s => {
+    const covChips = s.coverage.map(c => {
+      const isReceptor = c.uniprotId === gpcrBatch?.receptor.uniprotId
+      return `<span class="cov-chip${isReceptor ? ' cx-chip-shared' : ''}" title="${esc(c.proteinName)}${isReceptor ? ' — 受体' : ' — G 蛋白伴侣'}">${esc(c.uniprotId)}${c.chainRanges ? `<span class="cov-rng">${esc(c.chainRanges)}</span>` : ''}</span>`
+    }).join(' ')
+    const lit = s.pubmedId
+      ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${s.pubmedId}/" target="_blank" rel="noopener">${s.pubmedId}</a>`
+      : '—'
+    return `
+    <tr>
+      <td class="td-id"><a href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener">${s.pdbId}</a></td>
+      <td><span class="mth mth-${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}">${s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : esc(s.method.slice(0, 8))}</span></td>
+      <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
+      <td class="cov-cells"><span class="sh-cnt" title="该 PDB 覆盖 ${s.targetCount} 个输入靶点">×${s.targetCount}</span>${covChips}</td>
+      <td class="t-title" title="${esc(s.title)}">${esc(s.title.slice(0, 70))}</td>
+      <td class="num">${esc(s.releaseDate.slice(0, 10))}</td>
+      <td class="td-id">${lit}</td>
+    </tr>`
+  }).join('')
+  const receptorComplexHtml = gpcrBatch ? `
+  <section class="sec" id="receptor-gcomplex">
+    <h2><span class="sec-no">◈</span><span class="sec-title">${esc(receptorShort(gpcrBatch.receptor))} × ${esc(gpcrBatch.couplingLabel.split(' 型')[0])} 复合物结构（${receptorGComplex.length}）</span><span class="sec-en">Receptor × G-Protein Complexes</span></h2>
+    ${receptorGComplex.length ? `
+    <div class="sh-hero">
+      <div class="sh-hero-head"><span class="sh-ico" aria-hidden="true">◈</span>受体 × G 蛋白复合物结构 <b>${receptorGComplex.length}</b> 个<span class="sh-hero-sub">同一 PDB 条目同时覆盖受体与 G 蛋白组分 — <b>${esc(receptorShort(gpcrBatch.receptor))} 与该 G 蛋白类型共组装的直接结构先例</b>；最佳分辨率 <b>${rxCxBestRes.length ? Math.min(...rxCxBestRes).toFixed(2) + 'Å' : '—'}</b>${rxCxBestRes.length ? `（${receptorGComplex.find(s => s.resolution === Math.min(...rxCxBestRes))?.isCryoem ? 'Cryo-EM' : 'X-ray'}` : ''}${rxCxBestRes.length ? '）' : ''}；深绿底 = 受体实体</span></div>
+      <div class="sh-cov-sum">${gpcrBatch.receptor.uniprotId ? `<span class="sh-cov-chip">${esc(gpcrBatch.receptor.uniprotId)}<i>${receptorGComplex.length}</i></span>` : ''}${gpcrBatch.gproteins.map(g => g.uniprotId ? `<span class="sh-cov-chip" title="${esc(g.proteinName)} — G 蛋白伴侣">${esc(g.uniprotId)}<i>${receptorGComplex.filter(s => s.coverage.some(c => c.uniprotId === g.uniprotId)).length}</i></span>` : '').join('')}</div>
+    </div>
+    <p class="note">这些条目证实「${esc(receptorShort(gpcrBatch.receptor))}–G 蛋白复合物」已有直接解析先例：共表达 / 体外组装路线可借鉴其组分构成与化学计量（覆盖列 ×N 为该 PDB 覆盖的输入靶点数，深绿底为受体、浅底为 G 蛋白伴侣实体）；复合物的有效分子量与 Cryo-EM 适用性应结合下方受体的完整评估综合判断。全部批内共有结构（含仅覆盖 G 蛋白组分之间的条目）见页底「批次级补充分析」折叠。</p>
+    <div class="tbl-wrap"><table class="tbl-data">
+      ${SHARED_PDB_COLGROUP}
+      <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>覆盖组分</th><th>标题</th><th class="num">释放日期</th><th>文献</th></tr></thead>
+      <tbody>${rxCxRows}</tbody>
+    </table></div>` : `
+    <div class="callout callout-amber"><b>无 ${esc(receptorShort(gpcrBatch.receptor))} × ${esc(gpcrBatch.couplingLabel.split(' 型')[0])} 复合物结构先例</b>现有 PDB 中未检索到同时覆盖该受体与本批次 G 蛋白类型（${esc(gpcrBatch.couplingLabel)}）的复合物条目 — 受体与该 G 蛋白的复合物组装需从共表达或体外组装验证起步，无既有构建参数（化学计量 / 界面突变）可借鉴；可参照其他 GPCR–G 蛋白复合物结构的通用组装策略（亲和共纯化、scFv / mini-G 稳定化等）设计验证路线。受体的单独结构可行性见下方其完整评估报告。</div>`}
+  </section>` : ''
+
+  // v2.26：批次级补充分析区块（合并评估分析 / 共有结构 / 评估表要点 / 配体 / 对比矩阵 /
+  // 序列一致性 / 序列归属 / 客户实验数据）— 普通 batch 作为首页章节流；GPCR 受体主导
+  // 批次收纳为首页底部折叠（主报告 = 受体完整评估），打印时自动展开（既有打印逻辑）
+  const batchSupplementHtml = `
+  ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点。</div>`}
+
+  <section class="sec sec-llm" id="llm">
+    <h2>${secHead(noLlm, '合并评估分析', 'Merged Analysis')}</h2>
+    ${renderMarkdown(llmHomeMd || '（LLM 分析不可用 — 请参考下方数据区块与评估表要点）', 1)}
+  </section>
+
+  ${sharedStructuresHtml}${sharedAdded ? `<p class="note" style="margin-top:-6px">v2.26：共有结构基于全量 PDB ID 交集在线补齐（新增 ${sharedAdded} 条）— 高频共用组分（G 蛋白等）在 PDB 有 1000+ 条目，评估时落库的 500 条截断曾致复合物共有结构漏检。</p>` : ''}
+
+  ${insightsHtml}
+  ${ligandsHtml}
+
+  <section class="sec" id="matrix">
+    <h2>${secHead(noMatrix, `跨靶点对比矩阵（${targets.length} 个靶点）`, 'Comparison Matrix')}</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>UniProt</th><th>靶点</th><th class="num">PDB</th><th class="num">最佳分辨率</th><th class="num">覆盖率</th><th>寡聚态</th><th class="num">同源结构</th><th class="num">文献</th><th class="num">X-ray</th><th class="num">Cryo-EM</th><th class="num">NMR</th><th class="num">总体</th></tr></thead>
+      <tbody>${matrixRows}</tbody>
+    </table></div>
+    ${oligoTargets.length ? `<p class="note">各靶点评分已包含蛋白聚集形式（寡聚态）调整（判定徽标见刊头靶点卡片与矩阵寡聚态列，调整明细与证据链见下方折叠；各靶点结合寡聚态的具体建议已融入其单独报告页的结构可行性综述）。</p>${oligoFoldHtml}` : ''}
+  </section>
+
+  ${matrixHtml}
+  ${attributionHtml}
+
+  ${figHtml}`
 
   // v2.12：视图切换脚本（首页 ↔ 各靶点单独报告页）— hash 深链 + 打印全展开；
   // 点击卡片内普通链接（UniProt 等）不触发视图切换（仍走默认链接行为）；
@@ -1394,7 +1616,7 @@ ${body}
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<!-- mrg-fmt-v2.13 合并报告格式版本标记：旧版落盘 HTML 无此标记时由报告路由自动升级重渲染（v2.13：首页标题/字体同步单独评估 + 每靶点完整单独评估报告页 + PDB/文献全量展开） -->
+<!-- mrg-fmt-v2.26 合并报告格式版本标记：旧版落盘 HTML 无此标记时由报告路由自动升级重渲染（v2.26：共有结构全量 ID 交集补齐 — 3 靶点复合物结构漏检修复 + 受体–G 蛋白复合物批次切换为受体主导首页（受体完整评估 + 受体×G 蛋白复合物结构标注分析）+ 每靶点完整单独评估报告页 + PDB/文献全量展开） -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1499,6 +1721,9 @@ ${SINGLE_REPORT_CSS}
   .glance-tile.gt-shared .gt-value { color:#065f46; }
   /* 聚集形式证据链行（首页矩阵下折叠内） */
   .oligo-ev { margin:8px 0 0; border-top:1px dashed var(--line); padding-top:8px; }
+  /* v2.26 GPCR 受体主导首页：复合物结构面板覆盖芯片中受体实体高亮（深绿底白字） */
+  .cov-chip.cx-chip-shared { background:#065f46; color:#fff; border-color:#065f46; font-weight:700; }
+  .cov-chip.cx-chip-shared .cov-rng { background:#0b7a5c; color:#eafff5; }
   .oligo-ev-line { display:flex; gap:10px; font-size:12px; padding:3px 0; align-items:baseline; flex-wrap:wrap; }
   .oligo-ev-src { flex:0 0 158px; color:#065f46; white-space:nowrap; }
   .oligo-ev-ref { flex:0 0 120px; font-family:var(--mono); font-size:11px; color:var(--sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -1512,6 +1737,14 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 <div class="page">
 
   <div class="rpt-view rpt-view-on" id="view-home">
+${gpcrBatch ? `
+  ${gpcrHeadHtml}
+  ${receptorComplexHtml}
+${receptorBodyHtml}
+  <details class="fold" id="gpcr-batch-fold">
+    <summary>批次级补充分析 — 合并评估分析 · 共有结构（${sharedStructures.length}${sharedLitByPmid.size ? ' · 含共有文献' : ''}）${insightsHtml ? ' · 评估表要点' : ''}${ligandsHtml ? ' · 配体' : ''} · 对比矩阵${embedded.length ? ' · 实验数据' : ''}（受体主导批次：批次级材料收纳于此，主报告为上方受体的完整评估）</summary>
+    ${batchSupplementHtml}
+  </details>` : `
   <header class="rpt-head">
     <div class="rpt-eyebrow">TargetEval · Merged Structure Feasibility Report</div>
     <h1 class="rpt-title">${esc(reportTitle)}</h1>
@@ -1521,7 +1754,7 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
       <div><b>PDB 结构合计</b> ${pdbTotal} 个${bestRes != null ? ` · 最佳 ${bestRes.toFixed(2)}Å` : ''}（X-ray ${msAgg.xray} · Cryo-EM ${msAgg.cryoem} · NMR ${msAgg.nmr}）</div>
       <div><b>同源结构合计</b> ${blastTotal} 个</div>
       <div><b>关键文献合计</b> ${litTotal} 篇</div>
-      <div><b>共有结构</b> ${sharedStructures.length} 个（同一 PDB 覆盖 ≥2 个靶点）</div>
+      <div><b>共有结构</b> ${sharedStructures.length} 个（同一 PDB 覆盖 ≥2 个靶点${sharedAdded ? ` · 含评估后补齐 ${sharedAdded} 条` : ''}）</div>
       <div><b>分析引擎</b> ${esc(input.engineSummary || '—')}</div>
       <div><b>报告日期</b> ${dateStr} · 编号 ${esc(input.batchReportId.slice(0, 10))}</div>
       ${input.goal ? `<div><b>客户目标</b> <span style="color:#92400e">${esc(input.goal.length > 120 ? input.goal.slice(0, 119) + '…' : input.goal)}</span></div>` : ''}
@@ -1559,37 +1792,14 @@ ${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
     </div>
   </nav>
 
-  ${input.llmOk ? '' : `<div class="warn-box">LLM 分析生成失败（${esc(input.llmErrors.join('；')) || '未知原因'}）。以下为系统收集的确定性数据与评估表 AI 解析要点。</div>`}
-
-  <section class="sec sec-llm" id="llm">
-    <h2>${secHead(noLlm, '合并评估分析', 'Merged Analysis')}</h2>
-    ${renderMarkdown(llmHomeMd || '（LLM 分析不可用 — 请参考下方数据区块与评估表要点）', 1)}
-  </section>
-
-  ${sharedStructuresHtml}
-
-  ${insightsHtml}
-  ${ligandsHtml}
-
-  <section class="sec" id="matrix">
-    <h2>${secHead(noMatrix, `跨靶点对比矩阵（${targets.length} 个靶点）`, 'Comparison Matrix')}</h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>UniProt</th><th>靶点</th><th class="num">PDB</th><th class="num">最佳分辨率</th><th class="num">覆盖率</th><th>寡聚态</th><th class="num">同源结构</th><th class="num">文献</th><th class="num">X-ray</th><th class="num">Cryo-EM</th><th class="num">NMR</th><th class="num">总体</th></tr></thead>
-      <tbody>${matrixRows}</tbody>
-    </table></div>
-    ${oligoTargets.length ? `<p class="note">各靶点评分已包含蛋白聚集形式（寡聚态）调整（判定徽标见刊头靶点卡片与矩阵寡聚态列，调整明细与证据链见下方折叠；各靶点结合寡聚态的具体建议已融入其单独报告页的结构可行性综述）。</p>${oligoFoldHtml}` : ''}
-  </section>
-
-  ${matrixHtml}
-  ${attributionHtml}
-
-  ${figHtml}
-
+  ${batchSupplementHtml}
   <footer class="rpt-foot">
-    Generated by TargetEval · 多靶点合并评估（v2.13 格式：复合物评估与单独评估分层 — 首页为复合物级分析 + 共有结构与共有文献；每靶点独立单独评估报告页与单靶点评估报告同格式同流程[评估分析 / 可行性评分 / PDB 结构与文献全量展开 / 同源 / 客户实验数据]，刊头靶点卡片进入 · 打印时全部页面依序输出）<br>
+    ${gpcrBatch
+      ? `Generated by TargetEval · 受体主导复合物合并评估（v2.26 格式：首页为受体（主要评估对象）的完整单独评估报告 + 「受体 × G 蛋白复合物结构」标注分析；G 蛋白伴侣保留单独评估页（刊头卡片进入）；批次级补充分析（合并评估 / 共有结构 / 对比矩阵）收纳于首页底部折叠，打印时自动展开 · 共有结构经全量 ID 交集在线补齐）`
+      : `Generated by TargetEval · 多靶点合并评估（v2.26 格式：复合物评估与单独评估分层 — 首页为复合物级分析 + 共有结构与共有文献（全量 ID 交集在线补齐）；每靶点独立单独评估报告页与单靶点评估报告同格式同流程[评估分析 / 可行性评分 / PDB 结构与文献全量展开 / 同源 / 客户实验数据]，刊头靶点卡片进入 · 打印时全部页面依序输出；受体–G 蛋白复合物批次自动切换为受体主导首页）`}<br>
     SOURCES: UniProt REST · RCSB Data API · PDBe API · NCBI BLAST (pdbaa) / RCSB 序列检索（NCBI 拥堵时兜底） · PubMed E-utilities<br>
     Analysis engine: ${esc(input.engineSummary || '—')} · 本报告由系统自动生成，供研究参考，不构成投资/医疗建议。
-  </footer>
+  </footer>`}
   </div>
 
   ${targetViews}

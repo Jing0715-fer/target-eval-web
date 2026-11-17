@@ -461,22 +461,72 @@ export interface HtExcelExtractResult {
  * 上传 Excel/CSV 靶点表 → 服务端 LLM 解析分组（LLM 超时/失败时服务端自动回退
  * 规则提取，通道不卡死）。v2.19：本地引擎配置随请求内联携带（导入解析 LLM
  * 走用户本人的引擎）。quick=true 跳过 LLM 直接规则提取（调试/兜底通道）。
+ * v2.26 流式版（三级降级，同 fetchDocxInsights 口径 — 修复公网网关 ~30s 空闲
+ * 切断导致的 HTTP 502）：流式（NDJSON 心跳）→ 断流自动重试一次 → quick 兜底。
  */
 export async function extractHtTargetsFromExcel(
   file: File,
   opts: { quick?: boolean } = {},
 ): Promise<HtExcelExtractResult> {
   const llm = getLlmEngineOverride()
+  // v2.6.2 同款三级降级：0→1 流式重试，1→2 quick 快速兜底（毫秒级规则提取）
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchHtExtractStream(file, attempt >= 2 ? { quick: true } : opts, llm)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (attempt >= 2) throw err // quick 也失败（几乎不可能）— 彻底失败
+      if (attempt === 0 && !STREAM_BROKEN_RE.test(msg)) throw err // 语义错误（4xx 等）不重试
+      continue // 断流/5xx/网关 502 → 重试
+    }
+  }
+}
+
+/** v2.26：ht-extract NDJSON 流式读取（心跳保活 — 终态 done 行携带提取结果） */
+async function fetchHtExtractStream(
+  file: File,
+  opts: { quick?: boolean },
+  llm: ReturnType<typeof getLlmEngineOverride>,
+): Promise<HtExcelExtractResult> {
   const fd = new FormData()
   fd.append('file', file)
   if (opts.quick) fd.append('quick', '1')
   if (llm) fd.append('llm', JSON.stringify(llm))
   const res = await fetch('/api/evaluate/ht-extract', { method: 'POST', body: fd })
-  const data = (await res.json().catch(() => null)) as (HtExcelExtractResult & { ok?: boolean; error?: string }) | null
-  if (!res.ok || !data?.ok) {
-    throw new Error(data?.error ?? `Excel 解析失败（HTTP ${res.status}）`)
+  // 校验类错误（400/413/422）仍为普通 JSON 错误响应（流尚未建立）
+  if (!res.ok || !res.body) {
+    const err = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(err?.error ?? `Excel 解析失败（HTTP ${res.status}）`)
   }
-  return data
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        let ev: { type?: string; ok?: boolean; error?: string } & Partial<HtExcelExtractResult> | null = null
+        try {
+          ev = JSON.parse(line)
+        } catch { ev = null /* 半行/坏行丢弃，等下一块补齐 */ }
+        if (ev?.type === 'done') {
+          if (!ev.ok || !Array.isArray(ev.groups)) {
+            throw new Error(ev.error ?? 'Excel 解析失败')
+          }
+          const { type: _t, ok: _ok, error: _e, ...data } = ev
+          return { ok: true, ...data } as HtExcelExtractResult
+        }
+        // ping 心跳：仅保活
+      }
+      nl = buffer.indexOf('\n')
+    }
+  }
+  throw new Error('Excel 解析流中断（网络波动/网关超时），正在自动重试…')
 }
 
 // ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────

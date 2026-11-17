@@ -16,6 +16,7 @@ import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
 import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
 import { propagateFamilyBlast } from '@/lib/eval/blast-family'
+import { augmentTargetsForSharedPdbCoverage } from '@/lib/eval/rcsb'
 import { getEngineSummary, runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { fetchUniprotInfo } from '@/lib/eval/uniprot'
 import { attributeSequences } from '@/lib/eval/homology'
@@ -75,7 +76,7 @@ function isRelationJudgment(v: unknown): v is RelationJudgment {
 // 调用方继续服务旧 HTML（叠加既有 CSS/UX 升级注入）。
 // 并发去重：同 id 在途请求共享同一 Promise（iframe 预览 + 下载同时到达只渲染一次）。
 const upgradeInflight = new Map<string, Promise<string | null>>()
-const MERGED_FMT_MARKER = 'mrg-fmt-v2.13'
+const MERGED_FMT_MARKER = 'mrg-fmt-v2.26'  // v2.26：共有结构全量交集补齐 + 受体–G 蛋白批次受体主导首页（旧报告重渲染即修复）
 
 async function upgradeLegacyHtml(record: BatchReport): Promise<string | null> {
   let jobIds: string[] = []
@@ -110,9 +111,17 @@ async function upgradeLegacyHtml(record: BatchReport): Promise<string | null> {
 
   let sequenceAttribution: SequenceAttribution[] | undefined
   try { sequenceAttribution = record.sequenceAttribution ? JSON.parse(record.sequenceAttribution) : undefined } catch { /* ignore */ }
-  let sharedStructures: SharedStructure[] | undefined
-  try { sharedStructures = record.sharedStructures ? JSON.parse(record.sharedStructures) : undefined } catch { /* ignore */ }
-  if (!sharedStructures) sharedStructures = computeSharedStructures(targets)
+  // v2.26：共有结构覆盖补齐（全量 ID 交集在线执行 — 旧作业免重跑即修复 3 靶点复合物
+  // 结构漏检）+ 一律重算（DB 落库值基于 500 条截断的旧交集，不再信任）；重算结果回写 DB
+  const augmented = await augmentTargetsForSharedPdbCoverage(targets)
+  targets = augmented.targets
+  const sharedStructures = computeSharedStructures(targets)
+  if (sharedStructures.length) {
+    await db.batchReport.update({
+      where: { id: record.id },
+      data: { sharedStructures: JSON.stringify(sharedStructures) },
+    }).catch(() => undefined)
+  }
 
   const llmErrors = record.error ? [record.error] : []
   const html = await renderMergedReportHtml({
@@ -250,8 +259,11 @@ async function runBatchReportGeneration(ctx: {
   }
   try {
     // 重新加载（拿到各作业最新持久化数据）
-    const targets = await loadMergedTargets(jobIds)
+    let targets = await loadMergedTargets(jobIds)
     if (targets.length < 2) return void (await fail('完成的评估作业不足 2 个'))
+    // v2.26：共有结构覆盖补齐（全量 ID 交集在线执行 — 生成路径 digest / 落库
+    // sharedStructures / 渲染共用同一份补齐 targets；渲染层幂等重入零网络）
+    targets = (await augmentTargetsForSharedPdbCoverage(targets)).targets
 
     // v1.11 同源家族 BLAST 委托结果传播：≥90% 组内代表检索一次，其余成员在此补齐
     // （先于 LLM 生成执行 — 即使 LLM 失败，传播结果也已持久化到各成员作业）

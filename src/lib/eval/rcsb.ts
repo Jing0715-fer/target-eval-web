@@ -18,9 +18,8 @@ const LIGAND_JUNK = new Set([
   'UNL', 'UNX',
 ])
 
-/** 按 UniProt accession 检索关联 PDB ID 列表（去重）。
- *  v2.5：rows 上限 1000（RCSB search v2 分页限制内），适配「不限」详情拉取模式。 */
-export async function fetchPdbIdsForUniprot(uniprotId: string, max = 500): Promise<string[]> {
+/** 单页检索（fetchPdbIdsForUniprot / fetchAllPdbIdsForUniprot 共用 — 失败返回 []） */
+async function requestPdbIdPage(uniprotId: string, start: number, rows: number, signal?: AbortSignal): Promise<string[]> {
   const body = {
     query: {
       type: 'terminal',
@@ -33,13 +32,16 @@ export async function fetchPdbIdsForUniprot(uniprotId: string, max = 500): Promi
     },
     return_type: 'entry',
     request_options: {
-      paginate: { start: 0, rows: Math.min(1000, max) },
+      paginate: { start, rows },
       sort: [{ sort_by: 'rcsb_accession_info.initial_release_date', direction: 'desc' }],
     },
   }
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (signal?.aborted) return []
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 20_000)
+    const onAbort = () => controller.abort()
+    signal?.addEventListener('abort', onAbort, { once: true })
     try {
       const res = await fetch(SEARCH_URL, {
         method: 'POST',
@@ -49,20 +51,64 @@ export async function fetchPdbIdsForUniprot(uniprotId: string, max = 500): Promi
       })
       if (res.ok) {
         const data = await res.json() as { result_set?: Array<{ identifier?: string }> }
-        const ids = (data.result_set ?? [])
+        return (data.result_set ?? [])
           .map(r => (r.identifier ?? '').toUpperCase())
           .filter(id => /^[0-9A-Z]{4}$/.test(id))
-        return [...new Set(ids)]
       }
       if (res.status < 500 && res.status !== 429) return []
     } catch {
       /* 重试一次 */
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
     }
     if (attempt === 0) await new Promise(r => setTimeout(r, 1200))
   }
   return []
+}
+
+/** 按 UniProt accession 检索关联 PDB ID 列表（去重）。
+ *  v2.5：rows 上限 1000（RCSB search v2 分页限制内），适配「不限」详情拉取模式。 */
+export async function fetchPdbIdsForUniprot(uniprotId: string, max = 500): Promise<string[]> {
+  const ids = await requestPdbIdPage(uniprotId, 0, Math.min(1000, max))
+  return [...new Set(ids)]
+}
+
+/** 全量 ID 分页硬上限（每页 1000 × 3 页；ID 列表极轻，防爆护栏） */
+const ALL_IDS_HARD_CAP = 3000
+
+/** v2.26 全量 ID 进程内缓存（TTL 10 分钟，容量 64 — augment 在「生成→渲染」两次
+ *  调用间幂等重入，第二次零网络请求直达 added=0 分支） */
+const allIdsCache = new Map<string, { t: number; ids: string[] }>()
+
+/**
+ * v2.26 共有结构覆盖补齐：按 UniProt accession 分页拉取**全量**关联 PDB ID。
+ * 背景（用户实测 3 靶点复合物共有结构未检出的根因）：fetchPdbIdsForUniprot 默认
+ * max=500 且按 release_date 降序截断 — 高频共用组分（Gβ GNB1 实测 1345 条、
+ * 8KFX 排第 765）落库 directPdbs 缺条目 → 多靶点交集为空。
+ */
+export async function fetchAllPdbIdsForUniprot(uniprotId: string, signal?: AbortSignal): Promise<string[]> {
+  const key = uniprotId.trim().toUpperCase()
+  const hit = allIdsCache.get(key)
+  if (hit && Date.now() - hit.t < 600_000) return hit.ids
+  const out: string[] = []
+  for (let start = 0; start < ALL_IDS_HARD_CAP; start += 1000) {
+    if (signal?.aborted) break
+    const page = await requestPdbIdPage(uniprotId, start, 1000, signal)
+    if (!page.length) break
+    out.push(...page)
+    if (page.length < 1000) break // total 不足一页 → 已拉全
+  }
+  const ids = [...new Set(out)]
+  if (ids.length) {
+    if (allIdsCache.size >= 64) {
+      // 淘汰最旧条目（Map 迭代序 = 插入序）
+      const oldest = allIdsCache.keys().next().value
+      if (oldest) allIdsCache.delete(oldest)
+    }
+    allIdsCache.set(key, { t: Date.now(), ids })
+  }
+  return ids
 }
 
 interface EntryDetail {
@@ -376,4 +422,137 @@ export async function fetchPdbEntries(
   }
 
   return { entries, totalFound: total }
+}
+
+// ─── v2.26 共有结构覆盖补齐（合并报告渲染/生成前在线执行 — 新旧作业通吃）─────────
+
+/** augmentTargetsForSharedPdbCoverage 接受的靶点最小形状 */
+export interface SharedPdbAugmentTarget {
+  uniprotId?: string
+  proteinName: string
+  directPdbs: PdbEntry[]
+}
+
+/** 补齐详情的候选条目上限（交集物理上远小；护栏防极端大表） */
+const AUGMENT_MAX_NEW_ENTRIES = 100
+/** 补齐整体墙钟预算（分页 ID 检索 + GraphQL 详情；超时/失败静默返回原 targets） */
+const AUGMENT_BUDGET_MS = 45_000
+
+/**
+ * v2.26 多靶点共有结构覆盖补齐。
+ * 现状根因：评估作业落库的 directPdbs 上限 500 条（fetchPdbIdsForUniprot 默认），
+ * 高频共用组分（Gβ/Gα 等）在 PDB 有 1000+ 条目 → 复合物共有结构若排位 >500 即
+ * 缺失 → 共有结构交集为空（用户 CCR8+GNAI1+GNB1 批次：8KFX 等 5 个复合物全丢）。
+ *
+ * 本函数在合并报告生成/渲染前执行（旧报告 GET 升级重渲染同样经过）：
+ *  1. 每个输入 UniProt 分页拉取全量 PDB ID（≤3000/acc；ID 列表极轻）
+ *  2. 求覆盖 ≥2 个输入 UniProt 的候选共有条目（全量口径交集 — 免重跑评估即修复）
+ *  3. 各 target.directPdbs 缺失的候选 → GraphQL 批量详情（50/批）→ 精简 PdbEntry
+ *  4. 按条目实体 UniProt 注记（uniprotAccs）归属并入对应 target 的 directPdbs
+ *     （合并后按分辨率升序重排 — 与评估管线落库顺序一致）
+ * 网络失败/超时静默返回原 targets（行为同修复前，永不阻塞报告生成）。
+ * 只补交集内缺失条目 — 不把全量 1000+ 条灌进 directPdbs（单靶点明细列表体积不受影响）。
+ */
+export async function augmentTargetsForSharedPdbCoverage<T extends SharedPdbAugmentTarget>(
+  targets: T[],
+  signal?: AbortSignal,
+): Promise<{ targets: T[]; added: number }> {
+  const accs = [...new Set(targets.map(t => t.uniprotId).filter((a): a is string => !!a))]
+  if (accs.length < 2) return { targets, added: 0 }
+
+  const budgetCtrl = new AbortController()
+  const budgetTimer = setTimeout(() => budgetCtrl.abort(), AUGMENT_BUDGET_MS)
+  const onOuterAbort = () => budgetCtrl.abort()
+  signal?.addEventListener('abort', onOuterAbort, { once: true })
+  try {
+    // 1) 全量 ID（并发；单 acc 失败 → 退回该靶点现有 directPdbs 的 ID 集，不倒退）
+    const idsByAcc = new Map<string, Set<string>>()
+    await Promise.all(accs.map(async acc => {
+      try {
+        const ids = await fetchAllPdbIdsForUniprot(acc, budgetCtrl.signal)
+        idsByAcc.set(acc, new Set(ids))
+      } catch { /* 单 acc 失败仅跳过（下方兜底回填） */ }
+    }))
+    for (const t of targets) {
+      if (!t.uniprotId || idsByAcc.has(t.uniprotId)) continue
+      const s = new Set<string>()
+      for (const p of t.directPdbs) s.add(p.pdbId.toUpperCase())
+      idsByAcc.set(t.uniprotId, s)
+    }
+    if (budgetCtrl.signal.aborted) return { targets, added: 0 }
+
+    // 2) 候选共有条目（覆盖 ≥2 个输入 UniProt）
+    const cover = new Map<string, Set<string>>()
+    for (const [acc, ids] of idsByAcc) {
+      for (const id of ids) {
+        const s = cover.get(id)
+        if (s) s.add(acc)
+        else cover.set(id, new Set([acc]))
+      }
+    }
+    const candidates = [...cover.entries()].filter(([, accSet]) => accSet.size >= 2).map(([id]) => id)
+    if (!candidates.length) return { targets, added: 0 }
+    // 覆盖数降序（3 靶点复合物优先于 2 靶点对）——详情拉取上限内保最重要的先补
+    const candidateRank = new Map(candidates.map(id => [id, cover.get(id)!.size]))
+    candidates.sort((a, b) => (candidateRank.get(b)! - candidateRank.get(a)!) || a.localeCompare(b))
+
+    // 3) 候选条目来源：已有详情（任一 target 持有 → 直接复制并入缺失 target — 同一条 PDB
+    //    的详情全等，无需重拉）+ 全无详情的（GraphQL 批量拉取，≤100 条护栏）
+    const existingById = new Map<string, PdbEntry>()
+    for (const t of targets) for (const p of t.directPdbs) existingById.set(p.pdbId.toUpperCase(), p)
+    const needFetch = candidates.filter(id => !existingById.has(id)).slice(0, AUGMENT_MAX_NEW_ENTRIES)
+    const metas = needFetch.length ? await fetchEntriesMetaBatch(needFetch, budgetCtrl.signal) : new Map<string, EntryMeta>()
+    if (budgetCtrl.signal.aborted) return { targets, added: 0 }
+
+    // 4) 归属并入：每个候选条目 → 其覆盖的全部输入 UniProt 对应 target 的 directPdbs
+    //    （copy：已有 entry 引用复制；fetch：uniprotAccs 权威校验 ≥2 输入 acc）
+    const addByAcc = new Map<string, PdbEntry[]>()
+    let added = 0
+    for (const id of candidates) {
+      const covAccs = [...cover.get(id)!]
+      const entry = existingById.get(id)
+      if (entry) {
+        // 已有详情（任一 target 持有）→ 复制并入其它覆盖 target（同 PDB 详情全等）
+        for (const a of covAccs) {
+          const arr = addByAcc.get(a)
+          if (arr) arr.push(entry)
+          else addByAcc.set(a, [entry])
+        }
+        added++
+        continue
+      }
+      const m = metas.get(id)
+      if (!m) continue
+      const hitAccs = m.uniprotAccs.filter(a => (accs as string[]).includes(a))
+      if (hitAccs.length < 2) continue
+      const fetched = entryMetaToPdbEntry(m)
+      for (const a of hitAccs) {
+        const arr = addByAcc.get(a)
+        if (arr) arr.push(fetched)
+        else addByAcc.set(a, [fetched])
+      }
+      added++
+    }
+    if (!added) return { targets, added: 0 }
+
+    const out = targets.map(t => {
+      const add = t.uniprotId ? addByAcc.get(t.uniprotId) : undefined
+      if (!add?.length) return t
+      const have = new Set(t.directPdbs.map(p => p.pdbId.toUpperCase()))
+      const merged = [...t.directPdbs, ...add.filter(e => !have.has(e.pdbId.toUpperCase()))]
+      merged.sort((a, b) => {
+        if (a.resolution == null && b.resolution == null) return a.pdbId.localeCompare(b.pdbId)
+        if (a.resolution == null) return 1
+        if (b.resolution == null) return -1
+        return a.resolution - b.resolution
+      })
+      return { ...t, directPdbs: merged }
+    })
+    return { targets: out, added }
+  } catch {
+    return { targets, added: 0 } // 永不阻塞：任何异常退回原数据
+  } finally {
+    clearTimeout(budgetTimer)
+    signal?.removeEventListener('abort', onOuterAbort)
+  }
 }
