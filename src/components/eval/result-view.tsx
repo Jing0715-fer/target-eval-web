@@ -21,6 +21,7 @@ import {
   RotateCcw,
   SearchX,
   ShieldCheck,
+  Sparkles,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -90,8 +91,8 @@ function SpecCell({
   )
 }
 
-/** 纯 CSS 评分条（细轨 + 档位色 — 语义色保留但克制） */
-function ScoreBar({ label, item, delay = 0 }: { label: string; item: ScoreItem; delay?: number }) {
+/** 纯 CSS 评分条（细轨 + 档位色 — 语义色保留但克制）；v2.18：AI 复核 delta 徽章（≠0 时紧随分值） */
+function ScoreBar({ label, item, delay = 0, delta = 0 }: { label: string; item: ScoreItem; delay?: number; delta?: number }) {
   const maxScore = item.maxScore && item.maxScore > 0 ? item.maxScore : 10
   const pct = Math.max(2, Math.min(100, (item.score / maxScore) * 100))
   const level = scoreLevel(item.score)
@@ -110,6 +111,19 @@ function ScoreBar({ label, item, delay = 0 }: { label: string; item: ScoreItem; 
             {Number(item.score.toFixed(1))}
             <span className="text-[11px] font-normal text-muted-foreground"> /{maxScore}</span>
           </span>
+          {delta !== 0 && (
+            <span
+              title={`AI 复核${delta > 0 ? '上调' : '下调'} ${Math.abs(delta)} 分`}
+              className={cn(
+                'inline-flex items-center rounded-full border px-1.5 py-0 font-mono text-[10px] font-bold',
+                delta > 0
+                  ? 'border-violet-500/40 bg-violet-500/[0.08] text-violet-700 dark:text-violet-400'
+                  : 'border-red-500/30 bg-red-500/[0.08] text-red-700 dark:text-red-400',
+              )}
+            >
+              AI {delta > 0 ? '+' : '−'}{Math.abs(delta)}
+            </span>
+          )}
           <RatingBadge score={item.score} rating={item.rating} />
         </span>
       </div>
@@ -486,6 +500,9 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const itxAdj = summary.scores?.interactionAdjust ?? null
   const itxBest = itx?.complexes[0]
 
+  /** v2.18：LLM 智能复核（规则分之上的 AI 专家修正层 — 紫色系视觉与规则维度区分） */
+  const llmA = summary.scores?.llmAdjust ?? null
+
   return (
     <div className="flex flex-col gap-8">
       {/* 0. 返回导航条 */}
@@ -498,10 +515,11 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <ArrowLeft className="size-3.5" />
           新建评估
         </Button>
-        {/* 当前靶点徽标：批量切换/同蛋白家族场景下让「正在看哪个靶点」一目了然 */}
+        {/* 当前靶点徽标：批量切换/同蛋白家族场景下让「正在看哪个靶点」一目了然；
+            v2.16：序列靶点（无 UniProt）显示身份识别来源 */}
         <span className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-primary/30 bg-primary/[0.06] px-2.5 font-mono text-[11px] font-semibold text-primary">
           <Crosshair className="size-3 shrink-0" aria-hidden />
-          当前靶点 {u.uniprotId}
+          {u.uniprotId ? `当前靶点 ${u.uniprotId}` : `序列靶点${summary.targetIdentity ? ` · ${summary.targetIdentity.sourceLabel}` : ''}`}
         </span>
         <span className="font-mono text-[11px] text-muted-foreground/70">
           作业 {job.id.slice(0, 8)} · 耗时 {formatDuration(Math.round((summary.durationMs ?? 0) / 1000))}
@@ -523,15 +541,38 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </h1>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-xs text-muted-foreground">
           {u.entryName && <span className="font-semibold">{u.entryName}</span>}
-          <a
-            href={`https://www.uniprot.org/uniprotkb/${u.uniprotId}/entry`}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-semibold text-primary transition-colors hover:bg-primary/[0.12]"
-          >
-            {u.uniprotId}
-            <Database className="size-3" />
-          </a>
+          {u.uniprotId ? (
+            <a
+              href={`https://www.uniprot.org/uniprotkb/${u.uniprotId}/entry`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-semibold text-primary transition-colors hover:bg-primary/[0.12]"
+            >
+              {u.uniprotId}
+              <Database className="size-3" />
+            </a>
+          ) : summary.targetIdentity ? (
+            /* v2.16：序列靶点身份徽标（评估表/nr 识别/同源推断 — 含近似 UniProt 条目时外链） */
+            <span
+              className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-700 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+              title={summary.targetIdentity.note ?? summary.targetIdentity.sourceLabel}
+            >
+              {summary.targetIdentity.sourceLabel}
+              {summary.targetIdentity.identity != null ? ` ${Math.round(summary.targetIdentity.identity)}%` : ''}
+              {summary.targetIdentity.uniprotId && (
+                <a
+                  href={`https://www.uniprot.org/uniprotkb/${summary.targetIdentity.uniprotId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-0.5 inline-flex items-center gap-0.5 hover:underline"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {summary.targetIdentity.uniprotId}
+                  <Database className="size-3" />
+                </a>
+              )}
+            </span>
+          ) : null}
           {(u.geneNames ?? []).slice(0, 6).map((g) => (
             <span key={g} className="rounded-md border border-border px-1.5 py-0.5">
               {g}
@@ -682,7 +723,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             no={scoreNo}
             title="方法学可行性评分"
             en="Feasibility Scores"
-            count={scores ? `${Number(scores.overall.score.toFixed(1))}/10 综合${oligo ? ' · 含聚集形式调整' : ''}` : undefined}
+            count={scores ? `${Number(scores.overall.score.toFixed(1))}/10 综合${oligo ? ' · 含聚集形式调整' : ''}${llmA ? (llmA.applied ? ' · AI 复核微调' : ' · AI 复核确认') : ''}` : undefined}
           />
         </div>
         <Card className="gap-0 rounded-xl border-border bg-card shadow-none">
@@ -690,13 +731,48 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             <div className="grid gap-5 sm:grid-cols-2">
               {scores && (
                 <>
-                  <ScoreBar label="X-ray 结晶学" item={scores.xray} delay={0.05} />
-                  <ScoreBar label="Cryo-EM 冷冻电镜" item={scores.cryoem} delay={0.15} />
-                  <ScoreBar label="NMR 核磁共振" item={scores.nmr} delay={0.25} />
-                  <ScoreBar label="总体可行性" item={scores.overall} delay={0.35} />
+                  <ScoreBar label="X-ray 结晶学" item={scores.xray} delay={0.05} delta={llmA?.xray ?? 0} />
+                  <ScoreBar label="Cryo-EM 冷冻电镜" item={scores.cryoem} delay={0.15} delta={llmA?.cryoem ?? 0} />
+                  <ScoreBar label="NMR 核磁共振" item={scores.nmr} delay={0.25} delta={llmA?.nmr ?? 0} />
+                  <ScoreBar label="总体可行性" item={scores.overall} delay={0.35} delta={llmA?.overall ?? 0} />
                 </>
               )}
             </div>
+            {llmA && (
+              <div className="flex flex-col gap-3 border-t border-dashed border-border pt-4">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/[0.08] px-2.5 text-xs font-semibold text-violet-700 dark:text-violet-400">
+                    <Sparkles className="size-3.5 shrink-0" aria-hidden />
+                    AI 复核
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {llmA.applied ? '已微调系统评分' : '复核确认维持系统评分'}
+                    {llmA.applied && llmA.overall !== 0 ? `（总体 ${llmA.overall > 0 ? '+' : '−'}${Math.abs(llmA.overall)}）` : ''}
+                  </span>
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                    <AdjChip label="X-ray" v={llmA.xray} />
+                    <AdjChip label="Cryo-EM" v={llmA.cryoem} />
+                    <AdjChip label="NMR" v={llmA.nmr} />
+                  </span>
+                  <span className="font-mono text-[11px] text-muted-foreground/70">
+                    置信度 {llmA.confidence === 'high' ? '高' : llmA.confidence === 'medium' ? '中' : '低'}
+                    {llmA.engine ? ` · ${llmA.engine}` : ''} · {(llmA.durationMs / 1000).toFixed(1)}s
+                  </span>
+                </div>
+                {(llmA.notes.xray || llmA.notes.cryoem || llmA.notes.nmr || llmA.notes.overall) && (
+                  <ul className="grid gap-1.5 text-xs leading-6 text-muted-foreground sm:grid-cols-1">
+                    {llmA.notes.xray && <li><b className="mr-1.5 font-semibold text-violet-700 dark:text-violet-400">X-ray</b>{llmA.notes.xray}</li>}
+                    {llmA.notes.cryoem && <li><b className="mr-1.5 font-semibold text-violet-700 dark:text-violet-400">Cryo-EM</b>{llmA.notes.cryoem}</li>}
+                    {llmA.notes.nmr && <li><b className="mr-1.5 font-semibold text-violet-700 dark:text-violet-400">NMR</b>{llmA.notes.nmr}</li>}
+                    {llmA.notes.overall && <li><b className="mr-1.5 font-semibold text-violet-700 dark:text-violet-400">总体</b>{llmA.notes.overall}</li>}
+                  </ul>
+                )}
+                <p className="text-xs leading-6 text-muted-foreground">
+                  系统规则分先行计算，随后由 AI 专家基于同一证据链复核（调整幅度经服务端钳制 ±2 以内，已计入上述分值）；评分数值仅供参考，最终可行性需结合实验条件判断。
+                </p>
+              </div>
+            )}
             {oligo && (
               <div className="flex flex-col gap-3 border-t border-dashed border-border pt-4">
                 <div className="flex flex-wrap items-center gap-2.5">

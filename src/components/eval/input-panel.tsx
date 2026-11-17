@@ -437,6 +437,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       requests = entries.map(e => ({
         mode: 'sequence' as const,
         sequence: e.seq,
+        // v2.16：FASTA 头随作业携带 — 序列靶点的命名证据（含 sp|ACC| 时后端直接归属 UniProt）
+        sequenceHeader: e.header || undefined,
         goal: trimmedGoal,
         ligands,
         options,
@@ -447,6 +449,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       const selectedSeq =
         selectedSequenceIndex != null
           ? (upload.parsed.sequences[selectedSequenceIndex]?.seq ?? undefined)
+          : undefined
+      // v2.16：评估表序列标签（如「EBOV GPΔMuc 33-308」）随作业携带 — 序列靶点命名证据
+      const selectedSeqHeader =
+        selectedSequenceIndex != null
+          ? (upload.parsed.sequences[selectedSequenceIndex]?.header ?? undefined)
           : undefined
       // 多 UniProt 靶点 → 每个靶点一份独立作业（串行执行，全部不落下）；
       // 仅选序列时 → 单作业。伴随序列随每个作业提交，由后端同靶点校验决定是否合并；
@@ -460,6 +467,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         uniprotFromDocx: u ?? undefined,
         sequence: selectedSeq,
         sequenceFromDocx: selectedSeq,
+        sequenceHeader: selectedSeqHeader,
         goal: trimmedGoal,
         ligands,
         evalTable,

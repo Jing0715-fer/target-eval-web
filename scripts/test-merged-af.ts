@@ -16,11 +16,17 @@ function check(name: string, cond: boolean, detail?: unknown) {
 }
 
 function mockTarget(uniprot: string, name: string, pdbCount: number, af: AlphafoldSummaryInfo): MergedTargetData {
-  const scores: Scores = {
+  const scores: Scores & { rationale: { xray: string; cryoem: string; nmr: string; overall: string } } = {
     xray: { score: 8, rating: '优先推荐' },
     cryoem: { score: 4, rating: '中等' },
     nmr: { score: 3, rating: '困难' },
     overall: { score: 7, rating: '优先推荐' },
+    rationale: {
+      xray: '高分辨率同源先例充分',
+      cryoem: '装配分子量低于 Cryo-EM 下限',
+      nmr: '中等大小可谱学解析',
+      overall: 'X-ray 优先，Cryo-EM 需复合物增重',
+    },
   }
   const pdbs: PdbEntry[] = Array.from({ length: pdbCount }, (_, i) => ({
     pdbId: `1AB${i}`,
@@ -112,6 +118,10 @@ async function main() {
   const errors: string[] = []
   page.on('pageerror', (e: Error) => errors.push(String(e).slice(0, 200)))
   await page.goto(`file://${htmlPath}`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  // v2.12+ 视图懒初始化：加载时只初始化当前可见视图（隐藏视图 canvas 尺寸 0 盲
+  // 初始化会空白）。触发全量初始化走真实路径 = beforeprint（打印前 initAll
+  // 同款机制），逐视图等待 af-live。
+  await page.evaluate(`window.dispatchEvent(new Event('beforeprint'))`)
   try {
     await page.waitForFunction(
       `document.querySelectorAll('.af-stage[data-maf]').length === 3 && document.querySelectorAll('.af-stage.af-live, .af-stage.af-fail').length === 3`,
@@ -126,8 +136,10 @@ async function main() {
   console.log(`  af-live: ${liveCount} · af-fail: ${failCount}`)
   check('3 个视图全部 af-live（交互初始化成功）', liveCount === 3 && failCount === 0, { liveCount, failCount })
   check('无页面脚本错误', errors.length === 0, errors)
-  // 滚到简报章节截图留档
-  await page.evaluate(`document.querySelector('#mini-reports').scrollIntoView()`)
+  // 深链进入第一个靶点视图截图留档（v2.12+ 单独评估页结构）
+  await page.evaluate(`location.hash = 'view-target-P69905'`)
+  await new Promise(r => setTimeout(r, 600))
+  await page.evaluate(`(document.querySelector('#view-target-P69905') || document.body).scrollIntoView()`)
   await new Promise(r => setTimeout(r, 800))
   await page.screenshot({ path: '/tmp/merged-af-mini.png', type: 'png' })
   check('截图已保存', true)

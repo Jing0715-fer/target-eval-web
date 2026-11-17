@@ -33,12 +33,13 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
-import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure } from './types'
+import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
 import { synthesizeScoreRationale } from './score'
 import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { loadCachedEsmfoldModel } from './esmfold'
 import { splitQaChapter, parseInsightQa, QA_CHAPTER_TITLE } from './qa-chapter'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
@@ -74,6 +75,9 @@ export interface MergedTargetData {
   mwAugment?: MwAugmentAnalysis | null
   /** v2.9：AlphaFold 预测结构信息（v2.0+ 作业存于摘要；旧作业在渲染时按需补齐） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入靶点；
+   *  模型文本按 cacheKey 从 db/cache/esmfold 直读入公共 MODELS 池） */
+  esmfold?: EsmfoldSummaryInfo | null
   /** v2.13：该靶点独立 LLM 报告全文（批次评估时按单靶点流程生成并持久化；
    *  旧批次作业无此字段 — 单独评估页回退合并报告的各靶点综述） */
   reportMarkdown?: string | null
@@ -83,6 +87,8 @@ export interface MergedTargetData {
   interaction?: InteractionAnalysis | null
   /** UniProt 条目名（单独评估页 meta-grid 展示） */
   entryName?: string
+  /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 单独评估页题目/刊头消费） */
+  targetIdentity?: TargetIdentityInfo | null
 }
 
 /** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属）
@@ -116,6 +122,10 @@ export interface MergedTargetLite {
   construct?: ConstructInfo
   /** v2.9：AlphaFold 预测结构元数据（前端简报卡展示；交互 3D 视图见 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
+  esmfold?: EsmfoldSummaryInfo | null
+  /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 分组头/简报卡展示） */
+  targetIdentity?: TargetIdentityInfo | null
 }
 
 /** 轻量化：网页合并视图（v1.24 起全部携带 — PDB/BLAST/文献不再截断，全部展示） */
@@ -144,6 +154,9 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     gapText: t.gapText,
     construct: t.construct,
     alphafold: t.alphafold,
+    esmfold: t.esmfold ?? null,
+    // v2.16：靶点身份（前端展示与单独评估页题目用）
+    targetIdentity: t.targetIdentity ?? null,
   }
 }
 
@@ -162,8 +175,10 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       ligands?: LigandResolution[]
       mwAugment?: MwAugmentAnalysis | null
       alphafold?: AlphafoldSummaryInfo
+      esmfold?: EsmfoldSummaryInfo
       interaction?: InteractionAnalysis | null
       coveredRanges?: Array<[number, number]>
+      targetIdentity?: TargetIdentityInfo
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -212,6 +227,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       ligands: summary.ligands,
       mwAugment: summary.mwAugment ?? null,
       alphafold: summary.alphafold,
+      // v2.15：ESMFold 兜底预测（AFDB 无收录/纯序列输入靶点）
+      esmfold: summary.esmfold ?? null,
       // v2.13：单独评估页所需 — 独立 LLM 报告 / 覆盖区间 / 互作证据 / 条目名
       reportMarkdown: job.reportMarkdown,
       coverage: summary.coveredRanges
@@ -219,6 +236,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
         : null,
       interaction: summary.interaction ?? null,
       entryName: summary.uniprot?.entryName,
+      // v2.16：序列靶点身份识别链（题目/刊头不再「未知靶点」）
+      targetIdentity: summary.targetIdentity ?? null,
     })
   }
   return targets
@@ -237,10 +256,26 @@ const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目
 function targetDigest(t: MergedTargetData): string {
   const lines: string[] = []
   lines.push(`### ${t.label}${t.proteinName && t.proteinName !== t.label ? `（${t.proteinName}）` : ''}`)
+  // v2.16：序列靶点身份证据（无 UniProt 归属时 — LLM 用识别名称呼靶点并注明推断性质）
+  if (!t.uniprotId && t.targetIdentity) {
+    const ti = t.targetIdentity
+    lines.push(`靶点身份（${ti.sourceLabel}${ti.identity != null ? ` · 一致性 ${Math.round(ti.identity)}%` : ''}${ti.uniprotId ? ` · 最近条目 ${ti.uniprotId}` : ''}）: ${ti.name}${ti.note ? `（${ti.note.slice(0, 90)}）` : ''} — 用该名称称呼靶点并标注「序列靶点」；推断身份须注明依据，不得当作已确认 UniProt 条目`)
+  }
   if (t.geneNames.length) lines.push(`基因: ${t.geneNames.slice(0, 5).join(', ')} · 物种: ${t.organism || '—'} · 长度: ${t.sequenceLength} aa`)
   lines.push(`评分: X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10 · 总体 ${t.scores.overall.score}/10（${t.scores.overall.rating}）`)
+  // v2.18：AI 复核（LLM 智能调分）— 各靶点小节的必写维度
+  const llmA = t.scores.llmAdjust
+  if (llmA) {
+    const fmt = (v: number) => (v > 0 ? `+${v}` : v < 0 ? `${v}` : '±0')
+    lines.push(`AI 复核: ${llmA.applied ? '已微调系统评分' : '确认维持系统评分'}（X-ray ${fmt(llmA.xray)} / Cryo-EM ${fmt(llmA.cryoem)} / NMR ${fmt(llmA.nmr)}；置信度${llmA.confidence === 'high' ? '高' : llmA.confidence === 'medium' ? '中' : '低'}）— ${llmA.notes.overall || '三方法复核意见综合'}；逐方法意见：X-ray ${llmA.notes.xray || '维持'}；Cryo-EM ${llmA.notes.cryoem || '维持'}；NMR ${llmA.notes.nmr || '维持'}（调整已计入上述分值，报告一律使用调整后分值）`)
+  }
   const ms = t.methodStats
   lines.push(`PDB 结构: ${t.directPdbs.length} 个（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）${ms.bestResolution != null ? `，最佳 ${ms.bestResolution}Å` : ''} · 覆盖率 ${t.coveragePercent}%${t.coverageText ? `（已覆盖: ${t.coverageText.slice(0, 160)}）` : ''}${t.gapText ? ` · 未覆盖区间: ${t.gapText.slice(0, 160)}` : ''} · 配体 ${t.ligandCount} 种 · 文献 ${t.literatureCount} 篇`)
+  // v2.14：方法先例分布 — Cryo-EM 占主导时显性提示（小靶点的已有 EM 结构必然为复合物/增重形式，
+  // 推荐方法不得仅因单体分子量小而排除 Cryo-EM）
+  if (t.directPdbs.length > 0 && ms.cryoemCount > 0 && ms.cryoemCount >= ms.xrayCount + ms.nmrCount) {
+    lines.push(`方法先例: ${ms.cryoemCount}/${t.directPdbs.length} 个已有结构为 Cryo-EM${ms.cryoemCount === t.directPdbs.length ? '（全部）' : ''} — 该靶点以复合物/装配形式被 Cryo-EM 解析已有直接先例，方法推荐应以此为主要依据（不得仅因单体分子量小而将 Cryo-EM 排除或降为末选）`)
+  }
   // v2.0：配体归一数据（批次内共享 — 输入相同，结果一致）
   if (t.ligands?.length) {
     const okLig = t.ligands.filter(l => l.ok)
@@ -494,7 +529,7 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 
 ## 各靶点结构可行性综述
 对批次中每个靶点输出一个小节（### 靶点名），每节包含（详细程度不低于独立单靶点报告）：
-- **一句话结论**：该靶点结构解析可行性如何、推荐方法
+- **一句话结论**：该靶点结构解析可行性如何、推荐方法（方法先例行为「Cryo-EM 占主导/全部」时，推荐方法必须优先论证沿已有 Cryo-EM 复合物/装配路线 — 禁止仅因单体分子量小而推荐 X-ray/NMR 并将 Cryo-EM 降为末选；引用具体 PDB 与分辨率作先例依据）
 - **已有结构研究概况**：引用 PDB 数量/方法分布/最佳分辨率/覆盖率（含覆盖区间与空白区间）/高频配体/结构释放年份分布（研究热度变化）
 - **同源结构证据**：BLAST/序列检索命中概况（最高一致性/命中数）；命中为共享自家族代表时必须如实说明（未单独检索、共享来源），不得虚构
 - **文献证据**：引用 1-2 篇代表性文献（PMID + 一句话贡献，优先结构解析文献）
@@ -541,9 +576,6 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 
 // ─── 合并报告 HTML 渲染（期刊风，与单靶点报告同一设计语言）──────────────────
 
-function scoreCell(item: { score: number; rating: string }): string {
-  return `${item.score}/10 · ${esc(item.rating)}`
-}
 
 /**
  * v2.12：拆出 markdown 中的「各靶点结构可行性综述」章节 — 各 ### 小节按
@@ -720,7 +752,24 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       afBudgetLeft -= st.pdbText.length
     } catch { /* 视图降级 — 统计信息 */ }
   }))
-  const af3dBundle = afViews.size > 0 ? await ensure3DmolBundle() : null
+  // v2.15：ESMFold 兜底模型入公共 MODELS 池（键 esm:{cacheKey} — 与 AF 模型键空间
+  // 不碰撞）。AFDB 有模型的靶点不会有 esmfold 摘要（管线引擎互斥），此处仅对
+  // 无 AFDB 收录的靶点补充。纯磁盘直读（毫秒级 — 单独评估作业 af2 相位已写缓存），
+  // 超出批次预算/缓存缺失时降级统计卡。不联网重取（合并报告生成走低频后台任务，
+  // 公共服务配额宝贵；重新评估该靶点即可回填）。
+  interface EsmMiniView { pdbText: string; sequenceLength: number; globalPlddt: number | null; fracVeryHigh: number | null }
+  const esmViews = new Map<string, EsmMiniView>()
+  await Promise.all(targets.map(async t => {
+    if (t.alphafold?.available || !t.esmfold?.available || !t.esmfold.cacheKey) return
+    try {
+      const cached = await loadCachedEsmfoldModel(t.esmfold.cacheKey)
+      if (!cached) return
+      if (cached.pdbText.length > afBudgetLeft) return
+      esmViews.set(t.esmfold.cacheKey, { pdbText: cached.pdbText, sequenceLength: cached.meta.sequenceLength, globalPlddt: t.esmfold.globalPlddt ?? cached.meta.meanPlddt, fracVeryHigh: t.esmfold.fracVeryHigh ?? cached.meta.fracVeryHigh })
+      afBudgetLeft -= cached.pdbText.length
+    } catch { /* 视图降级 — 统计信息 */ }
+  }))
+  const af3dBundle = afViews.size > 0 || esmViews.size > 0 ? await ensure3DmolBundle() : null
 
   // ── v2.13：各靶点单独评估页 — 直接渲染完整单靶点报告主体 ───────────────
   // v2.9「简报卡」退役：每靶点页复用 renderSingleReportBody（单靶点报告同款
@@ -733,8 +782,14 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // MODELS 映射为 UniProt → 模型 PDB 文本（纯字符串 — plddtStyleApplyJs 直接消费）
   // v2.12：懒初始化 — 只初始化「当前可见视图」内的阶段（隐藏视图的 canvas 尺寸
   // 为 0，盲初始化会渲染出空白）；视图切换时补初始化，打印前全量初始化（海报补齐）
-  const afModelsJson = JSON.stringify(Object.fromEntries([...afViews].map(([k, v]) => [k, v.pdbText]))).replace(/<\//g, '<\\/')
-  const mtrViewerJs = afViews.size > 0 ? `
+  // v2.15：ESMFold 模型并入同一 MODELS 池（键 esm:{cacheKey} — 与 AF 模型键空间
+  // 不碰撞；值统一为 PDB 文本字符串，mtrViewerJs 的 addModel(pdb,'pdb') 直接消费）
+  const afModelEntries: Array<[string, string]> = [
+    ...[...afViews].map(([k, v]) => [k, v.pdbText] as [string, string]),
+    ...[...esmViews].map(([k, v]) => [`esm:${k}`, v.pdbText] as [string, string]),
+  ]
+  const afModelsJson = JSON.stringify(Object.fromEntries(afModelEntries)).replace(/<\//g, '<\\/')
+  const mtrViewerJs = afViews.size > 0 || esmViews.size > 0 ? `
     ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
     <script>
     (function () {
@@ -972,10 +1027,10 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const ms = t.methodStats
     return `
     <div class="tgt-card" data-goto="target-${targetKeyOf(t)}" title="查看 ${esc(t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
-      <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : ''}</div>
+      <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : t.targetIdentity ? ` <span class="tgt-idsrc" title="${esc(t.targetIdentity.note ?? t.targetIdentity.sourceLabel)}">${esc(t.targetIdentity.sourceLabel)}${t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}</span>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
-      <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
+      <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.llmAdjust ? `<span class="tgt-ai-adj${t.scores.llmAdjust.applied ? '' : ' keep'}" title="${esc(t.scores.llmAdjust.notes.overall || 'AI 复核意见')}">AI 复核${t.scores.llmAdjust.applied ? (() => { const d = Math.trunc(Number(t.scores.llmAdjust!.overall)) || 0; return d > 0 ? ` +${d}` : d < 0 ? ` −${Math.abs(d)}` : '' })() : '维持'}</span>` : ''}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
       <div class="tgt-stats">
         <span>PDB <b>${t.directPdbs.length}</b></span>
         <span>${ms.bestResolution != null ? `最佳 <b>${ms.bestResolution.toFixed(2)}Å</b>` : '无直接结构'}</span>
@@ -1197,13 +1252,21 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const prev = i > 0 ? targets[i - 1] : null
     const next = i < targets.length - 1 ? targets[i + 1] : null
     // AF 交互视图（公共 MODELS 池）：本次获取的可内嵌模型 > 作业摘要元数据（降级统计卡）
+    // v2.15：AFDB 无收录的靶点（esmfold 摘要 available）→ ESMFold 兜底视图（池键
+    // esm:{cacheKey}，engine='esmfold' — 卡片标注/外链切换 ESM Atlas 口径）；
+    // 缓存缺失/超预算时降级统计卡（元数据 + esmatlas 链接）。
     const view = t.uniprotId ? afViews.get(t.uniprotId) : undefined
+    const esmView = t.esmfold?.cacheKey ? esmViews.get(t.esmfold.cacheKey) : undefined
     const afSummary = (t.alphafold?.available ? t.alphafold : (t.uniprotId ? afMetaFill.get(t.uniprotId) : undefined)) ?? t.alphafold
     const afPooled = view && t.uniprotId
       ? { mafKey: t.uniprotId, modelId: view.modelId, version: view.version, globalPlddt: view.globalPlddt, fracVeryHigh: view.fracVeryHigh, pdbKb: Math.max(1, Math.round(view.pdbText.length / 1024)) }
       : afSummary?.available && t.uniprotId
         ? { mafKey: t.uniprotId, modelId: afSummary.modelId ?? 'AF 模型', version: afSummary.version ?? 1, globalPlddt: afSummary.globalPlddt ?? null, fracVeryHigh: afSummary.fracVeryHigh ?? null, pdbKb: 0, metaOnly: true }
-        : undefined
+        : esmView && t.esmfold?.available && t.esmfold.cacheKey
+          ? { mafKey: `esm:${t.esmfold.cacheKey}`, modelId: 'ESMFold v1', version: 1, globalPlddt: esmView.globalPlddt, fracVeryHigh: esmView.fracVeryHigh, pdbKb: Math.max(1, Math.round(esmView.pdbText.length / 1024)), engine: 'esmfold' as const, sequenceLength: esmView.sequenceLength }
+          : t.esmfold?.available
+            ? { mafKey: `esm:${t.esmfold.cacheKey ?? ''}`, modelId: 'ESMFold v1', version: 1, globalPlddt: t.esmfold.globalPlddt ?? null, fracVeryHigh: t.esmfold.fracVeryHigh ?? null, pdbKb: 0, metaOnly: true, engine: 'esmfold' as const, sequenceLength: t.esmfold.sequenceLength }
+            : undefined
     // LLM 章节来源：独立报告（新批次）→ 合并综述（旧批次回退）→ 说明占位
     const ownMd = t.reportMarkdown?.trim() || ''
     const reviewMd = reviewByTarget.get(t.uniprotId ?? t.label) || ''
@@ -1221,6 +1284,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
         geneNames: t.geneNames, organism: t.organism, sequenceLength: t.sequenceLength,
       } : null,
       sequence: '',
+      // v2.16：序列靶点身份（题目/刊头用识别名，不再「序列靶点评估」笼统命名）
+      targetIdentity: t.targetIdentity ?? undefined,
       goal: input.goal,
       goalHints: [],
       insights: input.insights ?? undefined,
@@ -1238,6 +1303,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       oligomer: t.oligomer,
       ligands: t.ligands,
       alphafold: t.alphafold,
+      esmfold: t.esmfold ?? undefined,
       mwAugment: t.mwAugment ?? undefined,
       interaction: t.interaction ?? undefined,
     }
@@ -1354,7 +1420,7 @@ ${SINGLE_REPORT_CSS}
   .tgt-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; margin:14px 0; }
   .tgt-card { border:1px solid var(--line); border-radius:5px; padding:12px 14px; background:#fff; cursor:pointer; transition:border-color .15s, box-shadow .15s; }
   .tgt-card:hover { border-color:#a7f3d0; box-shadow:0 2px 10px rgba(4,120,87,.10); }
-  .tgt-name { font-weight:600; font-size:14px; color:var(--ink); } .tgt-name a { color:var(--accent-2); text-decoration:none; }
+  .tgt-name { font-weight:600; font-size:14px; color:var(--ink); } .tgt-name a { color:var(--accent-2); text-decoration:none; } .tgt-idsrc { font-size:10.5px; font-weight:500; color:#92400e; background:#fef3c7; border-radius:3px; padding:1px 6px; margin-left:4px; vertical-align:1px; }
   .tgt-meta { font-size:11.5px; color:var(--sub); margin-top:3px; }
   .tgt-score { font-size:12px; color:var(--accent-2); margin-top:5px; }
   .tgt-open { margin-top:7px; padding-top:7px; border-top:1px dashed var(--line); font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.5px; color:var(--accent-2); }
@@ -1366,6 +1432,9 @@ ${SINGLE_REPORT_CSS}
   .tgt-oligo .oligo-stoich { font-size:10px; padding:0 7px; }
   .tgt-oligo-conf { font-size:10.5px; color:var(--sub); }
   .tgt-oligo-adj { margin-left:6px; font-size:10px; color:#047857; border:1px solid #a7f3d0; border-radius:99px; padding:0 7px; background:#ecfdf5; white-space:nowrap; }
+  /* v2.18：AI 复核徽标（LLM 智能调分）— 紫色系与单靶点报告同源视觉 */
+  .tgt-ai-adj { margin-left:6px; font-size:10px; color:#5b21b6; border:1px solid #c4b5fd; border-radius:99px; padding:0 7px; background:#ede9fe; white-space:nowrap; cursor:help; }
+  .tgt-ai-adj.keep { color:#6d28d9; border-color:#ddd6fe; background:#f5f3ff; }
   /* 目录：共有结构条目突出 + 靶点速览导航 */
   .toc-shared { color:#065f46; font-weight:700; }
   .toc-shared::before { content:'◈ '; color:var(--accent-2); }

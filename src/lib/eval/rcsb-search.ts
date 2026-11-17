@@ -87,16 +87,21 @@ export async function searchRcsbHomologs(
   const data = (await res.json()) as { result_set?: RcsbSearchHit[]; total_count?: number }
   const rows = data.result_set ?? []
 
-  // polymer_entity 标识形如 "3QWQ_1"（条目_id 实体序号）→ 取 PDB 条目号；同一 PDB 多实体取最高 identity
+  // polymer_entity 标识形如 "3QWQ_1"（条目_id 实体序号）→ 取 PDB 条目号 + 实体序号
+  //（v2.16：实体序号保留在 entityId — 复合物结构按命中实体归属 UniProt，避免取错链）；
+  // 同一 PDB 多实体取最高 identity（连同 entityId 一并保留胜者）
   const seen = new Map<string, BlastHit>()
   for (const row of rows) {
     const ident = (row.identifier ?? '').trim()
     const pdbId = ident.split('_')[0]?.toUpperCase() ?? ''
     if (!/^[0-9][A-Z0-9]{3}$/.test(pdbId)) continue
+    const entityIdRaw = ident.split('_')[1]
+    const entityId = /^\d+$/.test(entityIdRaw ?? '') ? parseInt(entityIdRaw as string, 10) : undefined
     const ctx = row.services?.[0]?.nodes?.[0]?.match_context?.[0]
     if (!ctx || typeof ctx.sequence_identity !== 'number') continue
     const hit: BlastHit = {
       pdbId,
+      entityId,
       description: '', // 由 enrichBlastHits 经 RCSB data API 补结构标题
       identity: Math.round(ctx.sequence_identity * 1000) / 10,
       evalue: typeof ctx.evalue === 'number' ? ctx.evalue : 0,
@@ -122,7 +127,8 @@ export async function searchRcsbHomologs(
 
 /**
  * 查询某 PDB 条目指定实体的 UniProt accession（序列模式回填元数据用）。
- * 近似取主实体（entity 1）— 仅在 identity ≥85% 的近同源回填场景调用，可接受。
+ * v2.16：entityNum 由 RCSB 序列检索命中的实体序号传入（复合物按命中链归属 —
+ * 不再近似取主实体；NCBI pdbaa 命中无实体信息时仍缺省 entity 1）。
  */
 export async function fetchUniprotForEntryEntity(entryId: string, entityNum = 1): Promise<string | null> {
   try {

@@ -23,11 +23,23 @@
  *    组分有结构 → 组装先例与组分模板可用（X-ray +1）；curated 装配总分子量
  *    ≥100 kDa → Cryo-EM +1（curated 化学计量比 mwAugment 伙伴推断可靠，
  *    接管时抑制 mwAugment/寡聚维度的 Cryo-EM 分量，避免双重加分）
+ *  - v2.14：已有结构方法先例对评分的约束（用户反馈：小分子量靶点已有结构全部为
+ *    Cryo-EM 复合物时，不得仅凭分子量推荐 X-ray/NMR — 不符合科学事实）：
+ *    · 已有 Cryo-EM 结构 = 该靶点以复合物/增重形式被 Cryo-EM 解析的直接先例
+ *      （<50 kDa 单体无法单独冷冻电镜解析）→ <300 aa 小分子量惩罚（-2）不再适用；
+ *    · BLAST「无同源先例」扣分（-1）仅在无任何直接结构时适用 — 同源检索跳过/
+ *      失败不应反向压低已有直接结构（更强先例）靶点的评分；
+ *    · rationale 按先例事实表述（复合物路线可行），不再按「改用其他方法」表述
  */
 import type { InteractionAnalysis, InteractionAdjustInfo, MethodStats, MwAugmentAdjustInfo, MwAugmentAnalysis, OligomerAdjustInfo, OligomerAnalysis, PdbEntry, Scores, UniprotFeature, BlastHit } from './types'
 
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n))
+}
+
+/** v2.18：导出评级标签（score-llm.ts AI 复核调整后重算评级用） */
+export function ratingLabel(score: number): string {
+  return `${rating(score)}·${ratingZh(score)}`
 }
 
 function rating(score: number): string {
@@ -62,6 +74,9 @@ export interface ScoreResult extends Scores {
   /** 各方法的一句话依据（报告用） */
   rationale: { xray: string; cryoem: string; nmr: string; overall: string }
 }
+
+/** computeScores 完整返回类型（含方法统计 — v2.18 导出供 score-llm 复核层复用） */
+export type FullScoreResult = ScoreResult & { methodStats: MethodStats }
 
 /**
  * v1.26/v1.27：分子量增重策略对评分的调整（小分子量靶点维度）。
@@ -242,7 +257,7 @@ export function computeOligomerAdjust(
   }
 }
 
-export function computeScores(input: ScoreInput): ScoreResult & { methodStats: MethodStats } {
+export function computeScores(input: ScoreInput): FullScoreResult {
   const { sequenceLength, directPdbs, blastHits, coveragePercent } = input
 
   const tmCount = input.features.filter(f => f.type === 'Transmembrane').length
@@ -258,6 +273,12 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
   const highResCryoem = directPdbs.filter(p => p.isCryoem && p.resolution != null && p.resolution <= 3.5).length
   const bestResolution = directPdbs.reduce<number | null>(
     (best, p) => (p.resolution != null && (best == null || p.resolution < best) ? p.resolution : best), null)
+  const bestCryoemRes = directPdbs.filter(p => p.isCryoem && p.resolution != null).reduce<number | null>(
+    (best, p) => (best == null || p.resolution! < best ? p.resolution! : best), null)
+  // v2.14：已有 Cryo-EM 结构先例（对 <50 kDa 小靶点意味着复合物/增重路线已被证明 —
+  // 单体颗粒无法单独冷冻电镜解析，已有 EM 条目必然为复合物或含技术组分）
+  const hasCryoemPrecedent = cryoemCount > 0
+  const allCryoem = hasCryoemPrecedent && xrayCount === 0 && nmrCount === 0
 
   // ── 聚集形式（寡聚态）调整（v1.25：整数幅度，后置于舍入之后 → 必然体现在最终分）──
   const oligo = computeOligomerAdjust(input.oligomer, sequenceLength)
@@ -290,7 +311,7 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
   let cryoem = 5
   if (sequenceLength > 1500) cryoem += 3
   else if (sequenceLength >= 500) cryoem += 1
-  else if (sequenceLength < 300) cryoem -= 2
+  else if (sequenceLength < 300) cryoem -= hasCryoemPrecedent ? 0 : 2 // v2.14：已有 Cryo-EM 先例时小分子量惩罚不适用（装配路线已被证明，仅样品制备需沿先例组装）
   if (tmCount >= 2) cryoem += 2        // 膜蛋白是 Cryo-EM 强项
   if (highResCryoem > 0) cryoem += 1.5
   if (domainCount >= 3 && sequenceLength < 600) cryoem -= 0.5 // 多结构域小蛋白柔性强
@@ -307,7 +328,10 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
 
   // ── BLAST 同源加成（方法无关的技术先例信号，整数）──
   const bestIdentity = blastHits.length > 0 ? Math.max(...blastHits.map(b => b.identity)) : 0
-  const boost = bestIdentity >= 80 ? 2 : bestIdentity >= 50 ? 1 : bestIdentity >= 30 ? 0 : -1
+  // v2.14：「无同源先例」扣分仅在无任何直接结构时适用 — 已有直接结构（尤其 Cryo-EM
+  // 复合物先例）是强于同源推断的结构先例，同源检索跳过/失败不应反向压低评分
+  const noPrecedentPenalty = directPdbs.length > 0 ? 0 : -1
+  const boost = bestIdentity >= 80 ? 2 : bestIdentity >= 50 ? 1 : bestIdentity >= 30 ? 0 : noPrecedentPenalty
 
   // ── 调整叠加（整数、最后应用 → 调整值即最终分变化值）──
   const xrayFinal = clamp(xray + boost + (oligo?.xray ?? 0) + (mwAdj?.xray ?? 0) + (intAdj?.xray ?? 0), 1, 10)
@@ -331,7 +355,13 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
     intAdj && intAdj.xray > 0 ? `互作复合物加成 ${fmtAdj(intAdj.xray)}：curated 复合物（${intAdj.complexAc}）组分有结构 — 组装先例与组分模板可用` : '',
   ].filter(Boolean).join('；')
   r.cryoem = [
-    sequenceLength > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间' : sequenceLength >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）' : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
+    // v2.14：小分子量 + 已有 Cryo-EM 先例 → 先例即复合物/增重路线被证明的直接证据，
+    // 不得再按「改用其他方法」表述（科学事实：该靶点已被 Cryo-EM 反复解析）
+    sequenceLength > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间'
+      : sequenceLength >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）'
+        : hasCryoemPrecedent
+          ? `小分子量（<500 aa）单体颗粒成像困难，但已有 ${cryoemCount} 个 Cryo-EM 结构先例${allCryoem ? '（全部已有结构均为 Cryo-EM）' : ''}${bestCryoemRes != null ? `，最佳 ${bestCryoemRes}Å` : ''} — 靶点以复合物/装配形式可被 Cryo-EM 解析，沿已有组装路线可行`
+          : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
     tmCount >= 2 ? '多次跨膜膜蛋白，Cryo-EM 是首选方法' : '',
     highResCryoem > 0 ? `已有 ${highResCryoem} 个 ≤3.5Å 的 Cryo-EM 结构` : cryoemCount > 0 ? `已有 ${cryoemCount} 个 Cryo-EM 结构` : '',
     oligo && oligo.cryoem > 0 && !mwTakeover && !intTakeover ? `聚集形式加成 ${fmtAdj(oligo.cryoem)}：寡聚装配使有效分子量增大/复合物特征形貌利于 Cryo-EM` : '',
@@ -341,6 +371,7 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
   r.nmr = [
     sequenceLength < 300 ? '小分子量（<300 aa），NMR 适合' : sequenceLength < 500 ? '中等偏大，NMR 周期较长' : '分子量过大（>500 aa），超出 NMR 常规范围',
     tmCount >= 1 ? '含跨膜区，NMR 样品制备困难' : '',
+    nmrCount > 0 ? `已有 ${nmrCount} 个 NMR 结构先例` : allCryoem ? `无 NMR 结构先例（已有 ${cryoemCount} 个结构全部以 Cryo-EM 解析 — 单体路线未被该靶点的研究实践采用）` : '',
     oligo && oligo.nmr < 0 ? `聚集形式扣分 ${fmtAdj(oligo.nmr)}：寡聚/复合物形式使表观分子量超出 NMR 适用范围` : '',
   ].filter(Boolean).join('；')
   r.overall = `序列覆盖率 ${coveragePercent}%；已有结构 ${directPdbs.length} 个（X-ray ${xrayCount} / Cryo-EM ${cryoemCount} / NMR ${nmrCount}）${bestResolution != null ? `，最佳分辨率 ${bestResolution}Å` : ''}；BLAST 同源加成 ${fmtAdj(boost)}` +
@@ -367,6 +398,8 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
  * 从仍留存于摘要的确定性数据（序列长度/方法统计/BLAST/覆盖率/调整明细，
  * 调整 note 为评估时原文）重建各方法一句话依据，口吻与 computeScores 一致，
  * 供各靶点单独评估页的评分卡展示 — 内容不虚构，缺失信号（跨膜区等）不臆测。
+ * v2.18.1（代码审查 P3-3）：摘要至今均不持久化 rationale（合并报告全部走本合成）—
+ * 带 llmAdjust 的作业在此补齐「AI 复核」短语，口径与 applyLlmScoreAdjust 一致。
  */
 export function synthesizeScoreRationale(input: {
   sequenceLength: number
@@ -384,8 +417,22 @@ export function synthesizeScoreRationale(input: {
   const oligo = input.scores.oligomerAdjust
   const mwAdj = input.scores.mwAugmentAdjust
   const intAdj = input.scores.interactionAdjust
+  // v2.18.1：AI 复核短语（与 applyLlmScoreAdjust 同款拼接 — 合并报告各靶点页一致性）
+  const llmA = input.scores.llmAdjust
+  const aiSuffix = (delta: number, note: string) => {
+    const d = Math.trunc(Number(delta)) || 0
+    const verb = d > 0 ? `AI 复核上调 ${d}` : d < 0 ? `AI 复核下调 ${-d}` : 'AI 复核维持'
+    return `；${verb}：${note || '未给出补充理由'}`
+  }
+  const aiX = llmA ? aiSuffix(llmA.xray, llmA.notes.xray) : ''
+  const aiC = llmA ? aiSuffix(llmA.cryoem, llmA.notes.cryoem) : ''
+  const aiN = llmA ? aiSuffix(llmA.nmr, llmA.notes.nmr) : ''
+  const aiO = llmA ? aiSuffix(llmA.overall, llmA.notes.overall || '三方法复核意见综合') : ''
   const ms0: Pick<MethodStats, 'xrayCount' | 'cryoemCount' | 'nmrCount' | 'bestResolution'> =
     ms ?? { xrayCount: 0, cryoemCount: 0, nmrCount: 0, bestResolution: null }
+  // v2.14：与 computeScores 同口径 — 已有 Cryo-EM 先例时小分子量不按「改用其他方法」表述
+  const hasCryoemPrecedent = ms0.cryoemCount > 0
+  const allCryoem = hasCryoemPrecedent && ms0.xrayCount === 0 && ms0.nmrCount === 0
   return {
     xray: [
       `${L} aa ${L < 500 ? '（适合结晶的长度区间）' : '（长于典型可结晶片段，需截短构建）'}`,
@@ -393,22 +440,25 @@ export function synthesizeScoreRationale(input: {
       idPart,
       oligo && oligo.xray < 0 ? `聚集形式调整 ${fmtAdj(oligo.xray)}：${oligo.note}` : '',
       intAdj && intAdj.xray > 0 ? `互作复合物加成 ${fmtAdj(intAdj.xray)}：${intAdj.note}` : '',
-    ].filter(Boolean).join('；'),
+    ].filter(Boolean).join('；') + aiX,
     cryoem: [
-      L > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间' : L >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）' : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
+      L > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间' : L >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）'
+        : hasCryoemPrecedent
+          ? `小分子量（<500 aa）单体颗粒成像困难，但已有 ${ms0.cryoemCount} 个 Cryo-EM 结构先例${allCryoem ? '（全部已有结构均为 Cryo-EM）' : ''}${ms0.bestResolution != null ? `，最佳 ${ms0.bestResolution}Å` : ''} — 靶点以复合物/装配形式可被 Cryo-EM 解析，沿已有组装路线可行`
+          : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
       ms0.cryoemCount > 0 ? `已有 ${ms0.cryoemCount} 个 Cryo-EM 结构${bestRes}` : '',
       oligo && oligo.cryoem > 0 ? `聚集形式加成 ${fmtAdj(oligo.cryoem)}：${oligo.note}` : '',
       mwAdj ? `分子量维度（${mwAdj.note}）` : '',
       intAdj ? `互作复合物维度：${intAdj.note}` : '',
-    ].filter(Boolean).join('；'),
+    ].filter(Boolean).join('；') + aiC,
     nmr: [
       L < 300 ? '小分子量（<300 aa），NMR 适合' : L < 500 ? '中等偏大，NMR 周期较长' : '分子量过大（>500 aa），超出 NMR 常规范围',
-      ms0.nmrCount > 0 ? `已有 ${ms0.nmrCount} 个 NMR 结构` : '',
+      ms0.nmrCount > 0 ? `已有 ${ms0.nmrCount} 个 NMR 结构` : allCryoem ? `无 NMR 结构先例（已有 ${ms0.cryoemCount} 个结构全部以 Cryo-EM 解析）` : '',
       oligo && oligo.nmr < 0 ? `聚集形式扣分 ${fmtAdj(oligo.nmr)}：${oligo.note}` : '',
-    ].filter(Boolean).join('；'),
+    ].filter(Boolean).join('；') + aiN,
     overall: `序列覆盖率 ${Math.round(input.coveragePercent)}%；已有结构 ${input.directPdbCount} 个（X-ray ${ms0.xrayCount} / Cryo-EM ${ms0.cryoemCount} / NMR ${ms0.nmrCount}）${bestRes}${idPart ? `；${idPart}` : ''}` +
       (oligo ? `；聚集形式调整（${oligo.label}${oligo.stoichiometry ? ` · ${oligo.stoichiometry}` : ''}）：X-ray ${fmtAdj(oligo.xray)} / Cryo-EM ${fmtAdj(oligo.cryoem)} / NMR ${fmtAdj(oligo.nmr)}` : '') +
       (mwAdj ? `；分子量增重调整：Cryo-EM ${fmtAdj(mwAdj.cryoem)} — ${mwAdj.note}` : '') +
-      (intAdj ? `；互作复合物证据${intAdj.level === 'curated' ? `（${intAdj.complexAc}）` : '（binary 伙伴）'}：X-ray ${fmtAdj(intAdj.xray)} / Cryo-EM ${fmtAdj(intAdj.cryoem)} / NMR ${fmtAdj(intAdj.nmr)}` : ''),
+      (intAdj ? `；互作复合物证据${intAdj.level === 'curated' ? `（${intAdj.complexAc}）` : '（binary 伙伴）'}：X-ray ${fmtAdj(intAdj.xray)} / Cryo-EM ${fmtAdj(intAdj.cryoem)} / NMR ${fmtAdj(intAdj.nmr)}` : '') + aiO,
   }
 }

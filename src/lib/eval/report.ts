@@ -7,9 +7,9 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, UniprotInfo } from './types'
+import type { BlastHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, TargetIdentityInfo, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
-import type { AlphafoldSummaryInfo } from './types'
+import type { AlphafoldSummaryInfo, EsmfoldSummaryInfo } from './types'
 import type { LigandResolution } from './ligand'
 import { describeBlastStatus } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
@@ -19,10 +19,14 @@ import { elideSequenceRuns } from './seq-elide'
 export interface ReportContext {
   uniprot: UniprotInfo | null
   sequence: string
+  /** v2.16：序列标签头（FASTA 头 / 评估表序列标签 — 靶点命名证据） */
+  sequenceHeader?: string
   goal?: string
   goalHints: string[]
   /** 评估表 LLM 智能解析要点（目标/科学问题/实验数据摘要等） */
   insights?: FormInsights
+  /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链 — 评估表名/nr 识别/同源推断） */
+  targetIdentity?: TargetIdentityInfo
   /** 批次关系说明（v1.8+ 非关联批量：LLM 在执行摘要中说明独立/复合物项目定位） */
   batchNote?: string
   /** 客户提供的伴随序列（合并评估：UniProt 为主 + 构建边界分析） */
@@ -45,6 +49,8 @@ export interface ReportContext {
   ligands?: LigandResolution[]
   /** v2.0：AlphaFold 预测信息（报告头图元数据） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入时） */
+  esmfold?: EsmfoldSummaryInfo
   /** v1.26：分子量增重策略分析（mw-augment.ts 产出；小分子量靶点时 applicable=true） */
   mwAugment?: MwAugmentAnalysis
   /** v1.29：互作复合物证据分析（interaction.ts 产出；无直接结构时有证据则 hasEvidence=true） */
@@ -130,9 +136,23 @@ function buildDigest(ctx: ReportContext): string {
     if (u.keywords?.length) lines.push(`关键词: ${u.keywords.join(', ')}`)
     if (domainFeat.length) lines.push(`关键特征: ${domainFeat.join(' | ')}`)
   } else {
-    lines.push(`未知 UniProt（序列直接输入），序列长度 ${ctx.sequence.length} aa`)
+    lines.push(`序列直接输入（无 UniProt 归属），序列长度 ${ctx.sequence.length} aa`)
+    // v2.16：靶点身份识别证据链（评估表名 / nr 识别 / 同源推断）— LLM 用该名称称呼靶点
+    if (ctx.targetIdentity) {
+      const ti = ctx.targetIdentity
+      lines.push(`靶点身份（${ti.sourceLabel}）: ${ti.name}`)
+      const parts: string[] = []
+      if (ti.identity != null) parts.push(`一致性 ${ti.identity}%`)
+      if (ti.uniprotId) parts.push(`最近 UniProt 条目 ${ti.uniprotId}${ti.uniprotEntry ? `（${ti.uniprotEntry}）` : ''}`)
+      if (ti.geneName) parts.push(`基因 ${ti.geneName}`)
+      if (ti.organism) parts.push(ti.organism)
+      lines.push(`识别证据: ${ti.note}${parts.length ? `；${parts.join('；')}` : ''}`)
+      lines.push(`（靶点命名指引：题目与正文用「${ti.name.slice(0, 40)}」称呼该靶点并标注「序列靶点」；身份为${ti.source === 'eval-table' ? '评估表客户提供' : '推断'}（${ti.sourceLabel}）时须注明依据与强度，不得当作已确认的 UniProt 条目）`)
+    } else if (ctx.sequenceHeader) {
+      lines.push(`序列标签: ${ctx.sequenceHeader.slice(0, 60)}`)
+    }
     const topHit = ctx.blastHits[0]
-    if (topHit) lines.push(`BLAST 首命中: ${topHit.description}`)
+    if (topHit) lines.push(`BLAST 首命中: ${topHit.description}（identity ${topHit.identity}%）`)
   }
 
   lines.push('')
@@ -293,6 +313,16 @@ function buildDigest(ctx: ReportContext): string {
     lines.push(`【AlphaFold 预测】${ctx.alphafold.modelId ?? ''}（模型 v${ctx.alphafold.version ?? '?'}）：平均 pLDDT ${ctx.alphafold.globalPlddt ?? '—'}${ctx.alphafold.fracVeryHigh != null ? `，pLDDT ≥90 区段占 ${Math.round(ctx.alphafold.fracVeryHigh * 100)}%` : ''}`)
     lines.push('（报告头部已附 pLDDT 着色的 AlphaFold 预测结构图；pLDDT ≥70 区段构象可信度较高，可作为构建设计与 Cryo-EM 分子量估计的参考 — 引用时须注明其为计算预测而非实验结构）')
   }
+  // v2.15：ESMFold 兜底（无 AFDB 收录时）— 单序列语言模型预测，无 MSA，精度低于 AF2
+  if (ctx.esmfold?.available) {
+    lines.push('')
+    lines.push(`【ESMFold 预测】ESMFold v1（ESM Atlas 公共 API）：${ctx.esmfold.sequenceLength ?? '—'} aa，平均 pLDDT ${ctx.esmfold.globalPlddt ?? '—'}${ctx.esmfold.fracVeryHigh != null ? `，pLDDT ≥90 区段占 ${Math.round(ctx.esmfold.fracVeryHigh * 100)}%` : ''}`)
+    lines.push('（该靶点在 AlphaFold DB 无收录或无 UniProt 归属 — 报告头部附 ESMFold 预测结构图（pLDDT 着色）；ESMFold 单序列预测无 MSA，可信度通常低于 AlphaFold2，pLDDT ≥70 区段构象较可信，仅作构建设计与分子量估计参考 — 引用时须注明计算预测而非实验结构）')
+  } else if (ctx.esmfold && ctx.esmfold.available === false && ctx.esmfold.note && !ctx.alphafold?.available) {
+    lines.push('')
+    lines.push(`【ESMFold 预测】不可用：${ctx.esmfold.note}`)
+    lines.push('（如业务需要计算预测结构，可在实验策略建议中说明用户可自行使用需登录的 ColabFold / AlphaFold Server 补充；报告主体仍以实验结构证据为准）')
+  }
   if (ctx.coverage) {
     lines.push('')
     lines.push(`【结构覆盖情况】序列覆盖率 ${ctx.coverage.coveragePercent}%（PDBe 映射）`)
@@ -333,11 +363,22 @@ function buildDigest(ctx: ReportContext): string {
   }
 
   lines.push('')
-  lines.push('【可行性评分（本系统计算，1-10）】')
-  lines.push(`- X-ray: ${ctx.scores.xray.score}/10 — ${ctx.scores.rationale.xray}`)
-  lines.push(`- Cryo-EM: ${ctx.scores.cryoem.score}/10 — ${ctx.scores.rationale.cryoem}`)
-  lines.push(`- NMR: ${ctx.scores.nmr.score}/10 — ${ctx.scores.rationale.nmr}`)
-  lines.push(`- 总体: ${ctx.scores.overall.score}/10 — ${ctx.scores.rationale.overall}`)
+  lines.push('【可行性评分（系统规则计算 + AI 复核，1-10）】')
+  const adjL = ctx.scores.llmAdjust
+  lines.push(`- X-ray: ${ctx.scores.xray.score}/10${adjL && adjL.xray !== 0 ? `（AI 复核 ${adjL.xray > 0 ? '+' : ''}${adjL.xray}）` : ''} — ${ctx.scores.rationale.xray}`)
+  lines.push(`- Cryo-EM: ${ctx.scores.cryoem.score}/10${adjL && adjL.cryoem !== 0 ? `（AI 复核 ${adjL.cryoem > 0 ? '+' : ''}${adjL.cryoem}）` : ''} — ${ctx.scores.rationale.cryoem}`)
+  lines.push(`- NMR: ${ctx.scores.nmr.score}/10${adjL && adjL.nmr !== 0 ? `（AI 复核 ${adjL.nmr > 0 ? '+' : ''}${adjL.nmr}）` : ''} — ${ctx.scores.rationale.nmr}`)
+  lines.push(`- 总体: ${ctx.scores.overall.score}/10${adjL && adjL.overall !== 0 ? `（AI 复核 ${adjL.overall > 0 ? '+' : ''}${adjL.overall}）` : ''} — ${ctx.scores.rationale.overall}`)
+  if (adjL) {
+    lines.push(`AI 复核意见（置信度${adjL.confidence === 'high' ? '高' : adjL.confidence === 'medium' ? '中' : '低'}${adjL.engine ? `，引擎 ${adjL.engine}` : ''}）：`)
+    lines.push(`  - X-ray：${adjL.notes.xray || '维持系统分'}${adjL.xray !== 0 ? `（${adjL.xray > 0 ? '+' : ''}${adjL.xray}）` : ''}`)
+    lines.push(`  - Cryo-EM：${adjL.notes.cryoem || '维持系统分'}${adjL.cryoem !== 0 ? `（${adjL.cryoem > 0 ? '+' : ''}${adjL.cryoem}）` : ''}`)
+    lines.push(`  - NMR：${adjL.notes.nmr || '维持系统分'}${adjL.nmr !== 0 ? `（${adjL.nmr > 0 ? '+' : ''}${adjL.nmr}）` : ''}`)
+    lines.push(`  - 总体：${adjL.notes.overall || '三方法复核意见综合'}`)
+    lines.push('（评分经过 AI 专家复核微调（±2 以内，已计入上述分值）：报告引用分数时一律使用调整后分值；「结构解析可行性评估」的评分依据解读需一并解读 AI 复核的调整理由，不得把复核前后的分值混用）')
+  } else {
+    lines.push('（本次 AI 复核未生效或未执行 — 分值即系统规则评分，报告中按此表述）')
+  }
 
   return lines.join('\n')
 }
@@ -472,11 +513,20 @@ ${ctx.images.map(i => {
 
 /** C2 结构解析可行性评估 */
 function chC2(ctx: ReportContext): string {
+  // v2.14：已有结构方法先例分布 — Cryo-EM 先例占主导（或全部）时的推荐路线约束
+  const directCount = ctx.directPdbs.length
+  const cryoemCount = ctx.directPdbs.filter(p => p.isCryoem).length
+  const xrayCount = ctx.directPdbs.filter(p => p.isXray).length
+  const nmrCount = ctx.directPdbs.filter(p => p.isNmr).length
+  const cryoemDominant = directCount > 0 && cryoemCount > 0 && cryoemCount >= xrayCount + nmrCount
+  const precedentNote = cryoemDominant
+    ? `\n- 方法先例约束（关键）：该靶点已有 ${directCount} 个结构中 ${cryoemCount} 个为 Cryo-EM${cryoemCount === directCount ? '（全部）' : ''} — 靶点以复合物/装配形式被 Cryo-EM 解析已被反复验证（小分子量靶点的已有 EM 结构必然为复合物或含技术组分）。三方法对比矩阵与推荐技术路线必须以「沿已有 Cryo-EM 复合物/装配路线」为首要先例路径论证，明确引用具体 PDB 与分辨率；禁止仅因单体分子量小而将 Cryo-EM 排除或降为末选（不符合科学事实）；X-ray/NMR 仅作为单体/分段路线的备选论述，并如实说明其先例相对不足（X-ray ${xrayCount} 个 / NMR ${nmrCount} 个先例）`
+    : ''
   return `撰写报告的「结构解析可行性评估」一章（以 ## 结构解析可行性评估 开头，仅输出这一章，不要输出其他章节）：
 
 ## 结构解析可行性评估
-- ### 三方法对比矩阵：用 Markdown 表格对比 X-ray / Cryo-EM / NMR 在本靶点上的适配性，行维度至少包括：分子量适配、可结晶性/成象条件、已有成功先例、构象异质性处理、预计周期、综合评分（引用系统评分）${ctx.mwAugment?.applicable ? '\n- 分子量维度（小分子量靶点）：Cryo-EM 的「分子量适配」按装配有效分子量（~' + (ctx.mwAugment.assemblyKda ?? ctx.mwAugment.monomerKda) + ' kDa' + (ctx.mwAugment.assemblyPath === 'homolog-complex' ? '，同源复合物推断 — 需组装验证' : ctx.mwAugment.assemblyKda == null ? '，无生物装配路径 — 需技术增重' : '') + '）评估而非单体分子量；X-ray/NMR 行说明分子量对其影响的差异（增重对 NMR 无益、对 X-ray 非瓶颈）' : ''}
-- ### 评分依据解读：逐方法解释系统评分的含义（引用评分依据文本），哪些因素是加分项/减分项${ctx.mwAugment?.applicable ? '；Cryo-EM 评分中的「分子量维度」调整（' + (ctx.scores.mwAugmentAdjust ? ctx.scores.mwAugmentAdjust.note : '无') + '）需明确解读' : ''}
+- ### 三方法对比矩阵：用 Markdown 表格对比 X-ray / Cryo-EM / NMR 在本靶点上的适配性，行维度至少包括：分子量适配、可结晶性/成象条件、已有成功先例、构象异质性处理、预计周期、综合评分（引用系统评分）${ctx.mwAugment?.applicable ? '\n- 分子量维度（小分子量靶点）：Cryo-EM 的「分子量适配」按装配有效分子量（~' + (ctx.mwAugment.assemblyKda ?? ctx.mwAugment.monomerKda) + ' kDa' + (ctx.mwAugment.assemblyPath === 'homolog-complex' ? '，同源复合物推断 — 需组装验证' : ctx.mwAugment.assemblyKda == null ? '，无生物装配路径 — 需技术增重' : '') + '）评估而非单体分子量；X-ray/NMR 行说明分子量对其影响的差异（增重对 NMR 无益、对 X-ray 非瓶颈）' : ''}${precedentNote}
+- ### 评分依据解读：逐方法解释系统评分的含义（引用评分依据文本），哪些因素是加分项/减分项${ctx.mwAugment?.applicable ? '；Cryo-EM 评分中的「分子量维度」调整（' + (ctx.scores.mwAugmentAdjust ? ctx.scores.mwAugmentAdjust.note : '无') + '）需明确解读' : ''}${ctx.scores.llmAdjust ? '；本评分已经 AI 专家复核微调（X-ray ' + (ctx.scores.llmAdjust.xray > 0 ? '+' : '') + ctx.scores.llmAdjust.xray + ' / Cryo-EM ' + (ctx.scores.llmAdjust.cryoem > 0 ? '+' : '') + ctx.scores.llmAdjust.cryoem + ' / NMR ' + (ctx.scores.llmAdjust.nmr > 0 ? '+' : '') + ctx.scores.llmAdjust.nmr + '）— 需解读 AI 复核意见（见数据上下文「AI 复核意见」块）与规则分的综合依据' : ''}
 - ### 推荐技术路线：明确给出第一推荐方法与理由、备选方法与触发条件（如 X-ray 失败多少轮后转 Cryo-EM）${ctx.mwAugment?.applicable ? '\n- 增重路径优先级：生理装配（寡聚/复合物，已有结构先例）→ 同源复合物（BLAST 推断，identity 按高低取舍，共表达/体外组装前需 pull-down/SPR 验证互作）→ 互作伙伴复合物（无结构先例，需共表达/体外组装与 SEC-MALS 验证）→ 技术组分（Fab/nanobody/MBP/ferritin 支架）；逐条回应「与客户目的的比对」中的契合/需注意/冲突条目（加入的蛋白是否改变研究对象/锁定构象/遮蔽界面）' : ''}
 - 篇幅 400-600 字（宁精炼勿超长）`
 }

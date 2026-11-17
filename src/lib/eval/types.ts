@@ -159,6 +159,9 @@ export interface BlastHit {
   evalueRaw: string
   /** v1.31：主引文 PubMed ID（RCSB GraphQL 批量补齐；无引文时缺失） */
   pubmedId?: string
+  /** v2.16：RCSB 序列检索命中的聚合物实体序号（标识 3QWQ_1 的尾段 — 复合物结构
+   *  中准确归属 UniProt 需按命中实体而非条目主实体；NCBI pdbaa 命中缺失） */
+  entityId?: number
 }
 
 // ─── PubMed ───────────────────────────────────────────────────────────────────
@@ -194,6 +197,28 @@ export interface Scores {
   mwAugmentAdjust?: MwAugmentAdjustInfo
   /** v1.29：互作复合物证据调整明细（无直接结构时；无证据时缺省） */
   interactionAdjust?: InteractionAdjustInfo
+  /** v2.18：LLM 智能复核调整明细（复核失败/跳过时缺省 — 系统规则分即终分） */
+  llmAdjust?: LlmScoreAdjustInfo
+}
+
+/** v2.18：LLM 智能复核调整明细（score-llm.ts 产出并应用；评分卡/报告展示） */
+export interface LlmScoreAdjustInfo {
+  /** AI 复核是否实际调整了分数（false = 复核确认维持系统分） */
+  applied: boolean
+  /** 三方法有效调整量（钳制后实际变化值；0 = 维持） */
+  xray: number
+  cryoem: number
+  nmr: number
+  /** 总体有效调整量（总体分由三方法最大值推导） */
+  overall: number
+  /** 复核置信度 */
+  confidence: 'high' | 'medium' | 'low'
+  /** 逐方法复核意见（一句话依据 — delta 为 0 时为「维持理由」） */
+  notes: { xray: string; cryoem: string; nmr: string; overall: string }
+  /** 复核引擎（页脚元数据展示） */
+  engine?: string
+  /** 复核耗时 ms */
+  durationMs: number
 }
 
 /** v1.25：聚集形式调整明细（score.ts computeOligomerAdjust 产出；评分卡展示） */
@@ -545,6 +570,52 @@ export function describeBlastStatus(info: BlastStatusInfo | undefined | null): s
   }
 }
 
+// ─── 序列靶点身份识别（v2.16）──────────────────────────────────────────
+
+/**
+ * 纯序列输入（无 UniProt ID）时的靶点身份识别结果。
+ * 识别级联（按名称优先级）：
+ *  1. 评估表蛋白名（LLM 提取 insights.proteinName / 序列标签头）
+ *  2. BLAST nr 最佳命中（sp|ACC|ENTRY 描述 — 含真实蛋白名/物种/基因名）
+ *  3. PDB 同源最佳命中描述（Chain A, XXX kinase domain → 同源推断）
+ * UniProt accession 定位（peptide 精确检索 / PDB BLAST ≥85% / nr ≥85%）成功时
+ * 走完整回填（uniprotInfo 置位），本结构仅保留识别来源注记。
+ */
+export interface TargetIdentityInfo {
+  /** 展示名（评估表蛋白名 / nr 命中蛋白名 / PDB 同源描述清洗结果） */
+  name: string
+  /** 识别来源 */
+  source: 'eval-table' | 'blast-nr' | 'blast-homolog'
+  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断） */
+  sourceLabel: string
+  /** 命中一致性 %（blast-nr / blast-homolog 时存在） */
+  identity?: number
+  /** 定位到的 UniProt accession（nr 命中 sp|ACC| / tr|ACC| 形态；回填未达阈值时为近似条目） */
+  uniprotId?: string
+  /** UniProt 条目名（如 P53_HUMAN） */
+  uniprotEntry?: string
+  organism?: string
+  geneName?: string
+  /** 识别证据注记（报告/日志中呈现） */
+  note?: string
+}
+
+/** 识别来源 → 中文标签 */
+export function describeTargetIdentitySource(source: TargetIdentityInfo['source']): string {
+  switch (source) {
+    case 'eval-table': return '评估表'
+    case 'blast-nr': return 'BLAST nr 识别'
+    case 'blast-homolog': return 'PDB 同源推断'
+  }
+}
+
+/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」；评估表来源为空） */
+export function targetIdentityTitleSuffix(ti: TargetIdentityInfo): string {
+  if (ti.source === 'eval-table') return ''
+  const tag = ti.source === 'blast-nr' ? 'nr 识别' : '同源'
+  return ti.identity != null ? ` · ${tag} ${Math.round(ti.identity)}%` : ` · ${tag}`
+}
+
 export interface JobSummary {
   uniprot: {
     uniprotId: string
@@ -584,12 +655,16 @@ export interface JobSummary {
   ligands?: LigandResolution[]
   /** v2.0：AlphaFold 预测结构信息（报告头图来源；无预测/渲染失败时 available=false） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 预测结构信息（AFDB 无收录时的兜底；失败/超限 available=false） */
+  esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
   /** v2.13：deferred 批次同样按单靶点流程生成完整独立报告（展示并入合并报告的
    * 靶点单独评估页）；reportDeferred 仅表示 HTML 不单独落盘 */
   reportDeferred?: boolean
   /** 批次关系说明（v1.8+ 非关联批量时 LLM 在报告中说明独立/复合物定位） */
   batchNote?: string
+  /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链；历史作业缺省） */
+  targetIdentity?: TargetIdentityInfo
 }
 
 // ─── AlphaFold 预测结构（v2.0 报告头图）────────────────────────────
@@ -606,6 +681,26 @@ export interface AlphafoldSummaryInfo {
   /** pLDDT ≥90 区段占比（0-1） */
   fracVeryHigh?: number | null
   /** 渲染失败/无预测原因（available=false 时） */
+  note?: string
+}
+
+// ─── ESMFold 公共预测结构（v2.15 AFDB 兜底）──────────────────────
+
+/** 作业摘要中的 ESMFold 信息（ESM Atlas 公共 API — 无 UniProt 归属 / AFDB 无
+ *  收录的靶点兜底；模型文本存 db/cache/esmfold/{cacheKey}.pdb，摘要只存元数据） */
+export interface EsmfoldSummaryInfo {
+  available: boolean
+  /** 模型标识（固定 'ESMFold v1'） */
+  modelId?: string
+  /** 平均 pLDDT（0-100，已从 0-1 标度归一） */
+  globalPlddt?: number | null
+  /** pLDDT ≥90 区段占比（0-1） */
+  fracVeryHigh?: number | null
+  /** 预测序列长度（清洗后标准字符数） */
+  sequenceLength?: number
+  /** 磁盘缓存键（序列 sha1 前 20 位）— 合并报告据此直读模型文本 */
+  cacheKey?: string
+  /** 不可用原因（available=false 时：超限/超时/服务退化） */
   note?: string
 }
 

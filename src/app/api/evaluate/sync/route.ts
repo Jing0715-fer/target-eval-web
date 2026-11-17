@@ -39,6 +39,8 @@ interface SyncBody {
   mode?: InputMode
   uniprot?: string
   sequence?: string
+  /** v2.16：序列标签头（FASTA 头/评估表序列标签 — 靶点命名证据 + 头内 UniProt 提取） */
+  sequenceHeader?: string
   uploadId?: string
   docxJobId?: string
   uniprotFromDocx?: string
@@ -81,6 +83,8 @@ export async function POST(req: Request) {
   const uploadId = body.docxJobId || body.uploadId || undefined
   const sequence = body.sequence || body.sequenceFromDocx || undefined
   const uniprot = body.uniprot || body.uniprotFromDocx || undefined
+  // v2.16：序列标签头消毒（≤80 字，与异步路由同口径）
+  const sequenceHeader = typeof body.sequenceHeader === 'string' ? body.sequenceHeader.trim().slice(0, 80) || undefined : undefined
 
   if (mode === 'uniprot' && !uniprot) {
     return NextResponse.json({ ok: false, error: 'mode=uniprot 需要 uniprot 字段' }, { status: 400, headers: { 'Cache-Control': 'no-store' } })
@@ -323,6 +327,7 @@ const evalTable: InlineEvalTable | undefined = body.evalTable
               mode,
               uniprot: uniprot?.toUpperCase(),
               sequence,
+              sequenceHeader,
               uploadId,
               evalTable,
               goal: typeof body.goal === 'string' ? body.goal.slice(0, 2000) : undefined,

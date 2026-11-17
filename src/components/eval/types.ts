@@ -4,9 +4,9 @@
  * 注意：后端并行开发中，字段可能缺失，所有可缺失字段均按可空处理。
  */
 
-import type { BlastStatusInfo } from '@/lib/eval/types'
+import type { BlastStatusInfo, TargetIdentityInfo } from '@/lib/eval/types'
 
-export type { BlastStatusInfo, BlastStatusCode } from '@/lib/eval/types'
+export type { BlastStatusInfo, BlastStatusCode, TargetIdentityInfo } from '@/lib/eval/types'
 export { MAX_PDB_UNLIMITED } from '@/lib/eval/types'
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'canceled'
@@ -34,6 +34,8 @@ export interface EvaluateRequest {
   uniprot?: string
   /** mode=sequence 必填（FASTA 或裸序列）；mode=uniprot 时为可选伴随序列（合并评估）；mode=docx 选择序列时也放在此字段 */
   sequence?: string
+  /** v2.16：序列标签头（FASTA > 头 / 评估表序列标签 — 序列靶点命名证据；含 UniProt accession 时直接归属） */
+  sequenceHeader?: string
   /** mode=docx：上传解析返回的 uploadId（契约字段名） */
   docxJobId?: string
   /** docxJobId 的兼容别名（后端并行开发可能采用此命名），与 docxJobId 同值 */
@@ -210,6 +212,10 @@ export interface MergedTargetLite {
   construct?: ConstructInfo
   /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
+  esmfold?: EsmfoldSummaryInfo | null
+  /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 分组头/简报卡展示） */
+  targetIdentity?: TargetIdentityInfo | null
 }
 
 /** 合并评估报告（关联靶点批量生成） */
@@ -371,6 +377,28 @@ export interface Scores {
   mwAugmentAdjust?: MwAugmentAdjustInfo
   /** v1.30：互作复合物证据调整明细（无直接结构时） */
   interactionAdjust?: InteractionAdjustInfo
+  /** v2.18：LLM 智能复核调整明细（复核失败/跳过时缺省 — 系统规则分即终分） */
+  llmAdjust?: LlmScoreAdjustInfo
+}
+
+/** v2.18：LLM 智能复核调整明细（score-llm.ts 产出并应用；评分卡展示） */
+export interface LlmScoreAdjustInfo {
+  /** AI 复核是否实际调整了分数（false = 复核确认维持系统分） */
+  applied: boolean
+  /** 三方法有效调整量（钳制后实际变化值；0 = 维持） */
+  xray: number
+  cryoem: number
+  nmr: number
+  /** 总体有效调整量（总体分由三方法最大值推导） */
+  overall: number
+  /** 复核置信度 */
+  confidence: 'high' | 'medium' | 'low'
+  /** 逐方法复核意见（一句话依据 — delta 为 0 时为「维持理由」） */
+  notes: { xray: string; cryoem: string; nmr: string; overall: string }
+  /** 复核引擎（页脚元数据展示） */
+  engine?: string
+  /** 复核耗时 ms */
+  durationMs: number
 }
 
 export interface MethodStats {
@@ -618,11 +646,15 @@ export interface JobSummary {
   ligands?: LigandResolution[]
   /** v2.0：AlphaFold 预测信息（报告头图元数据） */
   alphafold?: AlphafoldSummaryInfo
+  /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入时） */
+  esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */
   reportDeferred?: boolean
   /** 批次关系说明（v1.8+ 非关联批量） */
   batchNote?: string
+  /** v2.16：靶点身份识别证据链（序列输入无 UniProt 归属时；历史作业缺省） */
+  targetIdentity?: TargetIdentityInfo
 }
 
 export interface PdbEntry {
@@ -702,6 +734,18 @@ export interface AlphafoldSummaryInfo {
   globalPlddt?: number | null
   version?: number
   fracVeryHigh?: number | null
+  note?: string
+}
+
+/** v2.15：ESMFold 公共 API 兜底预测元数据（前端镜像 — 与后端 types 同构） */
+export interface EsmfoldSummaryInfo {
+  available: boolean
+  modelId?: string
+  /** 平均 pLDDT（0-100，已从 0-1 标度归一） */
+  globalPlddt?: number | null
+  fracVeryHigh?: number | null
+  /** 预测序列长度 */
+  sequenceLength?: number
   note?: string
 }
 

@@ -198,21 +198,41 @@ async function gqlEntries(pdbIds: string[], query: string, signal?: AbortSignal)
 
 /**
  * 拉取候选复合物结构的实体/装配组成（RCSB GraphQL）。
- * 候选：directPdbs 中标题含异源寡聚词/复合物信号的条目，按分辨率优先，上限 24
- * （小分子 "in complex with" 条目占多数 — 大样本量保证真蛋白复合物进入实体判定）。
- * GraphQL 12 id/批，最多 2 批。
+ *
+ * v2.14 候选口径（修复标题正则漏检）：
+ *  - 本函数仅在单体 < 50 kDa 的小分子量靶点路径调用 — 此时该靶点的 **Cryo-EM 直接
+ *    结构本身就是装配/增重路线成立的直接证据**（<50 kDa 单体颗粒无法单独冷冻电镜
+ *    解析，已有 EM 条目必然以复合物或含技术组分形式存在），因此 Cryo-EM 条目
+ *    无条件纳入候选，不再依赖标题关键词；
+ *  - 旧口径仅按标题正则（hetero…/complex with|of）预筛，实测漏检大量真实复合物
+ *    （如 TCR-CD3 复合物 "…TCR and CD3 complex in LMNG"、"Fab-CD3-…-TCR tetramer"），
+ *    导致已有结构全部为 Cryo-EM 的小靶点反而拿不到装配分子量证据；
+ *  - 直接结构 ≤ 24 个时全部纳入（GraphQL 12 id/批 × 2 批，网络成本不变）；
+ *    超出时按「Cryo-EM 条目 → 标题信号条目 → 分辨率」优先保留 24 个。
+ *    实体级判定（非靶点组分 ≥10 kDa 才构成增重路径）会滤除纯同源寡聚误报。
  */
 export async function fetchComplexAssemblyInfo(
   pdbs: PdbEntry[],
   signal?: AbortSignal,
 ): Promise<Map<string, ComplexAssemblyInfo>> {
-  // 候选筛选：标题含 hetero 寡聚词（蛋白-蛋白装配的直接信号）
+  // 标题信号（蛋白-蛋白装配的辅助信号 — v2.14 起仅为超量时的排序依据）
   const heteroRe = /\bhetero(dimer|trimer|tetramer|pentamer|hexamer|oligomer|complex)\b/i
   const complexRe = /\bcomplex (with|of)\b/i
-  const candidates = pdbs
-    .filter(p => heteroRe.test(p.title) || complexRe.test(p.title))
+  const hasTitleSignal = (p: PdbEntry) => heteroRe.test(p.title) || complexRe.test(p.title)
+  // Cryo-EM 条目：小分子量靶点的必然复合物/增重先例，无条件纳入
+  const emEntries = pdbs.filter(p => p.isCryoem)
+  const titleEntries = pdbs.filter(p => !p.isCryoem && hasTitleSignal(p))
+  const restEntries = pdbs
+    .filter(p => !p.isCryoem && !hasTitleSignal(p))
     .sort((a, b) => (a.resolution ?? 99) - (b.resolution ?? 99))
-    .slice(0, 24)
+  const CAP = 24
+  const candidates = [
+    ...emEntries,
+    ...titleEntries,
+    ...(emEntries.length + titleEntries.length < CAP ? restEntries.slice(0, Math.max(0, CAP - emEntries.length - titleEntries.length)) : []),
+  ]
+    .sort((a, b) => (a.resolution ?? 99) - (b.resolution ?? 99))
+    .slice(0, CAP)
   if (!candidates.length) return new Map()
 
   const out = new Map<string, ComplexAssemblyInfo>()
@@ -561,6 +581,17 @@ function zoneOf(kda: number): { note: string } {
 }
 
 /** 由输入（已含网络数据）构建分析结果（纯同步计算） */
+
+/** v2.14：组分归属回退 — 构建体实体常映射到链级 UniProt（如 Vγ9 构建体实体映射
+ * 全链 P0CF51 而非 V 结构域条目 Q99603），uniprotIds 不含靶点 ID 时按蛋白名
+ * 匹配实体描述（严格包含，避免家族内他亚基误报：如 "gamma variable 9" 不匹配
+ * "delta variable 2"）。仅用于 isTarget 归属展示与伙伴分子量口径。 */
+function entityMatchesTargetName(desc: string, uniprot: UniprotInfo | null | undefined): boolean {
+  const name = uniprot?.proteinName?.trim()
+  if (!name || name.length < 6) return false
+  return desc.toLowerCase().includes(name.toLowerCase())
+}
+
 export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis {
   const seqLen = input.sequenceLength
   const monomerKda = aaToKda(seqLen)
@@ -588,7 +619,14 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
   // ── 路径 1：已有复合物结构（RCSB 实体/装配）──
   const complexes: MwComplex[] = []
   for (const [, c] of input.complexes) {
-    const nonTargetEntities = c.entities.filter(e => !targetUniprot || !e.uniprotIds.includes(targetUniprot))
+    // v2.14：靶点实体归属 — uniprot 匹配优先；构建体实体映射链级 UniProt 时
+    // （uniprotIds 不含靶点 ID），回退蛋白名严格包含（见 entityMatchesTargetName）
+    const hasUniprotMatch = targetUniprot !== '' && c.entities.some(e => e.uniprotIds.includes(targetUniprot))
+    const isTargetEntity = (e: ComplexAssemblyInfo['entities'][number]) =>
+      hasUniprotMatch
+        ? e.uniprotIds.includes(targetUniprot)
+        : entityMatchesTargetName(e.description, input.uniprot)
+    const nonTargetEntities = c.entities.filter(e => !isTargetEntity(e))
     if (nonTargetEntities.length === 0) continue // 纯同源寡聚条目（由 oligomer 维度处理）
     const nonTargetKda = aaToKda(nonTargetEntities.reduce((s, e) => s + e.lengthAa, 0))
     if (nonTargetKda < 10) continue // 伙伴贡献过小（短肽为主）— 不构成增重路径
@@ -598,7 +636,7 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
       uniprotId: e.uniprotIds[0],
       lengthAa: e.lengthAa,
       kda: aaToKda(e.lengthAa),
-      isTarget: targetUniprot ? e.uniprotIds.includes(targetUniprot) : e.description === c.entities[0]?.description,
+      isTarget: isTargetEntity(e),
     }))
 
     const hasArtificial = nonTargetEntities.some(e => ARTIFICIAL_RE.test(e.description))
@@ -629,7 +667,9 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
       note,
     })
   }
-  complexes.sort((a, b) => (a.resolution ?? 99) - (b.resolution ?? 99))
+  // v2.14：装配证据按分子量降序（增重路径的证据强度 = 可达到的最大装配规模；
+  // 分辨率作次序 — 高分辨大装配优先，避免仅按分辨率选中一小装配低估增重潜力）
+  complexes.sort((a, b) => b.totalKda - a.totalKda || (a.resolution ?? 99) - (b.resolution ?? 99))
 
   // ── 路径 2：自身寡聚（拷贝数 × 单体）──
   const oligoCopies = input.oligomer.category === 'homo-oligomer'

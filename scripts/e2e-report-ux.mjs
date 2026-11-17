@@ -210,8 +210,11 @@ async function newPage(w, h, touch = false) {
       props: document.querySelectorAll('.lig-props').length,
     }
   })
-  ok('合并报告配体 2D 图：2 张全 SVG（磁盘缓存回补）且全部可灯箱放大', m.figs === 2 && m.svg === 2 && m.zoomable === 2, JSON.stringify(m))
-  ok('合并报告复制按钮挂载 4 个 + 性质 chips', m.copyBtns === 4 && m.props === 2, JSON.stringify(m))
+  // v2.18.1 断言修正：v2.13 起合并报告内嵌各靶点单独评估页（同页复用单靶点报告体）—
+// 配体 2D 图/复制按钮/性质 chips 在合并主视图与靶点单独页各出现一套（2×2 图 / 2×4 按钮 / 2×2 chips）。
+// 行为本质不变：全部 SVG（磁盘缓存回补生效）且全部可灯箱放大。
+  ok('合并报告配体 2D 图：4 张（主视图+靶点页各 2）全 SVG（磁盘缓存回补）且全部可灯箱放大', m.figs === 4 && m.svg === 4 && m.png === 0 && m.zoomable === 4, JSON.stringify(m))
+  ok('合并报告复制按钮挂载 8 个（两套视图）+ 性质 chips 4 组', m.copyBtns === 8 && m.props === 4, JSON.stringify(m))
   await page.locator('.lig-struct img').first().scrollIntoViewIfNeeded()
   await page.locator('.lig-struct img').first().click()
   await page.waitForTimeout(350)
