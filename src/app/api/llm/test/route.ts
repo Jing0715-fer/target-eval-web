@@ -3,7 +3,7 @@
  * body: { providerKey?, baseUrl?, apiKey?, model?, useActive? }
  */
 import { NextResponse } from 'next/server'
-import { getActiveLlmConfig, getProviderMeta, unifiedLlmChat } from '@/lib/eval/llm-provider'
+import { getActiveLlmConfig, getProviderMeta, reuseSavedApiKey, unifiedLlmChat } from '@/lib/eval/llm-provider'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -41,7 +41,14 @@ export async function POST(req: Request) {
       const model = (body.model ?? '').trim() || meta.defaultModel || ''
       if (!baseUrl) return NextResponse.json({ ok: false, error: '请先填写 Base URL' }, { status: 400 })
       if (!model) return NextResponse.json({ ok: false, error: '请先填写模型名' }, { status: 400 })
-      override = { providerKey, baseUrl, apiKey: (body.apiKey ?? '').trim(), model }
+      override = {
+        providerKey,
+        baseUrl,
+        // v2.18.1：表单 Key 留空 → 沿用已保存同供应商 Key（baseUrl 须与保存时一致，
+        // 与保存路由 v2.5 防定向外送同规则）——此前留空会裸发请求吃 401
+        apiKey: await reuseSavedApiKey(providerKey, baseUrl, (body.apiKey ?? '').trim()),
+        model,
+      }
     }
   } else {
     const cfg = await getActiveLlmConfig()

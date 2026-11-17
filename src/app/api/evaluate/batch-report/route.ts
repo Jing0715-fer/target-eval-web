@@ -16,7 +16,7 @@ import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
 import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
 import { propagateFamilyBlast } from '@/lib/eval/blast-family'
-import { getEngineSummary } from '@/lib/eval/llm-provider'
+import { getEngineSummary, runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { fetchUniprotInfo } from '@/lib/eval/uniprot'
 import { attributeSequences } from '@/lib/eval/homology'
 import { computeSharedStructures } from '@/lib/eval/shared-structures'
@@ -32,6 +32,8 @@ interface BatchReportBody {
   uploadId?: string
   relation?: RelationJudgment
   goal?: string
+  /** v2.19：用户本地引擎配置（localStorage → 请求内联携带；服务端不落盘） */
+  llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
 }
 
 /** 服务端重算评估表序列归属（不信任前端透传；fetchUniprotInfo LRU 缓存，二次拉取快） */
@@ -204,13 +206,16 @@ export async function POST(req: Request) {
   })
 
   // 后台生成（fire-and-forget；uploadId 归属已在上传流程验证，此处透传可信）
-  void runBatchReportGeneration({
+  // v2.19：生成过程在用户本地引擎配置的请求作用域内执行 — 三段式 LLM 与
+  // engineSummary 标注均随用户本人的引擎；Key 不落盘。
+  const llmOverride = sanitizeLlmOverride(body.llm)
+  void runWithLlmOverride(llmOverride, () => runBatchReportGeneration({
     batchReportId: record.id,
     jobIds,
     uploadId,
     relation,
     goal: body.goal,
-  })
+  }))
 
   return NextResponse.json({
     ok: true,

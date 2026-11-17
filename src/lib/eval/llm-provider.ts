@@ -7,7 +7,8 @@
  *  - anthropic  Anthropic Messages API（x-api-key + anthropic-version）
  *  - google     Google Gemini generateContent（x-goog-api-key）
  *
- * 内存策略：激活配置全局单例缓存（TTL 30s + 主动失效），API key 仅后端持有；
+ * 内存策略：v2.19 起引擎配置完全用户本地化 — 评估请求内联携带（AsyncLocalStorage
+ * 请求作用域覆写），服务端不再持久化任何 Key；历史 SQLite 存量配置惰性清除。
  * 模型列表响应截断 ≤300 条，防超大响应。
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -19,8 +20,8 @@ export type ProviderProtocol = 'zai' | 'openai' | 'anthropic' | 'google'
 
 export type ProviderKey =
   | 'builtin' | 'openai' | 'anthropic' | 'google' | 'deepseek' | 'qwen'
-  | 'zhipu' | 'moonshot' | 'minimax' | 'doubao' | 'xai' | 'openrouter'
-  | 'ollama' | 'custom'
+  | 'zhipu' | 'moonshot' | 'minimax' | 'minimax-intl' | 'minimax-legacy' | 'doubao' | 'xai'
+  | 'openrouter' | 'ollama' | 'custom'
 
 export interface ProviderMeta {
   key: ProviderKey
@@ -47,7 +48,16 @@ export const PROVIDERS: ProviderMeta[] = [
   { key: 'qwen', label: '通义千问', hint: '阿里云百炼 DashScope 兼容模式', protocol: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'qwen-plus' },
   { key: 'zhipu', label: '智谱 GLM', hint: 'GLM-4.5 / GLM-4-Plus（BigModel）', protocol: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'glm-4-plus' },
   { key: 'moonshot', label: '月之暗面 Kimi', hint: 'Kimi k2 / moonshot-v1 系列', protocol: 'openai', baseUrl: 'https://api.moonshot.cn/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'kimi-k2-0711-preview' },
-  { key: 'minimax', label: 'MiniMax', hint: 'MiniMax-M1 / abab 系列', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '', needsKey: true, defaultModel: 'MiniMax-M1', modelsNote: '该供应商暂不支持自动获取模型列表，请参考其文档手动填写' },
+  // v2.20.1：MiniMax 三端点分立（v2.20 误切端点的纠偏）——国内/国际两平台 Key 不通用：
+  //  - api.minimax.cn/v1  国内新端点（platform.minimax.cn 文档），MiniMax-M3.1-Flash /
+  //    M3 所在，国内 Key 在此鉴权。v2.20 曾把主条目切到 api.minimax.io（国际端点），
+  //    国内 Key 打过去 = HTTP 401 "invalid api key (2049)"（用户实测报错）。
+  //  - api.minimax.io/v1  国际端点（platform.minimax.io 文档），需国际 Key，独立条目。
+  //  - api.minimaxi.com  旧国内端点（chatcompletion_v2），只服务 M2.x 系列 ——
+  //    「模型列表只显示到 M2.7」的原始根因（/v1/models 列表仅含 M2.x）。
+  { key: 'minimax', label: 'MiniMax（国内）', hint: 'MiniMax-M3.1-Flash / M3 · api.minimax.cn（国内 Key）', protocol: 'openai', baseUrl: 'https://api.minimax.cn/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'MiniMax-M3.1-Flash' },
+  { key: 'minimax-intl', label: 'MiniMax 国际版', hint: 'MiniMax-M3.1-Flash / M3 · api.minimax.io（国际 Key，与国内不通用）', protocol: 'openai', baseUrl: 'https://api.minimax.io/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'MiniMax-M3.1-Flash' },
+  { key: 'minimax-legacy', label: 'MiniMax 旧版 API', hint: '旧 chatcompletion_v2：MiniMax-M2.7 / M2.5 / M2.1（api.minimaxi.com）', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '/v1/models', needsKey: true, defaultModel: 'MiniMax-M2.7' },
   { key: 'doubao', label: '火山方舟 豆包', hint: 'Doubao / Ark endpoint 模型', protocol: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'doubao-seed-1-6-250615' },
   { key: 'xai', label: 'xAI Grok', hint: 'Grok 4 / Grok 3', protocol: 'openai', baseUrl: 'https://api.x.ai/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'grok-3' },
   { key: 'openrouter', label: 'OpenRouter', hint: '聚合 400+ 模型（含免费档）', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: false, defaultModel: 'openai/gpt-4o-mini' },
@@ -59,8 +69,7 @@ export function getProviderMeta(key: string): ProviderMeta | null {
   return PROVIDERS.find(p => p.key === key) ?? null
 }
 
-// ─── 激活配置（内存单例缓存）──────────────────────────────────────────────────
-
+/** 激活配置（请求级覆写）*/
 export interface ActiveLlmConfig {
   providerKey: ProviderKey
   label: string
@@ -69,43 +78,37 @@ export interface ActiveLlmConfig {
   model: string
 }
 
-const CACHE_TTL_MS = 30_000
 const g = globalThis as unknown as {
-  __llmCfg?: { config: ActiveLlmConfig | null; loadedAt: number }
+  __llmOverrideStorage?: AsyncLocalStorage<ActiveLlmConfig>
+  __llmCfgWiped?: boolean
 }
 
 /** v2.5 安全修复：请求级引擎覆写存 AsyncLocalStorage（随 await 链传播，请求间隔离）。 */
-const llmOverrideStorage = new AsyncLocalStorage<ActiveLlmConfig>()
+const llmOverrideStorage = (g.__llmOverrideStorage ??= new AsyncLocalStorage<ActiveLlmConfig>())
 
-/** 读取激活配置（无 = 内置 z-ai）。DB 故障时静默回退内置。
- *  v2.5 安全修复：请求级覆写（AsyncLocalStorage）优先于全局配置 —— 原实现把覆写
- *  写入全局单例，同实例并发请求会互相污染（A 的评估数据可能发往 B 配置的端点）。 */
+/**
+ * 读取生效配置：请求级覆写（AsyncLocalStorage）→ 无则 null（内置 z-ai）。
+ * v2.19：彻底移除服务端 SQLite 读取 — 引擎配置由用户浏览器本地存储，随评估
+ * 请求内联携带；不再存在「任一用户保存的 Key 驱动所有人评估」的全局共享问题。
+ */
 export async function getActiveLlmConfig(): Promise<ActiveLlmConfig | null> {
-  const reqScoped = llmOverrideStorage.getStore()
-  if (reqScoped) return reqScoped
-  const c = g.__llmCfg
-  if (c && Date.now() - c.loadedAt < CACHE_TTL_MS) return c.config
-  let config: ActiveLlmConfig | null = null
-  try {
-    const row = await db.llmConfig.findFirst({ where: { isActive: true } })
-    if (row) {
-      const meta = getProviderMeta(row.providerKey)
-      config = {
-        providerKey: (meta?.key ?? 'custom') as ProviderKey,
-        label: row.label || meta?.label || row.providerKey,
-        baseUrl: row.baseUrl || meta?.baseUrl || '',
-        apiKey: row.apiKey ?? '',
-        model: row.model,
-      }
-    }
-  } catch { /* DB 不可用 → 内置引擎兜底 */ }
-  g.__llmCfg = { config, loadedAt: Date.now() }
-  return config
+  return llmOverrideStorage.getStore() ?? null
 }
 
-/** 配置变更后立即失效缓存 */
+/** 兼容保留（旧缓存失效入口 — DB 已不存配置，无副作用） */
 export function invalidateLlmConfigCache(): void {
-  g.__llmCfg = undefined
+  /* v2.19：无服务端配置缓存，空操作 */
+}
+
+/** v2.19：惰性清除历史存量 — 旧版本曾把用户 Key 存在服务端 SQLite（全局共享行），
+ *  首个 GET /api/llm/config 触发一次性 deleteMany（每进程一次，幂等）。 */
+export async function wipeServerLlmConfigsOnce(): Promise<void> {
+  if (g.__llmCfgWiped) return
+  g.__llmCfgWiped = true
+  try {
+    await db.llmConfig.deleteMany({})
+    console.log('[llm] 已清除服务端存量引擎配置（v2.19：Key 仅存用户浏览器本地）')
+  } catch { /* DB 不可用 → 跳过 */ }
 }
 
 /**
@@ -139,6 +142,24 @@ export function runWithLlmOverride<T>(override: {
 } | null, fn: () => Promise<T>): Promise<T> {
   if (!override) return fn()
   return llmOverrideStorage.run(buildLlmOverrideConfig(override), fn)
+}
+
+/** v2.19：评估请求内联引擎配置消毒（异步评估/合并报告路由共用）。
+ *  未知供应商/缺模型名 → null（回退内置）；字符串限长防注入；baseUrl 须 http(s)。 */
+export function sanitizeLlmOverride(raw: unknown): { providerKey: string; baseUrl?: string; apiKey?: string; model: string } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as { providerKey?: unknown; baseUrl?: unknown; apiKey?: unknown; model?: unknown }
+  const providerKey = typeof r.providerKey === 'string' ? r.providerKey.trim().slice(0, 32) : ''
+  if (!providerKey || providerKey === 'builtin' || !getProviderMeta(providerKey)) return null
+  const model = typeof r.model === 'string' ? r.model.trim().slice(0, 200) : ''
+  if (!model) return null
+  const baseUrl = typeof r.baseUrl === 'string' ? r.baseUrl.trim().slice(0, 500) : ''
+  if (baseUrl && !/^https?:\/\//i.test(baseUrl)) return null
+  const apiKey = typeof r.apiKey === 'string' ? r.apiKey.trim().slice(0, 200) : ''
+  const out: { providerKey: string; baseUrl?: string; apiKey?: string; model: string } = { providerKey, model }
+  if (baseUrl) out.baseUrl = baseUrl
+  if (apiKey) out.apiKey = apiKey
+  return out
 }
 
 /** 当前引擎摘要（报告元数据/页脚展示用） */
@@ -305,6 +326,11 @@ async function callOpenaiCompat(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`
 
+  // v2.20：MiniMax-M3.1-Flash 是思考型模型 — thinking 默认开启且不可关（传 disabled
+  // 会 400），思考 token 计入 max_tokens：官方默认 effort=max 在评估长提示下既慢又
+  // 极易吃光 8192 输出额度导致正文为空。适配：reasoning_effort=medium 限深思考、
+  // 输出额度抬到 ≥16384；temperature 对该模型恒被忽略，干脆不送。
+  const isMiniMaxM31 = /minimax-m3\.1/i.test(cfg.model)
   const mkBody = (variant: 0 | 1 | 2) => {
     const body: Record<string, unknown> = {
       model: cfg.model,
@@ -313,9 +339,11 @@ async function callOpenaiCompat(
         { role: 'user', content: msgs.user },
       ],
     }
-    if (variant !== 2) body.temperature = msgs.temperature ?? 0.4
-    if (variant === 0) body.max_tokens = msgs.maxTokens ?? 8192
-    if (variant === 1) body.max_completion_tokens = msgs.maxTokens ?? 8192
+    if (isMiniMaxM31) body.reasoning_effort = 'medium'
+    if (variant !== 2 && !isMiniMaxM31) body.temperature = msgs.temperature ?? 0.4
+    const cap = isMiniMaxM31 ? Math.max(msgs.maxTokens ?? 8192, 16384) : (msgs.maxTokens ?? 8192)
+    if (variant === 0) body.max_tokens = cap
+    if (variant === 1) body.max_completion_tokens = cap
     return JSON.stringify(body)
   }
 
@@ -325,12 +353,26 @@ async function callOpenaiCompat(
     if (res.ok) {
       const data = (await res.json().catch(() => null)) as {
         choices?: Array<{ message?: { content?: unknown } }>
+        base_resp?: { status_code?: number; status_msg?: string }
       } | null
+      // v2.19：MiniMax 约定 — 错误也走 HTTP 200，正文 base_resp 携带状态码/消息
+      // （如 1004 = 鉴权失败）；提取出来给出真实原因而非误导性的「返回空内容」。
+      if (data?.base_resp && (data.base_resp.status_code ?? 0) !== 0) {
+        throw new Error(`供应商错误（code ${data.base_resp.status_code}）：${String(data.base_resp.status_msg ?? '').slice(0, 200)}`)
+      }
       const text = contentToString(data?.choices?.[0]?.message?.content)
       if (!text) throw new Error('LLM 返回空内容')
       return text
     }
     const errText = (await res.text().catch(() => '')).slice(0, 400)
+    // v2.20.2：402 额度不足追补人话指引（MiniMax Token Plan 用尽时返回的 message
+    // 是中文但用户未必知道下一步去哪充值；其他供应商 402 同样适用）
+    if (res.status === 402) {
+      const balanceHint = /insufficient[_\s-]?balance|Token Plan|用量上限|quota|余额|积分/i.test(errText)
+        ? '（Key 鉴权成功，但该账户额度/余额不足 — 请到供应商平台充值或升级套餐后重试）'
+        : ''
+      throw new Error(`HTTP ${res.status} ${errText || res.statusText}${balanceHint}`)
+    }
     if (res.status === 400 && variant < 2) {
       if (/max_completion_tokens/i.test(errText) && variant === 0) continue
       if (/max_tokens/i.test(errText) || /temperature/i.test(errText) || /unsupported|unknown parameter|not supported/i.test(errText)) continue
@@ -422,6 +464,13 @@ export interface ModelInfo { id: string; label?: string }
 const MAX_MODELS = 300
 const MODELS_TIMEOUT_MS = 15_000
 
+/** v2.18.1：表单 Key 留空时回填（models/test 路由共用）。
+ *  v2.19：服务端不再持久化 Key（无库可读），退化为恒等返回 — 前端 localStorage
+ *  中的 Key 由面板预填表单后显式携带，无需服务端回填。保留签名避免两处调用点改动。 */
+export async function reuseSavedApiKey(_providerKey: string, _baseUrl: string, apiKey: string): Promise<string> {
+  return apiKey
+}
+
 /** 拉取供应商模型列表（服务端执行，key 不经过前端）。 */
 export async function fetchProviderModels(
   providerKey: string,
@@ -438,7 +487,17 @@ export async function fetchProviderModels(
   }
   const baseUrl = (baseUrlOverride?.trim() || meta.baseUrl).replace(/\/$/, '')
   if (!baseUrl) return { ok: false, models: [], error: '请先填写 API Base URL' }
-  const key = apiKeyOverride ?? ''
+  // v2.18.1：表单 Key 留空 → 自动沿用已保存同供应商 Key（仅发往保存时的同一 baseUrl，
+  // 与配置保存路由 v2.5 防定向外送规则同口径）——此前留空会裸发请求吃 401，用户无从知道
+  // 「留空沿用」其实对模型列表也生效。v2.19：服务端不再存 Key（恒等返回），提示语同步更新。
+  const key = await reuseSavedApiKey(providerKey, baseUrl, apiKeyOverride ?? '')
+  if (meta.needsKey && !key.trim()) {
+    return {
+      ok: false,
+      models: [],
+      error: `${meta.label} 需要 API Key 才能获取模型列表 — 请先在上方填写 API Key（也可直接手动输入模型名）`,
+    }
+  }
   const url = joinUrl(baseUrl, meta.modelsPath)
   const headers: Record<string, string> = {}
   if (meta.protocol === 'anthropic') {
@@ -455,7 +514,17 @@ export async function fetchProviderModels(
     const res = await fetch(url, { headers, signal: ctrl.signal })
     if (!res.ok) {
       const errText = (await res.text().catch(() => '')).slice(0, 240)
-      return { ok: false, models: [], error: `HTTP ${res.status} ${errText || res.statusText}` }
+      // v2.18.1：常见错误码追加人话提示，让用户知道下一步该填什么
+      // v2.20.1：MiniMax 家族 401 追加端点/Key 平台不匹配提示（国内 Key 打国际端点报
+      // invalid api key (2049)，反之亦然 — 两平台 Key 不通用是实测高频坑）
+      const hint = res.status === 401 || res.status === 403
+        ? (providerKey.startsWith('minimax')
+            ? ' — 鉴权失败：MiniMax 国内 Key 请用 api.minimax.cn 端点、国际 Key 请用 api.minimax.io 端点（两平台 Key 不通用）；也可切「MiniMax 旧版 API」用 M2.x'
+            : ' — 鉴权失败：请检查 API Key 是否填写正确')
+        : res.status === 404
+          ? ' — 端点不存在：请检查 API Base URL 是否正确'
+          : ''
+      return { ok: false, models: [], error: `HTTP ${res.status} ${errText || res.statusText}${hint}` }
     }
     const raw = (await res.text().catch(() => ''))
     if (raw.length > 2_000_000) return { ok: false, models: [], error: '模型列表响应过大' }

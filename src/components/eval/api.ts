@@ -18,6 +18,11 @@ import type {
   SequenceAttribution,
   UploadResponse,
 } from './types'
+import {
+  migrateMinimaxDomesticDefault,
+  migrateMinimaxEndpoint,
+  type LocalEngineStore,
+} from './llm-store-migration'
 
 /** GET /api/jobs — 最近作业列表 */
 export async function fetchJobList(): Promise<JobListItem[]> {
@@ -101,28 +106,89 @@ export function clearStatelessEnv(): void {
   } catch { /* ignore */ }
 }
 
-// ─── v2.4 LLM 引擎配置内存暂存（无状态部署用） ────────────────────────────
+// ─── v2.19 LLM 引擎配置 — 浏览器本地存储（仅本人可用） ──────────────────────
 
 /**
- * 无状态部署中 SQLite 不跨请求保留，用户保存的引擎配置读不回来。
- * 配置面板保存时把原始配置（含 Key）暂存在内存（不落盘），
- * 同步评估请求内联携带。仅本页面会话内有效。
+ * v2.19：引擎配置（含 API Key）保存在浏览器 localStorage，按供应商分条保存 —
+ * 切换供应商再切回时自动回填 Key；评估/合并报告请求内联携带（服务端不落盘，
+ * 请求结束即弃）。旧版（v2.4~v2.18）曾把 Key 存服务端 SQLite 且全局共享
+ * （任一用户保存的 Key 驱动所有人评估），已废弃 — 服务端存量惰性清除。
  */
+
 export interface LlmEngineOverride {
   providerKey: string
+  label?: string
   baseUrl?: string
   apiKey?: string
   model: string
 }
 
-let llmOverride: LlmEngineOverride | null = null
+const LOCAL_ENGINE_KEY = 'te_llm_engine_v1'
 
-export function setLlmEngineOverride(cfg: LlmEngineOverride | null): void {
-  llmOverride = cfg
+function readEngineStore(): LocalEngineStore {
+  if (typeof window === 'undefined') return { active: null, providers: {} }
+  try {
+    const raw = window.localStorage.getItem(LOCAL_ENGINE_KEY)
+    if (!raw) return { active: null, providers: {} }
+    const parsed = JSON.parse(raw) as LocalEngineStore
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.providers !== 'object') return { active: null, providers: {} }
+    const s: LocalEngineStore = { active: typeof parsed.active === 'string' ? parsed.active : null, providers: parsed.providers ?? {} }
+    // v2.20/v2.20.1：MiniMax 端点迁移（两条均幂等，仅状态匹配时写回；纯函数见 ./llm-store-migration）
+    if (migrateMinimaxEndpoint(s) || migrateMinimaxDomesticDefault(s)) writeEngineStore(s)
+    return s
+  } catch {
+    return { active: null, providers: {} }
+  }
 }
 
+function writeEngineStore(s: LocalEngineStore): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(LOCAL_ENGINE_KEY, JSON.stringify(s))
+  } catch { /* 隐私模式/存储满 → 忽略（本次会话仍可用内存态） */ }
+}
+
+/** 当前生效引擎（激活供应商的本地配置；无 = 内置）— 评估请求自动内联携带 */
 export function getLlmEngineOverride(): LlmEngineOverride | null {
-  return llmOverride
+  const s = readEngineStore()
+  if (!s.active || s.active === 'builtin') return null
+  const e = s.providers[s.active]
+  if (!e || !e.model) return null
+  return { providerKey: s.active, label: e.label, baseUrl: e.baseUrl, apiKey: e.apiKey, model: e.model }
+}
+
+/** 保存并激活引擎（写入 localStorage，按供应商分条；cfg=null 仅恢复内置 —
+ *  各供应商已保存的配置保留，切回时自动回填 Key） */
+export function setLlmEngineOverride(cfg: LlmEngineOverride | null): void {
+  const s = readEngineStore()
+  if (!cfg) {
+    s.active = null
+    writeEngineStore(s)
+    return
+  }
+  s.active = cfg.providerKey
+  s.providers[cfg.providerKey] = {
+    label: cfg.label,
+    baseUrl: (cfg.baseUrl ?? '').trim(),
+    apiKey: (cfg.apiKey ?? '').trim(),
+    model: cfg.model.trim(),
+    savedAt: Date.now(),
+  }
+  writeEngineStore(s)
+}
+
+/** 读取指定供应商的本地保存配置（面板切换供应商时预填/切回自动回填 Key） */
+export function getEngineProviderEntry(providerKey: string): { label?: string; baseUrl: string; apiKey: string; model: string } | null {
+  const e = readEngineStore().providers[providerKey]
+  if (!e) return null
+  return { label: e.label, baseUrl: e.baseUrl ?? '', apiKey: e.apiKey ?? '', model: e.model ?? '' }
+}
+
+/** 当前引擎摘要（页眉/页脚展示；无本地配置 = 内置） */
+export function getLocalEngineSummary(): string {
+  const cfg = getLlmEngineOverride()
+  if (!cfg) return 'Z.ai GLM-4.6（内置）'
+  return `${cfg.label || cfg.providerKey} · ${cfg.model}`
 }
 
 /** 会话丢失（无状态部署：分块会话落在了被回收的实例上）→ 触发直传回退 */
@@ -293,10 +359,13 @@ export async function fetchDocxInsights(
 ): Promise<InsightsResponse> {
   // v2.6.2：uploadId 与内联 text 同时携带 — 磁盘路径优先，多实例磁盘不共享时
   // 服务端自动降级为内联全文（纯 text 无 uploadId 时为无状态直传回退通道）
+  // v2.19：本地引擎配置随请求内联携带（评估表智能解析 LLM 走用户本人的引擎）
+  const llm = getLlmEngineOverride()
   const body: Record<string, unknown> = {
     uploadId,
     force,
     ...(inline ? { text: inline.text, goalHints: inline.goalHints ?? [] } : {}),
+    ...(llm ? { llm } : {}),
   }
   // v2.6 流式：NDJSON 心跳保活（修复部署网关 ~30s 空闲切断导致的 HTTP 502 —
   // 旧版一次性 JSON 在冷启动 + LLM 慢时撞线）。流中断自动重试一次（实例已热）。
@@ -363,7 +432,8 @@ async function fetchInsightsStream(body: Record<string, unknown>): Promise<Insig
 
 // ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────
 
-/** POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.10：附带序列归属） */
+/** POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.10：附带序列归属）
+ *  v2.19：本地引擎配置随请求内联携带（关系判断 LLM 走用户本人的引擎） */
 export interface RelationJudgeResponse {
   judgment: RelationJudgment
   sequenceAttribution?: SequenceAttribution[]
@@ -378,10 +448,11 @@ export async function judgeTargetRelation(input: {
   sequences?: Array<{ header: string; seq: string; length: number }>
   goalHints?: string[]
 }): Promise<RelationJudgeResponse> {
+  const llm = getLlmEngineOverride()
   const res = await fetch('/api/evaluate/relation', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    body: JSON.stringify(llm ? { ...input, llm } : input),
   })
   const data = (await res.json().catch(() => null)) as {
     ok?: boolean
@@ -397,17 +468,19 @@ export async function judgeTargetRelation(input: {
 
 /** POST /api/evaluate/batch-report — 关联靶点全部完成后生成合并评估报告
  *  v1.12：后端异步生成（LLM 三段式分钟级），POST 立即返回 running，
- *  此处轮询 GET 直到终态（done / error），期间 UI 保持"生成中"状态。 */
+ *  此处轮询 GET 直到终态（done / error），期间 UI 保持"生成中"状态。
+ *  v2.19：本地引擎配置随请求内联携带（合并报告三段式生成走用户本人的引擎）。 */
 export async function generateBatchReport(input: {
   jobIds: string[]
   uploadId?: string
   relation: RelationJudgment
   goal?: string
 }): Promise<BatchReportInfo> {
+  const llm = getLlmEngineOverride()
   const res = await fetch('/api/evaluate/batch-report', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    body: JSON.stringify(llm ? { ...input, llm } : input),
   })
   const data = (await res.json().catch(() => null)) as { ok?: boolean; batchReport?: BatchReportInfo; error?: string } | null
   if (!res.ok || !data?.ok || !data.batchReport) {
@@ -464,45 +537,13 @@ export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
 
 // ─── LLM 引擎配置 ──────────────────────────────────────────────
 
-/** GET /api/llm/config — 当前引擎配置 + 供应商列表 */
+/** GET /api/llm/config — 供应商列表（v2.19：引擎配置在浏览器 localStorage，服务端无激活配置；
+ *  GET 顺带触发服务端历史存量配置的一次性清除） */
 export async function fetchLlmConfig(): Promise<LlmConfigResponse> {
   const res = await fetch('/api/llm/config', { cache: 'no-store' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const data = (await res.json().catch(() => null)) as LlmConfigResponse | null
   if (!data || !data.ok) throw new Error('配置读取失败')
-  return data
-}
-
-export interface SaveLlmConfigInput {
-  providerKey: string
-  baseUrl: string
-  apiKey: string
-  model: string
-  /** apiKey 为空时沿用已保存的相同供应商 Key */
-  keepKey?: boolean
-}
-
-/** POST /api/llm/config — 保存并启用引擎配置 */
-export async function saveLlmConfig(input: SaveLlmConfigInput): Promise<LlmConfigResponse> {
-  const res = await fetch('/api/llm/config', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  })
-  const data = (await res.json().catch(() => null)) as (LlmConfigResponse & { error?: string }) | null
-  if (!res.ok || !data || !data.ok) {
-    throw new Error(data?.error ?? `保存失败（HTTP ${res.status}）`)
-  }
-  return data
-}
-
-/** DELETE /api/llm/config — 恢复内置引擎 */
-export async function resetLlmConfig(): Promise<LlmConfigResponse> {
-  const res = await fetch('/api/llm/config', { method: 'DELETE' })
-  const data = (await res.json().catch(() => null)) as (LlmConfigResponse & { error?: string }) | null
-  if (!res.ok || !data || !data.ok) {
-    throw new Error(data?.error ?? `恢复默认失败（HTTP ${res.status}）`)
-  }
   return data
 }
 

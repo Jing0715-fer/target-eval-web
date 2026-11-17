@@ -21,6 +21,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { extractFormInsights, fallbackInsights } from '@/lib/eval/docx-llm'
 import { getOwner } from '@/lib/eval/request-guard'
+import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { isUploadId, uploadDir, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import type { FormInsights } from '@/lib/eval/types'
 
@@ -50,6 +51,8 @@ interface InsightsBody {
   goalHints?: string[]
   /** v2.6.2 快速兜底模式：跳过 LLM 直接规则提取（前端流式两次失败后的第三级降级） */
   quick?: boolean
+  /** v2.19：用户本地引擎配置（localStorage → 请求内联携带；服务端不落盘） */
+  llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
 }
 
 interface StoredParsed {
@@ -103,7 +106,8 @@ export async function POST(req: Request) {
       const ping = setInterval(sendBeat, HEARTBEAT_MS)
       const cleanup = () => { clearTimeout(firstBeat); clearInterval(ping) }
 
-      void (async () => {
+      // v2.19：智能解析 LLM 调用在用户本地引擎的请求作用域内执行（与评估/关系判断/合并报告同口径）
+      void runWithLlmOverride(sanitizeLlmOverride(body.llm), async () => {
         try {
           // ── v2.3 无状态模式：全文内联 ──
           if (!uploadId) {
@@ -190,7 +194,7 @@ export async function POST(req: Request) {
           cleanup()
           try { controller.close() } catch { /* already closed */ }
         }
-      })()
+      })
     },
     cancel() {
       // 客户端断开 — runExtraction 经 req.signal 中止 LLM（不再后台空转）

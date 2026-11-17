@@ -21,7 +21,7 @@ import { db } from '@/lib/db'
 import { createJobSnapshot, getJobSnapshot, makeReporter, markStatus } from '@/lib/eval/job-manager'
 import { runPipelineSegment, sanitizeCheckpoint, type InlineEvalTable, type PipelineCheckpoint, type PipelineResult } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
-import { runWithLlmOverride } from '@/lib/eval/llm-provider'
+import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import { MAX_PDB_UNLIMITED, type EvaluationOptions, type FormInsights, type InputMode } from '@/lib/eval/types'
 
@@ -231,14 +231,8 @@ const evalTable: InlineEvalTable | undefined = body.evalTable
   }
 
   // v2.5 安全修复：引擎配置覆写改为 AsyncLocalStorage 请求作用域（原全局单例会被并发请求互相污染）
-  const llmOverride = body.llm && typeof body.llm.providerKey === 'string' && typeof body.llm.model === 'string' && body.llm.model.trim()
-    ? {
-        providerKey: body.llm.providerKey,
-        baseUrl: typeof body.llm.baseUrl === 'string' ? body.llm.baseUrl : undefined,
-        apiKey: typeof body.llm.apiKey === 'string' ? body.llm.apiKey : undefined,
-        model: body.llm.model.trim(),
-      }
-    : null
+  // v2.19：与异步评估/合并报告路由统一 sanitizeLlmOverride 消毒（未知供应商/缺模型名 → 回退内置）
+  const llmOverride = sanitizeLlmOverride(body.llm)
 
   const encoder = new TextEncoder()
   const snapshot = createJobSnapshot(jobId)

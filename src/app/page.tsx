@@ -15,7 +15,7 @@ import { BatchBar } from '@/components/eval/batch-bar'
 import { HistoryDialog, RecentEvaluations } from '@/components/eval/history'
 import { LlmConfigPanel } from '@/components/eval/llm-config-panel'
 import { useEvaluationFlow } from '@/components/eval/use-evaluation-flow'
-import { fetchLlmConfig } from '@/components/eval/api'
+import { fetchLlmConfig, getLlmEngineOverride } from '@/components/eval/api'
 import { cn } from '@/lib/utils'
 
 const viewMotion = {
@@ -135,17 +135,15 @@ export default function Home() {
     isBuiltin: true,
   })
 
-  // 首次加载读取 LLM 引擎状态（失败静默保持内置）
+  // 首次加载读取 LLM 引擎状态（v2.19：读浏览器 localStorage；顺带触发服务端
+  // 历史存量配置的一次性清除 — fetchLlmConfig GET 副作用；失败静默保持内置）
   useEffect(() => {
-    let alive = true
-    fetchLlmConfig()
-      .then(d => {
-        if (alive) setEngine({ summary: d.engineSummary, isBuiltin: !d.active })
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
+    const llm = getLlmEngineOverride()
+    setEngine({
+      summary: llm ? `${llm.label || llm.providerKey} · ${llm.model}` : 'Z.ai GLM-4.6（内置）',
+      isBuiltin: !llm,
+    })
+    void fetchLlmConfig().catch(() => undefined)
   }, [])
 
   const handleEngineChange = useCallback((summary: string, isBuiltin: boolean) => {
