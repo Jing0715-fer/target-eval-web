@@ -171,11 +171,20 @@ export function doneProgress(): JobProgress {
   return { stage: 'done', percent: 100, message: '评估完成', stages }
 }
 
-/** 服务器重启后遗留的 running 作业 → 标记为中断错误（懒修复） */
+/**
+ * 服务器重启后遗留的 running 作业 → 标记为中断错误（懒修复）。
+ * v2.18.1：①由 /api/jobs 扩展到 /api/evaluate 发起前调用（孤儿 pending 不再
+ * 虚增排队计数堵死新评估）；②加 60s 宽限期 — DB create 与 createJobSnapshot
+ * 之间有毫秒级窗口，并发请求的清理不得误杀刚创建的作业（事故死行均为分钟级
+ * 以上，宽限期不影响其回收）。
+ */
+const REAP_GRACE_MS = 60 * 1000
+
 export async function reapOrphanJobs(): Promise<void> {
   try {
+    const graceCutoff = new Date(Date.now() - REAP_GRACE_MS)
     const orphans = await db.evaluationJob.findMany({
-      where: { status: { in: ['pending', 'running'] } },
+      where: { status: { in: ['pending', 'running'] }, updatedAt: { lt: graceCutoff } },
       select: { id: true },
     })
     for (const o of orphans) {

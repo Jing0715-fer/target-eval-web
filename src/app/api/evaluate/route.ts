@@ -5,7 +5,7 @@
  */
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { createJobSnapshot, enqueueJob, getJobSnapshot, makeReporter, setJobRunning, markStatus } from '@/lib/eval/job-manager'
+import { createJobSnapshot, enqueueJob, getJobSnapshot, makeReporter, setJobRunning, markStatus, reapOrphanJobs } from '@/lib/eval/job-manager'
 import { runPipeline } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
 import { checkJobQuota, quotaResponse, scheduleJobTtlCleanup, QuotaError } from '@/lib/eval/gatekeeper'
@@ -79,6 +79,10 @@ export async function POST(req: Request) {
   }
 
   // 并发/配额守卫（全局排队上限 + 每 IP 活跃上限 + 日配额）
+  // v2.18.1：先清理孤儿作业（进程重启后内存队列蒸发，DB pending 残留死行会
+  // 虚增排队计数，把所有新评估堵死——24 条孤儿堆积即此事故）。
+  // 失败静默：DB 不可用时退回原行为（仅计数，不清理）。
+  await reapOrphanJobs().catch(() => undefined)
   try {
     const quota = await checkJobQuota(owner.key)
     if (!quota.ok && quota.error) throw quota.error

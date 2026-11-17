@@ -34,8 +34,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: '当前为内置引擎，无需获取模型列表' })
     }
     providerKey = cfg.providerKey
+    // v2.18.1 安全加固：显式指定了与保存配置不同的 baseUrl 时不得携带已存 Key
+    // （防 Key 定向外送，与配置保存路由 v2.5 同规则）
+    apiKey = baseUrl && baseUrl !== cfg.baseUrl ? apiKey : (apiKey || cfg.apiKey)
     baseUrl = baseUrl || cfg.baseUrl
-    apiKey = apiKey || cfg.apiKey
   }
 
   if (!providerKey) {

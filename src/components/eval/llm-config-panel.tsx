@@ -449,6 +449,12 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                     {!provider?.supportsModels && provider?.modelsNote && (
                       <p className="text-[11px] text-amber-600 dark:text-amber-500">{provider.modelsNote}</p>
                     )}
+                    {/* v2.18.1：需要 Key 的供应商且当前既未输入也无已存 Key → 主动提示（不等到 401 报错） */}
+                    {provider?.supportsModels && provider.needsKey && apiKey.trim() === '' && savedKeyMasked === '' && (
+                      <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                        该供应商需先填写 API Key 才能获取模型列表（Key 可直接手动输入模型名绕过）
+                      </p>
+                    )}
                   </section>
                 </>
               )}

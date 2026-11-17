@@ -47,7 +47,7 @@ export const PROVIDERS: ProviderMeta[] = [
   { key: 'qwen', label: '通义千问', hint: '阿里云百炼 DashScope 兼容模式', protocol: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'qwen-plus' },
   { key: 'zhipu', label: '智谱 GLM', hint: 'GLM-4.5 / GLM-4-Plus（BigModel）', protocol: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'glm-4-plus' },
   { key: 'moonshot', label: '月之暗面 Kimi', hint: 'Kimi k2 / moonshot-v1 系列', protocol: 'openai', baseUrl: 'https://api.moonshot.cn/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'kimi-k2-0711-preview' },
-  { key: 'minimax', label: 'MiniMax', hint: 'MiniMax-M1 / abab 系列', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '', needsKey: true, defaultModel: 'MiniMax-M1', modelsNote: '该供应商暂不支持自动获取模型列表，请参考其文档手动填写' },
+  { key: 'minimax', label: 'MiniMax', hint: 'MiniMax-M2.7 / M2.5 / M2.1 系列', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '/v1/models', needsKey: true, defaultModel: 'MiniMax-M2.7' },
   { key: 'doubao', label: '火山方舟 豆包', hint: 'Doubao / Ark endpoint 模型', protocol: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'doubao-seed-1-6-250615' },
   { key: 'xai', label: 'xAI Grok', hint: 'Grok 4 / Grok 3', protocol: 'openai', baseUrl: 'https://api.x.ai/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'grok-3' },
   { key: 'openrouter', label: 'OpenRouter', hint: '聚合 400+ 模型（含免费档）', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: false, defaultModel: 'openai/gpt-4o-mini' },
@@ -422,6 +422,18 @@ export interface ModelInfo { id: string; label?: string }
 const MAX_MODELS = 300
 const MODELS_TIMEOUT_MS = 15_000
 
+/** v2.18.1：表单 Key 留空时回填已保存同供应商的 Key（models/test 路由共用）。
+ *  仅当请求 baseUrl 与保存时完全一致才回填 — 与保存路由 v2.5「防 Key 定向外送」
+ *  同口径；DB 不可用或无匹配 → 原样返回（后续 needsKey 检查给出人话提示）。 */
+export async function reuseSavedApiKey(providerKey: string, baseUrl: string, apiKey: string): Promise<string> {
+  if (apiKey.trim()) return apiKey
+  try {
+    const row = await db.llmConfig.findFirst({ where: { isActive: true, providerKey } })
+    if (row?.apiKey && row.baseUrl === baseUrl) return row.apiKey
+  } catch { /* DB 不可用 → 不回填 */ }
+  return apiKey
+}
+
 /** 拉取供应商模型列表（服务端执行，key 不经过前端）。 */
 export async function fetchProviderModels(
   providerKey: string,
@@ -438,7 +450,17 @@ export async function fetchProviderModels(
   }
   const baseUrl = (baseUrlOverride?.trim() || meta.baseUrl).replace(/\/$/, '')
   if (!baseUrl) return { ok: false, models: [], error: '请先填写 API Base URL' }
-  const key = apiKeyOverride ?? ''
+  // v2.18.1：表单 Key 留空 → 自动沿用已保存同供应商 Key（仅发往保存时的同一 baseUrl，
+  // 与配置保存路由 v2.5 防定向外送规则同口径）——此前留空会裸发请求吃 401，用户无从知道
+  // 「留空沿用」其实对模型列表也生效。
+  let key = await reuseSavedApiKey(providerKey, baseUrl, apiKeyOverride ?? '')
+  if (meta.needsKey && !key.trim()) {
+    return {
+      ok: false,
+      models: [],
+      error: `${meta.label} 需要 API Key 才能获取模型列表 — 请先在上方填写 API Key（已保存的 Key 表单留空即可自动沿用）`,
+    }
+  }
   const url = joinUrl(baseUrl, meta.modelsPath)
   const headers: Record<string, string> = {}
   if (meta.protocol === 'anthropic') {
@@ -455,7 +477,13 @@ export async function fetchProviderModels(
     const res = await fetch(url, { headers, signal: ctrl.signal })
     if (!res.ok) {
       const errText = (await res.text().catch(() => '')).slice(0, 240)
-      return { ok: false, models: [], error: `HTTP ${res.status} ${errText || res.statusText}` }
+      // v2.18.1：常见错误码追加人话提示，让用户知道下一步该填什么
+      const hint = res.status === 401 || res.status === 403
+        ? ' — 鉴权失败：请检查 API Key 是否填写正确'
+        : res.status === 404
+          ? ' — 端点不存在：请检查 API Base URL 是否正确'
+          : ''
+      return { ok: false, models: [], error: `HTTP ${res.status} ${errText || res.statusText}${hint}` }
     }
     const raw = (await res.text().catch(() => ''))
     if (raw.length > 2_000_000) return { ok: false, models: [], error: '模型列表响应过大' }
