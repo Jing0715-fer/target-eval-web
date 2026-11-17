@@ -67,6 +67,13 @@ export interface EvaluateRequest {
     }>
     insights?: FormInsights
   }
+  /** v2.19：用户本地引擎配置（浏览器 localStorage → 请求内联携带；服务端不落盘） */
+  llm?: {
+    providerKey: string
+    baseUrl?: string
+    apiKey?: string
+    model: string
+  }
   options: EvaluateOptions
 }
 

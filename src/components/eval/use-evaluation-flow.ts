@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
-import { evaluateSyncStream, fetchBatchReport, generateBatchReport, isStatelessEnv, judgeTargetRelation } from './api'
+import { evaluateSyncStream, fetchBatchReport, generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation } from './api'
 import { addSessionJob, getSessionJob } from './session-history'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
@@ -304,10 +304,12 @@ export function useEvaluationFlow() {
   /** 创建一个评估作业（POST /api/evaluate），失败返回 error */
   const createJob = async (request: EvaluateRequest): Promise<{ jobId?: string; error?: string }> => {
     try {
+      // v2.19：本地引擎配置随请求内联携带（服务端不落盘；Key 仅本次请求存活）
+      const llm = getLlmEngineOverride()
       const res = await fetch('/api/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
+        body: JSON.stringify(llm ? { ...request, llm } : request),
       })
       let data: { ok?: boolean; jobId?: string; error?: string } | null = null
       try {

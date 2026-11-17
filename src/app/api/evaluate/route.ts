@@ -8,6 +8,7 @@ import { db } from '@/lib/db'
 import { createJobSnapshot, enqueueJob, getJobSnapshot, makeReporter, setJobRunning, markStatus, reapOrphanJobs } from '@/lib/eval/job-manager'
 import { runPipeline } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
+import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { checkJobQuota, quotaResponse, scheduleJobTtlCleanup, QuotaError } from '@/lib/eval/gatekeeper'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import { MAX_PDB_UNLIMITED, type BlastGroup, type EvaluationOptions, type InputMode } from '@/lib/eval/types'
@@ -33,6 +34,8 @@ interface EvaluateBody {
   homologBlast?: Partial<BlastGroup>
   /** v2.0：配体输入（名称/分子式/三位 ID；上传文件提取的线索），最多 8 条 */
   ligands?: Array<{ raw: string; source?: 'text' | 'file' | 'eval-table'; fileName?: string }>
+  /** v2.19：用户本地引擎配置（localStorage → 请求内联携带；服务端不落盘） */
+  llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
   options?: Partial<EvaluationOptions>
 }
 
@@ -110,6 +113,8 @@ export async function POST(req: Request) {
     range,
   }
   const batchNote = body.batchNote?.trim().slice(0, 500) || undefined
+  // v2.19：用户本地引擎配置消毒（未知供应商/缺模型名 → 回退内置；不持久化）
+  const llmOverride = sanitizeLlmOverride(body.llm)
   // v2.0 配体输入消毒（去空/截断/上限 8 条）
   const rawLigands: Array<{ raw: string; source?: 'text' | 'file' | 'eval-table'; fileName?: string }> = Array.isArray(body.ligands) ? body.ligands : []
   const ligands = rawLigands
@@ -153,7 +158,9 @@ export async function POST(req: Request) {
   createJobSnapshot(job.id)
   const { report, log } = makeReporter(job.id)
 
-  enqueueJob(async () => {
+  enqueueJob(() => runWithLlmOverride(llmOverride, async () => {
+    // v2.19：整个管线在用户引擎的请求作用域内执行（AsyncLocalStorage 随 await 链
+    // 传播 — 含 getEngineSummary 报告标注；Key 仅存活于本作业内存，不落盘）
     // 复用已有快照（保留排队期间的取消标记），不存在才补建
     const snap = getJobSnapshot(job.id) ?? createJobSnapshot(job.id)
     if (snap.status === 'canceled') return
@@ -199,7 +206,7 @@ export async function POST(req: Request) {
         },
       }).catch(() => undefined)
     }
-  })
+  }))
 
   return NextResponse.json({ ok: true, jobId: job.id })
 }

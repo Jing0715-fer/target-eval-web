@@ -13,6 +13,7 @@ import * as path from 'node:path'
 import { fetchUniprotInfo } from '@/lib/eval/uniprot'
 import { judgeTargetRelation, type RelationTargetBrief } from '@/lib/eval/relation'
 import { getOwner } from '@/lib/eval/request-guard'
+import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
 import { detectAntibody } from '@/lib/eval/antibody'
 import { clusterHomologs, attributeSequences, groupHighIdentity, HOMOLOG_MERGE_IDENTITY, type HomologTarget } from '@/lib/eval/homology'
@@ -29,6 +30,8 @@ interface RelationBody {
   /** v2.4 无状态部署：评估表序列与目标提示由前端内联携带（磁盘 parsed.json 读不到时回退） */
   sequences?: ParsedSequence[]
   goalHints?: string[]
+  /** v2.19：用户本地引擎配置（localStorage → 请求内联携带；服务端不落盘） */
+  llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
 }
 
 /** v2.8：关系判断的靶点数防御性上限（与前端 MAX_BATCH_UNIPROT 对齐；超出返回明确错误而非静默截断） */
@@ -138,13 +141,14 @@ export async function POST(req: Request) {
     })
   }
 
-  const judgment: RelationJudgment = await judgeTargetRelation({
+  // v2.19：关系判断 LLM 调用在用户本地引擎的请求作用域内执行（与评估/合并报告同口径）
+  const judgment: RelationJudgment = await runWithLlmOverride(sanitizeLlmOverride(body.llm), () => judgeTargetRelation({
     targets: briefs,
     sequences: sequenceEvidence,
     goal: body.goal,
     insights: insights ?? { goals: goalHints, scientificQuestions: [], source: 'regex' },
     homologEvidence: homologPairs.length ? homologPairs : undefined,
-  })
+  }))
 
   // 确定性覆盖：序列一致性 ≥40% 的靶点对为同源家族（LLM 判为非关联时覆盖；
   // LLM 判为 complex/fusion 等物理关联时保留 LLM 类型，仅补充同源证据）

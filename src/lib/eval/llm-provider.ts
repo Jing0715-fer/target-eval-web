@@ -7,7 +7,8 @@
  *  - anthropic  Anthropic Messages API（x-api-key + anthropic-version）
  *  - google     Google Gemini generateContent（x-goog-api-key）
  *
- * 内存策略：激活配置全局单例缓存（TTL 30s + 主动失效），API key 仅后端持有；
+ * 内存策略：v2.19 起引擎配置完全用户本地化 — 评估请求内联携带（AsyncLocalStorage
+ * 请求作用域覆写），服务端不再持久化任何 Key；历史 SQLite 存量配置惰性清除。
  * 模型列表响应截断 ≤300 条，防超大响应。
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -59,8 +60,7 @@ export function getProviderMeta(key: string): ProviderMeta | null {
   return PROVIDERS.find(p => p.key === key) ?? null
 }
 
-// ─── 激活配置（内存单例缓存）──────────────────────────────────────────────────
-
+/** 激活配置（请求级覆写）*/
 export interface ActiveLlmConfig {
   providerKey: ProviderKey
   label: string
@@ -69,43 +69,37 @@ export interface ActiveLlmConfig {
   model: string
 }
 
-const CACHE_TTL_MS = 30_000
 const g = globalThis as unknown as {
-  __llmCfg?: { config: ActiveLlmConfig | null; loadedAt: number }
+  __llmOverrideStorage?: AsyncLocalStorage<ActiveLlmConfig>
+  __llmCfgWiped?: boolean
 }
 
 /** v2.5 安全修复：请求级引擎覆写存 AsyncLocalStorage（随 await 链传播，请求间隔离）。 */
-const llmOverrideStorage = new AsyncLocalStorage<ActiveLlmConfig>()
+const llmOverrideStorage = (g.__llmOverrideStorage ??= new AsyncLocalStorage<ActiveLlmConfig>())
 
-/** 读取激活配置（无 = 内置 z-ai）。DB 故障时静默回退内置。
- *  v2.5 安全修复：请求级覆写（AsyncLocalStorage）优先于全局配置 —— 原实现把覆写
- *  写入全局单例，同实例并发请求会互相污染（A 的评估数据可能发往 B 配置的端点）。 */
+/**
+ * 读取生效配置：请求级覆写（AsyncLocalStorage）→ 无则 null（内置 z-ai）。
+ * v2.19：彻底移除服务端 SQLite 读取 — 引擎配置由用户浏览器本地存储，随评估
+ * 请求内联携带；不再存在「任一用户保存的 Key 驱动所有人评估」的全局共享问题。
+ */
 export async function getActiveLlmConfig(): Promise<ActiveLlmConfig | null> {
-  const reqScoped = llmOverrideStorage.getStore()
-  if (reqScoped) return reqScoped
-  const c = g.__llmCfg
-  if (c && Date.now() - c.loadedAt < CACHE_TTL_MS) return c.config
-  let config: ActiveLlmConfig | null = null
-  try {
-    const row = await db.llmConfig.findFirst({ where: { isActive: true } })
-    if (row) {
-      const meta = getProviderMeta(row.providerKey)
-      config = {
-        providerKey: (meta?.key ?? 'custom') as ProviderKey,
-        label: row.label || meta?.label || row.providerKey,
-        baseUrl: row.baseUrl || meta?.baseUrl || '',
-        apiKey: row.apiKey ?? '',
-        model: row.model,
-      }
-    }
-  } catch { /* DB 不可用 → 内置引擎兜底 */ }
-  g.__llmCfg = { config, loadedAt: Date.now() }
-  return config
+  return llmOverrideStorage.getStore() ?? null
 }
 
-/** 配置变更后立即失效缓存 */
+/** 兼容保留（旧缓存失效入口 — DB 已不存配置，无副作用） */
 export function invalidateLlmConfigCache(): void {
-  g.__llmCfg = undefined
+  /* v2.19：无服务端配置缓存，空操作 */
+}
+
+/** v2.19：惰性清除历史存量 — 旧版本曾把用户 Key 存在服务端 SQLite（全局共享行），
+ *  首个 GET /api/llm/config 触发一次性 deleteMany（每进程一次，幂等）。 */
+export async function wipeServerLlmConfigsOnce(): Promise<void> {
+  if (g.__llmCfgWiped) return
+  g.__llmCfgWiped = true
+  try {
+    await db.llmConfig.deleteMany({})
+    console.log('[llm] 已清除服务端存量引擎配置（v2.19：Key 仅存用户浏览器本地）')
+  } catch { /* DB 不可用 → 跳过 */ }
 }
 
 /**
@@ -139,6 +133,24 @@ export function runWithLlmOverride<T>(override: {
 } | null, fn: () => Promise<T>): Promise<T> {
   if (!override) return fn()
   return llmOverrideStorage.run(buildLlmOverrideConfig(override), fn)
+}
+
+/** v2.19：评估请求内联引擎配置消毒（异步评估/合并报告路由共用）。
+ *  未知供应商/缺模型名 → null（回退内置）；字符串限长防注入；baseUrl 须 http(s)。 */
+export function sanitizeLlmOverride(raw: unknown): { providerKey: string; baseUrl?: string; apiKey?: string; model: string } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as { providerKey?: unknown; baseUrl?: unknown; apiKey?: unknown; model?: unknown }
+  const providerKey = typeof r.providerKey === 'string' ? r.providerKey.trim().slice(0, 32) : ''
+  if (!providerKey || providerKey === 'builtin' || !getProviderMeta(providerKey)) return null
+  const model = typeof r.model === 'string' ? r.model.trim().slice(0, 200) : ''
+  if (!model) return null
+  const baseUrl = typeof r.baseUrl === 'string' ? r.baseUrl.trim().slice(0, 500) : ''
+  if (baseUrl && !/^https?:\/\//i.test(baseUrl)) return null
+  const apiKey = typeof r.apiKey === 'string' ? r.apiKey.trim().slice(0, 200) : ''
+  const out: { providerKey: string; baseUrl?: string; apiKey?: string; model: string } = { providerKey, model }
+  if (baseUrl) out.baseUrl = baseUrl
+  if (apiKey) out.apiKey = apiKey
+  return out
 }
 
 /** 当前引擎摘要（报告元数据/页脚展示用） */
@@ -325,7 +337,13 @@ async function callOpenaiCompat(
     if (res.ok) {
       const data = (await res.json().catch(() => null)) as {
         choices?: Array<{ message?: { content?: unknown } }>
+        base_resp?: { status_code?: number; status_msg?: string }
       } | null
+      // v2.19：MiniMax 约定 — 错误也走 HTTP 200，正文 base_resp 携带状态码/消息
+      // （如 1004 = 鉴权失败）；提取出来给出真实原因而非误导性的「返回空内容」。
+      if (data?.base_resp && (data.base_resp.status_code ?? 0) !== 0) {
+        throw new Error(`供应商错误（code ${data.base_resp.status_code}）：${String(data.base_resp.status_msg ?? '').slice(0, 200)}`)
+      }
       const text = contentToString(data?.choices?.[0]?.message?.content)
       if (!text) throw new Error('LLM 返回空内容')
       return text
@@ -422,15 +440,10 @@ export interface ModelInfo { id: string; label?: string }
 const MAX_MODELS = 300
 const MODELS_TIMEOUT_MS = 15_000
 
-/** v2.18.1：表单 Key 留空时回填已保存同供应商的 Key（models/test 路由共用）。
- *  仅当请求 baseUrl 与保存时完全一致才回填 — 与保存路由 v2.5「防 Key 定向外送」
- *  同口径；DB 不可用或无匹配 → 原样返回（后续 needsKey 检查给出人话提示）。 */
-export async function reuseSavedApiKey(providerKey: string, baseUrl: string, apiKey: string): Promise<string> {
-  if (apiKey.trim()) return apiKey
-  try {
-    const row = await db.llmConfig.findFirst({ where: { isActive: true, providerKey } })
-    if (row?.apiKey && row.baseUrl === baseUrl) return row.apiKey
-  } catch { /* DB 不可用 → 不回填 */ }
+/** v2.18.1：表单 Key 留空时回填（models/test 路由共用）。
+ *  v2.19：服务端不再持久化 Key（无库可读），退化为恒等返回 — 前端 localStorage
+ *  中的 Key 由面板预填表单后显式携带，无需服务端回填。保留签名避免两处调用点改动。 */
+export async function reuseSavedApiKey(_providerKey: string, _baseUrl: string, apiKey: string): Promise<string> {
   return apiKey
 }
 
@@ -452,13 +465,13 @@ export async function fetchProviderModels(
   if (!baseUrl) return { ok: false, models: [], error: '请先填写 API Base URL' }
   // v2.18.1：表单 Key 留空 → 自动沿用已保存同供应商 Key（仅发往保存时的同一 baseUrl，
   // 与配置保存路由 v2.5 防定向外送规则同口径）——此前留空会裸发请求吃 401，用户无从知道
-  // 「留空沿用」其实对模型列表也生效。
-  let key = await reuseSavedApiKey(providerKey, baseUrl, apiKeyOverride ?? '')
+  // 「留空沿用」其实对模型列表也生效。v2.19：服务端不再存 Key（恒等返回），提示语同步更新。
+  const key = await reuseSavedApiKey(providerKey, baseUrl, apiKeyOverride ?? '')
   if (meta.needsKey && !key.trim()) {
     return {
       ok: false,
       models: [],
-      error: `${meta.label} 需要 API Key 才能获取模型列表 — 请先在上方填写 API Key（已保存的 Key 表单留空即可自动沿用）`,
+      error: `${meta.label} 需要 API Key 才能获取模型列表 — 请先在上方填写 API Key（也可直接手动输入模型名）`,
     }
   }
   const url = joinUrl(baseUrl, meta.modelsPath)

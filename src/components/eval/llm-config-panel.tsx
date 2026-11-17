@@ -23,8 +23,8 @@ import { cn } from '@/lib/utils'
 import {
   fetchLlmConfig,
   fetchLlmModels,
-  resetLlmConfig,
-  saveLlmConfig,
+  getEngineProviderEntry,
+  getLlmEngineOverride,
   setLlmEngineOverride,
   testLlmConnection,
 } from './api'
@@ -55,7 +55,6 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
   const [providerKey, setProviderKey] = useState('builtin')
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
-  const [savedKeyMasked, setSavedKeyMasked] = useState('')
   const [model, setModel] = useState('')
 
   // 模型列表
@@ -79,27 +78,27 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
   )
   const isBuiltin = providerKey === 'builtin'
 
-  // 打开时加载配置
+  // 打开时加载配置（v2.19：配置读浏览器 localStorage，服务端仅返回供应商表）
   const load = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
     try {
       const data = await fetchLlmConfig()
       setProviders(data.providers)
-      setHasActive(Boolean(data.active))
-      setActiveSummary(data.engineSummary)
-      if (data.active) {
-        setProviderKey(data.active.providerKey)
-        setBaseUrl(data.active.baseUrl)
-        setModel(data.active.model)
-        setSavedKeyMasked(data.active.hasKey ? data.active.apiKeyMasked : '')
+      const llm = getLlmEngineOverride()
+      setHasActive(Boolean(llm))
+      setActiveSummary(llm ? `${llm.label || llm.providerKey} · ${llm.model}` : 'Z.ai GLM-4.6（内置）')
+      if (llm) {
+        setProviderKey(llm.providerKey)
+        setBaseUrl(llm.baseUrl ?? '')
+        setModel(llm.model)
+        setApiKey(llm.apiKey ?? '')
       } else {
         setProviderKey('builtin')
         setBaseUrl('')
         setModel('')
-        setSavedKeyMasked('')
+        setApiKey('')
       }
-      setApiKey('')
       setModels([])
       setTest({ kind: 'idle' })
       setSaveMsg(null)
@@ -115,20 +114,19 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     if (open) void load()
   }, [open, load])
 
-  // 切换供应商：预填 Base URL / 默认模型
+  // 切换供应商：v2.19 — 本地保存过则自动回填（含 Key，切回无需重输），否则预填默认
   const selectProvider = (p: LlmProviderLite) => {
     if (p.key === providerKey) return
     setProviderKey(p.key)
-    setBaseUrl(p.baseUrl)
-    setModel(p.defaultModel)
+    const entry = p.key === 'builtin' ? null : getEngineProviderEntry(p.key)
+    setBaseUrl(entry?.baseUrl || p.baseUrl)
+    setModel(entry?.model || p.defaultModel)
+    setApiKey(entry?.apiKey ?? '')
     setModels([])
     setModelsOpen(false)
     setModelsError(null)
     setTest({ kind: 'idle' })
     setSaveMsg(null)
-    // 已保存的相同供应商 Key 提示
-    setSavedKeyMasked('')
-    setApiKey('')
   }
 
   // 获取模型列表
@@ -160,58 +158,50 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     }
   }
 
-  // 保存并启用
-  const save = async () => {
+  // 保存并启用（v2.19：写入浏览器 localStorage — 不发送服务端，仅本人可用）
+  const save = () => {
     setSaving(true)
     setSaveMsg(null)
     try {
-      const r = await saveLlmConfig({
-        providerKey,
-        baseUrl,
-        apiKey,
-        model,
-        keepKey: apiKey.trim() === '',
-      })
-      // v2.4：无状态部署 DB 不保留配置 → 内存暂存原始配置（含 Key），同步评估请求内联携带
-      // （Key 为空且 keepKey 时无法取回原值 → 仅在用户本次输入了 Key 时暂存完整配置）
-      if (apiKey.trim() !== '') {
-        setLlmEngineOverride({ providerKey, baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), model: model.trim() })
+      if (isBuiltin) {
+        setLlmEngineOverride(null)
+        setHasActive(false)
+        setActiveSummary('Z.ai GLM-4.6（内置）')
+        setSaveMsg({ ok: true, text: '已启用内置引擎（Z.ai GLM-4.6）' })
+        onEngineChange?.('Z.ai GLM-4.6（内置）', true)
+        return
       }
-      setSaveMsg({ ok: true, text: `已启用 ${r.engineSummary}` })
-      setHasActive(Boolean(r.active))
-      setActiveSummary(r.engineSummary)
-      onEngineChange?.(r.engineSummary, !r.active)
-      // 刷新已保存 Key 掩码
-      setApiKey('')
-      try {
-        const data = await fetchLlmConfig()
-        setSavedKeyMasked(data.active?.hasKey ? (data.active?.apiKeyMasked ?? '') : '')
-      } catch { /* 忽略 */ }
-    } catch (e) {
-      setSaveMsg({ ok: false, text: e instanceof Error ? e.message : '保存失败' })
+      const summary = `${provider?.label ?? providerKey} · ${model.trim()}`
+      setLlmEngineOverride({
+        providerKey,
+        label: provider?.label,
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim(),
+        model: model.trim(),
+      })
+      setSaveMsg({ ok: true, text: `已启用 ${summary} — 配置已保存到本浏览器，仅你本人可用` })
+      setHasActive(true)
+      setActiveSummary(summary)
+      onEngineChange?.(summary, false)
     } finally {
       setSaving(false)
     }
   }
 
-  // 恢复内置
-  const reset = async () => {
+  // 恢复内置（v2.19：清除本地激活；各供应商已存 Key 保留在本浏览器，切回自动回填）
+  const reset = () => {
     setResetting(true)
     setSaveMsg(null)
     try {
-      const r = await resetLlmConfig()
-      setLlmEngineOverride(null) // v2.4：同步清空内存暂存的引擎配置
+      setLlmEngineOverride(null)
       setProviderKey('builtin')
       setBaseUrl('')
       setModel('')
       setApiKey('')
-      setSavedKeyMasked('')
       setHasActive(false)
-      setActiveSummary(r.engineSummary)
-      setSaveMsg({ ok: true, text: '已恢复内置引擎（Z.ai GLM-4.6）' })
-      onEngineChange?.(r.engineSummary, true)
-    } catch (e) {
-      setSaveMsg({ ok: false, text: e instanceof Error ? e.message : '恢复失败' })
+      setActiveSummary('Z.ai GLM-4.6（内置）')
+      setSaveMsg({ ok: true, text: '已恢复内置引擎 — 各供应商已保存的 Key 仍保留在本浏览器，切换回去即自动回填' })
+      onEngineChange?.('Z.ai GLM-4.6（内置）', true)
     } finally {
       setResetting(false)
     }
@@ -235,7 +225,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     return models.filter(m => m.toLowerCase().includes(q))
   }, [models, model])
 
-  const canSave = !isBuiltin && baseUrl.trim() !== '' && model.trim() !== '' && (!provider?.needsKey || apiKey.trim() !== '' || savedKeyMasked !== '')
+  const canSave = !isBuiltin && baseUrl.trim() !== '' && model.trim() !== '' && (!provider?.needsKey || apiKey.trim() !== '')
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -249,7 +239,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                 LLM 分析引擎配置
               </DialogTitle>
               <DialogDescription className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                评估分析与评估表智能解析由该引擎驱动；内置引擎开箱即用，也可切换至任意主流供应商或自定义 OpenAI 兼容端点。
+                评估分析与评估表智能解析由该引擎驱动；配置（含 API Key）保存在浏览器本地、仅你本人可用，不存服务端。内置引擎开箱即用，也可切换至任意主流供应商或自定义 OpenAI 兼容端点。
               </DialogDescription>
             </div>
             <div className="hidden shrink-0 items-center gap-1.5 rounded-md border border-primary/30 bg-primary/[0.06] px-2.5 py-1.5 font-mono text-[11px] text-primary sm:flex">
@@ -352,7 +342,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                         type={showKey ? 'text' : 'password'}
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
-                        placeholder={savedKeyMasked ? `已保存 ${savedKeyMasked}，留空沿用` : (provider?.needsKey ? '必填' : '可选')}
+                        placeholder={provider?.needsKey ? '必填（仅保存在你的浏览器本地）' : '可选'}
                         className="h-10 rounded-lg pr-10 font-mono text-xs"
                         spellCheck={false}
                         autoComplete="off"
@@ -367,7 +357,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                       </button>
                     </div>
                     <p className="text-[11px] leading-relaxed text-muted-foreground/70">
-                      Key 仅保存在本地数据库用于服务端调用，不会出现在评估报告或前端页面中。
+                      Key 保存在浏览器本地（仅你本人可用）：随你发起的评估请求发送到服务器代为调用，服务端不落盘、不共享给其他用户；清除浏览器数据会同时清除已存 Key。
                     </p>
                   </section>
 
@@ -449,10 +439,10 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                     {!provider?.supportsModels && provider?.modelsNote && (
                       <p className="text-[11px] text-amber-600 dark:text-amber-500">{provider.modelsNote}</p>
                     )}
-                    {/* v2.18.1：需要 Key 的供应商且当前既未输入也无已存 Key → 主动提示（不等到 401 报错） */}
-                    {provider?.supportsModels && provider.needsKey && apiKey.trim() === '' && savedKeyMasked === '' && (
+                    {/* v2.19：需要 Key 的供应商且当前未填写 → 主动提示（Key 已存本地时切回会自动预填） */}
+                    {provider?.supportsModels && provider.needsKey && apiKey.trim() === '' && (
                       <p className="text-[11px] text-amber-600 dark:text-amber-500">
-                        该供应商需先填写 API Key 才能获取模型列表（Key 可直接手动输入模型名绕过）
+                        该供应商需先填写 API Key 才能获取模型列表（也可直接手动输入模型名）
                       </p>
                     )}
                   </section>
