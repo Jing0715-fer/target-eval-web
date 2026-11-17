@@ -62,6 +62,8 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
   const [modelsOpen, setModelsOpen] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelsError, setModelsError] = useState<string | null>(null)
+  // v2.20：用户自拉取/选中后是否手动键入过 — 预填值不作过滤词（防下拉只剩精确匹配一条）
+  const [modelQueryDirty, setModelQueryDirty] = useState(false)
 
   // 测试 / 保存
   const [test, setTest] = useState<TestState>({ kind: 'idle' })
@@ -100,6 +102,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
         setApiKey('')
       }
       setModels([])
+      setModelQueryDirty(false)
       setTest({ kind: 'idle' })
       setSaveMsg(null)
       setModelsError(null)
@@ -123,13 +126,14 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     setModel(entry?.model || p.defaultModel)
     setApiKey(entry?.apiKey ?? '')
     setModels([])
+    setModelQueryDirty(false)
     setModelsOpen(false)
     setModelsError(null)
     setTest({ kind: 'idle' })
     setSaveMsg(null)
   }
 
-  // 获取模型列表
+  // 获取模型列表（v2.20：拉取成功后重置 dirty — 预填模型名不作过滤词，展示完整列表）
   const loadModels = async () => {
     if (!provider || isBuiltin) return
     setModelsLoading(true)
@@ -138,6 +142,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     try {
       const data = await fetchLlmModels({ providerKey, baseUrl, apiKey })
       setModels(data.models?.map(m => m.id) ?? [])
+      setModelQueryDirty(false)
     } catch (e) {
       setModels([])
       setModelsError(e instanceof Error ? e.message : '获取失败')
@@ -219,11 +224,15 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     return () => document.removeEventListener('mousedown', onClick)
   }, [modelsOpen])
 
+  // v2.20：过滤陷阱修复 — 输入框预填的模型名（默认/已保存值）曾被当作过滤词，
+  // 点「获取模型列表」后列表被过滤得只剩精确匹配一条（如只剩 MiniMax-M2.7），
+  // 看起来像「模型不全」。未手动键入时展示完整列表，键入后才按输入过滤。
   const filteredModels = useMemo(() => {
+    if (!modelQueryDirty) return models
     const q = model.trim().toLowerCase()
     if (!q) return models
     return models.filter(m => m.toLowerCase().includes(q))
-  }, [models, model])
+  }, [models, model, modelQueryDirty])
 
   const canSave = !isBuiltin && baseUrl.trim() !== '' && model.trim() !== '' && (!provider?.needsKey || apiKey.trim() !== '')
 
@@ -372,6 +381,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                         value={model}
                         onChange={(e) => {
                           setModel(e.target.value)
+                          setModelQueryDirty(true)
                           if (models.length) setModelsOpen(true)
                         }}
                         onFocus={() => { if (models.length) setModelsOpen(true) }}
@@ -412,7 +422,9 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                           {!modelsLoading && !modelsError && (
                             <>
                               <div className="px-3 py-1 font-mono text-[10px] tracking-wider text-muted-foreground/70 uppercase">
-                                {filteredModels.length > 0 ? `${filteredModels.length} / ${models.length} models` : `无匹配 — 共 ${models.length} 个，清空输入查看全部`}
+                                {modelQueryDirty
+                                  ? (filteredModels.length > 0 ? `${filteredModels.length} / ${models.length} models` : `无匹配 — 共 ${models.length} 个，清空输入查看全部`)
+                                  : `共 ${models.length} 个模型`}
                               </div>
                               {filteredModels.map(m => (
                                 <button
@@ -420,6 +432,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                                   type="button"
                                   onClick={() => {
                                     setModel(m)
+                                    setModelQueryDirty(false)
                                     setModelsOpen(false)
                                   }}
                                   className={cn(

@@ -20,8 +20,8 @@ export type ProviderProtocol = 'zai' | 'openai' | 'anthropic' | 'google'
 
 export type ProviderKey =
   | 'builtin' | 'openai' | 'anthropic' | 'google' | 'deepseek' | 'qwen'
-  | 'zhipu' | 'moonshot' | 'minimax' | 'doubao' | 'xai' | 'openrouter'
-  | 'ollama' | 'custom'
+  | 'zhipu' | 'moonshot' | 'minimax' | 'minimax-legacy' | 'doubao' | 'xai'
+  | 'openrouter' | 'ollama' | 'custom'
 
 export interface ProviderMeta {
   key: ProviderKey
@@ -48,7 +48,12 @@ export const PROVIDERS: ProviderMeta[] = [
   { key: 'qwen', label: '通义千问', hint: '阿里云百炼 DashScope 兼容模式', protocol: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'qwen-plus' },
   { key: 'zhipu', label: '智谱 GLM', hint: 'GLM-4.5 / GLM-4-Plus（BigModel）', protocol: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'glm-4-plus' },
   { key: 'moonshot', label: '月之暗面 Kimi', hint: 'Kimi k2 / moonshot-v1 系列', protocol: 'openai', baseUrl: 'https://api.moonshot.cn/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'kimi-k2-0711-preview' },
-  { key: 'minimax', label: 'MiniMax', hint: 'MiniMax-M2.7 / M2.5 / M2.1 系列', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '/v1/models', needsKey: true, defaultModel: 'MiniMax-M2.7' },
+  // v2.20：MiniMax 官方端点换代 — 新 OpenAI 兼容端点 api.minimax.io/v1 才有
+  // MiniMax-M3.1-Flash / M3；旧 api.minimaxi.com（chatcompletion_v2）只服务 M2.x
+  // 系列（用户实测模型列表只到 M2.7 的根因）。旧端点保留为独立条目，老 Key/
+  // M2 工作流不断，随时切回。
+  { key: 'minimax', label: 'MiniMax', hint: 'MiniMax-M3.1-Flash / M3（OpenAI 兼容新端点）', protocol: 'openai', baseUrl: 'https://api.minimax.io/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'MiniMax-M3.1-Flash' },
+  { key: 'minimax-legacy', label: 'MiniMax 旧版 API', hint: '旧版 chatcompletion_v2：MiniMax-M2.7 / M2.5 / M2.1', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '/v1/models', needsKey: true, defaultModel: 'MiniMax-M2.7' },
   { key: 'doubao', label: '火山方舟 豆包', hint: 'Doubao / Ark endpoint 模型', protocol: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'doubao-seed-1-6-250615' },
   { key: 'xai', label: 'xAI Grok', hint: 'Grok 4 / Grok 3', protocol: 'openai', baseUrl: 'https://api.x.ai/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'grok-3' },
   { key: 'openrouter', label: 'OpenRouter', hint: '聚合 400+ 模型（含免费档）', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: false, defaultModel: 'openai/gpt-4o-mini' },
@@ -317,6 +322,11 @@ async function callOpenaiCompat(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`
 
+  // v2.20：MiniMax-M3.1-Flash 是思考型模型 — thinking 默认开启且不可关（传 disabled
+  // 会 400），思考 token 计入 max_tokens：官方默认 effort=max 在评估长提示下既慢又
+  // 极易吃光 8192 输出额度导致正文为空。适配：reasoning_effort=medium 限深思考、
+  // 输出额度抬到 ≥16384；temperature 对该模型恒被忽略，干脆不送。
+  const isMiniMaxM31 = /minimax-m3\.1/i.test(cfg.model)
   const mkBody = (variant: 0 | 1 | 2) => {
     const body: Record<string, unknown> = {
       model: cfg.model,
@@ -325,9 +335,11 @@ async function callOpenaiCompat(
         { role: 'user', content: msgs.user },
       ],
     }
-    if (variant !== 2) body.temperature = msgs.temperature ?? 0.4
-    if (variant === 0) body.max_tokens = msgs.maxTokens ?? 8192
-    if (variant === 1) body.max_completion_tokens = msgs.maxTokens ?? 8192
+    if (isMiniMaxM31) body.reasoning_effort = 'medium'
+    if (variant !== 2 && !isMiniMaxM31) body.temperature = msgs.temperature ?? 0.4
+    const cap = isMiniMaxM31 ? Math.max(msgs.maxTokens ?? 8192, 16384) : (msgs.maxTokens ?? 8192)
+    if (variant === 0) body.max_tokens = cap
+    if (variant === 1) body.max_completion_tokens = cap
     return JSON.stringify(body)
   }
 
