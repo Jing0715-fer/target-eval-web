@@ -30,7 +30,8 @@ import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { describeBlastStatus } from '@/lib/eval/types'
 import { RatingBadge } from './badges'
-import { formatDuration, formatPercent, formatResolution, scoreLevel } from './format'
+import { EvalLogConsole } from './log-console'
+import { formatDuration, formatPercent, formatResolution, logLevel, scoreLevel } from './format'
 import { PdbTable } from './pdb-table'
 import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
@@ -382,17 +383,20 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const summary = job.summary
   if (!summary?.uniprot) {
     return (
-      <Card className="rounded-xl border-border bg-card shadow-none">
-        <CardContent className="flex flex-col items-center gap-3 px-6 py-10 text-center">
-          <p className="text-sm text-muted-foreground">
-            该作业已完成，但暂无摘要数据（可能由后端数据不完整导致）。
-          </p>
-          <Button variant="outline" onClick={onNewEvaluation} className="gap-2 rounded-lg">
-            <RotateCcw className="size-4" />
-            返回新评估
-          </Button>
-        </CardContent>
-      </Card>
+      <div className="flex flex-col gap-6">
+        <Card className="rounded-xl border-border bg-card shadow-none">
+          <CardContent className="flex flex-col items-center gap-3 px-6 py-10 text-center">
+            <p className="text-sm text-muted-foreground">
+              该作业已完成，但暂无摘要数据（可能由后端数据不完整导致）。
+            </p>
+            <Button variant="outline" onClick={onNewEvaluation} className="gap-2 rounded-lg">
+              <RotateCcw className="size-4" />
+              返回新评估
+            </Button>
+          </CardContent>
+        </Card>
+        {(job.logs ?? []).length > 0 && <EvalLogConsole logs={job.logs ?? []} live={false} />}
+      </div>
     )
   }
 
@@ -447,6 +451,11 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const ligandNo = ligands.length > 0 ? nextNo() : null
   const blastNo = nextNo()
   const litNo = literature.length > 0 ? nextNo() : null
+  /** v2.21：运行日志回看（完成后不再丢弃 — 过滤/搜索/复制/下载都在日志控制台内） */
+  const logLines = job.logs ?? []
+  const logNo = logLines.length > 0 ? nextNo() : null
+  const logWarn = logLines.filter(l => logLevel(l) === 'warn').length
+  const logErr = logLines.filter(l => logLevel(l) === 'error').length
 
   /** 规格栅 BLAST 单元注释：按状态给出简短说明（不再是干巴巴的 0） */
   const blastSubMap: Record<string, string> = {
@@ -1364,6 +1373,28 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         >
           <SectionHeader no={litNo!} title="相关文献" en="References" count={`${literature.length} 篇`} />
           <LiteratureList items={literature} pdbs={pdbs} />
+        </motion.section>
+      )}
+
+      {/* 10. 运行日志（v2.21：完成后可回看 — 此前结果页完全没有日志入口，排查只能重跑） */}
+      {logNo && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, delay: 0.36, ease: 'easeOut' }}
+          className="flex flex-col gap-3"
+        >
+          <SectionHeader
+            no={logNo}
+            title="运行日志"
+            en="Run Logs"
+            count={
+              logWarn + logErr > 0
+                ? `${logLines.length} 行 · ${logWarn} 警告 · ${logErr} 错误`
+                : `${logLines.length} 行`
+            }
+          />
+          <EvalLogConsole logs={logLines} live={false} />
         </motion.section>
       )}
       </>}

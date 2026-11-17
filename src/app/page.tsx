@@ -15,7 +15,10 @@ import { BatchBar } from '@/components/eval/batch-bar'
 import { HistoryDialog, RecentEvaluations } from '@/components/eval/history'
 import { LlmConfigPanel } from '@/components/eval/llm-config-panel'
 import { useEvaluationFlow } from '@/components/eval/use-evaluation-flow'
+import { useHighThroughputFlow } from '@/components/eval/use-high-throughput-flow'
+import { HighThroughputView } from '@/components/eval/high-throughput-progress'
 import { fetchLlmConfig, getLlmEngineOverride } from '@/components/eval/api'
+import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 const viewMotion = {
@@ -127,6 +130,9 @@ function WorkflowGuide() {
 
 export default function Home() {
   const flow = useEvaluationFlow()
+  // v2.22 高通量评估：独立编排状态机（组间串行 + 限流自动暂停 + 断点续跑）
+  const ht = useHighThroughputFlow()
+  const htActive = ht.phase !== 'idle'
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyKey, setHistoryKey] = useState(0)
   const [llmConfigOpen, setLlmConfigOpen] = useState(false)
@@ -150,12 +156,19 @@ export default function Home() {
     setEngine({ summary, isBuiltin })
   }, [])
 
-  // 作业进入终态（done / error）时刷新侧边栏最近评估列表（常驻展示需要保持新鲜）
+  // 作业进入终态（done / error）时刷新侧边栏最近评估列表（常驻展示需要保持新鲜）；
+  // v2.22：高通量运行完成同样刷新（各组产出已入库）
   useEffect(() => {
     if (flow.phase === 'done' || flow.phase === 'error') {
       setHistoryKey((k) => k + 1)
     }
   }, [flow.phase])
+
+  useEffect(() => {
+    if (ht.phase === 'done') {
+      setHistoryKey((k) => k + 1)
+    }
+  }, [ht.phase])
 
   /** 根据阶段计算 stepper 步数：0 输入 / 1 数据收集 / 2 分析生成 / 3-4 报告 */
   const step =
@@ -170,16 +183,37 @@ export default function Home() {
             : 1
 
   const handleNewEvaluation = () => {
+    ht.exitToIdle()
     flow.reset()
     setHistoryKey((k) => k + 1) // 刷新最近评估列表
     if (typeof window !== 'undefined') window.scrollTo({ top: 0 })
   }
 
+  // 历史记录入口守卫：高通量运行中不切换视图（前端编排不中断）；
+  // paused/done 时退出 HT 视图后正常打开（运行记录保留在本地与 HT 标签页）
   const openHistoryJob = (id: string) => {
+    if (ht.phase === 'running') {
+      toast({
+        title: '高通量评估进行中',
+        description: '请先等待完成或停止高通量运行，再查看历史评估（运行中的编排不可后台切换）。',
+        variant: 'destructive',
+      })
+      return
+    }
+    ht.exitToIdle()
     void flow.loadJob(id)
   }
 
   const openBatchReport = (id: string) => {
+    if (ht.phase === 'running') {
+      toast({
+        title: '高通量评估进行中',
+        description: '请先等待完成或停止高通量运行，再查看合并报告。',
+        variant: 'destructive',
+      })
+      return
+    }
+    ht.exitToIdle()
     void flow.loadBatchReport(id)
   }
 
@@ -197,8 +231,9 @@ export default function Home() {
 
       {/* 主列：工作区 + 页脚（v2.4 宽屏：xl 起放开容器宽度，充分利用页面） */}
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-5 xl:max-w-[1440px] 2xl:max-w-[1720px]">
-          {/* 非 idle 阶段：紧凑流程指示器（idle 阶段由 Hero + 右栏管线导引承载） */}
-          {flow.phase !== 'idle' && !flow.loadingHistoryJob && (
+          {/* 非 idle 阶段：紧凑流程指示器（idle 阶段由 Hero + 右栏管线导引承载）；
+              v2.22：高通量运行使用自带组导航的独立视图，不显示单链 Stepper */}
+          {flow.phase !== 'idle' && !flow.loadingHistoryJob && !htActive && (
             <Stepper step={step} className="mb-5" />
           )}
 
@@ -209,7 +244,25 @@ export default function Home() {
             </div>
           ) : (
             <AnimatePresence mode="wait">
-              {flow.phase === 'idle' && (
+              {/* v2.22 高通量评估视图（running / paused / done）— 优先于单链 flow 分支渲染 */}
+              {htActive && (
+                <motion.div key="ht" {...viewMotion}>
+                  <HighThroughputView
+                    flow={ht}
+                    onOpenJob={(id) => {
+                      ht.exitToIdle()
+                      void flow.loadJob(id)
+                    }}
+                    onOpenBatchReport={(id) => {
+                      ht.exitToIdle()
+                      void flow.loadBatchReport(id)
+                    }}
+                    onNewEvaluation={handleNewEvaluation}
+                  />
+                </motion.div>
+              )}
+
+              {flow.phase === 'idle' && !htActive && (
                 <motion.div key="idle" {...viewMotion} className="flex flex-1 flex-col">
                   {/* 主视觉 */}
                   <StudioHero />
@@ -219,10 +272,14 @@ export default function Home() {
                   <div className="mt-4 grid flex-1 grid-cols-1 gap-4 lg:grid-cols-12 lg:items-stretch">
                     <div className="lg:col-span-8 xl:col-span-7">
                       <InputPanel
-                        submitting={flow.submitting}
+                        submitting={flow.submitting || ht.starting}
                         submitError={flow.submitError}
                         onStart={flow.startEvaluation}
                         onClearSubmitError={flow.clearSubmitError}
+                        onStartHighThroughput={ht.startRun}
+                        recentHTRuns={ht.recentRuns}
+                        onResumeHTRun={ht.openRunById}
+                        onDeleteHTRun={ht.removeRun}
                       />
                     </div>
                     <aside
@@ -244,7 +301,7 @@ export default function Home() {
                 </motion.div>
               )}
 
-              {flow.phase === 'running' && (
+              {flow.phase === 'running' && !htActive && (
                 <motion.div key="running" {...viewMotion}>
                   <ProgressPanel
                     job={flow.job}
@@ -257,7 +314,7 @@ export default function Home() {
                 </motion.div>
               )}
 
-              {flow.phase === 'error' && (
+              {flow.phase === 'error' && !htActive && (
                 <motion.div key="error" {...viewMotion}>
                   <ErrorPanel
                     job={flow.job}
@@ -269,7 +326,7 @@ export default function Home() {
                 </motion.div>
               )}
 
-              {flow.phase === 'done' && flow.job && (
+              {flow.phase === 'done' && flow.job && !htActive && (
                 <motion.div key={`done-${flow.job.id}`} {...viewMotion}>
                   {flow.batch && flow.batch.items.length > 1 && (
                     <div className="mb-4">

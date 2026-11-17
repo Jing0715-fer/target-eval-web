@@ -114,6 +114,58 @@ export function parseMultiUniprotIds(text: string): { valid: string[]; invalid: 
   return { valid, invalid }
 }
 
+// ─── v2.22 高通量评估：分组解析 ─────────────────────────────────────────────
+
+/**
+ * 高通量运行的最大组数（每组一份独立报告）。v2.23.1：12 → 300 —
+ * Excel 导入的百行级靶点清单（如 102 行 = 100 组）此前被 12 组上限
+ * 压到超限 → 开始按钮被禁用，导入功能等于不可用。
+ */
+export const MAX_HT_GROUPS = 300
+/** 单组（复合物批量）内靶点数上限 — 与批量评估上限一致 */
+export const MAX_HT_TARGETS_PER_GROUP = 30
+/**
+ * 一次高通量运行的靶点总数上限（UniProt + 序列兜底靶点合计）。v2.23.1：30 → 600。
+ * 实际推进节流由服务端守卫负责（每 IP 并发 2 + 24h 作业配额），配额用尽时
+ * 高通量流程自动暂停、配额恢复后可从断点续跑（不在此处预拦）。
+ */
+export const MAX_HT_TARGETS_TOTAL = 600
+
+/**
+ * 解析高通量分组输入（v2.22）：
+ *  - 「;」（半角/全角分号）分隔组：每组按复合物批量评估（关系判断 → 逐靶点 → 合并报告），单独出报告
+ *  - 组内「,」（半角/全角逗号）或空白/换行分隔靶点
+ *  - 组内仅一个靶点 = 独立评估（单作业独立报告）
+ * 全局去重保序（重复出现的靶点在后出现的组内剔除，不入重复评估）；
+ * 返回分组列表 + 无效 token + 跨组重复的 token（仅提示用）。
+ */
+export function parseGroupedUniprotIds(text: string): {
+  groups: string[][]
+  invalid: string[]
+  duplicates: string[]
+} {
+  const groups: string[][] = []
+  const invalid: string[] = []
+  const duplicates: string[] = []
+  const seen = new Set<string>()
+  for (const chunk of text.split(/[;；]+/)) {
+    const tokens = chunk.split(/[\s,，]+/).map((t) => t.trim().toUpperCase()).filter(Boolean)
+    if (tokens.length === 0) continue
+    const ids: string[] = []
+    for (const t of tokens) {
+      if (seen.has(t)) {
+        if (!duplicates.includes(t)) duplicates.push(t)
+        continue
+      }
+      seen.add(t)
+      if (isValidUniprotId(t)) ids.push(t)
+      else if (!invalid.includes(t)) invalid.push(t)
+    }
+    if (ids.length > 0) groups.push(ids)
+  }
+  return { groups, invalid, duplicates }
+}
+
 /** 单条 FASTA 序列（解析多 FASTA 用） */
 export interface FastaEntry {
   header: string
