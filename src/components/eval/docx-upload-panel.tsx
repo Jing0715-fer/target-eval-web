@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react'
 import {
+  ArrowRight,
   CircleAlert,
   CircleCheckBig,
   Dna,
@@ -14,6 +15,7 @@ import {
   PillBottle,
   RefreshCw,
   ScanEye,
+  SearchCheck,
   Sparkles,
   Target,
 } from 'lucide-react'
@@ -157,6 +159,9 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
 
   const { parsed } = upload
   const hasBoth = Boolean(selectedUniprots.length > 0 && selectedSequenceIndex != null)
+  // v2.24 名称解析命中（非标准评估表：无 UniProt/序列，靶点名称经 UniProt REST 解析）
+  const rResolved = insights?.resolvedUniprots ?? []
+  const rUnresolved = insights?.unresolvedNames ?? []
   // 要点文本渲染时省略长序列片段（兼容历史缓存 insights），并配合 break-words 防溢出
   const eGoals = (insights?.goals ?? []).map(elideSequenceRuns)
   const eQuestions = (insights?.scientificQuestions ?? []).map(elideSequenceRuns)
@@ -203,7 +208,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
       {insightsLoading && (
         <div className="flex items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/[0.05] px-3.5 py-3 text-xs text-foreground/90">
           <LoaderCircle className="size-4 shrink-0 animate-spin text-primary" />
-          AI 正在解析评估表：提取客户目标、待解决科学问题与实验数据要点…
+          AI 正在解析评估表：提取客户目标、待解决科学问题与实验数据要点{parsed.uniprotIds.length === 0 && parsed.sequences.length === 0 ? '，并按靶点名称检索 UniProt 编号（如 TL1A → TNFSF15）…' : '…'}
         </div>
       )}
       {!insightsLoading && (insights || insightsError) && (
@@ -362,6 +367,59 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* v2.24 非标准评估表兼容：靶点名称 → UniProt 解析命中（表内无 UniProt/序列时） */}
+      {rResolved.length > 0 && (
+        <div>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-foreground/80">
+            <SearchCheck className="size-3.5 shrink-0 text-teal-600 dark:text-teal-400" aria-hidden />
+            <span>蛋白名称 → UniProt 解析命中</span>
+            <span className="rounded-md bg-teal-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-teal-600 dark:text-teal-400">
+              命中 {rResolved.length}/{rResolved.length + rUnresolved.length}
+            </span>
+            <span className="text-[11px] font-normal text-muted-foreground/80">（评估表未含 UniProt/序列 — 已按靶点名称检索 UniProt 并自动填入下方可选靶点）</span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {rResolved.map((r) => (
+              <div
+                key={`${r.name}-${r.accession}`}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-teal-500/30 bg-teal-500/[0.04] px-2.5 py-1.5"
+                title={`命中依据：${r.matchedOn === 'gene' ? '基因符号/别名精确命中' : r.matchedOn === 'protein' ? '蛋白名命中' : '全文检索命中'}${r.alternates?.length ? `；备选：${r.alternates.map(a => `${a.accession}（${a.organism ?? '未知物种'}${a.reviewed ? ' · 已评审' : ''}）`).join('、')}` : ''}`}
+              >
+                <span className="font-mono text-[12px] font-semibold text-foreground/90">{r.name}</span>
+                <ArrowRight className="size-3 shrink-0 text-muted-foreground/60" aria-hidden />
+                <span className="font-mono text-[12px] font-semibold text-primary">{r.accession}</span>
+                <span
+                  className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
+                  title={[r.proteinName, r.geneNames?.join(' / '), r.organism, r.reviewed ? 'Swiss-Prot 已评审' : 'TrEMBL 未评审', r.seqLength ? `${r.seqLength} aa` : null].filter(Boolean).join(' · ')}
+                >
+                  {[r.proteinName, r.organism, r.reviewed ? 'Swiss-Prot 已评审' : 'TrEMBL', r.seqLength ? `${r.seqLength} aa` : null].filter(Boolean).join(' · ')}
+                </span>
+                <span
+                  className="shrink-0 rounded-sm border border-teal-500/30 bg-teal-500/[0.07] px-1 py-px font-mono text-[9px] font-medium text-teal-600 dark:text-teal-400"
+                  title={r.matchedOn === 'gene' ? '基因符号/别名精确命中' : r.matchedOn === 'protein' ? '蛋白名命中' : '全文检索命中（已评审人源条目）'}
+                >
+                  {r.matchedOn === 'gene' ? '别名命中' : r.matchedOn === 'protein' ? '蛋白名命中' : '全文命中'}
+                </span>
+                {r.alternates?.length ? (
+                  <span
+                    className="shrink-0 font-mono text-[10px] text-muted-foreground/70"
+                    title={r.alternates.map(a => `${a.accession}（${a.organism ?? '未知物种'}${a.reviewed ? ' · 已评审' : ''}）`).join('；')}
+                  >
+                    备选 {r.alternates.length}
+                  </span>
+                ) : null}
+              </div>
+            ))}
+            {rUnresolved.length > 0 && (
+              <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                <CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden />
+                未能解析出 UniProt：{rUnresolved.join('、')}（可切换到「UniProt」标签手动输入对应 accession）
+              </p>
+            )}
+          </div>
         </div>
       )}
 

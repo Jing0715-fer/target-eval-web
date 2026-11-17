@@ -262,16 +262,28 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   }, [])
 
   /** 上传成功后自动执行 LLM 智能解析（不阻塞选择评估对象）
-   *  v2.4：无状态模式内联携带全文（服务器磁盘读不到 parsed 数据） */
-  const runInsights = async (uploadId: string, inline?: { text: string; goalHints?: string[] }) => {
+   *  v2.4：无状态模式内联携带全文（服务器磁盘读不到 parsed 数据）
+   *  v2.24：resolveNames — 评估表无 UniProt/序列时，服务端把提取的靶点名称经
+   *  UniProt REST 解析为 accession，命中后注入 parsed 芯片并自动选中 */
+  const runInsights = async (uploadId: string, inline?: { text: string; goalHints?: string[] }, resolveNames = false) => {
     setInsightsLoading(true)
     setInsightsError(null)
     setInsights(null)
     try {
-      const res = await fetchDocxInsights(uploadId, false, inline)
+      const res = await fetchDocxInsights(uploadId, false, inline, resolveNames)
       const data = res.insights
       if (!data) throw new Error('解析结果为空')
       setInsights(data)
+      // v2.24 非标准评估表兼容：名称解析命中 → 注入 parsed UniProt 芯片并自动选中
+      // （parsed 原本无 UniProt 时才注入 — 避免重复解析后重复添加）
+      const resolvedAcs = [...new Set((data.resolvedUniprots ?? []).map(r => r.accession))]
+        .slice(0, MAX_BATCH_UNIPROT)
+      if (resolvedAcs.length > 0) {
+        setUpload(prev => prev && prev.parsed.uniprotIds.length === 0
+          ? { ...prev, parsed: { ...prev.parsed, uniprotIds: resolvedAcs } }
+          : prev)
+        setSelectedUniprots(prev => (prev.length > 0 ? prev : resolvedAcs))
+      }
       // 目标输入框为空时自动填入解析出的客户目标
       if (data.goals.length > 0 && goal.trim() === '') {
         setGoal(data.goals.slice(0, 3).join('；'))
@@ -330,7 +342,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       const inline = res.fullText
         ? { text: res.fullText, goalHints: res.parsed.goalHints }
         : undefined
-      void runInsights(res.uploadId, inline)
+      // v2.24：非标准评估表（无 UniProt/序列）— 智能解析同时做靶点名称→UniProt 解析
+      const needsResolve = res.parsed.uniprotIds.length === 0 && res.parsed.sequences.length === 0
+      void runInsights(res.uploadId, inline, needsResolve)
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : '上传解析失败，请稍后重试')
     } finally {
@@ -885,6 +899,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       upload.stateless && upload.fullText
                         ? { text: upload.fullText, goalHints: upload.parsed.goalHints }
                         : undefined,
+                      upload.parsed.uniprotIds.length === 0 && upload.parsed.sequences.length === 0,
                     )}
                     onApplyGoal={applyGoal}
                   />

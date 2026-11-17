@@ -260,6 +260,24 @@ export interface BatchReportListItem {
 
 // ─── 评估表 LLM 智能解析 ──────────────────────────────────────
 
+/** v2.24 非标准评估表兼容：蛋白名称 → UniProt accession 解析命中（UniProt REST 权威结果） */
+export interface ResolvedUniprot {
+  /** 输入名称（如 TL1A） */
+  name: string
+  accession: string
+  entryName?: string
+  proteinName?: string
+  geneNames?: string[]
+  organism?: string
+  /** Swiss-Prot reviewed 条目 */
+  reviewed: boolean
+  /** 命中字段：gene / protein / text（全文兜底） */
+  matchedOn: 'gene' | 'protein' | 'text'
+  seqLength?: number
+  /** 备选命中（最多 2 条：近缘物种 / 未评审异构体） */
+  alternates?: Array<{ accession: string; proteinName?: string; organism?: string; reviewed: boolean }>
+}
+
 /** LLM 从评估表内容中提取的结构化要点 */
 export interface FormInsights {
   proteinName?: string
@@ -273,6 +291,12 @@ export interface FormInsights {
   keyConcerns?: string[]
   /** v2.3：文档中提及的配体/化合物（LLM 提取，最多 8 条 — 自动填入配体输入） */
   ligands?: string[]
+  /** v2.24：提取出的靶点名称（基因符号/别名，≤12 条） */
+  targetNames?: string[]
+  /** v2.24：名称→accession 解析命中（评估表无 UniProt/序列时由 UniProt REST 解析） */
+  resolvedUniprots?: ResolvedUniprot[]
+  /** v2.24：未能解析出 UniProt 的名称（提示手动补填） */
+  unresolvedNames?: string[]
   source: 'llm' | 'regex'
 }
 

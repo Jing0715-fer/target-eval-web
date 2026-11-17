@@ -12,6 +12,7 @@ import { llmChat } from './llm'
 import { extractGoalHints } from './docx'
 import { extractLigandCandidatesFromText } from './ligand'
 import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
+import { isResolvableName } from './name-resolve'
 import { elideSequenceRuns } from './seq-elide'
 import type { FormInsights } from './types'
 
@@ -27,6 +28,7 @@ const SYSTEM = `你是一位结构生物学 CRO 项目的评估分析师。用�
   "sequenceNotes": "构建/序列说明：截短边界、突变位点、标签、linker 等（无则省略，≤200 字）",
   "homologs": "文档中提及的同源蛋白/参考蛋白/已有结构信息（无则省略，≤200 字）",
   "keyConcerns": ["风险与关注点：样品量不足、蛋白不稳定、翻译后修饰等（最多 5 条，无则省略）"],
+  "targetNames": ["文中被评估的靶点/蛋白名称——基因符号、蛋白缩写、英文别名（如 TL1A、PD-L1、HER2、c-Met、PCSK9、5-HT2B），最多 12 条，去重。只收录真正被评估的靶点；排除亲和标签、缓冲试剂、细胞系、仪器方法与只是文献引用提及的蛋白。中文靶点名（如“死亚配体1”）务必给出对应英文标准名/基因符号（如 TNFSF15）。文档只提及靶点名称而无 UniProt 编号时，系统将用这些名称检索 UniProt。未提及则省略"],
   "ligands": ["文档中提及的小分子配体/化合物/辅因子/药物（中英文俗名均可，如 ATP、血红素、伊马替尼、staurosporine；只提取文档真实提及的，最多 8 条，未提及则省略）。注意：只收小分子化学实体 — 抗体及其片段/克隆（scFv、Fab、Fc、nanobody、VHH、抗体克隆号如「027 scFv」）、蛋白标签（GST/MBP/His）、缓冲液与纯化试剂均不是配体，禁止提取"],
 }
 注意：goals 和 scientificQuestions 是两个不同维度——goals 是客户想要达成什么（如"解析 apo 与复合物结构"），scientificQuestions 是科学上待回答的问题（如"抑制活性氧还依赖的二聚化界面是否保守"）。只提取文档中真实存在的信息，禁止推测编造。
@@ -60,15 +62,45 @@ function sanitizeStr(v: unknown, maxLen: number): string | undefined {
   return s || undefined
 }
 
-/** 规则兜底（LLM 不可用时）：v2.5 直接对全文做结构化提取 ——
- *  目标：预期目标N / 项目目的等表格字段的「标签行 + 值行」配对（剔除表尾填写范例模板段）；
- *  配体：字段式 / 「与 X 配体」邻接式 / 字典扫描提名，后续经 resolveLigandInput 归一。 */
+/** v2.24 靶点名称提取（规则路径，LLM 不可用时使用）——
+ *  1) 字段标签式：「靶点/靶点名称/蛋白名称/基因名/Target:…」后的短 token（含同行多靶点，逗号/顿号分隔）；
+ *  2) 独立短拉丁 token 行（表单一行只有靶点名，如整行「TL1A」）；
+ *  提取结果经 isResolvableName 噪音过滤（试剂/字段词/罗马数字不会误入）。 */
+const TARGET_LABEL_RE =
+  /(?:靶点名称|靶点名|靶点|蛋白名称|基因名称|基因名|基因|target\s*name|target|gene\s*name|gene|protein\s*name)\s*[:：=]\s*([A-Za-z0-9][A-Za-z0-9\-/. 、，,；;]{0,80})/gi
+
+export function extractTargetNamesFallback(text: string): string[] {
+  const out = new Set<string>()
+  let m: RegExpExecArray | null
+  while ((m = TARGET_LABEL_RE.exec(text))) {
+    for (const tok of m[1].split(/[\s,，;；、|()（）]+/)) {
+      const t = tok.trim()
+      if (out.size >= 12) break
+      if (isResolvableName(t)) out.add(t)
+    }
+  }
+  // 独立短拉丁 token 行（表单靶点行）
+  for (const raw of text.split(/\r?\n/)) {
+    if (out.size >= 12) break
+    const t = raw.trim()
+    if (/^[A-Za-z0-9][A-Za-z0-9\-]{1,29}$/.test(t) && isResolvableName(t)) out.add(t)
+  }
+  return [...out]
+}
+
+/** 规则兜底（LLM 不可用时）：v2.5 直接对全文做结构化提取 —— 目标（预期目标N / 项目目的等
+ *  表格字段的「标签行 + 值行」配对，剔除表尾填写范例模板段）+ 配体（字段式 / 「与 X 配体」
+ *  邻接式 / 字典扫描提名，后续经 resolveLigandInput 归一）；
+ *  v2.24：靶点名称一并提取 —— 评估表无 UniProt/序列时用于 UniProt 检索。 */
 export function fallbackInsights(text: string, goalHints: string[]): FormInsights {
   const structuredGoals = text.trim() ? extractGoalHints(text) : []
   const goals = (structuredGoals.length ? structuredGoals : goalHints.slice(0, 4)).map(elideSequenceRuns)
   const insights: FormInsights = { goals, scientificQuestions: [], source: 'regex' }
   const ligands = text.trim() ? extractLigandCandidatesFromText(text) : []
   if (ligands.length) insights.ligands = ligands.slice(0, 8)
+  // v2.24：靶点名称提取（评估表无 UniProt/序列时由路由侧解析为 accession）
+  const targetNames = text.trim() ? extractTargetNamesFallback(text) : []
+  if (targetNames.length) insights.targetNames = targetNames
   return insights
 }
 
@@ -124,6 +156,10 @@ ${trimmed.slice(0, 14000)}
   const ligandMentions = sanitizeStrArray(obj.ligands, 8, 60)
     .filter(name => !isBiologicMention(name) && !isLikelyCloneNumber(name))
   if (ligandMentions.length) insights.ligands = ligandMentions
+
+  // v2.24：靶点名称提取（评估表无 UniProt/序列时由路由侧解析为 UniProt accession）
+  const targetNames = sanitizeStrArray(obj.targetNames, 12, 40).filter(isResolvableName)
+  if (targetNames.length) insights.targetNames = targetNames
 
   // LLM 提取为空时回退规则结果，保证 goals 至少有 goalHints
   if (!insights.goals.length && goalHints.length) {

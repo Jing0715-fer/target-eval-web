@@ -356,6 +356,8 @@ export async function fetchDocxInsights(
   uploadId: string,
   force = false,
   inline?: { text: string; goalHints?: string[] },
+  /** v2.24：评估表无 UniProt/序列时，服务端把提取到的靶点名称经 UniProt REST 解析为 accession */
+  resolveNames = false,
 ): Promise<InsightsResponse> {
   // v2.6.2：uploadId 与内联 text 同时携带 — 磁盘路径优先，多实例磁盘不共享时
   // 服务端自动降级为内联全文（纯 text 无 uploadId 时为无状态直传回退通道）
@@ -365,6 +367,7 @@ export async function fetchDocxInsights(
     uploadId,
     force,
     ...(inline ? { text: inline.text, goalHints: inline.goalHints ?? [] } : {}),
+    ...(resolveNames ? { resolveNames: true } : {}),
     ...(llm ? { llm } : {}),
   }
   // v2.6 流式：NDJSON 心跳保活（修复部署网关 ~30s 空闲切断导致的 HTTP 502 —

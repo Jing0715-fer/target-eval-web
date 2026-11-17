@@ -823,6 +823,24 @@ export interface DocxParsed {
 
 // ─── 评估表 LLM 智能解析（FormInsights）───────────────────────────────────
 
+/** v2.24 非标准评估表兼容：蛋白名称 → UniProt accession 解析结果（UniProt REST 权威命中） */
+export interface ResolvedUniprot {
+  /** 输入名称（如 TL1A / PD-L1 / 中文蛋白名译出的英文名） */
+  name: string
+  accession: string
+  entryName?: string
+  proteinName?: string
+  geneNames?: string[]
+  organism?: string
+  /** Swiss-Prot reviewed 条目 */
+  reviewed: boolean
+  /** 命中字段：gene = 基因符号/别名精确命中；protein = 蛋白名命中；text = 全文检索兜底 */
+  matchedOn: 'gene' | 'protein' | 'text'
+  seqLength?: number
+  /** 备选命中（最多 2 条：近缘物种 / 未评审异构体） */
+  alternates?: Array<{ accession: string; proteinName?: string; organism?: string; reviewed: boolean }>
+}
+
 /** LLM 从评估表内容中提取的结构化要点 */
 export interface FormInsights {
   /** 靶点蛋白名（如“表皮生长因子受体”） */
@@ -844,8 +862,15 @@ export interface FormInsights {
   /** 解析来源：llm = 大模型提取；regex = 规则兜底 */
   /** v2.0：文档中提及的配体/化合物（中英文名均可，最多 8 条 — 供配体归一管线消费） */
   ligands?: string[]
+  /** v2.24：提取出的靶点名称（基因符号/别名，用于 UniProt 检索，≤12 条） */
+  targetNames?: string[]
+  /** v2.24：名称→accession 解析命中（评估表无 UniProt/序列时由 UniProt REST 解析） */
+  resolvedUniprots?: ResolvedUniprot[]
+  /** v2.24：未能解析出 UniProt 的名称（≤8 条，前端提示用户手动补填） */
+  unresolvedNames?: string[]
   source: 'llm' | 'regex'
 }
+
 
 // ─── 同靶点 UniProt+序列合并评估（构建信息）─────────────────────────────────
 
