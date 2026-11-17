@@ -3,7 +3,7 @@
 import { CircleAlert, LoaderCircle, RotateCcw, Undo2 } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { LogCard } from './progress-panel'
+import { EvalLogConsole } from './log-console'
 import type { JobDetail } from './types'
 
 export interface ErrorPanelProps {
@@ -58,7 +58,7 @@ export function ErrorPanel({ job, submitting, onRetry, onReset, submitError }: E
         </Button>
       </div>
 
-      {logs.length > 0 && <LogCard logs={logs} title="失败前的执行日志" />}
+      {logs.length > 0 && <EvalLogConsole logs={logs} title="失败前的执行日志" live={false} />}
     </div>
   )
 }
