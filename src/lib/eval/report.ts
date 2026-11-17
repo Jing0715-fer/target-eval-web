@@ -363,11 +363,22 @@ function buildDigest(ctx: ReportContext): string {
   }
 
   lines.push('')
-  lines.push('【可行性评分（本系统计算，1-10）】')
-  lines.push(`- X-ray: ${ctx.scores.xray.score}/10 — ${ctx.scores.rationale.xray}`)
-  lines.push(`- Cryo-EM: ${ctx.scores.cryoem.score}/10 — ${ctx.scores.rationale.cryoem}`)
-  lines.push(`- NMR: ${ctx.scores.nmr.score}/10 — ${ctx.scores.rationale.nmr}`)
-  lines.push(`- 总体: ${ctx.scores.overall.score}/10 — ${ctx.scores.rationale.overall}`)
+  lines.push('【可行性评分（系统规则计算 + AI 复核，1-10）】')
+  const adjL = ctx.scores.llmAdjust
+  lines.push(`- X-ray: ${ctx.scores.xray.score}/10${adjL && adjL.xray !== 0 ? `（AI 复核 ${adjL.xray > 0 ? '+' : ''}${adjL.xray}）` : ''} — ${ctx.scores.rationale.xray}`)
+  lines.push(`- Cryo-EM: ${ctx.scores.cryoem.score}/10${adjL && adjL.cryoem !== 0 ? `（AI 复核 ${adjL.cryoem > 0 ? '+' : ''}${adjL.cryoem}）` : ''} — ${ctx.scores.rationale.cryoem}`)
+  lines.push(`- NMR: ${ctx.scores.nmr.score}/10${adjL && adjL.nmr !== 0 ? `（AI 复核 ${adjL.nmr > 0 ? '+' : ''}${adjL.nmr}）` : ''} — ${ctx.scores.rationale.nmr}`)
+  lines.push(`- 总体: ${ctx.scores.overall.score}/10${adjL && adjL.overall !== 0 ? `（AI 复核 ${adjL.overall > 0 ? '+' : ''}${adjL.overall}）` : ''} — ${ctx.scores.rationale.overall}`)
+  if (adjL) {
+    lines.push(`AI 复核意见（置信度${adjL.confidence === 'high' ? '高' : adjL.confidence === 'medium' ? '中' : '低'}${adjL.engine ? `，引擎 ${adjL.engine}` : ''}）：`)
+    lines.push(`  - X-ray：${adjL.notes.xray || '维持系统分'}${adjL.xray !== 0 ? `（${adjL.xray > 0 ? '+' : ''}${adjL.xray}）` : ''}`)
+    lines.push(`  - Cryo-EM：${adjL.notes.cryoem || '维持系统分'}${adjL.cryoem !== 0 ? `（${adjL.cryoem > 0 ? '+' : ''}${adjL.cryoem}）` : ''}`)
+    lines.push(`  - NMR：${adjL.notes.nmr || '维持系统分'}${adjL.nmr !== 0 ? `（${adjL.nmr > 0 ? '+' : ''}${adjL.nmr}）` : ''}`)
+    lines.push(`  - 总体：${adjL.notes.overall || '三方法复核意见综合'}`)
+    lines.push('（评分经过 AI 专家复核微调（±2 以内，已计入上述分值）：报告引用分数时一律使用调整后分值；「结构解析可行性评估」的评分依据解读需一并解读 AI 复核的调整理由，不得把复核前后的分值混用）')
+  } else {
+    lines.push('（本次 AI 复核未生效或未执行 — 分值即系统规则评分，报告中按此表述）')
+  }
 
   return lines.join('\n')
 }
@@ -515,7 +526,7 @@ function chC2(ctx: ReportContext): string {
 
 ## 结构解析可行性评估
 - ### 三方法对比矩阵：用 Markdown 表格对比 X-ray / Cryo-EM / NMR 在本靶点上的适配性，行维度至少包括：分子量适配、可结晶性/成象条件、已有成功先例、构象异质性处理、预计周期、综合评分（引用系统评分）${ctx.mwAugment?.applicable ? '\n- 分子量维度（小分子量靶点）：Cryo-EM 的「分子量适配」按装配有效分子量（~' + (ctx.mwAugment.assemblyKda ?? ctx.mwAugment.monomerKda) + ' kDa' + (ctx.mwAugment.assemblyPath === 'homolog-complex' ? '，同源复合物推断 — 需组装验证' : ctx.mwAugment.assemblyKda == null ? '，无生物装配路径 — 需技术增重' : '') + '）评估而非单体分子量；X-ray/NMR 行说明分子量对其影响的差异（增重对 NMR 无益、对 X-ray 非瓶颈）' : ''}${precedentNote}
-- ### 评分依据解读：逐方法解释系统评分的含义（引用评分依据文本），哪些因素是加分项/减分项${ctx.mwAugment?.applicable ? '；Cryo-EM 评分中的「分子量维度」调整（' + (ctx.scores.mwAugmentAdjust ? ctx.scores.mwAugmentAdjust.note : '无') + '）需明确解读' : ''}
+- ### 评分依据解读：逐方法解释系统评分的含义（引用评分依据文本），哪些因素是加分项/减分项${ctx.mwAugment?.applicable ? '；Cryo-EM 评分中的「分子量维度」调整（' + (ctx.scores.mwAugmentAdjust ? ctx.scores.mwAugmentAdjust.note : '无') + '）需明确解读' : ''}${ctx.scores.llmAdjust ? '；本评分已经 AI 专家复核微调（X-ray ' + (ctx.scores.llmAdjust.xray > 0 ? '+' : '') + ctx.scores.llmAdjust.xray + ' / Cryo-EM ' + (ctx.scores.llmAdjust.cryoem > 0 ? '+' : '') + ctx.scores.llmAdjust.cryoem + ' / NMR ' + (ctx.scores.llmAdjust.nmr > 0 ? '+' : '') + ctx.scores.llmAdjust.nmr + '）— 需解读 AI 复核意见（见数据上下文「AI 复核意见」块）与规则分的综合依据' : ''}
 - ### 推荐技术路线：明确给出第一推荐方法与理由、备选方法与触发条件（如 X-ray 失败多少轮后转 Cryo-EM）${ctx.mwAugment?.applicable ? '\n- 增重路径优先级：生理装配（寡聚/复合物，已有结构先例）→ 同源复合物（BLAST 推断，identity 按高低取舍，共表达/体外组装前需 pull-down/SPR 验证互作）→ 互作伙伴复合物（无结构先例，需共表达/体外组装与 SEC-MALS 验证）→ 技术组分（Fab/nanobody/MBP/ferritin 支架）；逐条回应「与客户目的的比对」中的契合/需注意/冲突条目（加入的蛋白是否改变研究对象/锁定构象/遮蔽界面）' : ''}
 - 篇幅 400-600 字（宁精炼勿超长）`
 }

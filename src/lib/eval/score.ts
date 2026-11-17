@@ -37,6 +37,11 @@ function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n))
 }
 
+/** v2.18：导出评级标签（score-llm.ts AI 复核调整后重算评级用） */
+export function ratingLabel(score: number): string {
+  return `${rating(score)}·${ratingZh(score)}`
+}
+
 function rating(score: number): string {
   if (score >= 9) return 'Excellent'
   if (score >= 7) return 'Good'
@@ -69,6 +74,9 @@ export interface ScoreResult extends Scores {
   /** 各方法的一句话依据（报告用） */
   rationale: { xray: string; cryoem: string; nmr: string; overall: string }
 }
+
+/** computeScores 完整返回类型（含方法统计 — v2.18 导出供 score-llm 复核层复用） */
+export type FullScoreResult = ScoreResult & { methodStats: MethodStats }
 
 /**
  * v1.26/v1.27：分子量增重策略对评分的调整（小分子量靶点维度）。
@@ -249,7 +257,7 @@ export function computeOligomerAdjust(
   }
 }
 
-export function computeScores(input: ScoreInput): ScoreResult & { methodStats: MethodStats } {
+export function computeScores(input: ScoreInput): FullScoreResult {
   const { sequenceLength, directPdbs, blastHits, coveragePercent } = input
 
   const tmCount = input.features.filter(f => f.type === 'Transmembrane').length
@@ -390,6 +398,8 @@ export function computeScores(input: ScoreInput): ScoreResult & { methodStats: M
  * 从仍留存于摘要的确定性数据（序列长度/方法统计/BLAST/覆盖率/调整明细，
  * 调整 note 为评估时原文）重建各方法一句话依据，口吻与 computeScores 一致，
  * 供各靶点单独评估页的评分卡展示 — 内容不虚构，缺失信号（跨膜区等）不臆测。
+ * v2.18.1（代码审查 P3-3）：摘要至今均不持久化 rationale（合并报告全部走本合成）—
+ * 带 llmAdjust 的作业在此补齐「AI 复核」短语，口径与 applyLlmScoreAdjust 一致。
  */
 export function synthesizeScoreRationale(input: {
   sequenceLength: number
@@ -407,6 +417,17 @@ export function synthesizeScoreRationale(input: {
   const oligo = input.scores.oligomerAdjust
   const mwAdj = input.scores.mwAugmentAdjust
   const intAdj = input.scores.interactionAdjust
+  // v2.18.1：AI 复核短语（与 applyLlmScoreAdjust 同款拼接 — 合并报告各靶点页一致性）
+  const llmA = input.scores.llmAdjust
+  const aiSuffix = (delta: number, note: string) => {
+    const d = Math.trunc(Number(delta)) || 0
+    const verb = d > 0 ? `AI 复核上调 ${d}` : d < 0 ? `AI 复核下调 ${-d}` : 'AI 复核维持'
+    return `；${verb}：${note || '未给出补充理由'}`
+  }
+  const aiX = llmA ? aiSuffix(llmA.xray, llmA.notes.xray) : ''
+  const aiC = llmA ? aiSuffix(llmA.cryoem, llmA.notes.cryoem) : ''
+  const aiN = llmA ? aiSuffix(llmA.nmr, llmA.notes.nmr) : ''
+  const aiO = llmA ? aiSuffix(llmA.overall, llmA.notes.overall || '三方法复核意见综合') : ''
   const ms0: Pick<MethodStats, 'xrayCount' | 'cryoemCount' | 'nmrCount' | 'bestResolution'> =
     ms ?? { xrayCount: 0, cryoemCount: 0, nmrCount: 0, bestResolution: null }
   // v2.14：与 computeScores 同口径 — 已有 Cryo-EM 先例时小分子量不按「改用其他方法」表述
@@ -419,7 +440,7 @@ export function synthesizeScoreRationale(input: {
       idPart,
       oligo && oligo.xray < 0 ? `聚集形式调整 ${fmtAdj(oligo.xray)}：${oligo.note}` : '',
       intAdj && intAdj.xray > 0 ? `互作复合物加成 ${fmtAdj(intAdj.xray)}：${intAdj.note}` : '',
-    ].filter(Boolean).join('；'),
+    ].filter(Boolean).join('；') + aiX,
     cryoem: [
       L > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间' : L >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）'
         : hasCryoemPrecedent
@@ -429,15 +450,15 @@ export function synthesizeScoreRationale(input: {
       oligo && oligo.cryoem > 0 ? `聚集形式加成 ${fmtAdj(oligo.cryoem)}：${oligo.note}` : '',
       mwAdj ? `分子量维度（${mwAdj.note}）` : '',
       intAdj ? `互作复合物维度：${intAdj.note}` : '',
-    ].filter(Boolean).join('；'),
+    ].filter(Boolean).join('；') + aiC,
     nmr: [
       L < 300 ? '小分子量（<300 aa），NMR 适合' : L < 500 ? '中等偏大，NMR 周期较长' : '分子量过大（>500 aa），超出 NMR 常规范围',
       ms0.nmrCount > 0 ? `已有 ${ms0.nmrCount} 个 NMR 结构` : allCryoem ? `无 NMR 结构先例（已有 ${ms0.cryoemCount} 个结构全部以 Cryo-EM 解析）` : '',
       oligo && oligo.nmr < 0 ? `聚集形式扣分 ${fmtAdj(oligo.nmr)}：${oligo.note}` : '',
-    ].filter(Boolean).join('；'),
+    ].filter(Boolean).join('；') + aiN,
     overall: `序列覆盖率 ${Math.round(input.coveragePercent)}%；已有结构 ${input.directPdbCount} 个（X-ray ${ms0.xrayCount} / Cryo-EM ${ms0.cryoemCount} / NMR ${ms0.nmrCount}）${bestRes}${idPart ? `；${idPart}` : ''}` +
       (oligo ? `；聚集形式调整（${oligo.label}${oligo.stoichiometry ? ` · ${oligo.stoichiometry}` : ''}）：X-ray ${fmtAdj(oligo.xray)} / Cryo-EM ${fmtAdj(oligo.cryoem)} / NMR ${fmtAdj(oligo.nmr)}` : '') +
       (mwAdj ? `；分子量增重调整：Cryo-EM ${fmtAdj(mwAdj.cryoem)} — ${mwAdj.note}` : '') +
-      (intAdj ? `；互作复合物证据${intAdj.level === 'curated' ? `（${intAdj.complexAc}）` : '（binary 伙伴）'}：X-ray ${fmtAdj(intAdj.xray)} / Cryo-EM ${fmtAdj(intAdj.cryoem)} / NMR ${fmtAdj(intAdj.nmr)}` : ''),
+      (intAdj ? `；互作复合物证据${intAdj.level === 'curated' ? `（${intAdj.complexAc}）` : '（binary 伙伴）'}：X-ray ${fmtAdj(intAdj.xray)} / Cryo-EM ${fmtAdj(intAdj.cryoem)} / NMR ${fmtAdj(intAdj.nmr)}` : '') + aiO,
   }
 }

@@ -571,7 +571,7 @@ export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.
     .sec { break-inside: auto; }
     .sec > h2, .sec h3, .sec h4, .sec h5, .fig-group, .itx-h3 { break-after: avoid-page; }
     .rpt-head, .glance, .toc, .score-row, .score-rationale, .fig, .lig-card, .lit-item,
-    .callout, .warn-box, .cx-card, .cx-shared, .cx-solo-comp, .oligo-strip, .oligo-card,
+    .callout, .warn-box, .cx-card, .cx-shared, .cx-solo-comp, .oligo-strip, .oligo-card, .llm-adj-strip,
     .lig-ident, .cov-fig, blockquote { break-inside: avoid-page; }
     thead { display: table-header-group; }
     .tbl-wrap { overflow: visible; }
@@ -585,7 +585,7 @@ export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.
   }
 `
 
-export const UX_PAGE_CSS = `  /* ${UX_PAGE_MARKER} 一键复制按钮 + 表格横滚指示（v2.7.6） */
+export const UX_PAGE_CSS = `  /* ${UX_PAGE_MARKER} 一键复制按钮 + 表格横滚指示 + 目录滚动高亮 + 表格行悬停（v2.7.6 / v2.18） */
   .lig-ident div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px; }
   .lig-ident .mono { flex: 1 1 auto; min-width: 0; }
   .copy-btn { flex: none; margin-left: 8px; padding: 1px 9px; border-radius: 4px; border: 1px solid #c7ece0; background: #f0fdf7; color: #047857; font-family: var(--mono, ui-monospace, Menlo, monospace); font-size: 10px; font-weight: 600; letter-spacing: .4px; line-height: 1.7; cursor: pointer; }
@@ -598,6 +598,12 @@ export const UX_PAGE_CSS = `  /* ${UX_PAGE_MARKER} 一键复制按钮 + 表格�
   .tbl-wrap::before { left: 0; background: linear-gradient(90deg, rgba(28,25,23,.10), rgba(28,25,23,0)); }
   .tbl-wrap.rw-right::after, .tbl-wrap.rw-left::before { opacity: 1; }
   @media print { .tbl-wrap::before, .tbl-wrap::after { display: none; } }
+  /* v2.18 可读性：数据表行悬停反馈（长表定位行时不易跟丢）+ 目录滚动高亮 */
+  .tbl-data tbody tr { transition: background .12s; }
+  .tbl-data tbody tr:hover { background: #f6faf8; }
+  .toc a { transition: color .15s; }
+  .toc a.cur { color: var(--accent-2, #047857); font-weight: 700; border-left: 2px solid var(--accent-2, #047857); padding-left: 6px; }
+  @media print { .toc a.cur { border-left: none; } }
 `
 
 export const UX_PAGE_JS = `<script>
@@ -674,6 +680,38 @@ export const UX_PAGE_JS = `<script>
     upd(w);
   });
   window.addEventListener('resize', function () { wraps.forEach(upd); }, { passive: true });
+
+  // ── v2.18 目录滚动高亮（scroll-spy）：当前阅读章节在目录中高亮 + 左缘标记；
+  // 阅读线取视口顶部下方 140px；隐藏视图（display:none，合并报告切换页）跳过 ──
+  var tocLinks = Array.prototype.slice.call(document.querySelectorAll('.toc a[href^="#"]'));
+  if (tocLinks.length && 'scrollY' in window) {
+    var tocIds = [];
+    tocLinks.forEach(function (a) {
+      var id = a.getAttribute('href').slice(1);
+      if (id && document.getElementById(id) && tocIds.indexOf(id) < 0) tocIds.push(id);
+    });
+    var tocCur = null;
+    var spy = function () {
+      // 阅读线（视口顶下方 140px）：取已越过阅读线且 top 最大（最近越过）的章节 —
+      // 即当前正在阅读的章节（取最小会把页面上方早已越过的章节误判为当前）
+      var best = null, bestTop = -Infinity;
+      tocIds.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (!el || el.getClientRects().length === 0) return; // 隐藏视图不参与
+        var top = el.getBoundingClientRect().top;
+        if (top <= 140 && top > bestTop) { best = id; bestTop = top; }
+      });
+      if (best !== tocCur) {
+        tocCur = best;
+        tocLinks.forEach(function (a) {
+          a.classList.toggle('cur', a.getAttribute('href').slice(1) === tocCur);
+        });
+      }
+    };
+    window.addEventListener('scroll', spy, { passive: true });
+    window.addEventListener('hashchange', spy); // v2.18.1（P3）：目录点击跳转后立即刷新高亮
+    spy();
+  }
 })();
 </script>`
 
@@ -769,15 +807,28 @@ function slug(s: string): string {
 
 // ─── 确定性数据区块 ───────────────────────────────────────────────────────────
 
-function scoreBar(label: string, item: { score: number; rating: string }, color: string, cls = ''): string {
+function scoreBar(label: string, item: { score: number; rating: string }, color: string, cls = '', delta = 0): string {
   const pct = Math.round((item.score / 10) * 100)
+  // v2.18：AI 复核调整徽章（delta≠0 时紧随分数 — 与评分行同一视觉行）。
+  // v2.18.1（代码审查 P2-1）：delta 强制数值化（历史/伪造数据防御 — sanitizeCheckpoint 之外的双保险）
+  const d = Math.trunc(Number(delta)) || 0
+  const deltaChip = d !== 0
+    ? `<span class="score-delta ${d > 0 ? 'sd-pos' : 'sd-neg'}" title="AI 复核${d > 0 ? '上调' : '下调'} ${Math.abs(d)} 分（见下方 AI 复核明细）">AI ${d > 0 ? '+' : '−'}${Math.abs(d)}</span>`
+    : ''
   return `
   <div class="score-row ${cls}">
     <div class="score-label">${label}</div>
     <div class="score-track"><div class="score-fill" style="width:${pct}%;background:${color}"></div></div>
-    <div class="score-num">${item.score}<span class="score-max">/10</span></div>
+    <div class="score-num">${item.score}<span class="score-max">/10</span>${deltaChip}</div>
     <div class="score-rating">${esc(item.rating)}</div>
   </div>`
+}
+
+/** v2.18 评分依据单元格：长句按「；」拆分分行（扫读友好）+ 双列网格（评分卡更紧凑） */
+function rationaleCell(label: string, text: string): string {
+  const segs = text.split('；').map(s => s.trim()).filter(Boolean)
+  if (!segs.length) return ''
+  return `<div class="sr-item"><b class="sr-label">${label}</b>${segs.map(s => `<span class="sr-seg">${esc(s)}</span>`).join('')}</div>`
 }
 
 /** 配体短显示："A1B6E (N-[4-(3-chloro…))" → 截断化学名保留编号（悬停可见全名） */
@@ -1513,6 +1564,25 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const oligoCategoryZh = oligo?.category === 'monomer' ? '单体' : oligo?.category === 'homo-oligomer' ? '同源寡聚体' : oligo?.category === 'hetero-complex' ? '异源复合物' : '未知'
   const adjChip = (label: string, v: number) =>
     `<span class="adj-chip ${v > 0 ? 'adj-pos' : v < 0 ? 'adj-neg' : 'adj-zero'}">${label} ${v > 0 ? '+' : v < 0 ? '−' : '±'}${Math.abs(v)}</span>`
+  // v2.18：AI 复核条（LLM 智能调分明细 — 评分卡内嵌，紧随评分依据）
+  const llmA = ctx.scores.llmAdjust
+  const llmAdjStripHtml = llmA ? `
+    <div class="llm-adj-strip">
+      <div class="llm-adj-head">
+        <span class="llm-adj-badge">AI 复核</span>
+        <span class="llm-adj-title">${llmA.applied ? `已微调系统评分${llmA.overall !== 0 ? `（总体 ${llmA.overall > 0 ? '+' : '−'}${Math.abs(llmA.overall)}）` : '（总体维持）'}` : '复核确认维持系统评分'}</span>
+        <span class="llm-chips">${adjChip('X-ray', llmA.xray)}${adjChip('Cryo-EM', llmA.cryoem)}${adjChip('NMR', llmA.nmr)}</span>
+        <span class="llm-conf">置信度：${llmA.confidence === 'high' ? '高' : llmA.confidence === 'medium' ? '中' : '低'}</span>
+      </div>
+      ${(llmA.notes.xray || llmA.notes.cryoem || llmA.notes.nmr || llmA.notes.overall) ? `
+      <ul class="llm-notes">
+        ${llmA.notes.xray ? `<li><b>X-ray</b>：${esc(llmA.notes.xray)}</li>` : ''}
+        ${llmA.notes.cryoem ? `<li><b>Cryo-EM</b>：${esc(llmA.notes.cryoem)}</li>` : ''}
+        ${llmA.notes.nmr ? `<li><b>NMR</b>：${esc(llmA.notes.nmr)}</li>` : ''}
+        ${llmA.notes.overall ? `<li><b>总体</b>：${esc(llmA.notes.overall)}</li>` : ''}
+      </ul>` : ''}
+      <span class="llm-engine">复核引擎 ${esc(llmA.engine ?? '—')} · ${(llmA.durationMs / 1000).toFixed(1)}s — 调整幅度经服务端钳制（±2 以内），已计入上述分值</span>
+    </div>` : ''
   const oligoStripHtml = oligo ? `
     <div class="oligo-strip">
       <div class="oligo-strip-head">
@@ -1610,16 +1680,17 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
 
   const scoreHtml = `
   <div class="score-card">
-    ${scoreBar('X-ray 结晶', ctx.scores.xray, scoreColor(ctx.scores.xray.score))}
-    ${scoreBar('Cryo-EM', ctx.scores.cryoem, scoreColor(ctx.scores.cryoem.score))}
-    ${scoreBar('NMR', ctx.scores.nmr, scoreColor(ctx.scores.nmr.score))}
-    ${scoreBar('综合评估', ctx.scores.overall, scoreColor(ctx.scores.overall.score), 'row-overall')}
+    ${scoreBar('X-ray 结晶', ctx.scores.xray, scoreColor(ctx.scores.xray.score), '', llmA?.xray ?? 0)}
+    ${scoreBar('Cryo-EM', ctx.scores.cryoem, scoreColor(ctx.scores.cryoem.score), '', llmA?.cryoem ?? 0)}
+    ${scoreBar('NMR', ctx.scores.nmr, scoreColor(ctx.scores.nmr.score), '', llmA?.nmr ?? 0)}
+    ${scoreBar('综合评估', ctx.scores.overall, scoreColor(ctx.scores.overall.score), 'row-overall', llmA?.overall ?? 0)}
     <div class="score-rationale">
-      <div>· X-ray：${esc(ctx.scores.rationale.xray)}</div>
-      <div>· Cryo-EM：${esc(ctx.scores.rationale.cryoem)}</div>
-      <div>· NMR：${esc(ctx.scores.rationale.nmr)}</div>
-      <div>· 综合：${esc(ctx.scores.rationale.overall)}</div>
+      ${rationaleCell('X-ray', ctx.scores.rationale.xray)}
+      ${rationaleCell('Cryo-EM', ctx.scores.rationale.cryoem)}
+      ${rationaleCell('NMR', ctx.scores.rationale.nmr)}
+      ${rationaleCell('综合', ctx.scores.rationale.overall)}
     </div>
+    ${llmAdjStripHtml}
     ${oligoStripHtml}
     ${mwStripHtml}
     ${interactionStripHtml}
@@ -1696,6 +1767,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
         <div class="glance-score" style="color:${scoreColor(ctx.scores.overall.score)}">${ctx.scores.overall.score}<span>/10</span></div>
         <div class="glance-hero-label">综合可行性 · ${esc(ctx.scores.overall.rating)}</div>
         <span class="glance-rating" style="background:${scoreColor(ctx.scores.overall.score)}">${esc(ctx.scores.overall.rating.split('·')[1] ?? ctx.scores.overall.rating)}</span>
+        ${llmA ? `<span class="glance-ai-tag" title="评分经 AI 专家复核${llmA.applied ? '微调' : '确认'} — 详见「可行性评分」章节">AI 复核${llmA.applied ? (llmA.overall > 0 ? ` +${llmA.overall}` : llmA.overall < 0 ? ` −${Math.abs(llmA.overall)}` : '') : ' · 维持'}</span>` : ''}
       </div>
       <div class="glance-tiles">
         <div class="glance-tile"><div class="gt-label">推荐方法</div><div class="gt-value">${esc(recommendVal)}</div><div class="gt-sub">${esc(recommendSub)}</div></div>
@@ -1707,7 +1779,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
         <div class="glance-tile"><div class="gt-label">结构覆盖率</div><div class="gt-value">${ctx.coverage ? ctx.coverage.coveragePercent + '%' : '—'}</div><div class="gt-sub">${ctx.coverage ? (ctx.gapText ? '存在未覆盖区间（见评分与结构章节）' : '已有结构覆盖完整') : '无覆盖率数据（PDBe 未返回）'}</div></div>
       </div>
     </div>
-    <div class="glance-foot">推荐路线：${esc(topM.label)}为主${methodTie ? '' : `，${esc(secondM.label)}备选`} — 评分依据与增重/寡聚调整详见「可行性评分」章节，实验策略详见「评估分析」的推荐技术路线与实验方案建议。</div>
+    <div class="glance-foot">推荐路线：${esc(topM.label)}为主${methodTie ? '' : `，${esc(secondM.label)}备选`} — 评分依据与增重/寡聚调整${llmA ? '与 AI 复核意见' : ''}详见「可行性评分」章节，实验策略详见「评估分析」的推荐技术路线与实验方案建议。</div>
   </section>`
 
   // 实验图分组展示：gel / sec / other 各成小组，类型一目了然
@@ -1973,7 +2045,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   <section class="sec" id="${idOf('scores')}">
     <h2>${secHead(scoresNo, '可行性评分', 'Scores')}</h2>
     ${scoreHtml}
-    <p class="note">评分由系统规则计算（1-10）：基础分（序列长度/跨膜特征/已有结构先例/结构域柔性）经舍入后叠加 BLAST 同源加成、蛋白聚集形式（寡聚态）与分子量增重调整（调整值见评分卡内明细）——两步调整均为整数，直接体现在最终分。评分数值仅供参考，最终可行性需结合实验条件判断；聚集形式判定的证据链与策略影响在评估分析章节中展开。</p>
+    <p class="note">评分流程分两层：系统规则先计算基础分（1-10：序列长度/跨膜特征/已有结构先例/结构域柔性，经舍入后叠加 BLAST 同源加成、蛋白聚集形式（寡聚态）与分子量增重调整${llmA ? '），随后由 AI 专家基于同一证据链复核' : ' — 调整值见评分卡内明细；两步调整均为整数，直接体现在最终分'}${llmA ? (llmA.applied ? '，并对分值做了 ±2 以内的微调（调整已计入上述分值，逐方法理由见上方「AI 复核」明细）' : '，复核结论为维持系统评分（意见见上方明细）') : ''}。评分数值仅供参考，最终可行性需结合实验条件判断；聚集形式判定的证据链与策略影响在评估分析章节中展开。</p>
   </section>
 
   <section class="sec" id="${idOf('pdbs')}">
@@ -2192,7 +2264,29 @@ export const SINGLE_REPORT_CSS = `  :root {
     .score-track{ grid-column:1 / -1; grid-row:2; }
     .score-rating{ grid-column:1 / -1; grid-row:3; text-align:left; }
   }
-  .score-rationale { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--sub); line-height:2; }
+  .score-rationale { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--sub); line-height:1.9; display:grid; grid-template-columns:1fr 1fr; gap:8px 28px; }
+  .sr-item { min-width:0; }
+  .sr-label { display:block; color:var(--ink); font-weight:700; margin-bottom:2px; }
+  .sr-seg { display:block; padding-left:11px; position:relative; overflow-wrap:anywhere; }
+  .sr-seg::before { content:'·'; position:absolute; left:1px; color:var(--faint); }
+  @media (max-width:860px){ .score-rationale{ grid-template-columns:1fr; gap:6px; } }
+
+  /* ── v2.18 AI 复核（LLM 智能调分）— 紫色系视觉语言，与绿色方法分区分 ── */
+  .score-delta { display:inline-block; margin-left:7px; padding:0 8px; border-radius:99px; font-size:10px; font-weight:700; font-family:var(--mono); vertical-align:2px; line-height:1.7; }
+  .score-delta.sd-pos { background:#ede9fe; color:#5b21b6; border:1px solid #c4b5fd; }
+  .score-delta.sd-neg { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
+  .llm-adj-strip { margin-top:14px; border:1px solid #ddd6fe; background:linear-gradient(180deg,#faf5ff,#fdfdfc); border-radius:6px; padding:12px 16px 10px; }
+  .llm-adj-head { display:flex; flex-wrap:wrap; gap:7px 10px; align-items:center; }
+  .llm-adj-badge { font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:1.2px; color:#fff; background:#6d28d9; border-radius:3px; padding:2px 9px; }
+  .llm-adj-title { font-weight:700; font-size:13px; color:#4c1d95; }
+  .llm-conf { font-size:11.5px; color:var(--sub); }
+  .llm-notes { margin:9px 0 7px; padding-left:2px; list-style:none; font-size:12.5px; color:var(--sub); line-height:1.95; }
+  .llm-notes li { padding-left:15px; position:relative; }
+  .llm-notes li::before { content:'◆'; position:absolute; left:0; top:2px; font-size:8px; color:#a78bfa; }
+  .llm-notes li b { color:#5b21b6; font-weight:700; margin-right:3px; }
+  .llm-engine { font-size:11px; color:var(--faint); font-family:var(--mono); }
+  .glance-ai-tag { display:inline-block; margin-top:7px; padding:1px 10px; border-radius:99px; background:#ede9fe; color:#5b21b6; font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:.5px; border:1px solid #c4b5fd; }
+  @media print { .score-delta, .glance-ai-tag { -webkit-print-color-adjust:exact; print-color-adjust:exact; } }
   /* v1.28：综合分行强调（突出关键信息）*/
   .score-row.row-overall { background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:6px; padding:10px 12px; margin:16px -12px 4px; }
   .score-row.row-overall .score-label { color:var(--accent); font-size:14px; }

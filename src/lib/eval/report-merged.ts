@@ -263,6 +263,12 @@ function targetDigest(t: MergedTargetData): string {
   }
   if (t.geneNames.length) lines.push(`基因: ${t.geneNames.slice(0, 5).join(', ')} · 物种: ${t.organism || '—'} · 长度: ${t.sequenceLength} aa`)
   lines.push(`评分: X-ray ${t.scores.xray.score}/10 · Cryo-EM ${t.scores.cryoem.score}/10 · NMR ${t.scores.nmr.score}/10 · 总体 ${t.scores.overall.score}/10（${t.scores.overall.rating}）`)
+  // v2.18：AI 复核（LLM 智能调分）— 各靶点小节的必写维度
+  const llmA = t.scores.llmAdjust
+  if (llmA) {
+    const fmt = (v: number) => (v > 0 ? `+${v}` : v < 0 ? `${v}` : '±0')
+    lines.push(`AI 复核: ${llmA.applied ? '已微调系统评分' : '确认维持系统评分'}（X-ray ${fmt(llmA.xray)} / Cryo-EM ${fmt(llmA.cryoem)} / NMR ${fmt(llmA.nmr)}；置信度${llmA.confidence === 'high' ? '高' : llmA.confidence === 'medium' ? '中' : '低'}）— ${llmA.notes.overall || '三方法复核意见综合'}；逐方法意见：X-ray ${llmA.notes.xray || '维持'}；Cryo-EM ${llmA.notes.cryoem || '维持'}；NMR ${llmA.notes.nmr || '维持'}（调整已计入上述分值，报告一律使用调整后分值）`)
+  }
   const ms = t.methodStats
   lines.push(`PDB 结构: ${t.directPdbs.length} 个（X-ray ${ms.xrayCount} / Cryo-EM ${ms.cryoemCount} / NMR ${ms.nmrCount}）${ms.bestResolution != null ? `，最佳 ${ms.bestResolution}Å` : ''} · 覆盖率 ${t.coveragePercent}%${t.coverageText ? `（已覆盖: ${t.coverageText.slice(0, 160)}）` : ''}${t.gapText ? ` · 未覆盖区间: ${t.gapText.slice(0, 160)}` : ''} · 配体 ${t.ligandCount} 种 · 文献 ${t.literatureCount} 篇`)
   // v2.14：方法先例分布 — Cryo-EM 占主导时显性提示（小靶点的已有 EM 结构必然为复合物/增重形式，
@@ -570,9 +576,6 @@ export async function generateMergedReport(input: MergedReportInput, signal?: Ab
 
 // ─── 合并报告 HTML 渲染（期刊风，与单靶点报告同一设计语言）──────────────────
 
-function scoreCell(item: { score: number; rating: string }): string {
-  return `${item.score}/10 · ${esc(item.rating)}`
-}
 
 /**
  * v2.12：拆出 markdown 中的「各靶点结构可行性综述」章节 — 各 ### 小节按
@@ -1027,7 +1030,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : t.targetIdentity ? ` <span class="tgt-idsrc" title="${esc(t.targetIdentity.note ?? t.targetIdentity.sourceLabel)}">${esc(t.targetIdentity.sourceLabel)}${t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}</span>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
-      <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
+      <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.llmAdjust ? `<span class="tgt-ai-adj${t.scores.llmAdjust.applied ? '' : ' keep'}" title="${esc(t.scores.llmAdjust.notes.overall || 'AI 复核意见')}">AI 复核${t.scores.llmAdjust.applied ? (() => { const d = Math.trunc(Number(t.scores.llmAdjust!.overall)) || 0; return d > 0 ? ` +${d}` : d < 0 ? ` −${Math.abs(d)}` : '' })() : '维持'}</span>` : ''}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
       <div class="tgt-stats">
         <span>PDB <b>${t.directPdbs.length}</b></span>
         <span>${ms.bestResolution != null ? `最佳 <b>${ms.bestResolution.toFixed(2)}Å</b>` : '无直接结构'}</span>
@@ -1429,6 +1432,9 @@ ${SINGLE_REPORT_CSS}
   .tgt-oligo .oligo-stoich { font-size:10px; padding:0 7px; }
   .tgt-oligo-conf { font-size:10.5px; color:var(--sub); }
   .tgt-oligo-adj { margin-left:6px; font-size:10px; color:#047857; border:1px solid #a7f3d0; border-radius:99px; padding:0 7px; background:#ecfdf5; white-space:nowrap; }
+  /* v2.18：AI 复核徽标（LLM 智能调分）— 紫色系与单靶点报告同源视觉 */
+  .tgt-ai-adj { margin-left:6px; font-size:10px; color:#5b21b6; border:1px solid #c4b5fd; border-radius:99px; padding:0 7px; background:#ede9fe; white-space:nowrap; cursor:help; }
+  .tgt-ai-adj.keep { color:#6d28d9; border-color:#ddd6fe; background:#f5f3ff; }
   /* 目录：共有结构条目突出 + 靶点速览导航 */
   .toc-shared { color:#065f46; font-weight:700; }
   .toc-shared::before { content:'◈ '; color:var(--accent-2); }

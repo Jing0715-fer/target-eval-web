@@ -212,12 +212,17 @@ export async function unifiedLlmChat(
       const transient = isRateLimit || /\boverloaded|temporarily|status 5\d\d|timeout|超时|ECONNRESET|ETIMEDOUT|fetch failed|content[_\s-]?filter|content policy|safety|moderation/i.test(msg)
       if (!transient || attempt === MAX_RETRIES - 1) break
       // 429 限流用专用长退避（20s/40s/60s/90s/120s），其他瞬态用指数退避（4s/8s/16s...）
+      // v2.18.1（代码审查 P2-3）：退避可中止 — caller signal 触发时提前结束 sleep，
+      // 下轮循环开头的 aborted 检查立即返回；不再让取消/段超时等完长退避。
       const delay = isRateLimit
         ? RATE_LIMIT_DELAYS_MS[Math.min(rateLimitIdx, RATE_LIMIT_DELAYS_MS.length - 1)]
         : BASE_DELAY_MS * Math.pow(2, attempt)
       rateLimitIdx++
       console.log(`[llm] 第 ${attempt + 1} 次重试（${isRateLimit ? '限流' : '瞬态'}，等 ${Math.round(delay / 1000)}s）：${msg.slice(0, 120)}`)
-      await new Promise(r => setTimeout(r, delay))
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, delay)
+        signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+      })
     }
   }
   return { ok: false, text: '', error: lastErr || 'LLM 调用失败', durationMs: Date.now() - t0 }

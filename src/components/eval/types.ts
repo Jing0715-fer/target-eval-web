@@ -377,6 +377,28 @@ export interface Scores {
   mwAugmentAdjust?: MwAugmentAdjustInfo
   /** v1.30：互作复合物证据调整明细（无直接结构时） */
   interactionAdjust?: InteractionAdjustInfo
+  /** v2.18：LLM 智能复核调整明细（复核失败/跳过时缺省 — 系统规则分即终分） */
+  llmAdjust?: LlmScoreAdjustInfo
+}
+
+/** v2.18：LLM 智能复核调整明细（score-llm.ts 产出并应用；评分卡展示） */
+export interface LlmScoreAdjustInfo {
+  /** AI 复核是否实际调整了分数（false = 复核确认维持系统分） */
+  applied: boolean
+  /** 三方法有效调整量（钳制后实际变化值；0 = 维持） */
+  xray: number
+  cryoem: number
+  nmr: number
+  /** 总体有效调整量（总体分由三方法最大值推导） */
+  overall: number
+  /** 复核置信度 */
+  confidence: 'high' | 'medium' | 'low'
+  /** 逐方法复核意见（一句话依据 — delta 为 0 时为「维持理由」） */
+  notes: { xray: string; cryoem: string; nmr: string; overall: string }
+  /** 复核引擎（页脚元数据展示） */
+  engine?: string
+  /** 复核耗时 ms */
+  durationMs: number
 }
 
 export interface MethodStats {

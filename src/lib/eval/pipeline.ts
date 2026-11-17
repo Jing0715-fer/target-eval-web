@@ -31,6 +31,7 @@ import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWit
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
+import { reviewScoresWithLlm, applyLlmScoreAdjust } from './score-llm'
 import { analyzeOligomericState } from './oligomer'
 import { analyzeInteractionEvidence } from './interaction'
 import { analyzeMwAugmentation } from './mw-augment'
@@ -186,6 +187,8 @@ interface PipelineState {
   oligomer: OligomerAnalysis | null
   mwAugment: MwAugmentAnalysis | null
   scores: ScoresResult | null
+  /** v2.18：LLM 评分复核实际尝试次数（≥2 次后放弃，保留规则分；handoff 预算闸门不计入） */
+  scoreLlmAttempts: number
   // ── AF2 / ESMFold / 报告 ──
   afFigure: { dataUri: string; modelId: string; globalPlddt: number | null; version: number; fracVeryHigh: number | null } | null
   afSummary: AlphafoldSummaryInfo | null
@@ -264,6 +267,7 @@ function freshState(): PipelineState {
     oligomer: null,
     mwAugment: null,
     scores: null,
+    scoreLlmAttempts: 0,
     afFigure: null,
     afSummary: null,
     esmSummary: null,
@@ -491,6 +495,30 @@ export function sanitizeCheckpoint(raw: unknown): PipelineCheckpoint | null {
   if (st.reportParts != null && !Array.isArray(st.reportParts)) return null
   // v2.6.3：新增跨段计数器消毒（数值有界 — 防伪造 state 注入异常值）
   if (st.blastSubmitCuts != null && (typeof st.blastSubmitCuts !== 'number' || st.blastSubmitCuts < 0 || st.blastSubmitCuts > 10)) return null
+  // v2.18.1（代码审查 P2-1）：AI 复核尝试次数 + llmAdjust 明细消毒 —
+  // 伪造 checkpoint 不得注入字符串型 delta（评分卡 title 属性/合并徽标的插值面）
+  if (st.scoreLlmAttempts != null && (typeof st.scoreLlmAttempts !== 'number' || st.scoreLlmAttempts < 0 || st.scoreLlmAttempts > 2)) return null
+  if (st.scores != null) {
+    if (typeof st.scores !== 'object' || Array.isArray(st.scores)) return null
+    const la = (st.scores as Record<string, unknown>).llmAdjust
+    if (la != null) {
+      if (typeof la !== 'object' || Array.isArray(la)) return null
+      const a = la as Record<string, unknown>
+      for (const k of ['xray', 'cryoem', 'nmr', 'overall']) {
+        if (a[k] != null && (typeof a[k] !== 'number' || !Number.isInteger(a[k]) || Math.abs(a[k] as number) > 2)) return null
+      }
+      const nt = a.notes as Record<string, unknown> | undefined
+      if (nt != null) {
+        if (typeof nt !== 'object' || Array.isArray(nt)) return null
+        for (const v of Object.values(nt)) {
+          if (typeof v !== 'string' || v.length > 400) return null
+        }
+      }
+      if (a.confidence != null && !['high', 'medium', 'low'].includes(String(a.confidence))) return null
+      if (a.engine != null && (typeof a.engine !== 'string' || a.engine.length > 120)) return null
+      if (a.durationMs != null && (typeof a.durationMs !== 'number' || a.durationMs < 0 || a.durationMs > 600_000)) return null
+    }
+  }
   if (st.reportPartFails != null) {
     if (typeof st.reportPartFails !== 'object' || Array.isArray(st.reportPartFails)) return null
     for (const v of Object.values(st.reportPartFails)) {
@@ -517,6 +545,11 @@ export async function runPipelineSegment(
 /** 分段预算剩余量（无预算 = Infinity） */
 function budgetLeft(cb: PipelineCallbacks): number {
   return cb.deadline != null && cb.deadline > 0 ? cb.deadline - Date.now() : Infinity
+}
+
+/** 调整值格式化（+1 / -2 / ±0 — 日志用） */
+function fmtAdj(n: number): string {
+  return n > 0 ? `+${n}` : n < 0 ? `${n}` : '±0'
 }
 
 // ─── 分段执行器 ──────────────────────────────────────────────────────────────
@@ -598,7 +631,7 @@ class SegmentRunner {
       case 'pubmed': await this.phasePubmed(); return null
       case 'blast': return await this.phaseBlast()
       case 'gate': return await this.phaseGate()
-      case 'analysis': await this.phaseAnalysis(); return null
+      case 'analysis': return await this.phaseAnalysis()
       case 'af2': return await this.phaseAf2()
       case 'report': return await this.phaseReport()
       case 'render': return await this.phaseRender()
@@ -1467,50 +1500,115 @@ class SegmentRunner {
     return null
   }
 
-  // ─── 阶段 7：聚集形式（寡聚态）分析 + 评分 ──────────────────────────────
+  // ─── 阶段 7：聚集形式（寡聚态）分析 + 评分 + LLM 复核 ──────────────────────
+  //
+  // v2.18：phaseAnalysis 改为幂等可重入（子步骤守卫）并新增 LLM 评分复核子步骤 —
+  // 预算闸门（<12s）在复核前 handoff，下一段从守卫处继续（不再重算寡聚/分子量/
+  // 规则分）；复核失败/超时不阻塞评估（规则分即终分），尝试 ≥2 次后放弃。
 
-  private async phaseAnalysis(): Promise<void> {
+  private async phaseAnalysis(): Promise<PipelineSegmentResult | null> {
     const st = this.st
-    this.report('score', '分析蛋白聚集形式（寡聚态）…', 0.3)
-    st.oligomer = analyzeOligomericState({
-      uniprot: st.uniprotInfo,
-      directPdbs: st.directPdbs,
-      blastHits: st.blastHits,
-      literature: st.literature,
-    })
-    this.log(`聚集形式分析：${st.oligomer.summary}（证据 ${st.oligomer.evidence.length} 条，置信度${st.oligomer.confidence === 'high' ? '高' : st.oligomer.confidence === 'medium' ? '中' : '低'}）`)
+    if (!st.oligomer) {
+      this.report('score', '分析蛋白聚集形式（寡聚态）…', 0.2)
+      st.oligomer = analyzeOligomericState({
+        uniprot: st.uniprotInfo,
+        directPdbs: st.directPdbs,
+        blastHits: st.blastHits,
+        literature: st.literature,
+      })
+      this.log(`聚集形式分析：${st.oligomer.summary}（证据 ${st.oligomer.evidence.length} 条，置信度${st.oligomer.confidence === 'high' ? '高' : st.oligomer.confidence === 'medium' ? '中' : '低'}）`)
+    }
 
     // v1.26/v1.27：分子量增重策略（小分子量靶点）— UniProt 伙伴长度 + RCSB 复合物装配
     // + 冲突分析；直接路径装配不足 50 kDa 时经 BLAST 同源命中扩展检索大复合物（v1.27）
-    this.report('score', '分析分子量与增重策略（小分子量靶点）…', 0.4)
-    st.mwAugment = await analyzeMwAugmentation({
-      uniprot: st.uniprotInfo,
-      sequenceLength: st.uniprotInfo?.sequenceLength ?? st.sequence.length,
-      oligomer: st.oligomer,
-      directPdbs: st.directPdbs,
-      blastHits: st.blastHits,
-      goal: st.goal || undefined,
-      goalHints: st.goalHints,
-      signal: this.signal,
-    })
-    this.log(st.mwAugment.applicable
-      ? `分子量增重分析：单体 ~${st.mwAugment.monomerKda} kDa${st.mwAugment.assemblyKda != null ? ` → 装配 ~${st.mwAugment.assemblyKda} kDa（${st.mwAugment.assemblyPath}；复合物结构 ${st.mwAugment.complexes.length} 个；同源复合物 ${(st.mwAugment.homologComplexes ?? []).length} 个；伙伴 ${st.mwAugment.partners.filter(p => p.kda != null).length} 个）` : '，无装配增重路径'}（冲突分析 ${st.mwAugment.conflicts.length} 条）`
-      : `分子量增重分析：不适用（单体 ~${st.mwAugment.monomerKda} kDa ≥ 50 kDa）`)
+    if (!st.mwAugment) {
+      this.report('score', '分析分子量与增重策略（小分子量靶点）…', 0.35)
+      st.mwAugment = await analyzeMwAugmentation({
+        uniprot: st.uniprotInfo,
+        sequenceLength: st.uniprotInfo?.sequenceLength ?? st.sequence.length,
+        oligomer: st.oligomer,
+        directPdbs: st.directPdbs,
+        blastHits: st.blastHits,
+        goal: st.goal || undefined,
+        goalHints: st.goalHints,
+        signal: this.signal,
+      })
+      this.log(st.mwAugment.applicable
+        ? `分子量增重分析：单体 ~${st.mwAugment.monomerKda} kDa${st.mwAugment.assemblyKda != null ? ` → 装配 ~${st.mwAugment.assemblyKda} kDa（${st.mwAugment.assemblyPath}；复合物结构 ${st.mwAugment.complexes.length} 个；同源复合物 ${(st.mwAugment.homologComplexes ?? []).length} 个；伙伴 ${st.mwAugment.partners.filter(p => p.kda != null).length} 个）` : '，无装配增重路径'}（冲突分析 ${st.mwAugment.conflicts.length} 条）`
+        : `分子量增重分析：不适用（单体 ~${st.mwAugment.monomerKda} kDa ≥ 50 kDa）`)
+    }
 
-    this.report('score', '计算可行性评分…', 0.5)
-    st.scores = computeScores({
-      sequenceLength: st.uniprotInfo?.sequenceLength ?? st.sequence.length,
-      features: st.uniprotInfo?.features ?? [],
-      directPdbs: st.directPdbs,
-      blastHits: st.blastHits,
-      coveragePercent: st.coverage?.coveragePercent ?? 0,
-      oligomer: st.oligomer,
-      mwAugment: st.mwAugment,
-      interaction: st.interaction,
-    })
-    this.log(`评分完成：X-ray ${st.scores.xray.score}/10 · Cryo-EM ${st.scores.cryoem.score}/10 · NMR ${st.scores.nmr.score}/10 · 总体 ${st.scores.overall.score}/10${st.scores.interactionAdjust ? `（含互作复合物调整：${st.scores.interactionAdjust.level === 'curated' ? st.scores.interactionAdjust.complexAc : 'binary 伙伴'}）` : ''}`)
+    if (!st.scores) {
+      this.report('score', '计算可行性评分…', 0.5)
+      st.scores = computeScores({
+        sequenceLength: st.uniprotInfo?.sequenceLength ?? st.sequence.length,
+        features: st.uniprotInfo?.features ?? [],
+        directPdbs: st.directPdbs,
+        blastHits: st.blastHits,
+        coveragePercent: st.coverage?.coveragePercent ?? 0,
+        oligomer: st.oligomer,
+        mwAugment: st.mwAugment,
+        interaction: st.interaction,
+      })
+      this.log(`评分完成：X-ray ${st.scores.xray.score}/10 · Cryo-EM ${st.scores.cryoem.score}/10 · NMR ${st.scores.nmr.score}/10 · 总体 ${st.scores.overall.score}/10${st.scores.interactionAdjust ? `（含互作复合物调整：${st.scores.interactionAdjust.level === 'curated' ? st.scores.interactionAdjust.complexAc : 'binary 伙伴'}）` : ''}`)
+    }
+
+    // ── v2.18：LLM 智能复核（规则分之上的专家修正层；失败不阻塞） ──
+    if (!st.scores.llmAdjust && st.scoreLlmAttempts < 2) {
+      // 段预算闸门：复核是单次 LLM 调用（含供应商层重试），预留预算才开启；
+      // 不足则 handoff（守卫使下一段零成本重入，不重算上游分析）。
+      // v2.18.1（代码审查 P2-2）：闸门随段预算伸缩（min(12s, segBudget×0.85)，下限 6s）—
+      // 小段部署（EVAL_SYNC_SEGMENT_MS 可低至 ~10s）下固定 12s 会造成无限 handoff 乒乓。
+      const needMs = Math.min(12_000, Math.max(6_000, Math.trunc(this.segBudgetMs * 0.85)))
+      const budget = budgetLeft(this.cb)
+      if (budget < needMs) {
+        this.report('score', '等待 AI 复核评分（下一段继续）…', 0.75)
+        return this.handoff()
+      }
+      const timeoutMs = Math.max(6_000, Math.min(30_000, budget - 1_500))
+      this.report('score', 'AI 复核评分（LLM 专家修正，±2 以内）…', 0.75)
+      const out = await reviewScoresWithLlm({
+        sequenceLength: st.uniprotInfo?.sequenceLength ?? st.sequence.length,
+        features: st.uniprotInfo?.features ?? [],
+        directPdbs: st.directPdbs,
+        blastHits: st.blastHits,
+        coveragePercent: st.coverage?.coveragePercent ?? 0,
+        oligomer: st.oligomer,
+        mwAugment: st.mwAugment,
+        interaction: st.interaction,
+        targetName: st.uniprotInfo?.proteinName ?? st.targetIdentity?.name,
+        uniprotId: st.uniprotInfo?.uniprotId,
+        goal: st.goal || undefined,
+        gapText: st.gapText || undefined,
+        ligandCount: new Set(st.directPdbs.flatMap(p => p.ligands.map(l => l.split('(')[0].trim()))).size || undefined,
+        literatureCount: st.literature.length,
+      }, st.scores, AbortSignal.any([this.signal, AbortSignal.timeout(timeoutMs)]))
+      st.scoreLlmAttempts += 1
+      // v2.18.1（代码审查 P1-2）：用户取消必须传播（与管线其他阶段同口径 —
+      // 路由据此标 canceled）；仅复核超时/失败才软降级保留规则分。
+      if (this.signal.aborted) throw new Error('评估已取消（AI 复核评分阶段）')
+      if (out.ok && out.proposal) {
+        const engine = await getEngineSummary()
+        const applied = applyLlmScoreAdjust(st.scores, out.proposal, { engine, durationMs: out.durationMs })
+        st.scores = applied.scores
+        const adj = applied.info
+        if (adj.applied) {
+          this.log(`AI 复核调分：X-ray ${fmtAdj(adj.xray)} · Cryo-EM ${fmtAdj(adj.cryoem)} · NMR ${fmtAdj(adj.nmr)} → 总体 ${fmtAdj(adj.overall)}（置信度${adj.confidence === 'high' ? '高' : adj.confidence === 'medium' ? '中' : '低'}，${(out.durationMs / 1000).toFixed(1)}s）— ${adj.notes.overall || '三方法复核意见综合'}`)
+        } else {
+          this.log(`AI 复核维持系统评分（X-ray/Cryo-EM/NMR 均 ±0，置信度${adj.confidence === 'high' ? '高' : adj.confidence === 'medium' ? '中' : '低'}）— ${adj.notes.overall || '规则评分与证据一致'}`)
+        }
+      } else {
+        // v2.18.1（代码审查 P1-1）：失败重试真实可达 — 分段模式交还 checkpoint，
+        // 下一段零成本重入重试（attempts 已 +1，上限 2 次天然有界）；异步路径/
+        // 二次失败放弃，保留规则分。
+        const retryable = st.scoreLlmAttempts < 2 && this.cb.deadline != null && this.cb.deadline > 0
+        this.log(`AI 复核评分未生效（${out.error ?? '未知原因'}）— 本次保留系统规则评分${retryable ? '（交还下段重试一次）' : '（已放弃，规则分即终分）'}`, 'warn')
+        if (retryable) return this.handoff()
+      }
+    }
     this.report('score', '评分完成', 1)
     this.advance('af2')
+    return null
   }
 
   // ─── 阶段 7.5：AlphaFold 预测结构（v2.0 报告头图）────────────────────────
@@ -1812,6 +1910,8 @@ class SegmentRunner {
         mwAugmentAdjust: st.scores!.mwAugmentAdjust,
         /** v1.29：互作复合物证据调整明细（无直接结构且有证据时） */
         interactionAdjust: st.scores!.interactionAdjust,
+        /** v2.18：LLM 智能复核调整明细（复核失败/跳过时缺省 — 规则分即终分） */
+        llmAdjust: st.scores!.llmAdjust,
       },
       methodStats: st.scores!.methodStats,
       ligandCount: new Set(st.directPdbs.flatMap(p => p.ligands.map(l => l.split('(')[0].trim()))).size,
