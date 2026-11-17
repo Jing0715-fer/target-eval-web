@@ -212,6 +212,22 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
     }
   }
 
+  // v2.20.2：获取成功且下拉打开时，自动滚到当前模型行 — 列表按字母序排列时
+  // 最新模型（如 MiniMax-M3.1-Flash）排在尾部，视口有限会被折叠在滚动区底下
+  // 看不见（用户实测「只显示到 M2.7」的根因）；主动滚过去让用户第一眼看到预填值。
+  const scrollModelIntoView = useCallback(() => {
+    if (!modelsOpen || !models.length) return
+    requestAnimationFrame(() => {
+      const cont = modelsListRef.current?.querySelector('.eval-scroll')
+      const q = model.trim().toLowerCase()
+      const target = q
+        ? Array.from(cont?.querySelectorAll('button[data-model]') ?? []).find(b => b.getAttribute('data-model')?.toLowerCase() === q)
+        : undefined
+      if (target) (target as HTMLElement).scrollIntoView({ block: 'center' })
+    })
+  }, [modelsOpen, models.length, model])
+  useEffect(() => { scrollModelIntoView() }, [scrollModelIntoView])
+
   // 点击模型列表外部关闭
   useEffect(() => {
     if (!modelsOpen) return
@@ -406,7 +422,9 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                       </Button>
 
                       {modelsOpen && (modelsLoading || modelsError || models.length > 0) && (
-                        <div className="eval-scroll absolute top-full right-0 left-0 z-10 mt-1.5 max-h-52 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-lg">
+                      // v2.20.2：max-h-52→max-h-80 — 拉高视口让常见 9~16 条列表一屏全见；
+                      // 更长列表仍可滚动（配合 scrollModelIntoView 自动定位当前模型）
+                        <div className="eval-scroll absolute top-full right-0 left-0 z-10 mt-1.5 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-lg">
                           {modelsLoading && (
                             <div className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground">
                               <LoaderCircle className="size-3.5 animate-spin" />
@@ -430,6 +448,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                                 <button
                                   key={m}
                                   type="button"
+                                  data-model={m}
                                   onClick={() => {
                                     setModel(m)
                                     setModelQueryDirty(false)

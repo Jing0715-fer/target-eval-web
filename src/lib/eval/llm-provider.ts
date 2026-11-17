@@ -365,6 +365,14 @@ async function callOpenaiCompat(
       return text
     }
     const errText = (await res.text().catch(() => '')).slice(0, 400)
+    // v2.20.2：402 额度不足追补人话指引（MiniMax Token Plan 用尽时返回的 message
+    // 是中文但用户未必知道下一步去哪充值；其他供应商 402 同样适用）
+    if (res.status === 402) {
+      const balanceHint = /insufficient[_\s-]?balance|Token Plan|用量上限|quota|余额|积分/i.test(errText)
+        ? '（Key 鉴权成功，但该账户额度/余额不足 — 请到供应商平台充值或升级套餐后重试）'
+        : ''
+      throw new Error(`HTTP ${res.status} ${errText || res.statusText}${balanceHint}`)
+    }
     if (res.status === 400 && variant < 2) {
       if (/max_completion_tokens/i.test(errText) && variant === 0) continue
       if (/max_tokens/i.test(errText) || /temperature/i.test(errText) || /unsupported|unknown parameter|not supported/i.test(errText)) continue
