@@ -20,7 +20,7 @@ export type ProviderProtocol = 'zai' | 'openai' | 'anthropic' | 'google'
 
 export type ProviderKey =
   | 'builtin' | 'openai' | 'anthropic' | 'google' | 'deepseek' | 'qwen'
-  | 'zhipu' | 'moonshot' | 'minimax' | 'minimax-legacy' | 'doubao' | 'xai'
+  | 'zhipu' | 'moonshot' | 'minimax' | 'minimax-intl' | 'minimax-legacy' | 'doubao' | 'xai'
   | 'openrouter' | 'ollama' | 'custom'
 
 export interface ProviderMeta {
@@ -48,12 +48,16 @@ export const PROVIDERS: ProviderMeta[] = [
   { key: 'qwen', label: '通义千问', hint: '阿里云百炼 DashScope 兼容模式', protocol: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'qwen-plus' },
   { key: 'zhipu', label: '智谱 GLM', hint: 'GLM-4.5 / GLM-4-Plus（BigModel）', protocol: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'glm-4-plus' },
   { key: 'moonshot', label: '月之暗面 Kimi', hint: 'Kimi k2 / moonshot-v1 系列', protocol: 'openai', baseUrl: 'https://api.moonshot.cn/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'kimi-k2-0711-preview' },
-  // v2.20：MiniMax 官方端点换代 — 新 OpenAI 兼容端点 api.minimax.io/v1 才有
-  // MiniMax-M3.1-Flash / M3；旧 api.minimaxi.com（chatcompletion_v2）只服务 M2.x
-  // 系列（用户实测模型列表只到 M2.7 的根因）。旧端点保留为独立条目，老 Key/
-  // M2 工作流不断，随时切回。
-  { key: 'minimax', label: 'MiniMax', hint: 'MiniMax-M3.1-Flash / M3（OpenAI 兼容新端点）', protocol: 'openai', baseUrl: 'https://api.minimax.io/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'MiniMax-M3.1-Flash' },
-  { key: 'minimax-legacy', label: 'MiniMax 旧版 API', hint: '旧版 chatcompletion_v2：MiniMax-M2.7 / M2.5 / M2.1', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '/v1/models', needsKey: true, defaultModel: 'MiniMax-M2.7' },
+  // v2.20.1：MiniMax 三端点分立（v2.20 误切端点的纠偏）——国内/国际两平台 Key 不通用：
+  //  - api.minimax.cn/v1  国内新端点（platform.minimax.cn 文档），MiniMax-M3.1-Flash /
+  //    M3 所在，国内 Key 在此鉴权。v2.20 曾把主条目切到 api.minimax.io（国际端点），
+  //    国内 Key 打过去 = HTTP 401 "invalid api key (2049)"（用户实测报错）。
+  //  - api.minimax.io/v1  国际端点（platform.minimax.io 文档），需国际 Key，独立条目。
+  //  - api.minimaxi.com  旧国内端点（chatcompletion_v2），只服务 M2.x 系列 ——
+  //    「模型列表只显示到 M2.7」的原始根因（/v1/models 列表仅含 M2.x）。
+  { key: 'minimax', label: 'MiniMax（国内）', hint: 'MiniMax-M3.1-Flash / M3 · api.minimax.cn（国内 Key）', protocol: 'openai', baseUrl: 'https://api.minimax.cn/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'MiniMax-M3.1-Flash' },
+  { key: 'minimax-intl', label: 'MiniMax 国际版', hint: 'MiniMax-M3.1-Flash / M3 · api.minimax.io（国际 Key，与国内不通用）', protocol: 'openai', baseUrl: 'https://api.minimax.io/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'MiniMax-M3.1-Flash' },
+  { key: 'minimax-legacy', label: 'MiniMax 旧版 API', hint: '旧 chatcompletion_v2：MiniMax-M2.7 / M2.5 / M2.1（api.minimaxi.com）', protocol: 'openai', baseUrl: 'https://api.minimaxi.com', chatPath: '/v1/text/chatcompletion_v2', modelsPath: '/v1/models', needsKey: true, defaultModel: 'MiniMax-M2.7' },
   { key: 'doubao', label: '火山方舟 豆包', hint: 'Doubao / Ark endpoint 模型', protocol: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'doubao-seed-1-6-250615' },
   { key: 'xai', label: 'xAI Grok', hint: 'Grok 4 / Grok 3', protocol: 'openai', baseUrl: 'https://api.x.ai/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: true, defaultModel: 'grok-3' },
   { key: 'openrouter', label: 'OpenRouter', hint: '聚合 400+ 模型（含免费档）', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1', chatPath: '/chat/completions', modelsPath: '/models', needsKey: false, defaultModel: 'openai/gpt-4o-mini' },
@@ -503,8 +507,12 @@ export async function fetchProviderModels(
     if (!res.ok) {
       const errText = (await res.text().catch(() => '')).slice(0, 240)
       // v2.18.1：常见错误码追加人话提示，让用户知道下一步该填什么
+      // v2.20.1：MiniMax 家族 401 追加端点/Key 平台不匹配提示（国内 Key 打国际端点报
+      // invalid api key (2049)，反之亦然 — 两平台 Key 不通用是实测高频坑）
       const hint = res.status === 401 || res.status === 403
-        ? ' — 鉴权失败：请检查 API Key 是否填写正确'
+        ? (providerKey.startsWith('minimax')
+            ? ' — 鉴权失败：MiniMax 国内 Key 请用 api.minimax.cn 端点、国际 Key 请用 api.minimax.io 端点（两平台 Key 不通用）；也可切「MiniMax 旧版 API」用 M2.x'
+            : ' — 鉴权失败：请检查 API Key 是否填写正确')
         : res.status === 404
           ? ' — 端点不存在：请检查 API Base URL 是否正确'
           : ''

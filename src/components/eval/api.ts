@@ -18,6 +18,11 @@ import type {
   SequenceAttribution,
   UploadResponse,
 } from './types'
+import {
+  migrateMinimaxDomesticDefault,
+  migrateMinimaxEndpoint,
+  type LocalEngineStore,
+} from './llm-store-migration'
 
 /** GET /api/jobs — 最近作业列表 */
 export async function fetchJobList(): Promise<JobListItem[]> {
@@ -118,18 +123,6 @@ export interface LlmEngineOverride {
   model: string
 }
 
-/** localStorage 存储结构：激活供应商 + 每供应商一条完整配置 */
-interface LocalEngineStore {
-  active: string | null
-  providers: Record<string, {
-    label?: string
-    baseUrl: string
-    apiKey: string
-    model: string
-    savedAt: number
-  }>
-}
-
 const LOCAL_ENGINE_KEY = 'te_llm_engine_v1'
 
 function readEngineStore(): LocalEngineStore {
@@ -140,45 +133,12 @@ function readEngineStore(): LocalEngineStore {
     const parsed = JSON.parse(raw) as LocalEngineStore
     if (!parsed || typeof parsed !== 'object' || typeof parsed.providers !== 'object') return { active: null, providers: {} }
     const s: LocalEngineStore = { active: typeof parsed.active === 'string' ? parsed.active : null, providers: parsed.providers ?? {} }
-    // v2.20：MiniMax 端点换代迁移（幂等，仅首次发生写回）
-    if (migrateMinimaxEndpoint(s)) writeEngineStore(s)
+    // v2.20/v2.20.1：MiniMax 端点迁移（两条均幂等，仅状态匹配时写回；纯函数见 ./llm-store-migration）
+    if (migrateMinimaxEndpoint(s) || migrateMinimaxDomesticDefault(s)) writeEngineStore(s)
     return s
   } catch {
     return { active: null, providers: {} }
   }
-}
-
-/**
- * v2.20 一次性迁移（随 readEngineStore 执行，幂等）：MiniMax 官方端点换代 —
- * 旧 api.minimaxi.com（chatcompletion_v2）只服务 M2.x 系列，拉不到 M3；新
- * OpenAI 兼容端点 api.minimax.io/v1 才有 MiniMax-M3.1-Flash / M3。本地已存
- * 'minimax' 条目（旧端点）拆两条：
- *  - 'minimax-legacy'：原样保留（Key + M2 模型，旧工作流不断，面板里一键切回）
- *  - 'minimax'：升级为新端点 + 默认模型 MiniMax-M3.1-Flash，Key 沿用（MiniMax
- *    平台同账号 Key 通常通用；若旧 Key 在新端点鉴权失败，切回旧版条目即可，
- *    配置一字不丢）
- * 自定义 baseUrl（如反代/中转）不动 — 尊重用户自己的端点选择。
- */
-function migrateMinimaxEndpoint(s: LocalEngineStore): boolean {
-  const old = s.providers.minimax
-  if (!old) return false
-  if (!/api\.minimaxi\.com/i.test(old.baseUrl ?? '')) return false
-  if (s.providers['minimax-legacy']) return false // 已迁移过
-  s.providers['minimax-legacy'] = {
-    label: old.label ?? 'MiniMax 旧版 API',
-    baseUrl: old.baseUrl,
-    apiKey: old.apiKey ?? '',
-    model: old.model ?? 'MiniMax-M2.7',
-    savedAt: Date.now(),
-  }
-  s.providers.minimax = {
-    label: 'MiniMax',
-    baseUrl: 'https://api.minimax.io/v1',
-    apiKey: old.apiKey ?? '',
-    model: /minimax-m3/i.test(old.model ?? '') ? old.model : 'MiniMax-M3.1-Flash',
-    savedAt: Date.now(),
-  }
-  return true
 }
 
 function writeEngineStore(s: LocalEngineStore): void {
