@@ -56,8 +56,8 @@ const MAX_CONSECUTIVE_FAILURES = 3
  *  一个作业等 BLAST 时另一个先做数据检索，批量总时长显著缩短） */
 const BATCH_WINDOW = 2
 
-/** 从请求中提取展示标签（批量切换栏用） */
-function requestLabel(req: EvaluateRequest): string {
+/** 从请求中提取展示标签（批量切换栏用；v2.22 起高通量编排亦复用） */
+export function requestLabel(req: EvaluateRequest): string {
   const u = (req.uniprotFromDocx ?? req.uniprot ?? '').trim().toUpperCase()
   if (u) return u
   // v2.16：序列靶点用标签头/FASTA 头命名（比「序列靶点」可识别；含 sp|ACC| 时取条目名段）
@@ -72,8 +72,8 @@ function requestLabel(req: EvaluateRequest): string {
   return '评估靶点'
 }
 
-/** 非关联批次的报告注入说明（服务端同样逻辑，此处用于展示一致性） */
-function buildBatchNote(judgment: RelationJudgment, total: number): string {
+/** 非关联批次的报告注入说明（服务端同样逻辑，此处用于展示一致性；v2.22 高通量复用） */
+export function buildBatchNote(judgment: RelationJudgment, total: number): string {
   const typeText = judgment.relationType === 'pathway'
     ? '同通路/功能相关但结构解析相互独立'
     : judgment.relationType === 'independent'
@@ -82,8 +82,8 @@ function buildBatchNote(judgment: RelationJudgment, total: number): string {
   return `本批次共评估 ${total} 个靶点，经分析为${typeText}${judgment.rationale ? `（${judgment.rationale.slice(0, 160)}）` : ''}，各靶点分别出具报告`
 }
 
-/** 关系判断完全失败时的兜底独立判断（保证合并报告仍能生成） */
-function fallbackIndependentJudgment(): RelationJudgment {
+/** 关系判断完全失败时的兜底独立判断（保证合并报告仍能生成；v2.22 高通量复用） */
+export function fallbackIndependentJudgment(): RelationJudgment {
   return {
     related: false,
     relationType: 'independent',
@@ -133,8 +133,9 @@ function autoDownloadInlineReport(reportHtml: string, key: string, label: string
  *  - Blob + <a download> 触发（沿用服务端 Content-Disposition 文件名）
  *  - 跨站 iframe（预览面板）可能拦截自动下载 → toast 引导手动按钮
  *  - 历史记录查看不经过触发点，不会误弹；失败时允许后续重试
+ * v2.22：导出供高通量编排复用（每组独立报告 / 合并报告完成即落盘）。
  */
-function autoDownloadHtmlReport(url: string, key: string, label: string) {
+export function autoDownloadHtmlReport(url: string, key: string, label: string) {
   if (autoDownloadedKeys.has(key)) return
   autoDownloadedKeys.add(key)
   void (async () => {
