@@ -82,6 +82,9 @@ export async function POST(req: Request) {
           rows: wb.rowCount,
           truncated: wb.truncated,
           bytes: file.size,
+          // v2.23.1 序列兜底计数（行缺 UniProt 但有构建序列 → 按序列评估）
+          seqGroups: result.seqGroups.length,
+          seqTargets: result.seqGroups.reduce((n, g) => n + g.length, 0),
         },
       })
     } finally {

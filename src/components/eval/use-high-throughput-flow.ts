@@ -28,7 +28,7 @@ import { generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetR
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
-import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HTStartPayload, JobDetail, RelationJudgment } from './types'
+import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
 
 export type HTPhase = 'idle' | 'running' | 'paused' | 'done'
 
@@ -296,17 +296,28 @@ export function useHighThroughputFlow() {
     const reattach = items.filter((it) => it.jobId && it.status === 'running')
 
     const launchOne = async (item: HTGroupItemState) => {
-      const u = item.label
-      const group = blastGroups.find((grp) => grp.members.includes(u))
-      const req: EvaluateRequest = {
-        mode: 'uniprot',
-        uniprot: u,
-        goal: runState.goal,
-        ligands: runState.ligands,
-        batchNote,
-        homologBlast: group,
-        options: { ...runState.options, reportMode: related ? 'deferred' : 'single' },
-      }
+      const label = item.label
+      // v2.23.1 序列兜底靶点：mode=sequence 提交（命名证据随构基标签头携带；
+      // 结构预测无 AFDB 收录时自动走 ESMFold 公共预测兜底）；UniProt 靶点走既有链路
+      const group = item.sequence ? undefined : blastGroups.find((grp) => grp.members.includes(label))
+      const req: EvaluateRequest = item.sequence
+        ? {
+            mode: 'sequence',
+            sequence: item.sequence,
+            sequenceHeader: item.sequenceHeader,
+            goal: runState.goal,
+            ligands: runState.ligands,
+            options: { ...runState.options, reportMode: 'single' },
+          }
+        : {
+            mode: 'uniprot',
+            uniprot: label,
+            goal: runState.goal,
+            ligands: runState.ligands,
+            batchNote,
+            homologBlast: group,
+            options: { ...runState.options, reportMode: related ? 'deferred' : 'single' },
+          }
       const created = await createJob(req)
       if (cancelRef.current || pausedRef.current) {
         item.status = 'canceled'
@@ -317,7 +328,7 @@ export function useHighThroughputFlow() {
         item.status = 'error'
         item.error = created.error
         if (isRateLimitError(created.error)) {
-          pauseWithReason(`提交靶点 ${u} 的评估作业被限流：${(created.error ?? '').slice(0, 120)}`)
+          pauseWithReason(`提交靶点 ${label} 的评估作业被限流：${(created.error ?? '').slice(0, 120)}`)
         }
         snapshot()
         return
@@ -327,7 +338,7 @@ export function useHighThroughputFlow() {
       activeJobIdsRef.current.add(created.jobId)
       displayJobIdRef.current = created.jobId // 进度面板跟随最新创建的作业
       const r = await waitForJobTerminal(created.jobId)
-      finishItem(item, u, related, g.index + 1, r)
+      finishItem(item, label, related, g.index + 1, r)
       snapshot()
     }
 
@@ -466,30 +477,48 @@ export function useHighThroughputFlow() {
       return { ok: false, error: msg }
     }
     const groups = (payload.groups ?? []).filter((g) => Array.isArray(g) && g.length > 0)
-    if (groups.length === 0) {
-      const msg = '未解析到有效分组（请用分号分隔组、组内逗号分隔靶点）'
+    // v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列 — 每行一组，逐序列独立评估）
+    const seqGroups = (payload.seqGroups ?? []).filter((g) => Array.isArray(g) && g.length > 0)
+    if (groups.length === 0 && seqGroups.length === 0) {
+      const msg = '未解析到有效分组（请用分号分隔组、组内逗号分隔靶点，或从 Excel 导入）'
       toast({ title: '无法开始高通量评估', description: msg, variant: 'destructive' })
       return { ok: false, error: msg }
     }
     setStarting(true)
     try {
       const now = Date.now()
+      const groupStates: HTGroupState[] = [
+        ...groups.map((targets, i) => ({
+          index: i,
+          targets,
+          items: targets.map((t, j) => ({ key: `${i}-${j}-${t}`, label: t, status: 'pending' as const })),
+          status: 'pending' as const,
+        })),
+        ...seqGroups.map((seqs, k) => ({
+          index: groups.length + k,
+          targets: [] as string[],
+          seqTargets: seqs,
+          items: seqs.map((s: HtSeqTarget, j: number) => ({
+            key: `sq-${k}-${j}-${s.length}`,
+            label: s.header ? `${s.header.slice(0, 24)} · ${s.length}aa` : `序列${j + 1} · ${s.length}aa`,
+            sequence: s.seq,
+            sequenceHeader: s.header || undefined,
+            status: 'pending' as const,
+          })),
+          status: 'pending' as const,
+        })),
+      ]
       const newRun: HTRunState = {
         id: `ht-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         createdAt: now,
         goal: payload.goal,
         options: payload.options,
         ligands: payload.ligands,
-        groups: groups.map((targets, i) => ({
-          index: i,
-          targets,
-          items: targets.map((t, j) => ({ key: `${i}-${j}-${t}`, label: t, status: 'pending' as const })),
-          status: 'pending' as const,
-        })),
+        groups: groupStates,
         currentIndex: 0,
         status: 'running',
         resumedCount: 0,
-        totalTargetCount: groups.reduce((n, g) => n + g.length, 0),
+        totalTargetCount: groupStates.reduce((n, g) => n + g.items.length, 0),
       }
       runRef.current = newRun
       pausedRef.current = false

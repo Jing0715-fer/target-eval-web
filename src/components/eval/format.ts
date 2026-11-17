@@ -116,12 +116,20 @@ export function parseMultiUniprotIds(text: string): { valid: string[]; invalid: 
 
 // ─── v2.22 高通量评估：分组解析 ─────────────────────────────────────────────
 
-/** 高通量运行的最大组数（每组一份独立报告） */
-export const MAX_HT_GROUPS = 12
+/**
+ * 高通量运行的最大组数（每组一份独立报告）。v2.23.1：12 → 300 —
+ * Excel 导入的百行级靶点清单（如 102 行 = 100 组）此前被 12 组上限
+ * 压到超限 → 开始按钮被禁用，导入功能等于不可用。
+ */
+export const MAX_HT_GROUPS = 300
 /** 单组（复合物批量）内靶点数上限 — 与批量评估上限一致 */
 export const MAX_HT_TARGETS_PER_GROUP = 30
-/** 一次高通量运行的靶点总数上限 — 与服务端每日作业配额（EVAL_MAX_JOBS_PER_DAY=30）对齐 */
-export const MAX_HT_TARGETS_TOTAL = 30
+/**
+ * 一次高通量运行的靶点总数上限（UniProt + 序列兜底靶点合计）。v2.23.1：30 → 600。
+ * 实际推进节流由服务端守卫负责（每 IP 并发 2 + 24h 作业配额），配额用尽时
+ * 高通量流程自动暂停、配额恢复后可从断点续跑（不在此处预拦）。
+ */
+export const MAX_HT_TARGETS_TOTAL = 600
 
 /**
  * 解析高通量分组输入（v2.22）：

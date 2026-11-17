@@ -30,12 +30,15 @@ import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { formatDateTime } from './format'
 import { extractHtTargetsFromExcel } from './api'
-import type { HTRunState } from './types'
+import type { HTRunState, HtSeqTarget } from './types'
 
 export interface HighThroughputPanelProps {
   value: string
   onChange: (v: string) => void
   parsed: { groups: string[][]; invalid: string[]; duplicates: string[] }
+  /** v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列） */
+  seqGroups: HtSeqTarget[][]
+  onSeqGroupsChange: (groups: HtSeqTarget[][]) => void
   recentRuns: HTRunState[]
   onResumeRun: (id: string) => void
   onDeleteRun: (id: string) => void
@@ -53,6 +56,9 @@ interface ExcelImportMeta {
   source: 'llm' | 'regex'
   groupCount: number
   targetCount: number
+  /** v2.23.1 序列兜底：行缺 UniProt 但有构建序列 → 按序列评估 */
+  seqGroupCount: number
+  seqTargetCount: number
   invalid: string[]
   note?: string
 }
@@ -70,8 +76,10 @@ function runStatusPill(run: HTRunState): { label: string; cls: string } {
   }
 }
 
-export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onResumeRun, onDeleteRun }: HighThroughputPanelProps) {
+export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, recentRuns, onResumeRun, onDeleteRun }: HighThroughputPanelProps) {
   const totalTargets = parsed.groups.reduce((n, g) => n + g.length, 0)
+  const seqTargetTotal = seqGroups.reduce((n, g) => n + g.length, 0)
+  const groupTotal = parsed.groups.length + seqGroups.length
 
   // ── v2.23 Excel 导入：LLM/规则提取分组 → 填入输入框（可撤销） ──
   const excelInputRef = useRef<HTMLInputElement>(null)
@@ -80,6 +88,8 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
   const [importMeta, setImportMeta] = useState<ExcelImportMeta | null>(null)
   /** 导入前的手输内容（撤销恢复用；null = 本次会话尚无导入） */
   const [preImportText, setPreImportText] = useState<string | null>(null)
+  /** 导入前的序列兜底组（撤销恢复用） */
+  const [preImportSeqGroups, setPreImportSeqGroups] = useState<HtSeqTarget[][] | null>(null)
 
   const handleExcelImport = async (file: File | null | undefined) => {
     if (!file || importing) return
@@ -95,17 +105,22 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
     setImportError(null)
     try {
       const r = await extractHtTargetsFromExcel(file)
-      if (!r.groups?.length) {
-        setImportError(r.note || '未在表格中识别到 UniProt 靶点（表格需含 UniProt accession 列）')
+      const seqs = r.seqGroups ?? []
+      if (!r.groups?.length && seqs.length === 0) {
+        setImportError(r.note || '未在表格中识别到 UniProt 靶点或构建序列（需含 UniProt accession 或序列列）')
         return
       }
       setPreImportText(value)
-      onChange(r.groups.map((g) => g.join(', ')).join(';\n'))
+      setPreImportSeqGroups(seqGroups)
+      if (r.groups.length > 0) onChange(r.groups.map((g) => g.join(', ')).join(';\n'))
+      onSeqGroupsChange(seqs)
       setImportMeta({
         fileName: file.name,
         source: r.source,
         groupCount: r.groups.length,
         targetCount: r.groups.reduce((n, g) => n + g.length, 0),
+        seqGroupCount: seqs.length,
+        seqTargetCount: seqs.reduce((n, g) => n + g.length, 0),
         invalid: r.invalid ?? [],
         note: r.note,
       })
@@ -117,9 +132,11 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
   }
 
   const undoExcelImport = () => {
-    if (preImportText === null) return
-    onChange(preImportText)
+    if (preImportText === null && preImportSeqGroups === null) return
+    if (preImportText !== null) onChange(preImportText)
+    if (preImportSeqGroups !== null) onSeqGroupsChange(preImportSeqGroups)
     setPreImportText(null)
+    setPreImportSeqGroups(null)
     setImportMeta(null)
     setImportError(null)
   }
@@ -167,7 +184,7 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
           {importing ? 'AI 解析中…' : '从 Excel 导入'}
         </Button>
         <span className="font-mono text-[10px] text-muted-foreground/70">
-          .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 导入会替换当前输入
+          .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 行缺 UniProt 但有序列则按序列评估 · 导入会替换当前输入
         </span>
       </div>
 
@@ -205,6 +222,11 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
           <span className="font-mono text-[11px] text-foreground/90">
             提取 {importMeta.groupCount} 组 · {importMeta.targetCount} 靶点，已填入下方分组
           </span>
+          {importMeta.seqGroupCount > 0 && (
+            <span className="font-mono text-[11px] text-teal-600 dark:text-teal-400" title="行内无 UniProt ID 但有构建序列（≥90 aa）→ 每条序列作为独立序列靶点评估">
+              另提取 {importMeta.seqGroupCount} 组 · {importMeta.seqTargetCount} 条序列靶点（无 UniProt 行，按序列评估）
+            </span>
+          )}
           {importMeta.note && (
             <span className="text-[10px] text-muted-foreground/80">{importMeta.note}</span>
           )}
@@ -230,21 +252,22 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
           <FileStack className="size-3" aria-hidden />
-          {parsed.groups.length} 组 · {totalTargets} 靶点
+          {groupTotal} 组 · {totalTargets + seqTargetTotal} 靶点
         </span>
         <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
           <Zap className="size-3" aria-hidden />
           逐组出报告 · 限流自动暂停
         </span>
-        {parsed.groups.length > 0 && (
+        {groupTotal > 0 && (
           <span className="font-mono text-[10px] text-muted-foreground/70">
             复合物组 {parsed.groups.filter((g) => g.length > 1).length} · 单靶点组 {parsed.groups.filter((g) => g.length === 1).length}
+            {seqGroups.length > 0 ? ` · 序列兜底组 ${seqGroups.length}` : ''}
           </span>
         )}
       </div>
 
-      {/* 分组预览：每组一行（组号 + 靶点 chips + 复合物/单靶点徽章） */}
-      {parsed.groups.length > 0 && (
+      {/* 分组预览：每组一行（组号 + 靶点 chips + 复合物/单靶点徽章）；v2.23.1 序列兜底组（行缺 UniProt，构建序列独立评估） */}
+      {(parsed.groups.length > 0 || seqGroups.length > 0) && (
         <ol className="flex flex-col gap-1.5">
           {parsed.groups.map((g, i) => (
             <li key={i} className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-muted/40 px-2.5 py-1.5">
@@ -267,6 +290,29 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
               </span>
             </li>
           ))}
+          {seqGroups.map((g, gi) => (
+            <li
+              key={`seq-${gi}`}
+              className="flex flex-wrap items-center gap-1.5 rounded-lg border border-teal-500/30 bg-teal-500/[0.04] px-2.5 py-1.5"
+              title="该行无 UniProt ID 但有构建序列（≥90 aa）→ 每条序列作为独立序列靶点评估（结构预测走 ESMFold 兜底）"
+            >
+              <span className="shrink-0 rounded-md bg-teal-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-teal-600 dark:text-teal-400">
+                G{String(parsed.groups.length + gi + 1).padStart(2, '0')}
+              </span>
+              {g.map((s, si) => (
+                <span
+                  key={`${s.header}-${si}`}
+                  className="max-w-64 truncate rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground/90"
+                  title={`${s.header || '裸序列'}（${s.length} aa）`}
+                >
+                  {s.header ? `${s.header.slice(0, 24)} · ${s.length}aa` : `序列 · ${s.length}aa`}
+                </span>
+              ))}
+              <span className="ml-auto shrink-0 rounded-md bg-teal-500/10 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-teal-600 dark:text-teal-400">
+                序列兜底 · {g.length} 条独立评估
+              </span>
+            </li>
+          ))}
         </ol>
       )}
 
@@ -284,9 +330,9 @@ export function HighThroughputPanel({ value, onChange, parsed, recentRuns, onRes
       )}
 
       <p className="text-[11px] leading-relaxed text-muted-foreground/80">
-        支持手输或「从 Excel 导入」（AI 语义提取分组）。每组按现有复合物批量评估链路执行
-        （靶点关系判断 → 并发评估 → 合并评估报告），组间串行推进；
-        遇 LLM 限流 / 服务配额时自动暂停，配额恢复后可从断点重新开始（已完成的组不会重复评估）。
+        支持手输或「从 Excel 导入」（AI 语义提取分组；行内无 UniProt ID 但有构建序列 ≥90 aa 时，该行自动转为序列靶点独立评估）。
+        每组按现有复合物批量评估链路执行（靶点关系判断 → 并发评估 → 合并评估报告），组间串行推进；
+        遇 LLM 限流 / 服务配额（含每日作业配额）自动暂停，配额恢复后可从断点重新开始（已完成的组不会重复评估）。
         每组报告与运行日志在完成后均保留可回看。
       </p>
 

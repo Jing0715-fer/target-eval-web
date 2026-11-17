@@ -432,14 +432,26 @@ async function fetchInsightsStream(body: Record<string, unknown>): Promise<Insig
 
 // ─── 高通量 Excel 导入（v2.23）──────────────────────────────
 
-/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组 */
+import type { HtSeqTarget } from './types'
+
+/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组（v2.23.1 增序列兜底组） */
 export interface HtExcelExtractResult {
   ok: boolean
   groups: string[][]
+  /** 序列兜底组：行缺 UniProt 但有构建序列 → 按序列评估（每行一组） */
+  seqGroups?: HtSeqTarget[][]
   invalid: string[]
   source: 'llm' | 'regex'
   note?: string
-  meta?: { fileName?: string; sheets?: number; rows?: number; truncated?: boolean; bytes?: number }
+  meta?: {
+    fileName?: string
+    sheets?: number
+    rows?: number
+    truncated?: boolean
+    bytes?: number
+    seqGroups?: number
+    seqTargets?: number
+  }
 }
 
 /**

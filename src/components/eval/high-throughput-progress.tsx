@@ -324,7 +324,11 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     {meta.label}
                   </span>
                   <span className="font-mono text-[10.5px] text-muted-foreground/70">
-                    {g.targets.length > 1 ? `复合物 ${g.targets.length} 靶点` : '单靶点'}
+                    {g.targets.length === 0
+                      ? (g.items.length > 1 ? `序列 ${g.items.length} 条 · 独立评估` : '单序列评估')
+                      : g.targets.length > 1
+                        ? `复合物 ${g.targets.length} 靶点`
+                        : '单靶点'}
                     {g.startedAt && g.finishedAt ? ` · ${formatDuration((g.finishedAt - g.startedAt) / 1000)}` : ''}
                   </span>
                   <span className="ml-auto flex flex-wrap items-center gap-1.5">

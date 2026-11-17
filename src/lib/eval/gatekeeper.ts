@@ -21,7 +21,12 @@ import { db } from '@/lib/db'
 // ─── 配额常量（公网默认档；可通过环境变量覆盖） ────────────────────────────────
 export const MAX_GLOBAL_PENDING = num(process.env.EVAL_MAX_QUEUE, 8)
 export const MAX_ACTIVE_PER_IP = num(process.env.EVAL_MAX_ACTIVE_PER_IP, 2)
-export const MAX_JOBS_PER_DAY = num(process.env.EVAL_MAX_JOBS_PER_DAY, 30)
+/**
+ * 每 IP 24h 作业创建配额。v2.23.1：30 → 150 — 高通量评估一次运行动辄上百作业
+ * （如 102 行靶点清单 ≈ 100+ 作业），30/日使高通量当天即触发自动暂停、跨多日
+ * 才能跑完；并发上限（≤2 活跃 + 全局队列 8）与 LLM 限流自动暂停仍是主要节流。
+ */
+export const MAX_JOBS_PER_DAY = num(process.env.EVAL_MAX_JOBS_PER_DAY, 150)
 export const MAX_UPLOADS_PER_DAY = num(process.env.EVAL_MAX_UPLOADS_PER_DAY, 20)
 /** docx 解析全局并发（mammoth/sharp/VLM 内存重负载） */
 export const PARSE_CONCURRENCY = num(process.env.EVAL_PARSE_CONCURRENCY, 2)

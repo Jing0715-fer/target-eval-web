@@ -213,6 +213,69 @@ console.log('── C. LLM 失败回退 ──')
     JSON.stringify(r.data).slice(0, 300))
 }
 
+// ─── D. v2.23.1 修订：上限解除 + 长单元格折叠 + 序列兜底 ────────────────────
+console.log('── D. v2.23.1 修订（真实 102 行清单）──')
+
+const REAL_FILE = new URL('../upload/第三批自研靶点_靶点清单.xlsx', import.meta.url)
+{
+  const buf = fs.readFileSync(REAL_FILE)
+  const r = await postExcel(buf, '第三批自研靶点_靶点清单.xlsx', { quick: '1' })
+  const groups = r.data.groups ?? []
+  const targets = groups.reduce((n, g) => n + g.length, 0)
+  const seqGroups = r.data.seqGroups ?? []
+  const seqTargets = seqGroups.reduce((n, g) => n + g.length, 0)
+  ok('D1 真实清单全量识别：组数 40 → ≈100（85 UniProt + 15 序列兜底），文本无截断',
+    r.status === 200 && groups.length >= 80 && groups.length + seqGroups.length >= 95 &&
+      targets + seqTargets >= 100 && r.data.meta?.truncated === false,
+    `groups=${groups.length} targets=${targets} seqGroups=${seqGroups.length} seqTargets=${seqTargets} meta=${JSON.stringify(r.data.meta)}`)
+  ok('D1b invalid 字段恒为数组（不缺省）', Array.isArray(r.data.invalid),
+    JSON.stringify(r.data.invalid))
+}
+
+{
+  // 序列兜底语义：行缺 UniProt 但有构建序列（[标签头] 多构段 + 裸序列）；行有 UniProt 则序列不参与
+  const seqA = 'M' + 'AKVDERFGHILPQNSTWYCVBNM'.repeat(6) // 139 aa
+  const seqB = 'MKFLVLWLQL'.repeat(13) // 130 aa
+  const seqC = 'MGSKLAEIARD'.repeat(12) // 132 aa（与 seqB 不同 — 验证跨行序列去重仅作用于相同序列）
+  const rows = [
+    ['靶点名称', 'UniProt ID', '序列（含标签与构建）'],
+    ['p53', 'P04637', `[His-TEV] ${seqA}`],
+    ['Fab 片段', '—', `[Fab HC] ${seqA} [Fab LC] ${seqB}`],
+    ['裸序列蛋白', '', seqC],
+    ['重复序列行', '', seqB],
+    ['空行蛋白', '', 'pET28a'],
+  ]
+  const r = await postExcel(buildXlsx(rows), 'seq-fallback.xlsx', { quick: '1' })
+  const seqGroups = r.data.seqGroups ?? []
+  ok('D2 序列兜底：无 UniProt 行 → 每行一组（多构段拆条），带 UniProt 行不产生序列靶点，相同序列跨行去重',
+    r.status === 200 && sameGroups(r.data.groups, [['P04637']]) &&
+      seqGroups.length === 2 && seqGroups[0].length === 2 && seqGroups[1].length === 1 &&
+      seqGroups[0][0].header === 'Fab HC' && seqGroups[0][1].header === 'Fab LC' &&
+      seqGroups[1][0].header === '' && seqGroups[1][0].seq === seqC,
+    JSON.stringify(seqGroups).slice(0, 400))
+}
+
+{
+  // 长单元格折叠：序列列巨大（数 KB）不再撑爆文本预算 — 120 行全量入文本（每行一个不同 accession）
+  const huge = 'M'.repeat(6000)
+  const rows = [['UniProt ID', '序列'], ...[...Array(120)].map((_, i) => [`P0${4630 + i}`, huge])]
+  const r = await postExcel(buildXlsx(rows), 'huge-seqs.xlsx', { quick: '1' })
+  ok('D3 长序列单元格折叠：120 行巨序列表全量识别（旧版文本 60KB 截断会只剩前十几行）',
+    r.status === 200 && (r.data.groups ?? []).length === 120 && r.data.meta?.truncated === false,
+    `groups=${(r.data.groups ?? []).length} meta=${JSON.stringify(r.data.meta)}`)
+}
+
+{
+  // LLM 大表通道（内置引擎真跑）：折叠后全表可见，LLM 分组 ≥ 80 组（失败自动回退规则 ≥ 95 亦可接受）
+  const buf = fs.readFileSync(REAL_FILE)
+  const r = await postExcel(buf, '第三批自研靶点_靶点清单.xlsx', {})
+  const groups = r.data.groups ?? []
+  const seqGroups = r.data.seqGroups ?? []
+  ok('D4 LLM 大表通道：102 行真表（内置引擎或规则回退）识别 ≥ 80 组',
+    r.status === 200 && r.data.ok === true && groups.length >= 80 && Array.isArray(seqGroups),
+    `source=${r.data.source} groups=${groups.length} seqGroups=${seqGroups.length}`)
+}
+
 // ─── 收尾 ────────────────────────────────────────────────────────────────────
 console.log(`\n${pass} 通过 · ${fail} 失败`)
 process.exit(fail > 0 ? 1 : 0)

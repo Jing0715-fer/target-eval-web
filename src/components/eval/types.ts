@@ -861,11 +861,23 @@ export interface JobListItem {
 
 // ─── v2.22 高通量评估 ───────────────────────────────────────────────────────
 
+/** v2.23.1：Excel 导入的序列靶点（行缺 UniProt ID 时按序列评估） */
+export interface HtSeqTarget {
+  /** 构建标签头（如「His-TEV-NTRC-83-548」；裸序列为空串） */
+  header: string
+  seq: string
+  length: number
+}
+
 /** 高通量运行的一组内单个靶点（作业）状态 */
 export interface HTGroupItemState {
   key: string
-  /** 展示标签（UniProt ID） */
+  /** 展示标签（UniProt ID 或序列构建头摘要） */
   label: string
+  /** v2.23.1 序列靶点：提交 mode=sequence 作业的原始序列（无则 UniProt 靶点） */
+  sequence?: string
+  /** v2.23.1 序列靶点：构建标签头（评估表/Excel 序列命名证据） */
+  sequenceHeader?: string
   jobId?: string
   /** pending = 尚未提交作业（未进入并发窗口）；running = 已提交未终态 */
   status: 'pending' | 'running' | 'done' | 'error' | 'canceled'
@@ -876,8 +888,10 @@ export interface HTGroupItemState {
 export interface HTGroupState {
   /** 组序号（0-based，展示 +1） */
   index: number
-  /** 组内 UniProt ID 列表 */
+  /** 组内 UniProt ID 列表（序列兜底组为空数组 — items 全为序列靶点） */
   targets: string[]
+  /** v2.23.1 序列兜底组的序列靶点（恢复运行时重新提交未启动项所需） */
+  seqTargets?: HtSeqTarget[]
   items: HTGroupItemState[]
   /** pending → judging → evaluating → merging → done；paused = 组间暂停标记 */
   status: 'pending' | 'judging' | 'evaluating' | 'merging' | 'done' | 'paused' | 'canceled'
@@ -914,6 +928,8 @@ export interface HTRunState {
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
 export interface HTStartPayload {
   groups: string[][]
+  /** v2.23.1 序列兜底组（Excel 行缺 UniProt 但有构建序列；每行一组，逐序列独立评估） */
+  seqGroups?: HtSeqTarget[][]
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

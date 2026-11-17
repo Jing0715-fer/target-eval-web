@@ -41,7 +41,7 @@ import {
 import { fetchDocxInsights, isStatelessEnv, uploadEvaluateDocx, type UploadProgress } from './api'
 import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
 import { HighThroughputPanel } from './high-throughput-panel'
-import type { EvaluateOptions, EvaluateRequest, FormInsights, HTRunState, HTStartPayload, InputMode, UploadResponse } from './types'
+import type { EvaluateOptions, EvaluateRequest, FormInsights, HTRunState, HtSeqTarget, HTStartPayload, InputMode, UploadResponse } from './types'
 import { MAX_PDB_UNLIMITED } from './types'
 import type { StartResult } from './use-evaluation-flow'
 import { parseLigandFileText, isBiologicMention, isLikelyCloneNumber, type LigandFileParsed } from '@/lib/eval/ligand-parse'
@@ -177,15 +177,19 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const uniprotOverLimit = uniprotParsed.valid.length > MAX_BATCH_UNIPROT
   const uniprotOverHint = uniprotParsed.valid.length > 20
 
-  // v2.22 高通量分组输入（组间「;」组内「,」）
+  // v2.22 高通量分组输入（组间「;」组内「,」）；v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列）
   const [htText, setHtText] = useState('')
+  const [htSeqGroups, setHtSeqGroups] = useState<HtSeqTarget[][]>([])
   const htParsed = useMemo(() => parseGroupedUniprotIds(htText), [htText])
   const htTargetTotal = htParsed.groups.reduce((n, g) => n + g.length, 0)
+  const htSeqTargetTotal = htSeqGroups.reduce((n, g) => n + g.length, 0)
+  const htGroupTotal = htParsed.groups.length + htSeqGroups.length
   const htOverLimit =
-    htParsed.groups.length > MAX_HT_GROUPS ||
-    htTargetTotal > MAX_HT_TARGETS_TOTAL ||
-    htParsed.groups.some((g) => g.length > MAX_HT_TARGETS_PER_GROUP)
-  const htValid = htParsed.groups.length >= 1 && htParsed.invalid.length === 0 && !htOverLimit
+    htGroupTotal > MAX_HT_GROUPS ||
+    htTargetTotal + htSeqTargetTotal > MAX_HT_TARGETS_TOTAL ||
+    htParsed.groups.some((g) => g.length > MAX_HT_TARGETS_PER_GROUP) ||
+    htSeqGroups.some((g) => g.length > MAX_HT_TARGETS_PER_GROUP)
+  const htValid = htGroupTotal >= 1 && htParsed.invalid.length === 0 && !htOverLimit
 
   // UniProt Tab 的可选伴随序列（合并评估）
   const [companionOpen, setCompanionOpen] = useState(false)
@@ -445,14 +449,19 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     let requests: EvaluateRequest[]
     if (mode === 'highthroughput') {
       // v2.22 高通量评估：分组载荷交给独立编排 hook — 组间串行、每组单独出报告、
-      // 限流自动暂停 + 断点续跑；goal/配体/高级选项与单次评估共享同一套字段
+      // 限流自动暂停 + 断点续跑；goal/配体/高级选项与单次评估共享同一套字段。
+      // v2.23.1：seqGroups = Excel 导入的序列兜底组（行缺 UniProt，按序列评估）。
       if (!htValid) return
       const groups = htParsed.groups
         .map((g) => g.slice(0, MAX_HT_TARGETS_PER_GROUP))
         .slice(0, MAX_HT_GROUPS)
         .filter((g) => g.length > 0)
-      if (groups.length === 0) return
-      const payload: HTStartPayload = { groups, goal: trimmedGoal, ligands, options }
+      const seqGroups = htSeqGroups
+        .map((g) => g.slice(0, MAX_HT_TARGETS_PER_GROUP))
+        .slice(0, Math.max(0, MAX_HT_GROUPS - groups.length))
+        .filter((g) => g.length > 0)
+      if (groups.length === 0 && seqGroups.length === 0) return
+      const payload: HTStartPayload = { groups, seqGroups, goal: trimmedGoal, ligands, options }
       await onStartHighThroughput(payload)
       return
     }
@@ -550,9 +559,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         : mode === 'highthroughput' ? '分组：组间「;」组内「,」'
           : '上传 Word 评估表'
   const step1Badge: ReactNode =
-    mode === 'highthroughput' && htParsed.groups.length > 0 ? (
+    mode === 'highthroughput' && htGroupTotal > 0 ? (
       <span className={badgeCls}>
-        {htParsed.groups.length} 组 · {htTargetTotal} 靶点 · 逐组出报告
+        {htGroupTotal} 组 · {htTargetTotal + htSeqTargetTotal} 靶点 · 逐组出报告
       </span>
     ) : mode === 'uniprot' && uniprotMulti ? (
       <span className={badgeCls}>{uniprotParsed.valid.length} 个靶点 · 批量评估</span>
@@ -565,7 +574,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const startLabel = submitting
     ? '正在创建评估作业…'
     : mode === 'highthroughput'
-      ? `开始高通量评估（${htParsed.groups.length} 组 · ${htTargetTotal} 靶点）`
+      ? `开始高通量评估（${htGroupTotal} 组 · ${htTargetTotal + htSeqTargetTotal} 靶点）`
       : mode === 'docx' && selectedUniprots.length > 1
         ? `开始评估（${selectedUniprots.length} 个靶点）`
         : mode === 'uniprot' && uniprotMulti
@@ -882,20 +891,22 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                 </div>
               </TabsContent>
 
-              {/* v2.22 高通量分组输入：组间「;」组内「,」，逐组出报告 + 限流自动暂停 */}
+              {/* v2.22 高通量分组输入：组间「;」组内「,」，逐组出报告 + 限流自动暂停；v2.23.1 序列兜底组 */}
               <TabsContent value="highthroughput" className="mt-0">
                 <HighThroughputPanel
                   value={htText}
                   onChange={setHtText}
                   parsed={htParsed}
+                  seqGroups={htSeqGroups}
+                  onSeqGroupsChange={setHtSeqGroups}
                   recentRuns={recentHTRuns}
                   onResumeRun={onResumeHTRun}
                   onDeleteRun={onDeleteHTRun}
                 />
                 {htOverLimit && (
                   <p className="mt-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
-                    超出高通量上限（组 ≤ {MAX_HT_GROUPS}、每组靶点 ≤ {MAX_HT_TARGETS_PER_GROUP}、靶点总数 ≤ {MAX_HT_TARGETS_TOTAL} —
-                    与服务端每日作业配额对齐），请拆分后分次运行。
+                    超出高通量上限（组 ≤ {MAX_HT_GROUPS}、每组靶点 ≤ {MAX_HT_TARGETS_PER_GROUP}、靶点总数 ≤ {MAX_HT_TARGETS_TOTAL}），请拆分后分次运行；
+                    未超限时每日作业配额用尽会自动暂停，配额恢复后可从断点续跑。
                   </p>
                 )}
               </TabsContent>
