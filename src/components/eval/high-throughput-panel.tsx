@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   CircleAlert,
   CircleCheckBig,
+  Download,
   FileSpreadsheet,
   FileStack,
   LoaderCircle,
@@ -42,6 +43,9 @@ export interface HighThroughputPanelProps {
   recentRuns: HTRunState[]
   onResumeRun: (id: string) => void
   onDeleteRun: (id: string) => void
+  /** v2.25 批量下载该次运行报告（zip 归档；archiving = 打包中禁用） */
+  onArchiveRun?: (id: string) => void
+  archiving?: boolean
 }
 
 const inputBase =
@@ -76,7 +80,7 @@ function runStatusPill(run: HTRunState): { label: string; cls: string } {
   }
 }
 
-export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, recentRuns, onResumeRun, onDeleteRun }: HighThroughputPanelProps) {
+export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving }: HighThroughputPanelProps) {
   const totalTargets = parsed.groups.reduce((n, g) => n + g.length, 0)
   const seqTargetTotal = seqGroups.reduce((n, g) => n + g.length, 0)
   const groupTotal = parsed.groups.length + seqGroups.length
@@ -374,6 +378,23 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                       >
                         <Play className="size-3" aria-hidden />
                         回看
+                      </Button>
+                    )}
+                    {/* v2.25 批量下载（zip：每组子文件夹 + 合并报告 + README 清单） */}
+                    {onArchiveRun && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={archiving || !r.groups.some((g) => g.mergedReportId || g.items.some((it) => it.status === 'done' && it.jobId))}
+                        onClick={() => onArchiveRun(r.id)}
+                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium"
+                        title="打包该次运行全部报告为单个 zip（每组一个子文件夹，含合并报告与 README 清单）"
+                      >
+                        {archiving
+                          ? <LoaderCircle className="size-3 animate-spin" aria-hidden />
+                          : <Download className="size-3" aria-hidden />}
+                        批量下载
                       </Button>
                     )}
                     <button

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowRight, CircleAlert, History, Layers, LoaderCircle, ShieldCheck, Trash2 } from 'lucide-react'
+import { ArrowRight, CircleAlert, Download, History, Layers, LoaderCircle, ShieldCheck, Trash2 } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,7 +17,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
-import { deleteJobById, fetchBatchReportList, fetchJobList, isStatelessEnv } from './api'
+import { toast } from '@/hooks/use-toast'
+import { deleteJobById, downloadHtReportArchive, fetchBatchReportList, fetchJobList, isStatelessEnv } from './api'
 import { removeSessionJob, sessionJobToListItem, getSessionJobs } from './session-history'
 import { StatusBadge } from './badges'
 import { formatDateTime, formatPercent } from './format'
@@ -377,6 +378,30 @@ export function RecentEvaluations({
   onOpenBatchReport: (id: string) => void
   onOpenHistory: () => void
 }) {
+  /** v2.25 批量下载：本列表全部已完成报告打包 zip（合并报告 + 单靶点报告平铺根目录） */
+  const [archivingAll, setArchivingAll] = useState(false)
+
+  const archiveAll = async () => {
+    if (!jobs || !batches) return
+    const entries = [
+      ...batches.filter((b) => b.status === 'done').map((b) => ({ mergedId: b.id })),
+      ...jobs.filter((j) => j.status === 'done').map((j) => ({ jobId: j.id, label: j.uniprotId ?? j.proteinName ?? j.title })),
+    ]
+    if (entries.length === 0) {
+      toast({ title: '没有可下载的报告', description: '当前列表没有已完成的评估报告。', variant: 'destructive' })
+      return
+    }
+    setArchivingAll(true)
+    try {
+      await downloadHtReportArchive(entries, 'recent')
+      toast({ title: '批量下载已开始', description: `已打包 ${entries.length} 份报告为 zip（合并报告 + 单靶点报告）。` })
+    } catch (e) {
+      toast({ title: '批量下载失败', description: e instanceof Error ? e.message : '归档服务暂不可用，请稍后重试', variant: 'destructive' })
+    } finally {
+      setArchivingAll(false)
+    }
+  }
+
   const [jobs, setJobs] = useState<JobListItem[] | null>(null)
   const [batches, setBatches] = useState<BatchReportListItem[] | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -436,11 +461,23 @@ export function RecentEvaluations({
       <div className="flex shrink-0 items-center gap-2 px-4 pb-2">
         <span className="lin-eyebrow shrink-0 text-muted-foreground/70">最近评估</span>
         <PrivacyBadge className="hidden xl:inline-flex" />
+        {/* v2.25 批量下载：全部已完成报告打包 zip */}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={archivingAll || empty || jobs == null || batches == null}
+          onClick={() => void archiveAll()}
+          className="ml-auto h-7 shrink-0 gap-1 rounded-lg px-2 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+          title="把最近评估的全部已完成报告（合并报告 + 单靶点报告）打包为单个 zip 下载"
+        >
+          {archivingAll ? <LoaderCircle className="size-3 animate-spin" /> : <Download className="size-3" />}
+          批量下载
+        </Button>
         <Button
           variant="ghost"
           size="sm"
           onClick={onOpenHistory}
-          className="ml-auto h-7 shrink-0 gap-1 rounded-lg px-2 text-[11px] text-muted-foreground hover:text-foreground"
+          className="h-7 shrink-0 gap-1 rounded-lg px-2 text-[11px] text-muted-foreground hover:text-foreground"
         >
           查看全部
           <ArrowRight className="size-3" />

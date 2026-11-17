@@ -75,6 +75,9 @@ export interface InputPanelProps {
   recentHTRuns: HTRunState[]
   onResumeHTRun: (id: string) => void
   onDeleteHTRun: (id: string) => void
+  /** v2.25 批量下载历史运行报告（zip 归档） */
+  onArchiveHTRun?: (id: string) => void
+  htArchiving?: boolean
 }
 
 // ─── 配体芯片 ─────────────────────────────────────────────────────────────────
@@ -166,7 +169,7 @@ function StepSection({
 }
 
 /** 输入视图（idle）：Linear 工作台卡片 — 步骤轨道（靶点 / 配体 / 目标）+ 高级选项 + 提交条 */
-export function InputPanel({ submitting, submitError, onStart, onClearSubmitError, onStartHighThroughput, recentHTRuns, onResumeHTRun, onDeleteHTRun }: InputPanelProps) {
+export function InputPanel({ submitting, submitError, onStart, onClearSubmitError, onStartHighThroughput, recentHTRuns, onResumeHTRun, onDeleteHTRun, onArchiveHTRun, htArchiving }: InputPanelProps) {
   const [mode, setMode] = useState<TabMode>('uniprot')
 
   // UniProt 输入（v1.22：支持多 ID，逗号/空格/换行分隔）
@@ -917,6 +920,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   recentRuns={recentHTRuns}
                   onResumeRun={onResumeHTRun}
                   onDeleteRun={onDeleteHTRun}
+                  onArchiveRun={onArchiveHTRun}
+                  archiving={htArchiving}
                 />
                 {htOverLimit && (
                   <p className="mt-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">

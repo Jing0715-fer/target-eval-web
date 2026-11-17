@@ -584,6 +584,43 @@ export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
   return data.items
 }
 
+// ─── 高通量批量下载（v2.25）──────────────────────────────────────
+
+/** HT 归档条目（组结构化：组号 + 组内靶点标签 → 服务端按 G01_/G02_… 建文件夹） */
+export interface HtArchiveEntry {
+  jobId?: string
+  mergedId?: string
+  /** 1-based 组序号（省略 → zip 根目录平铺） */
+  group?: number
+  label?: string
+}
+
+/** GET /api/evaluate/ht-archive — 一次高通量运行的全部报告打包 zip 下载
+ *  （每组一个子文件夹 + 合并报告 + _README.txt 清单）。失败抛错。 */
+export async function downloadHtReportArchive(entries: HtArchiveEntry[], fallbackName = '报告'): Promise<void> {
+  if (!entries.length) throw new Error('没有可下载的报告')
+  const res = await fetch(`/api/evaluate/ht-archive?entries=${encodeURIComponent(JSON.stringify(entries))}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(data?.error ?? `批量下载失败（HTTP ${res.status}）`)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('content-disposition') ?? ''
+  const m = /filename="?([^";\n]+)/i.exec(cd)
+  const filename = m?.[1]?.trim() || `TargetEval_HT_${fallbackName}_${new Date().toISOString().slice(0, 10)}.zip`
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 30_000)
+}
+
 // ─── LLM 引擎配置 ──────────────────────────────────────────────
 
 /** GET /api/llm/config — 供应商列表（v2.19：引擎配置在浏览器 localStorage，服务端无激活配置；

@@ -280,6 +280,8 @@ export default function Home() {
                         recentHTRuns={ht.recentRuns}
                         onResumeHTRun={ht.openRunById}
                         onDeleteHTRun={ht.removeRun}
+                        onArchiveHTRun={(id) => void ht.archiveRun(id)}
+                        htArchiving={ht.archiving}
                       />
                     </div>
                     <aside

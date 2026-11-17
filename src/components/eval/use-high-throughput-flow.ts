@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
-import { generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation } from './api'
+import { downloadHtReportArchive, generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
@@ -37,6 +37,21 @@ const POLL_INTERVAL_MS = 2000
 const MAX_CONSECUTIVE_FAILURES = 3
 /** 组内并发窗口（与服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=2 对齐） */
 const HT_WINDOW = 2
+
+/** v2.25 目录段安全化：非法字符折叠为空格并限长 */
+function safeDir(s: string, max = 60): string {
+  return (s || '')
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.\s]+$/, '')
+    .slice(0, max)
+}
+
+/** v2.25 组号段（G01_…：0-based index → 1-based 两位序号） */
+function groupFolderLabel(index: number): string {
+  return `G${String(index + 1).padStart(2, '0')}`
+}
 
 /**
  * 限流 / 配额特征指纹（v2.22）：
@@ -69,9 +84,16 @@ export function useHighThroughputFlow() {
   const [elapsedSec, setElapsedSec] = useState(0)
   const [canceling, setCanceling] = useState(false)
   const [starting, setStarting] = useState(false)
+  /** v2.25 批量下载中（视图禁用入口 + spinner） */
+  const [archiving, setArchiving] = useState(false)
 
   /** 权威运行状态（可变引用；每次关键节点 snapshot() 落 localStorage + 刷视图） */
   const runRef = useRef<HTRunState | null>(null)
+  /** v2.25：一次高通量运行的自动下载统一目录前缀 — 默认下载目录下新建文件夹，
+   *  同次运行的全部报告（每靶点独立报告 + 合并报告）都落在同一文件夹内。
+   *  命名：TargetEval_HT_日期_Ng（恢复运行/openRunById 时按 run 元数据重建，
+   *  页面刷新后自动下载继续落在同一文件夹）。 */
+  const runFolderRef = useRef<string>('')
   const pausedRef = useRef(false)
   const cancelRef = useRef(false)
   const activeJobIdsRef = useRef<Set<string>>(new Set())
@@ -229,8 +251,14 @@ export function useHighThroughputFlow() {
         } else {
           item.status = 'done'
           // 非关联批次 — 各靶点独立报告，完成即自动下载（关联批次 deferred 无独立 HTML）
+          // v2.25：目录前缀 = 运行文件夹 + 组号段（G01_…），同次运行集中在一个新文件夹
           if (!related && item.jobId) {
-            autoDownloadHtmlReport(`/api/jobs/${item.jobId}/report?download=1`, `job:${item.jobId}`, label)
+            autoDownloadHtmlReport(
+              `/api/jobs/${item.jobId}/report?download=1`,
+              `job:${item.jobId}`,
+              label,
+              `${runFolderRef.current}/${groupFolderLabel(groupNo - 1)}`,
+            )
           }
         }
       } else if (r.status === 'error') {
@@ -410,6 +438,7 @@ export function useHighThroughputFlow() {
           `/api/evaluate/batch-report?id=${encodeURIComponent(merged.id)}&download=1`,
           `batch:${merged.id}`,
           `第 ${g.index + 1} 组合并评估报告`,
+          `${runFolderRef.current}/${groupFolderLabel(g.index)}`,
         )
       } catch (e) {
         const msg = e instanceof Error ? e.message : '合并报告生成失败'
@@ -521,6 +550,7 @@ export function useHighThroughputFlow() {
         totalTargetCount: groupStates.reduce((n, g) => n + g.items.length, 0),
       }
       runRef.current = newRun
+      runFolderRef.current = safeDir(`TargetEval_HT_${new Date(now).toISOString().slice(0, 10)}_${groupStates.length}g`)
       pausedRef.current = false
       cancelRef.current = false
       activeJobIdsRef.current = new Set()
@@ -545,6 +575,9 @@ export function useHighThroughputFlow() {
   const resumeRun = useCallback(async (): Promise<StartResult> => {
     const r = runRef.current
     if (!r || r.status === 'done') return { ok: false, error: '没有可恢复的运行' }
+    if (!runFolderRef.current) {
+      runFolderRef.current = safeDir(`TargetEval_HT_${new Date(r.createdAt).toISOString().slice(0, 10)}_${r.groups.length}g`)
+    }
     pausedRef.current = false
     cancelRef.current = false
     r.status = 'running'
@@ -568,6 +601,7 @@ export function useHighThroughputFlow() {
         return
       }
       runRef.current = r
+      runFolderRef.current = safeDir(`TargetEval_HT_${new Date(r.createdAt).toISOString().slice(0, 10)}_${r.groups.length}g`)
       setRun(cloneRun(r))
       setDisplayJob(null)
       displayJobIdRef.current = null
@@ -592,6 +626,45 @@ export function useHighThroughputFlow() {
     },
     [refreshRecentRuns],
   )
+
+  /** v2.25：批量下载运行报告（zip：每组一个子文件夹 + 合并报告 + README 清单）。
+   *  - 无参数：归档整个当前运行；
+   *  - 传 id：归档任意历史运行（最近评估列表入口）；
+   *  - 传 groupIndex：归档当前运行的指定单组（组卡「本组打包」）。 */
+  const archiveRun = useCallback(async (id?: string, groupIndex?: number): Promise<void> => {
+    const r = id ? getHTRun(id) : runRef.current
+    if (!r) {
+      toast({ title: '无法批量下载', description: '运行记录不存在（浏览器数据被清理）', variant: 'destructive' })
+      return
+    }
+    // 归档条目：组内成功靶点的独立报告 + 组合并报告（组号→zip 子文件夹）
+    const entries: HtArchiveEntry[] = []
+    for (const g of r.groups) {
+      if (groupIndex != null && g.index !== groupIndex) continue
+      for (const it of g.items) {
+        if (it.status === 'done' && it.jobId) entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
+      }
+      if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
+    }
+    if (entries.length === 0) {
+      toast({ title: '没有可下载的报告', description: '该运行没有已完成的评估报告（全部失败/未开始或已清理）。', variant: 'destructive' })
+      return
+    }
+    setArchiving(true)
+    try {
+      await downloadHtReportArchive(entries, groupIndex != null ? `G${String(groupIndex + 1).padStart(2, '0')}` : `${r.groups.length}g`)
+      toast({
+        title: '批量下载已开始',
+        description: groupIndex != null
+          ? `已打包第 ${groupIndex + 1} 组 ${entries.length} 份报告为 zip。`
+          : `已打包 ${entries.length} 份报告为 zip（每组一个子文件夹，含合并报告与 README 清单）。`,
+      })
+    } catch (e) {
+      toast({ title: '批量下载失败', description: e instanceof Error ? e.message : '归档服务暂不可用，请稍后重试', variant: 'destructive' })
+    } finally {
+      setArchiving(false)
+    }
+  }, [])
 
   /** 手动停止：取消服务器侧活跃作业 + 未开始的组标 canceled；已完成组结果保留 */
   const cancelRun = useCallback(async (): Promise<void> => {
@@ -637,10 +710,14 @@ export function useHighThroughputFlow() {
     networkIssue,
     canceling,
     starting,
+    /** v2.25 批量下载中（入口禁用 + spinner） */
+    archiving,
     startRun,
     resumeRun,
     openRunById,
     removeRun,
+    /** v2.25 批量下载运行报告（当前运行或按 id 的历史运行 → zip） */
+    archiveRun,
     cancelRun,
     exitToIdle,
   }

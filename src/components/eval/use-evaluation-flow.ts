@@ -96,21 +96,37 @@ export function fallbackIndependentJudgment(): RelationJudgment {
 /** v1.19 自动下载记录（模块级：同一页面会话内每个报告只自动下载一次；切靶点/重渲染不重复） */
 const autoDownloadedKeys = new Set<string>()
 
+/** v2.25 文件名文件夹前缀安全化：非法字符折叠为空格并限长 */
+function safeDirName(s: string, max = 60): string {
+  return (s || '')
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.\s]+$/, '')
+    .slice(0, max)
+}
+
+/** v2.25 触发浏览器「另存为」式下载（带文件夹前缀时挂前缀；浏览器不支持目录型 download 属性时
+ *  遵循 W3C 规范忽略斜杠 — Chrome/Edge 实测会作为目录前缀展示，Safari/Firefox 落为普通文件名） */
+function triggerBrowserDownload(blob: Blob, filename: string, revokeAfterMs = 10_000) {
+  const blobUrl = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = blobUrl
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(blobUrl), revokeAfterMs)
+}
+
 /** v2.4 无状态模式：内联 HTML 报告 → Blob 自动下载（服务器不保留文件，第一时间落到本机） */
 function autoDownloadInlineReport(reportHtml: string, key: string, label: string) {
   if (autoDownloadedKeys.has(key)) return
   autoDownloadedKeys.add(key)
   try {
     const blob = new Blob([reportHtml], { type: 'text/html;charset=utf-8' })
-    const blobUrl = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = blobUrl
-    a.download = `TargetEval_${label.replace(/[\\/:*?"<>|\s]+/g, '_')}_${new Date().toISOString().slice(0, 10)}.html`
-    a.rel = 'noopener'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000)
+    triggerBrowserDownload(blob, `TargetEval_${label.replace(/[\\/:*?"<>|\s]+/g, '_')}_${new Date().toISOString().slice(0, 10)}.html`)
     toast({
       title: 'HTML 报告已自动下载',
       description: `${label} — 已保存到本机下载目录（无状态部署服务器不保留文件，请及时查看）。若浏览器未弹出下载，请点击结果页的「下载 HTML」按钮。`,
@@ -134,8 +150,10 @@ function autoDownloadInlineReport(reportHtml: string, key: string, label: string
  *  - 跨站 iframe（预览面板）可能拦截自动下载 → toast 引导手动按钮
  *  - 历史记录查看不经过触发点，不会误弹；失败时允许后续重试
  * v2.22：导出供高通量编排复用（每组独立报告 / 合并报告完成即落盘）。
+ * v2.25：dir 参数 — 同一次高通量运行的报告统一目录前缀（TargetEval_HT_日期/G01_…/），
+ *  浏览器支持 download 属性携带目录时归入同一新文件夹。
  */
-export function autoDownloadHtmlReport(url: string, key: string, label: string) {
+export function autoDownloadHtmlReport(url: string, key: string, label: string, dir?: string) {
   if (autoDownloadedKeys.has(key)) return
   autoDownloadedKeys.add(key)
   void (async () => {
@@ -147,7 +165,6 @@ export function autoDownloadHtmlReport(url: string, key: string, label: string) 
         return
       }
       const blob = await res.blob()
-      const blobUrl = URL.createObjectURL(blob)
       // 文件名：优先服务端 Content-Disposition，回退默认名
       // v2.10 ①：优先解析 filename*（RFC 5987，携带中文报告标题），回退 filename=
       const cd = res.headers.get('content-disposition') ?? ''
@@ -159,17 +176,12 @@ export function autoDownloadHtmlReport(url: string, key: string, label: string) 
       } else if (plain?.[1]) {
         try { filename = decodeURIComponent(plain[1].trim()) } catch { filename = plain[1].trim() }
       }
-      const a = document.createElement('a')
-      a.href = blobUrl
-      a.download = filename
-      a.rel = 'noopener'
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000)
+      // v2.25：高通量目录前缀（download 属性携带目录式名称 — 支持的浏览器归入同一文件夹）
+      if (dir) filename = `${safeDirName(dir)}/${filename}`
+      triggerBrowserDownload(blob, filename)
       toast({
         title: 'HTML 报告已自动下载',
-        description: `${label} — 已保存到本机下载目录（服务器端运行数据不长期保留，请及时查看）。若浏览器未弹出下载，请点击结果页的「下载 HTML」按钮。`,
+        description: `${label} — 已保存到本机下载目录${dir ? `「${safeDirName(dir)}」文件夹` : ''}（服务器端运行数据不长期保留，请及时查看）。若浏览器未弹出下载，可稍后在报告页手动下载。`,
       })
     } catch {
       autoDownloadedKeys.delete(key) // 失败允许重试
