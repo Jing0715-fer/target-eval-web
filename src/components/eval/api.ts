@@ -430,6 +430,40 @@ async function fetchInsightsStream(body: Record<string, unknown>): Promise<Insig
   throw new Error('智能解析流中断（网络波动/网关超时），正在自动重试…')
 }
 
+// ─── 高通量 Excel 导入（v2.23）──────────────────────────────
+
+/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组 */
+export interface HtExcelExtractResult {
+  ok: boolean
+  groups: string[][]
+  invalid: string[]
+  source: 'llm' | 'regex'
+  note?: string
+  meta?: { fileName?: string; sheets?: number; rows?: number; truncated?: boolean; bytes?: number }
+}
+
+/**
+ * 上传 Excel/CSV 靶点表 → 服务端 LLM 解析分组（LLM 超时/失败时服务端自动回退
+ * 规则提取，通道不卡死）。v2.19：本地引擎配置随请求内联携带（导入解析 LLM
+ * 走用户本人的引擎）。quick=true 跳过 LLM 直接规则提取（调试/兜底通道）。
+ */
+export async function extractHtTargetsFromExcel(
+  file: File,
+  opts: { quick?: boolean } = {},
+): Promise<HtExcelExtractResult> {
+  const llm = getLlmEngineOverride()
+  const fd = new FormData()
+  fd.append('file', file)
+  if (opts.quick) fd.append('quick', '1')
+  if (llm) fd.append('llm', JSON.stringify(llm))
+  const res = await fetch('/api/evaluate/ht-extract', { method: 'POST', body: fd })
+  const data = (await res.json().catch(() => null)) as (HtExcelExtractResult & { ok?: boolean; error?: string }) | null
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error ?? `Excel 解析失败（HTTP ${res.status}）`)
+  }
+  return data
+}
+
 // ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────
 
 /** POST /api/evaluate/relation — 批量评估前的靶点关系判断（v1.10：附带序列归属）
