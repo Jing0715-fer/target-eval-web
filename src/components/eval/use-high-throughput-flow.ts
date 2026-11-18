@@ -335,8 +335,8 @@ export function useHighThroughputFlow() {
             sequenceHeader: item.sequenceHeader,
             goal: runState.goal,
             ligands: runState.ligands,
-            // v2.27：行内构建区间（UniProt 归属后区间过滤；手动值优先于比对推导）
-            options: { ...runState.options, reportMode: 'single', range: item.range },
+            // v2.27/v2.29：行内构建区间与域名提示（手动值优先于比对推导；域名匹 UniProt domain 推导）
+            options: { ...runState.options, reportMode: 'single', range: item.range, rangeHint: item.domainHint },
           }
         : {
             mode: 'uniprot',
@@ -345,8 +345,8 @@ export function useHighThroughputFlow() {
             ligands: runState.ligands,
             batchNote,
             homologBlast: group,
-            // v2.27：截短构建感知 — options.range（仅保留链范围重叠的结构）
-            options: { ...runState.options, reportMode: related ? 'deferred' : 'single', range: item.range },
+            // v2.27/v2.29：截短构建感知与域名提示 — options.range / rangeHint
+            options: { ...runState.options, reportMode: related ? 'deferred' : 'single', range: item.range, rangeHint: item.domainHint },
           }
       const created = await createJob(req)
       if (cancelRef.current || pausedRef.current) {
@@ -583,6 +583,8 @@ export function useHighThroughputFlow() {
             label: t,
             // v2.27：逐靶点评估区间（Excel 构建区间 / 手输「:起-止」后缀）— 提交时随 options.range
             range: payload.groupRanges?.[i]?.[j],
+            // v2.29：结构域名提示（Excel 域名 / 手输「:域名」后缀）— 提交时随 options.rangeHint
+            domainHint: payload.groupDomainHints?.[i]?.[j],
             status: 'pending' as const,
           })),
           status: 'pending' as const,

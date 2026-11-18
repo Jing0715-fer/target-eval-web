@@ -40,7 +40,8 @@ import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
-import { filterPdbsByRange, filterBlastByRange, type ResidueRange } from './range-filter'
+import { splitPdbsByRange, splitBlastByRange, type ResidueRange } from './range-filter'
+import { matchDomainHint } from './domain-range'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
 import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
 import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
@@ -80,6 +81,9 @@ export interface PipelineResult {
   summary: JobSummary
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
+  /** v2.29：与评估区间无链范围重叠的结构（折叠保留展示 — 灰色行；DB 持久化在 summary 内） */
+  rangeOutsidePdbs?: PdbEntry[]
+  rangeOutsideBlastHits?: BlastHit[]
   literature: LiteratureItem[]
   reportPath: string | null
   reportMarkdown: string | null
@@ -161,6 +165,14 @@ interface PipelineState {
   pdbCompletedIds: string[]
   /** 排序+范围过滤+链区间回填已完成 */
   pdbFinalized: boolean
+  /** v2.29：与评估区间无链范围重叠的直接结构（折叠保留展示 — 灰色行；不参与评分/覆盖口径，上限 200） */
+  rangeOutsidePdbs: PdbEntry[]
+  /** v2.29：与评估区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100） */
+  rangeOutsideBlastHits: BlastHit[]
+  /** v2.29：结构域提示匹配出的评估区间（options.rangeHint → UniProt domain 划分；label 含命中描述） */
+  domainRange: { start: number; end: number; label: string } | null
+  /** 域名匹配已尝试（无 rangeHint 或无 UniProt 时为 true — 防止每段重复尝试） */
+  domainRangeDone: boolean
   // ── 配体 ──
   ligandUnique: LigandInput[]
   ligandResolved: LigandResolution[]
@@ -250,6 +262,10 @@ function freshState(): PipelineState {
     directPdbs: [],
     pdbCompletedIds: [],
     pdbFinalized: false,
+    rangeOutsidePdbs: [],
+    rangeOutsideBlastHits: [],
+    domainRange: null,
+    domainRangeDone: false,
     ligandUnique: [],
     ligandResolved: [],
     ligandResolveDone: false,
@@ -541,6 +557,10 @@ export async function runPipelineSegment(
   checkpoint?: PipelineCheckpoint,
 ): Promise<PipelineSegmentResult> {
   const st: PipelineState = checkpoint?.state ?? freshState()
+  // v2.29 防御性回填：旧版本 checkpoint 无范围外分流字段（undefined 数组调用 .length 会抛错）
+  if (!st.rangeOutsidePdbs) st.rangeOutsidePdbs = []
+  if (!st.rangeOutsideBlastHits) st.rangeOutsideBlastHits = []
+  if (st.domainRangeDone == null) st.domainRangeDone = false
   const seg = new SegmentRunner(input, cb, st)
   return seg.run()
 }
@@ -754,9 +774,34 @@ class SegmentRunner {
     if (st.phase === 'init') this.report('input', '输入解析完成', 1)
   }
 
-  // ─── v2.27 有效评估范围（截短构建感知）──────────────────────────────────
+  // ─── v2.27/v2.29 有效评估范围（截短构建感知 + 结构域匹配）──────────────────
   // 优先级：手动 options.range > 构建比对推导（同靶点序列 → compareSequences
-  // 定位的全长区间；UniProt 伴随/序列模式/docx 回填路径均含）。无区间 = 不过滤。
+  // 定位的全长区间）> 结构域名提示（options.rangeHint → UniProt domain 划分匹配）。
+  // 无区间 = 不过滤。v2.29 口径：区间不再丢弃无重叠结构，而是「重叠者优先展示，
+  // 无重叠折叠保留（灰色行）」— rangeOutsidePdbs / rangeOutsideBlastHits。
+
+  /** v2.29：结构域提示 → UniProt domain 区间（一次性解析缓存；无提示/无 UniProt/未命中 → null） */
+  private resolveDomainRange(): { start: number; end: number; label: string } | null {
+    const st = this.st
+    if (st.domainRangeDone) return st.domainRange
+    if (!st.uniprotInfo) return null // 尚未归属 UniProt — 待归属后再试（domainRangeDone 仍为 false）
+    st.domainRangeDone = true
+    const hint = this.input.options.rangeHint?.trim()
+    if (hint) {
+      const m = matchDomainHint(hint, st.uniprotInfo.features, st.uniprotInfo.sequenceLength)
+      if (m) {
+        st.domainRange = {
+          start: m.range[0],
+          end: m.range[1],
+          label: `结构域匹配：${m.term} → UniProt ${m.featureType}「${m.matched}」${m.segments > 1 ? `（${m.segments} 个区段并集）` : ''}`,
+        }
+        this.log(`评估表结构域提示「${hint}」与 UniProt domain 划分匹配：${m.featureType}「${m.matched}」→ 评估区间 ${m.range[0]}-${m.range[1]}（该区段结构优先展示，无重叠结构折叠保留）`)
+      } else {
+        this.log(`评估表结构域提示「${hint}」未匹配到 UniProt domain/拓扑域注释 — 按无区间评估（结构列表不分流）`, 'warn')
+      }
+    }
+    return st.domainRange
+  }
 
   /** 有效评估范围（UniProt 残基编号，1-based 闭区间；undefined = 不过滤） */
   private effectiveRange(): ResidueRange | undefined {
@@ -765,13 +810,59 @@ class SegmentRunner {
     if (c?.sameTarget && c.start != null && c.end != null && c.start >= 1 && c.end >= c.start) {
       return [c.start, c.end]
     }
+    const dr = this.resolveDomainRange()
+    if (dr) return [dr.start, dr.end]
     return undefined
   }
 
   /** 区间来源标签（日志/摘要说明用） */
   private rangeSourceLabel(): string {
     if (this.input.options.range) return '手动指定'
-    return this.st.comparison ? '构建比对推导' : '—'
+    if (this.st.comparison?.sameTarget && this.st.comparison.start != null && this.st.comparison.end != null) return '构建比对推导'
+    if (this.st.domainRange) return '结构域匹配（UniProt 注释）'
+    return '—'
+  }
+
+  /** v2.29：直接结构区间分流 — 主列表仅保留链范围重叠（或范围未知）结构；无重叠者折叠保留 */
+  private applyPdbRangeSplit(): void {
+    const st = this.st
+    const er = this.effectiveRange()
+    if (!er) return
+    const before = st.directPdbs.length
+    const split = splitPdbsByRange(st.directPdbs, er)
+    st.directPdbs = split.kept
+    let merged = 0
+    const seen = new Set(st.rangeOutsidePdbs.map(p => p.pdbId))
+    for (const p of split.outside) {
+      if (seen.has(p.pdbId) || st.rangeOutsidePdbs.length >= 200) continue
+      seen.add(p.pdbId)
+      st.rangeOutsidePdbs.push(p)
+      merged++
+    }
+    if (before !== st.directPdbs.length || merged > 0) {
+      this.log(`PDB 范围分流：${st.directPdbs.length} 条与区间 ${er[0]}-${er[1]}（${this.rangeSourceLabel()}）重叠优先展示；新增折叠保留 ${merged} 条（累计 ${st.rangeOutsidePdbs.length} 条无重叠 — 灰色行）`)
+    }
+  }
+
+  /** v2.29：BLAST 同源命中区间分流（构建坐标换算 — 语义同上） */
+  private applyBlastRangeSplit(): void {
+    const st = this.st
+    const bq = this.blastQueryRange()
+    if (!bq) return
+    const before = st.blastHits.length
+    const split = splitBlastByRange(st.blastHits, bq)
+    st.blastHits = split.kept
+    let merged = 0
+    const seen = new Set(st.rangeOutsideBlastHits.map(h => h.pdbId))
+    for (const h of split.outside) {
+      if (seen.has(h.pdbId) || st.rangeOutsideBlastHits.length >= 100) continue
+      seen.add(h.pdbId)
+      st.rangeOutsideBlastHits.push(h)
+      merged++
+    }
+    if (before !== st.blastHits.length || merged > 0) {
+      this.log(`同源命中范围分流：${st.blastHits.length} 条与查询区间重叠优先；新增折叠保留 ${merged} 条（累计 ${st.rangeOutsideBlastHits.length} 条无重叠）`)
+    }
   }
 
   /**
@@ -985,15 +1076,9 @@ class SegmentRunner {
         return this.handoff()
       }
       backfillChainRanges(st.directPdbs, st.uniprotInfo)
-      // v2.27：有效评估范围（手动 > 构建比对推导）— 仅保留链范围重叠的结构
-      const er = this.effectiveRange()
-      if (er) {
-        const before = st.directPdbs.length
-        st.directPdbs = filterPdbsByRange(st.directPdbs, er)
-        if (before !== st.directPdbs.length) {
-          this.log(`PDB 范围过滤：${before} → ${st.directPdbs.length}（限定 ${er[0]}-${er[1]}，${this.rangeSourceLabel()}）`)
-        }
-      }
+      // v2.29：有效评估范围（手动 > 构建比对 > 结构域匹配）— 链范围重叠者优先展示，
+      // 无重叠结构折叠保留（rangeOutsidePdbs，灰色行）
+      this.applyPdbRangeSplit()
       const ligCount = st.directPdbs.filter(p => p.ligands.length > 0).length
       this.log(`PDB 详情完成：${st.directPdbs.length} 个结构（含配体 ${ligCount} 个）`)
       st.pdbFinalized = true
@@ -1163,9 +1248,10 @@ class SegmentRunner {
           }
           if (filled > 0) {
             const before = st.directPdbs.length
-            st.directPdbs = filterPdbsByRange(st.directPdbs, erBackfill)
+            // v2.29：SIFTS 回填后的复分流 — 新判定的无重叠结构折叠保留
+            this.applyPdbRangeSplit()
             st.pdbCompletedIds = st.directPdbs.map(e => e.pdbId)
-            this.log(`SIFTS 链范围回填 ${filled} 个结构后复滤：${before} → ${st.directPdbs.length}（限定 ${erBackfill[0]}-${erBackfill[1]}）`)
+            this.log(`SIFTS 链范围回填 ${filled} 个结构后复分流：${before} → ${st.directPdbs.length}（限定 ${erBackfill[0]}-${erBackfill[1]}，范围外累计 ${st.rangeOutsidePdbs.length} 条）`)
           }
         }
         // v2.27：限定评估范围时覆盖率/未覆盖区间改为「区间内」口径（截短构建/聚蛋白片段）
@@ -1286,9 +1372,8 @@ class SegmentRunner {
         const directSet = new Set(st.directPdbs.map(p => p.pdbId))
         const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
         st.blastHits = await enrichBlastHits(filtered, directSet)
-        // v2.27：有效区间过滤（构建坐标换算 — 仅保留查询区间重叠的同源命中）
-        const bq = this.blastQueryRange()
-        if (bq) st.blastHits = filterBlastByRange(st.blastHits, bq)
+        // v2.29：有效区间分流（构建坐标换算 — 查询区间重叠者优先展示，无重叠命中折叠保留）
+        this.applyBlastRangeSplit()
         st.blastStatus = {
           status: st.blastHits.length > 0 ? 'ok' : 'no-hits',
           note: st.blastHits.length > 0 ? `${st.blastHits.length} 个同源命中${st.familyRep ? `（家族代表检索：结果将共享给 ≥${this.input.homologBlast?.minIdentity ?? 90}% 一致性的同源成员）` : ''}` : undefined,
@@ -1366,9 +1451,8 @@ class SegmentRunner {
         const directSet = new Set(st.directPdbs.map(p => p.pdbId))
         const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
         st.blastHits = await enrichBlastHits(filtered, directSet)
-        // v2.27：有效区间过滤（构建坐标换算）
-        const bq = this.blastQueryRange()
-        if (bq) st.blastHits = filterBlastByRange(st.blastHits, bq)
+        // v2.29：有效区间分流（构建坐标换算）
+        this.applyBlastRangeSplit()
         st.blastStatus = {
           status: st.blastHits.length > 0 ? 'ok' : 'no-hits',
           note: st.blastHits.length > 0 ? `${st.blastHits.length} 个同源命中` : undefined,
@@ -1525,13 +1609,11 @@ class SegmentRunner {
       st.pdbCompletedIds = r.entries.map(e => e.pdbId)
       st.pdbFinalized = true
       backfillChainRanges(st.directPdbs, info)
-      // v2.27：有效区间过滤（回填路径同主路径口径）
-      const erRb = this.effectiveRange()
-      if (erRb) st.directPdbs = filterPdbsByRange(st.directPdbs, erRb)
+      // v2.29：有效区间分流（回填路径同主路径口径 — 重叠优先，无重叠折叠保留）
+      this.applyPdbRangeSplit()
       const directSet2 = new Set(st.directPdbs.map(p => p.pdbId))
       st.blastHits = (await enrichBlastHits(st.blastHits.filter(h => !directSet2.has(h.pdbId)), directSet2))
-      const bqRb = this.blastQueryRange()
-      if (bqRb) st.blastHits = filterBlastByRange(st.blastHits, bqRb)
+      this.applyBlastRangeSplit()
     }
     this.report('pdbe', '补算 PDBe 覆盖率…', 0.5)
     try {
@@ -1572,9 +1654,8 @@ class SegmentRunner {
           const directSet = new Set(st.directPdbs.map(p => p.pdbId))
           const filtered = rescue.hits.filter(h => h.pdbId && !directSet.has(h.pdbId))
           st.blastHits = await enrichBlastHits(filtered, directSet)
-          // v2.27：有效区间过滤（构建坐标换算）
-          const bq = this.blastQueryRange()
-          if (bq) st.blastHits = filterBlastByRange(st.blastHits, bq)
+          // v2.29：有效区间分流（构建坐标换算 — 无重叠命中折叠保留）
+          this.applyBlastRangeSplit()
           st.blastStatus = {
             status: st.blastHits.length > 0 ? 'ok' : 'no-hits',
             note: st.blastHits.length > 0
@@ -1846,7 +1927,10 @@ class SegmentRunner {
       providedSequence: st.providedSequence && st.comparison
         ? { sequence: st.providedSequence, comparison: st.comparison }
         : undefined,
-      range: this.effectiveRange(), // v2.27：手动 > 构建比对推导（摘要/报告题目「残基 X-Y」）
+      range: this.effectiveRange(), // v2.27：手动 > 构建比对推导；v2.29：结构域匹配垫底（摘要/报告题目「残基 X-Y」）
+      rangeSource: this.rangeSourceLabel(), // v2.29：区间来源标签（结果页/折叠区文案）
+      rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs : undefined, // v2.29：无重叠结构（折叠保留展示）
+      rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits : undefined,
       directPdbs: st.directPdbs,
       blastHits: st.blastHits,
       blastStatus: st.blastStatus,
@@ -2052,8 +2136,13 @@ class SegmentRunner {
       literatureCount: st.literature.length,
       imageCount: st.images.length,
       durationMs,
-      /** v2.27：实际生效的评估范围（手动指定或构建比对/表格区间推导；无则缺省） */
+      /** v2.27：实际生效的评估范围（手动指定或构建比对/表格区间推导；v2.29 域名匹配亦可；无则缺省） */
       range: this.effectiveRange(),
+      /** v2.29：区间来源标签（手动指定 / 构建比对推导 / 结构域匹配（UniProt 注释）） */
+      rangeSource: this.rangeSourceLabel() || undefined,
+      /** v2.29：与区间无链范围重叠的结构（折叠保留展示 — 前端灰色行；上限 200/100） */
+      rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs.slice(0, 200) : undefined,
+      rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits.slice(0, 100) : undefined,
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,
@@ -2134,6 +2223,9 @@ class SegmentRunner {
       summary,
       directPdbs: st.directPdbs,
       blastHits: st.blastHits,
+      /** v2.29：与评估区间无重叠的结构（同步评估模式随结果返回 — 折叠保留展示） */
+      rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs.slice(0, 200) : undefined,
+      rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits.slice(0, 100) : undefined,
       literature: st.literature,
       reportPath,
       reportMarkdown: !deferReport && st.reportMarkdown ? st.reportMarkdown : null,

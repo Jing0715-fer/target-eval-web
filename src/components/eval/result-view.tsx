@@ -19,6 +19,7 @@ import {
   ChevronDown,
   Printer,
   RotateCcw,
+  Ruler,
   SearchX,
   ShieldCheck,
   Sparkles,
@@ -412,6 +413,13 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const reportMd = job.reportMarkdown?.trim() || null
   const reportLlmFailed = summary.reportLlmOk === false
   const reportDeferred = summary.reportDeferred === true
+  /** v2.29：评估区间与范围外结构（重叠优先展示 / 折叠保留） */
+  const rangeInfo = summary.range ?? null
+  const rangeLabel = rangeInfo
+    ? `${rangeInfo[0]}-${rangeInfo[1]}${summary.rangeSource === '结构域匹配（UniProt 注释）' ? ' · 结构域匹配' : summary.rangeSource === '构建比对推导' ? ' · 截短构建推导' : summary.rangeSource === '手动指定' ? ' · 手动指定' : ''}`
+    : undefined
+  const outsidePdbs = summary.rangeOutsidePdbs ?? []
+  const outsideBlastHits = summary.rangeOutsideBlastHits ?? []
   /** v2.4：内联 HTML 报告（无状态同步评估）— srcDoc 渲染 + Blob 下载，不经 /api/jobs/{id}/report */
   const inlineReportHtml = job.stateless ? (job.reportHtml ?? null) : null
   /** v1.31：web 端直接内嵌完整 HTML 报告（与「下载 HTML」同一份文件，样式 100% 一致）。
@@ -1187,12 +1195,28 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           en="Structures"
           count={
             pdbs.length > 0
-              ? `${pdbs.length} 个`
+              ? `${pdbs.length} 个${outsidePdbs.length > 0 ? ` · 范围外 ${outsidePdbs.length}` : ''}`
               : itx
                 ? `直接结构 0 · 互作组分证据${itxBest?.sharedPdbTotal ? `（共有 ${itxBest.sharedPdbTotal}）` : ''}`
                 : '0 个'
           }
         />
+        {rangeInfo && (
+          <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] px-4 py-3 text-xs leading-relaxed text-emerald-800 dark:text-emerald-300">
+            <Ruler className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+            <span>
+              <b>评估区间 {rangeInfo[0]}-{rangeInfo[1]}</b>
+              （{summary.rangeSource === '结构域匹配（UniProt 注释）'
+                ? '评估表结构域名 → UniProt domain 匹配'
+                : summary.rangeSource === '构建比对推导'
+                  ? '截短构建比对推导'
+                  : '手动指定'}）—
+              结构列表按「链范围与区间重叠优先」展示{outsidePdbs.length + outsideBlastHits.length > 0
+                ? `；无重叠的结构已折叠保留在下方（灰色行：PDB ${outsidePdbs.length} 条${outsideBlastHits.length ? ` · 同源 ${outsideBlastHits.length} 条` : ''}）`
+                : '；当前全部结构均与区间重叠'}。
+            </span>
+          </div>
+        )}
         {itx && pdbs.length === 0 && (
           <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3.5 text-xs leading-relaxed text-amber-800 dark:text-amber-300">
             <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
@@ -1204,7 +1228,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           </div>
         )}
         {itx && pdbs.length === 0 && <InteractionStructures itx={itx} />}
-        <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} />
+        <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} outsidePdbs={outsidePdbs} rangeLabel={rangeLabel} />
       </motion.section>
 
       {/* 7.5 配体研究数据（v2.0：非标准输入归一 + 含该配体结构） */}
@@ -1357,7 +1381,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           </div>
         )}
         {blastHits.length > 0 ? (
-          <BlastTable hits={blastHits} />
+          <BlastTable hits={blastHits} outsideHits={outsideBlastHits} rangeLabel={rangeLabel} />
         ) : (
           <BlastStatusBox status={blastInfo?.status} note={blastInfo?.note} provider={blastInfo?.provider} />
         )}

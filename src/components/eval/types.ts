@@ -24,8 +24,11 @@ export interface EvaluateOptions {
   maxPdb: number
   /** 报告模式：single = 独立报告（默认）；deferred = 数据并入合并报告（关联靶点批量） */
   reportMode?: 'single' | 'deferred'
-  /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）；PDB/BLAST 命中过滤为与该区间重叠的结构 */
+  /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）；范围重叠结构优先展示，无重叠折叠保留（v2.29） */
   range?: [number, number]
+  /** v2.29：结构域名提示（评估表不写区间而写域名时，如「胞外域」/「kinase domain」）—
+   *  管线内与 UniProt domain 划分匹配推导评估区间 */
+  rangeHint?: string
 }
 
 export interface EvaluateRequest {
@@ -217,6 +220,11 @@ export interface MergedTargetLite {
   coverageText?: string
   gapText?: string
   construct?: ConstructInfo
+  /** v2.29：评估区间 + 范围外结构（PdbTable/BlastTable 折叠区用；历史报告缺省） */
+  range?: [number, number]
+  rangeSource?: string
+  rangeOutsidePdbs?: PdbEntry[]
+  rangeOutsideBlastHits?: BlastHit[]
   /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
@@ -663,8 +671,14 @@ export interface JobSummary {
   literatureCount: number
   imageCount: number
   durationMs: number
-  /** v2.27：实际生效的评估范围（UniProt 残基编号 — 手动或构建比对/表格区间推导；历史作业缺省） */
+  /** v2.27：实际生效的评估范围（UniProt 残基编号 — 手动或构建比对/表格区间推导；v2.29 域名匹配亦可；历史作业缺省） */
   range?: [number, number]
+  /** v2.29：区间来源标签（手动指定 / 构建比对推导 / 结构域匹配（UniProt 注释）） */
+  rangeSource?: string
+  /** v2.29：与区间无链范围重叠的 PDB 结构（折叠保留展示 — 灰色行；上限 200） */
+  rangeOutsidePdbs?: PdbEntry[]
+  /** v2.29：与区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100） */
+  rangeOutsideBlastHits?: BlastHit[]
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+） */
   blast?: BlastStatusInfo
@@ -904,6 +918,9 @@ export interface HTGroupItemState {
   label: string
   /** v2.27：该靶点的评估区间（UniProt 残基编号；提交时随 options.range — 截短构建感知） */
   range?: [number, number]
+  /** v2.29：结构域名提示（如胞外域/kinase domain — 提交时随 options.rangeHint，
+   *  管线内与 UniProt domain 划分匹配推导区间） */
+  domainHint?: string
   /** v2.23.1 序列靶点：提交 mode=sequence 作业的原始序列（无则 UniProt 靶点） */
   sequence?: string
   /** v2.23.1 序列靶点：构建标签头（评估表/Excel 序列命名证据） */
@@ -964,6 +981,9 @@ export interface HTStartPayload {
   groups: string[][]
   /** v2.27：与 groups 逐组逐位对齐的评估区间（Excel 导入解析/手动「:起-止」后缀；无则不过滤） */
   groupRanges?: Array<Array<[number, number] | undefined>>
+  /** v2.29：与 groups 逐组逐位对齐的结构域名提示（评估表不写区间而写域名时；
+   *  管线内与 UniProt domain 划分匹配推导区间） */
+  groupDomainHints?: Array<Array<string | undefined>>
   /** v2.23.1 序列兜底组（Excel 行缺 UniProt 但有构建序列；每行一组，逐序列独立评估） */
   seqGroups?: HtSeqTarget[][]
   goal?: string

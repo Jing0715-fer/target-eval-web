@@ -14,6 +14,12 @@
  *  ③ 行内唯一靶点 + 存在构建区间 → 取首个（无注释可配时）；
  *  ④ 靶点数与区间数相等且全无区间 → 按出现顺序配对。
  *
+ * v2.29 结构域名提示（domainHint）：评估表常不写区间而写域名（「P51685 (CCR8 胞外域)」
+ * /「EGFR kinase domain」「跨膜区」）。本模块把域名 token 扫描出来随靶点携带，管线取得
+ * UniProt features 后由 domain-range.ts 匹配推导区间（手动区间 > 构建比对 > 域名匹配
+ * 三层级里墵垫底）。域名扫描与区间扫描同源同列（非 UniProt 单元格 ≤400 字符 + 括号注释），
+ * 配对分层亦同构（括号注释 → 行内计数配对）；已有数值区间的靶点不再扫域名（区间证据更强）。
+ *
  * 误配防护：区间形态边界守卫（区间首字符前不得是字母/数字、尾数后不得紧跟数字）
  * —— 防 accession 自带 isoform 段「P12345-12」被当成「45-12」，防标签/克隆号段
  * 「SLC10A1-3C」「CD1-H5243」中间夹的数字被当区间；仅数字-数字 / 字母前缀 / aa
@@ -36,6 +42,9 @@ export interface HtRowTarget {
   acc: string
   /** 截短构建区间（UniProt 残基编号，1-based 闭区间；无则不过滤） */
   range?: ResidueRange
+  /** v2.29：结构域名提示（如 ectodomain / 胞外域 / kinase domain — 管线内与
+   * UniProt domain 划分匹配推导评估区间；已带数值区间时不扫域名） */
+  domainHint?: string
 }
 
 export interface BuildRange {
@@ -115,6 +124,35 @@ export function scanBuildRanges(text: string): BuildRange[] {
         }
       }
       if (m.index === re.lastIndex) re.lastIndex++ // 防零宽死循环（防御性）
+    }
+  }
+  return out
+}
+
+// ─── v2.29 结构域名提示扫描 ───────────────────────────────────────────────
+
+/** 域名提及模式：英文「X domain / X-domain」（X = 前缀词，如 TM/kinase/SH2）+
+ *  无 domain 后缀的独立别名词（ectodomain/ECD/ICD）；中文「X结构域/X域/X区」
+ * （token 剥掉后缀 — 别名匹配兼容裸词，见 domain-range.ts ALIAS_RULES） */
+const DOMAIN_MENTION_PATTERNS: RegExp[] = [
+  /\b([A-Za-z][A-Za-z0-9/-]{0,24}(?:\s+[A-Za-z][A-Za-z0-9/-]{0,24}){0,2})\s+domain\b/i,
+  /\b([A-Za-z][A-Za-z0-9/-]{0,24})-domain\b/i,
+  /\b(ectodomain|ecd|icd)\b/i,
+  /([\u4e00-\u9fa5A-Za-z0-9]{1,16}?)(?:结构域|区域|域|区)/u,
+]
+
+/** 扫描文本中的结构域名 token（去重保序，≤4 个；返回原始 token） */
+export function scanDomainMentions(text: string): string[] {
+  if (!text) return []
+  const out: string[] = []
+  for (const re of DOMAIN_MENTION_PATTERNS) {
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+    let m: RegExpExecArray | null
+    while ((m = g.exec(text))) {
+      const tok = (m[1] ?? '').trim()
+      if (tok && tok.length >= 2 && !out.includes(tok)) out.push(tok)
+      if (out.length >= 4) return out
+      if (m.index === g.lastIndex) g.lastIndex++
     }
   }
   return out
@@ -215,6 +253,15 @@ export function scanRowTargets(row: string[]): RowScanResult {
       for (const h of bracketHeaders(cell)) addBuild(h)
     }
   }
+  // v2.29：行内结构域名 token（与构建区间同列同源；供无区间靶点配对）
+  const rowHints: string[] = []
+  for (const cell of row) {
+    if (!cell || cellHasUniprotId(cell)) continue
+    const text = cell.length <= BUILD_SCAN_CELL_MAX ? cell : bracketHeaders(cell).join(' ')
+    for (const h of scanDomainMentions(text)) {
+      if (!rowHints.includes(h)) rowHints.push(h)
+    }
+  }
   // ① Tier 1：UniProt 注释区间（UniProt 编号，权威）
   const targets: HtRowTarget[] = entries.map(e => ({
     acc: e.acc,
@@ -244,6 +291,20 @@ export function scanRowTargets(row: string[]): RowScanResult {
     targets[0].range = buildRanges[0].range
   } else if (lacking === targets.length && targets.length >= 2 && buildRanges.length === targets.length) {
     for (let i = 0; i < targets.length; i++) targets[i].range = buildRanges[i].range
+  }
+  // v2.29 结构域名提示配对（仅无区间靶点）：① 括号注释自带域名（如「P51685 (CCR8 胞外域)」）
+  // → ② 行内唯一无区间靶点取首个 → ③ 靶点数 = 域名数且全无提示时顺序配对。
+  // 已带数值区间的靶点不扫域名（区间证据更强 — 域名匹配仅在无区间时生效垫底）
+  for (let i = 0; i < targets.length; i++) {
+    if (targets[i].range) continue
+    const noteHint = scanDomainMentions(entries[i]?.note ?? '')[0]
+    if (noteHint) targets[i].domainHint = noteHint
+  }
+  const lackingHint = targets.filter(t => !t.range && !t.domainHint).length
+  if (targets.length === 1 && lackingHint === 1 && rowHints.length > 0) {
+    targets[0].domainHint = rowHints[0]
+  } else if (lackingHint === targets.length && targets.length >= 2 && rowHints.length === targets.length) {
+    for (let i = 0; i < targets.length; i++) targets[i].domainHint = rowHints[i]
   }
   // 行内去重（acc|区间 — 同格重复/注释与备注双写）
   const seen = new Set<string>()

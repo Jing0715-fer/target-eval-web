@@ -77,11 +77,14 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
   const sequenceLength = raw.sequence?.length ?? sequence.length
 
   // features：结构域/跨膜/信号肽/活性位点/重复序列等关键类型
+  // v2.29：补 Topological domain（胞外域/胞内域等拓扑区段 — 评估表「结构域名 →
+  // UniProt domain 匹配」的别名类提示靠它解析，如 P00533 Extracellular 1-621）
   const FEATURE_KEEP = new Set([
     'Domain', 'Signal', 'Transmembrane', 'Active site', 'Binding site',
     'Region', 'Repeat', 'Zinc finger', 'DNA-binding', 'Nucleotide binding',
     'Site', 'Modified residue', 'Disulfide bond', 'Calcium binding',
     'Motif', 'Compositionally biased region', 'Intramembrane',
+    'Topological domain',
   ])
   const features: UniprotFeature[] = []
   for (const f of raw.features ?? []) {

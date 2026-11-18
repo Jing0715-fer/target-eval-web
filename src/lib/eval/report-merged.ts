@@ -69,6 +69,14 @@ export interface MergedTargetData {
   ligandCount: number
   construct?: ConstructInfo
   durationMs: number
+  /** v2.29：实际生效评估区间（作业 summary.range — 手动/比对/域名匹配；历史作业缺省） */
+  range?: [number, number]
+  /** v2.29：区间来源标签；历史作业缺省 */
+  rangeSource?: string
+  /** v2.29：与区间无重叠的直接结构（折叠保留展示 — 灰色行；上限 200） */
+  rangeOutsidePdbs?: PdbEntry[]
+  /** v2.29：与区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100） */
+  rangeOutsideBlastHits?: BlastHit[]
   /** v1.24：聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
   ligands?: LigandResolution[]
@@ -121,6 +129,11 @@ export interface MergedTargetLite {
   coverageText?: string
   gapText?: string
   construct?: ConstructInfo
+  /** v2.29：评估区间 + 来源标签 + 范围外结构（前端 PdbTable/BlastTable 折叠区用；历史报告缺省） */
+  range?: [number, number]
+  rangeSource?: string
+  rangeOutsidePdbs?: PdbEntry[]
+  rangeOutsideBlastHits?: BlastHit[]
   /** v2.9：AlphaFold 预测结构元数据（前端简报卡展示；交互 3D 视图见 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
@@ -154,6 +167,11 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     coverageText: t.coverageText,
     gapText: t.gapText,
     construct: t.construct,
+    // v2.29：评估区间 + 范围外结构（前端 PdbTable/BlastTable 折叠区用）
+    range: t.range,
+    rangeSource: t.rangeSource,
+    rangeOutsidePdbs: t.rangeOutsidePdbs,
+    rangeOutsideBlastHits: t.rangeOutsideBlastHits,
     alphafold: t.alphafold,
     esmfold: t.esmfold ?? null,
     // v2.16：靶点身份（前端展示与单独评估页题目用）
@@ -180,6 +198,11 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       interaction?: InteractionAnalysis | null
       coveredRanges?: Array<[number, number]>
       targetIdentity?: TargetIdentityInfo
+      /** v2.29：评估区间/来源/范围外结构（新作业存在；历史作业缺省） */
+      range?: [number, number]
+      rangeSource?: string
+      rangeOutsidePdbs?: PdbEntry[]
+      rangeOutsideBlastHits?: BlastHit[]
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -224,6 +247,11 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       ligandCount: summary.ligandCount ?? 0,
       construct: summary.construct,
       durationMs: summary.durationMs ?? 0,
+      // v2.29：评估区间 + 范围外结构（单独评估页报告主体 — 重叠优先/折叠保留口径）
+      range: summary.range,
+      rangeSource: summary.rangeSource,
+      rangeOutsidePdbs: summary.rangeOutsidePdbs,
+      rangeOutsideBlastHits: summary.rangeOutsideBlastHits,
       oligomer: summary.oligomer,
       ligands: summary.ligands,
       mwAugment: summary.mwAugment ?? null,
@@ -1402,6 +1430,10 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
           ? `受体主导复合物批次 · ${relName}（置信度${relConfZh}）— 本靶点为 G 蛋白伴侣（${gpcrBatch.couplingLabel}，信号转导组分），非批次主要评估对象；受体（${gpcrBatch.receptor.uniprotId ?? gpcrBatch.receptor.label}）的完整评估即报告首页`
           : `关联靶点批次 · ${relName}（置信度${relConfZh}）— 本页为该靶点的单独评估报告，批次级分析与共有结构见报告首页`,
       providedSequence: t.construct ? { sequence: '', comparison: t.construct as unknown as SequenceComparison } : undefined,
+      range: t.range,
+      rangeSource: t.rangeSource,
+      rangeOutsidePdbs: t.rangeOutsidePdbs,
+      rangeOutsideBlastHits: t.rangeOutsideBlastHits,
       directPdbs: t.directPdbs,
       blastHits: t.blastHits,
       blastStatus: t.blastStatus,

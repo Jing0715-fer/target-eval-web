@@ -27,6 +27,12 @@
  *    此前被全局去重合并为一；现各自成独立靶点。
  *  - LLM 路径：区间由规则扫描确定性回填（按表内出现顺序出队）；LLM 全局去重
  *    合掉的「带区间」实例补为独立单靶点组（防漏检）。
+ *
+ * v2.29 结构域名提示：评估表不写区间而写域名（「P51685 (CCR8 胞外域)」/
+ *  「EGFR kinase domain」/「跨膜区」）→ groupDomainHints（与 groups 逐位对齐）；
+ * 作业携带 options.rangeHint，管线取得 UniProt features 后由 domain-range.ts
+ * 匹配 domain 划分推导评估区间（层级：手动区间 > 构建比对 > 域名匹配）。已带数值
+ * 区间的靶点不扫域名（区间证据更强）。LLM 路径域名同样由规则扫描确定性回填。
  */
 import * as XLSX from 'xlsx'
 import { llmChat } from './llm'
@@ -151,6 +157,9 @@ export interface HtExtractedGroups {
   /** v2.27：与 groups 逐组逐位对齐的评估区间（无则 undefined = 不过滤；
    *  来自 UniProt 列括号注释 / 构建列 / 序列标签头的截短区间） */
   groupRanges: Array<Array<ResidueRange | undefined>>
+  /** v2.29：与 groups 逐组逐位对齐的结构域名提示（如「胞外域」/「kinase domain」；
+   *  无则 undefined — 管线内与 UniProt domain 划分匹配推导区间；仅无数值区间的靶点携带） */
+  groupDomainHints: Array<Array<string | undefined>>
   /** 序列兜底组：行内无 UniProt 但有构建序列 → 每行一组，组内每条序列独立评估 */
   seqGroups: HtSeqTarget[][]
   /** LLM 提取出但不符合 UniProt 编号规则的 token（前端提示用） */
@@ -274,7 +283,7 @@ function rowTargetKey(t: HtRowTarget): string {
   return t.range ? `${t.acc}|${t.range[0]}-${t.range[1]}` : t.acc
 }
 
-/** v2.27：全表确定性靶点实例扫描（行序；acc|区间 去重）— LLM 分组的区间回填 + 漏检补充 */
+/** v2.27：全表确定性靶点实例扫描（行序；acc|区间 去重）— LLM 分组的区间/域名回填 + 漏检补充 */
 function scanSheetInstances(sheets: HtSheetRows[]): HtRowTarget[] {
   const out: HtRowTarget[] = []
   const seen = new Set<string>()
@@ -289,7 +298,7 @@ function scanSheetInstances(sheets: HtSheetRows[]): HtRowTarget[] {
         const key = rowTargetKey(t)
         if (seen.has(key)) continue
         seen.add(key)
-        out.push({ acc: t.acc, range: t.range })
+        out.push({ acc: t.acc, range: t.range, domainHint: t.domainHint })
       }
     }
   }
@@ -308,10 +317,12 @@ function scanSheetInstances(sheets: HtSheetRows[]): HtRowTarget[] {
 export function fallbackHtGroups(sheets: HtSheetRows[]): {
   groups: string[][]
   groupRanges: Array<Array<ResidueRange | undefined>>
+  groupDomainHints: Array<Array<string | undefined>>
   seqGroups: HtSeqTarget[][]
 } {
   const groups: string[][] = []
   const groupRanges: Array<Array<ResidueRange | undefined>> = []
+  const groupDomainHints: Array<Array<string | undefined>> = []
   const seqGroups: HtSeqTarget[][] = []
   const seenKeys = new Set<string>()
   const seenSeqs = new Set<string>()
@@ -336,7 +347,7 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
       }
     }
 
-    const byKey = new Map<string, { ids: string[]; ranges: Array<ResidueRange | undefined> }>()
+    const byKey = new Map<string, { ids: string[]; ranges: Array<ResidueRange | undefined>; hints: Array<string | undefined> }>()
     for (let r = dataStart; r < rows.length; r++) {
       const row = rows[r]
       // v2.27：分组列单元格不参与靶点/区间扫描（沿用原口径）
@@ -344,12 +355,14 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
       const scan = scanRowTargets(scanRow)
       const ids: string[] = []
       const ranges: Array<ResidueRange | undefined> = []
+      const hints: Array<string | undefined> = []
       for (const t of scan.targets) {
         const key = rowTargetKey(t)
         if (seenKeys.has(key)) continue
         seenKeys.add(key)
         ids.push(t.acc)
         ranges.push(t.range)
+        hints.push(t.domainHint)
       }
       if (ids.length > 0) {
         const key = groupCol >= 0 ? ((row[groupCol] ?? '').trim() || `#${r}`) : `#${r}`
@@ -358,11 +371,13 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
           for (let i = 0; i < ids.length; i++) {
             bucket.ids.push(ids[i])
             bucket.ranges.push(ranges[i])
+            bucket.hints.push(hints[i])
           }
         } else {
           byKey.set(key, {
             ids: ids.slice(0, MAX_TARGETS_PER_GROUP),
             ranges: ranges.slice(0, MAX_TARGETS_PER_GROUP),
+            hints: hints.slice(0, MAX_TARGETS_PER_GROUP),
           })
         }
         continue
@@ -390,9 +405,10 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
       if (groups.length >= MAX_GROUPS) break
       groups.push(bucket.ids)
       groupRanges.push(bucket.ranges)
+      groupDomainHints.push(bucket.hints)
     }
   }
-  return { groups, groupRanges, seqGroups }
+  return { groups, groupRanges, groupDomainHints, seqGroups }
 }
 
 /**
@@ -411,13 +427,14 @@ export async function extractHtGroups(
   opts: { quick?: boolean; signal?: AbortSignal } = {},
 ): Promise<HtExtractedGroups> {
   if (wb.rowCount === 0 || !wb.text.trim()) {
-    return { groups: [], groupRanges: [], seqGroups: [], invalid: [], source: 'regex', note: '表格内容为空' }
+    return { groups: [], groupRanges: [], groupDomainHints: [], seqGroups: [], invalid: [], source: 'regex', note: '表格内容为空' }
   }
   if (opts.quick) {
     const fb = fallbackHtGroups(wb.sheets)
     return {
       groups: fb.groups,
       groupRanges: fb.groupRanges,
+      groupDomainHints: fb.groupDomainHints,
       seqGroups: fb.seqGroups,
       invalid: [],
       source: 'regex',
@@ -436,6 +453,7 @@ export async function extractHtGroups(
     return {
       groups: fb.groups,
       groupRanges: fb.groupRanges,
+      groupDomainHints: fb.groupDomainHints,
       seqGroups: fb.seqGroups,
       invalid: [],
       source: 'regex',
@@ -448,6 +466,7 @@ export async function extractHtGroups(
     return {
       groups: fb.groups,
       groupRanges: fb.groupRanges,
+      groupDomainHints: fb.groupDomainHints,
       seqGroups: fb.seqGroups,
       invalid: [],
       source: 'regex',
@@ -457,10 +476,11 @@ export async function extractHtGroups(
   const { groups, invalid, capped } = sanitizeGroups(obj)
   if (groups.length === 0) {
     const fb = fallbackHtGroups(wb.sheets)
-    return { groups: fb.groups, groupRanges: fb.groupRanges, seqGroups: fb.seqGroups, invalid, source: 'regex', note: 'AI 未识别到有效靶点，已返回规则提取结果' }
+    return { groups: fb.groups, groupRanges: fb.groupRanges, groupDomainHints: fb.groupDomainHints, seqGroups: fb.seqGroups, invalid, source: 'regex', note: 'AI 未识别到有效靶点，已返回规则提取结果' }
   }
 
-  // ── v2.27 区间确定性回填：acc → 行序实例队列；LLM 组内出现序出队 ──
+  // ── v2.27/v2.29 区间/域名确定性回填：acc → 行序实例队列；LLM 组内出现序出队。
+  // 区间与域名从同一实例一次读出（两次独立出队会把第 2 个实例的提示错配给第 1 组）──
   const instances = scanSheetInstances(wb.sheets)
   const byAcc = new Map<string, HtRowTarget[]>()
   for (const inst of instances) {
@@ -469,14 +489,21 @@ export async function extractHtGroups(
     else byAcc.set(inst.acc, [inst])
   }
   const consumed = new Set<HtRowTarget>()
-  const groupRanges: Array<Array<ResidueRange | undefined>> = groups.map((g) =>
-    g.map((acc) => {
+  const groupRanges: Array<Array<ResidueRange | undefined>> = []
+  const groupDomainHints: Array<Array<string | undefined>> = []
+  for (const g of groups) {
+    const ranges: Array<ResidueRange | undefined> = []
+    const hints: Array<string | undefined> = []
+    for (const acc of g) {
       const q = byAcc.get(acc)
       const inst = q && q.length > 0 ? q.shift() : undefined
       if (inst) consumed.add(inst)
-      return inst?.range
-    }),
-  )
+      ranges.push(inst?.range)
+      hints.push(inst?.domainHint)
+    }
+    groupRanges.push(ranges)
+    groupDomainHints.push(hints)
+  }
   // LLM 全局去重合掉的「带区间」实例（聚蛋白片段等）→ 补为独立单靶点组
   let appended = 0
   for (const inst of instances) {
@@ -484,6 +511,7 @@ export async function extractHtGroups(
     if (groups.length >= MAX_GROUPS) break
     groups.push([inst.acc])
     groupRanges.push([inst.range])
+    groupDomainHints.push([inst.domainHint])
     appended++
   }
 
@@ -491,6 +519,7 @@ export async function extractHtGroups(
     groups,
     invalid,
     groupRanges,
+    groupDomainHints,
     seqGroups: fallbackHtGroups(wb.sheets).seqGroups,
     source: 'llm',
   }

@@ -21,9 +21,14 @@ export interface EvaluationOptions {
   /** 报告生成模式：single = 各靶点独立报告（默认）；deferred = 跳过单靶点报告，数据并入合并报告（关联靶点批量评估用） */
   reportMode?: 'single' | 'deferred'
   /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）。
-   *  设置后：PDB/BLAST 命中过滤为与该区间重叠的结构；报告题目显示范围。
-   *  仅 UniProt 单靶点模式（无伴随序列时）有效。 */
+   *  设置后：PDB/BLAST 命中中链范围与该区间重叠者优先展示，无重叠的折叠保留
+   *  （v2.29 口径）；报告题目显示范围。仅 UniProt 单靶点模式（无伴随序列时）有效。 */
   range?: [number, number]
+  /** v2.29：结构域名提示（评估表不写区间而写域名时携带，如「胞外域」/「kinase
+   *  domain」/「跨膜区」）— 管线取得 UniProt features 后由 domain-range.ts 与
+   *  UniProt domain 划分匹配推导评估区间（层级：手动区间 > 构建比对 > 域名匹配）；
+   *  匹配失败按无区间评估，不阻塞。 */
+  rangeHint?: string
 }
 
 // ─── UniProt ──────────────────────────────────────────────────────────────────
@@ -639,6 +644,14 @@ export interface JobSummary {
   durationMs: number
   /** v2.27：实际生效的评估范围（UniProt 残基编号 — 手动指定或构建比对/表格区间推导；历史作业缺省） */
   range?: [number, number]
+  /** v2.29：生效区间的来源标签（手动指定 / 构建比对推导 / 结构域匹配（UniProt 注释））
+   *  — 结果页与折叠区文案用；历史作业缺省 */
+  rangeSource?: string
+  /** v2.29：与评估区间无链范围重叠的 PDB 结构（折叠保留展示 — 灰色行；上限 200）
+   *  上表仅展示范围重叠优先结构。历史作业缺省。 */
+  rangeOutsidePdbs?: PdbEntry[]
+  /** v2.29：与评估区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100）；历史作业缺省 */
+  rangeOutsideBlastHits?: BlastHit[]
   /** 合并评估（UniProt+序列同靶点）时的构建信息 */
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+ 作业存在；历史作业缺省） */

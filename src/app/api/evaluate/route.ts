@@ -111,6 +111,9 @@ export async function POST(req: Request) {
     maxPdb: body.options?.maxPdb === MAX_PDB_UNLIMITED ? MAX_PDB_UNLIMITED : Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
     reportMode: body.options?.reportMode === 'deferred' ? 'deferred' : 'single',
     range,
+    // v2.29：结构域名提示（评估表不写区间而写域名 — 管线内与 UniProt domain 划分匹配推导区间）
+    rangeHint: typeof body.options?.rangeHint === 'string' && body.options.rangeHint.trim()
+      ? body.options.rangeHint.trim().slice(0, 60) : undefined,
   }
   const batchNote = body.batchNote?.trim().slice(0, 500) || undefined
   // v2.19：用户本地引擎配置消毒（未知供应商/缺模型名 → 回退内置；不持久化）

@@ -140,6 +140,11 @@ export async function POST(req: Request) {
                   (n, g, gi) => n + (result.groupRanges[gi] ?? []).filter(Boolean).length,
                   0,
                 ),
+                // v2.29：携带结构域名提示的靶点数（管线内与 UniProt domain 匹配推导区间）
+                domainHintTargets: result.groups.reduce(
+                  (n, g, gi) => n + (result.groupDomainHints[gi] ?? []).filter(Boolean).length,
+                  0,
+                ),
               },
             })
           } finally {

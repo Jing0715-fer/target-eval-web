@@ -437,12 +437,15 @@ async function fetchInsightsStream(body: Record<string, unknown>): Promise<Insig
 
 import type { HtSeqTarget } from './types'
 
-/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组（v2.23.1 增序列兜底组；v2.27 增构建区间） */
+/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组（v2.23.1 增序列兜底组；v2.27 增构建区间；v2.29 增结构域名提示） */
 export interface HtExcelExtractResult {
   ok: boolean
   groups: string[][]
   /** v2.27：与 groups 逐组逐位对齐的评估区间（undefined = 不过滤；截短构建感知） */
   groupRanges?: Array<Array<[number, number] | undefined>>
+  /** v2.29：与 groups 逐组逐位对齐的结构域名提示（评估表不写区间而写域名时 —
+   *  管线内与 UniProt domain 划分匹配推导区间） */
+  groupDomainHints?: Array<Array<string | undefined>>
   /** 序列兜底组：行缺 UniProt 但有构建序列 → 按序列评估（每行一组） */
   seqGroups?: HtSeqTarget[][]
   invalid: string[]
@@ -458,6 +461,8 @@ export interface HtExcelExtractResult {
     seqTargets?: number
     /** v2.27：携带构建区间的靶点数 */
     rangeTargets?: number
+    /** v2.29：携带结构域名提示的靶点数（管线内匹配 UniProt domain 推导区间） */
+    domainHintTargets?: number
   }
 }
 

@@ -138,19 +138,25 @@ export const MAX_HT_TARGETS_TOTAL = 600
  *  - 组内仅一个靶点 = 独立评估（单作业独立报告）
  *  - v2.27 截短构建感知：靶点可带评估区间后缀「:起始-结束」（UniProt 残基编号，
  *    如「P0DTD1:4393-5324」= 聚蛋白 nsp12 片段）— Excel 导入自动填入，也可手输；
- *    仅保留链范围与该区间重叠的结构
+ *    范围重叠结构优先展示，无重叠折叠保留
+ *  - v2.29 结构域名提示：靶点可带域名后缀「:域名」（如「P51685:胞外域」/
+ *    「P00533:kinase」— 评估表不写区间而写域名时）→ groupDomainHints 对齐携带，
+ *    管线内与 UniProt domain 划分匹配推导区间（数值区间优先）
  * 去重键 = accession|区间（全局保序去重；同 accession 不同区间 = 不同靶点 — 聚蛋白
- * 片段不再被合并为一次全长评估）；返回分组列表 + 对齐的区间 + 无效 token + 跨组重复。
+ * 片段不再被合并为一次全长评估）；返回分组列表 + 对齐的区间/域名提示 + 无效 token + 跨组重复。
  */
 export function parseGroupedUniprotIds(text: string): {
   groups: string[][]
   /** 与 groups 逐组逐位对齐的评估区间（undefined = 该靶点不过滤） */
   groupRanges: Array<Array<[number, number] | undefined>>
+  /** v2.29：与 groups 逐组逐位对齐的结构域名提示（无则 undefined — 管线内匹配 UniProt domain 推导区间） */
+  groupDomainHints: Array<Array<string | undefined>>
   invalid: string[]
   duplicates: string[]
 } {
   const groups: string[][] = []
   const groupRanges: Array<Array<[number, number] | undefined>> = []
+  const groupDomainHints: Array<Array<string | undefined>> = []
   const invalid: string[] = []
   const duplicates: string[] = []
   const seen = new Set<string>()
@@ -159,15 +165,18 @@ export function parseGroupedUniprotIds(text: string): {
     if (tokens.length === 0) continue
     const ids: string[] = []
     const ranges: Array<[number, number] | undefined> = []
+    const hints: Array<string | undefined> = []
     for (const t of tokens) {
       if (seen.has(t)) {
         if (!duplicates.includes(t)) duplicates.push(t)
         continue
       }
       seen.add(t)
-      // v2.27：可选区间后缀「:起始-结束」（1 ≤ 起 ≤ 止；格式不合法按无效 token 提示）
+      // v2.27 可选区间后缀「:起始-结束」（1 ≤ 起 ≤ 止）；v2.29 域名后缀「:域名」
+      // （非纯数字 token — 数值区间优先，域名仅在无区间时生效）
       let id = t
       let range: [number, number] | undefined
+      let hint: string | undefined
       const rm = t.match(/^([A-Z0-9-]+):(\d{1,5})-(\d{1,5})$/)
       if (rm) {
         id = rm[1]
@@ -179,10 +188,24 @@ export function parseGroupedUniprotIds(text: string): {
           if (!invalid.includes(t)) invalid.push(t)
           continue
         }
+      } else {
+        const hm = t.match(/^([A-Z0-9-]+):([^0-9:;\s][^:;]{1,40})$/)
+        if (hm) {
+          id = hm[1]
+          const h = hm[2].trim()
+          // 域名 token 至少 2 字符且非纯数字/纯符号
+          if (h.length >= 2 && !/^\d+$/.test(h) && !/^[-.\s]+$/.test(h)) {
+            hint = h
+          } else {
+            if (!invalid.includes(t)) invalid.push(t)
+            continue
+          }
+        }
       }
       if (isValidUniprotId(id)) {
         ids.push(id)
         ranges.push(range)
+        hints.push(hint)
       } else if (!invalid.includes(t)) {
         invalid.push(t)
       }
@@ -190,9 +213,10 @@ export function parseGroupedUniprotIds(text: string): {
     if (ids.length > 0) {
       groups.push(ids)
       groupRanges.push(ranges)
+      groupDomainHints.push(hints)
     }
   }
-  return { groups, groupRanges, invalid, duplicates }
+  return { groups, groupRanges, groupDomainHints, invalid, duplicates }
 }
 
 /** 单条 FASTA 序列（解析多 FASTA 用） */

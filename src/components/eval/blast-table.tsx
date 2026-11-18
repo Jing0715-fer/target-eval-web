@@ -11,9 +11,11 @@ import type { BlastHit } from './types'
 /** 折叠阈值：超过该数量时默认只显示前 N 条 */
 const COLLAPSED_COUNT = 15
 
-/** BLAST 同源结构表（长列表可折叠） */
-export function BlastTable({ hits }: { hits: BlastHit[] }) {
+/** BLAST 同源结构表（长列表可折叠）；v2.29 范围外命中折叠区（灰色行） */
+export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]; outsideHits?: BlastHit[]; rangeLabel?: string }) {
   const [expanded, setExpanded] = useState(false)
+  /** v2.29：范围外折叠区展开态 */
+  const [outsideExpanded, setOutsideExpanded] = useState(false)
   const collapsed = !expanded && hits.length > COLLAPSED_COUNT
   const visible = collapsed ? hits.slice(0, COLLAPSED_COUNT) : hits
 
@@ -96,6 +98,100 @@ export function BlastTable({ hits }: { hits: BlastHit[] }) {
           </TableBody>
         </Table>
       </div>
+
+      {/* v2.29 范围外命中折叠区：查询覆盖区间与评估区间无重叠（灰色行 + chip；不计入评分） */}
+      {outsideHits && outsideHits.length > 0 && (
+        <div className="border-t border-border/70 bg-muted/30">
+          <Button
+            variant="ghost"
+            onClick={() => setOutsideExpanded((v) => !v)}
+            className="h-10 w-full gap-1.5 rounded-none font-mono text-[11px] text-muted-foreground hover:bg-accent/60"
+            aria-expanded={outsideExpanded}
+          >
+            {outsideExpanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+            {outsideExpanded
+              ? '收起范围外同源结构'
+              : `展开范围外同源结构 ${outsideHits.length} 条（与评估区间${rangeLabel ? ` ${rangeLabel}` : ''}无重叠 — 灰色行）`}
+          </Button>
+          {outsideExpanded && (
+            <div className="eval-scroll overflow-auto">
+              <Table>
+                <TableHeader className="sticky top-0 z-10 bg-muted/70">
+                  <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+                    <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">PDB ID</TableHead>
+                    <TableHead className="eval-eyebrow h-9 min-w-44 text-muted-foreground">描述</TableHead>
+                    <TableHead className="eval-eyebrow h-9 text-muted-foreground">Identity</TableHead>
+                    <TableHead className="eval-eyebrow h-9 text-muted-foreground">E-value</TableHead>
+                    <TableHead className="eval-eyebrow h-9 min-w-28 text-muted-foreground" title="BLAST 命中在查询序列（=输入序列/UniProt 全长）上的起止残基位置（1-based 闭区间）">覆盖范围</TableHead>
+                    <TableHead className="eval-eyebrow h-9 text-muted-foreground">方法</TableHead>
+                    <TableHead className="eval-eyebrow h-9 text-muted-foreground">分辨率</TableHead>
+                    <TableHead className="eval-eyebrow h-9 pr-4 text-muted-foreground">文献</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {outsideHits.slice(0, 100).map((h, i) => (
+                    <TableRow key={`outside-${h.pdbId}-${i}`} className="border-border/60 bg-muted/25 hover:bg-muted/40">
+                      <TableCell className="pl-4">
+                        <a
+                          href={`https://www.rcsb.org/structure/${h.pdbId}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-mono text-xs font-semibold text-muted-foreground underline-offset-2 hover:underline"
+                        >
+                          {h.pdbId}
+                        </a>
+                      </TableCell>
+                      <TableCell className="max-w-64 truncate text-xs text-muted-foreground" title={h.description}>
+                        {h.description || '—'}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                        {h.identity != null ? `${Number(h.identity.toFixed(1))}%` : '—'}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                        {formatEvalue(h.evalue)}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                        <span>
+                          {h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
+                            ? `${h.queryFrom}-${h.queryTo}`
+                            : h.queryCoverage != null && h.queryCoverage > 0
+                              ? `${h.queryCoverage} aa`
+                              : '—'}
+                        </span>
+                        <span className="ml-1.5 inline-block rounded-full border border-border bg-muted px-1.5 py-px font-mono text-[9px] text-muted-foreground">范围外</span>
+                      </TableCell>
+                      <TableCell>
+                        <MethodBadge method={h.method} />
+                      </TableCell>
+                      <TableCell className="pr-4 font-mono text-xs tabular-nums text-muted-foreground">
+                        {formatResolution(h.resolution)}
+                      </TableCell>
+                      <TableCell className="pr-4">
+                        {h.pubmedId ? (
+                          <a
+                            href={`https://pubmed.ncbi.nlm.nih.gov/${h.pubmedId}/`}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`跳转 PubMed 文献 ${h.pubmedId}`}
+                            className="font-mono text-[11px] font-semibold text-muted-foreground underline-offset-2 hover:underline"
+                          >
+                            PMID {h.pubmedId}
+                          </a>
+                        ) : (
+                          <span className="text-muted-foreground/40">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <p className="border-t border-border/60 px-4 py-2 text-[11px] leading-relaxed text-muted-foreground/80">
+                以上同源命中的查询覆盖区间与评估区间无重叠（对应其他片段/其他结构域的同源参考）；折叠保留可查，行颜色区别于上表，不计入评分与「已有同源先例」统计。
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
       {hits.length > COLLAPSED_COUNT && (
         <div className="border-t border-border/70">

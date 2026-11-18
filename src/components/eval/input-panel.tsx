@@ -470,9 +470,11 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       // 限流自动暂停 + 断点续跑；goal/配体/高级选项与单次评估共享同一套字段。
       // v2.23.1：seqGroups = Excel 导入的序列兜底组（行缺 UniProt，按序列评估）。
       // v2.27：groupRanges = 逐组逐位对齐的评估区间（Excel 构建区间 / 手输「:起-止」后缀）。
+      // v2.29：groupDomainHints = 逐组逐位对齐的结构域名提示（Excel 域名 / 手输「:域名」后缀）。
       if (!htValid) return
       const groups: string[][] = []
       const groupRanges: Array<Array<[number, number] | undefined>> = []
+      const groupDomainHints: Array<Array<string | undefined>> = []
       for (let i = 0; i < htParsed.groups.length && groups.length < MAX_HT_GROUPS; i++) {
         const ids = htParsed.groups[i].slice(0, MAX_HT_TARGETS_PER_GROUP)
         if (ids.length === 0) continue
@@ -481,13 +483,17 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           htParsed.groupRanges[i]?.slice(0, MAX_HT_TARGETS_PER_GROUP)
             ?? ids.map(() => undefined),
         )
+        groupDomainHints.push(
+          htParsed.groupDomainHints[i]?.slice(0, MAX_HT_TARGETS_PER_GROUP)
+            ?? ids.map(() => undefined),
+        )
       }
       const seqGroups = htSeqGroups
         .map((g) => g.slice(0, MAX_HT_TARGETS_PER_GROUP))
         .slice(0, Math.max(0, MAX_HT_GROUPS - groups.length))
         .filter((g) => g.length > 0)
       if (groups.length === 0 && seqGroups.length === 0) return
-      const payload: HTStartPayload = { groups, groupRanges, seqGroups, goal: trimmedGoal, ligands, options }
+      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, goal: trimmedGoal, ligands, options }
       await onStartHighThroughput(payload)
       return
     }

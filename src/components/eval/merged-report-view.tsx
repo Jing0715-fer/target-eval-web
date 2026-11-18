@@ -793,8 +793,20 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           <div className="flex flex-col gap-5">
             {pdbTargets.map(t => (
               <div key={t.jobId} className="flex flex-col gap-2">
-                <TargetGroupHeader t={t} right={`${t.directPdbCount} PDB · 覆盖率 ${t.coveragePercent}%`} />
-                <PdbTable pdbs={t.directPdbs} literature={t.literature} />
+                <TargetGroupHeader
+                  t={t}
+                  right={`${t.directPdbCount} PDB · 覆盖率 ${t.coveragePercent}%${(t.rangeOutsidePdbs?.length ?? 0) > 0 ? ` · 范围外 ${t.rangeOutsidePdbs!.length}` : ''}`}
+                />
+                {/* v2.29：评估区间徽标（结构域匹配/截短构建推导 — 与单独评估页同口径） */}
+                {t.range && (
+                  <span
+                    className="w-fit rounded-md border border-emerald-500/40 bg-emerald-500/[0.07] px-2 py-0.5 font-mono text-[10px] text-emerald-700 dark:text-emerald-300"
+                    title={`评估区间 ${t.range[0]}-${t.range[1]}（范围重叠结构优先展示，无重叠折叠保留）`}
+                  >
+                    评估区间 {t.range[0]}-{t.range[1]}{t.rangeSource === '结构域匹配（UniProt 注释）' ? ' · 结构域匹配' : t.rangeSource === '构建比对推导' ? ' · 截短构建推导' : ''}
+                  </span>
+                )}
+                <PdbTable pdbs={t.directPdbs} literature={t.literature} outsidePdbs={t.rangeOutsidePdbs} rangeLabel={t.range ? `${t.range[0]}-${t.range[1]}` : undefined} />
               </div>
             ))}
           </div>
@@ -824,7 +836,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
             {blastTargets.map(t => (
               <div key={t.jobId} className="flex flex-col gap-2">
                 <TargetGroupHeader t={t} right={t.blastHits.length > 0 ? `${t.blastHitCount} 个同源结构` : '无命中'} />
-                {t.blastHits.length > 0 && <BlastTable hits={t.blastHits} />}
+                {t.blastHits.length > 0 && <BlastTable hits={t.blastHits} outsideHits={t.rangeOutsideBlastHits} rangeLabel={t.range ? `${t.range[0]}-${t.range[1]}` : undefined} />}
                 <BlastNote t={t} />
               </div>
             ))}

@@ -36,7 +36,14 @@ import type { HTRunState, HtSeqTarget } from './types'
 export interface HighThroughputPanelProps {
   value: string
   onChange: (v: string) => void
-  parsed: { groups: string[][]; groupRanges?: Array<Array<[number, number] | undefined>>; invalid: string[]; duplicates: string[] }
+  parsed: {
+    groups: string[][]
+    groupRanges?: Array<Array<[number, number] | undefined>>
+    /** v2.29：与 groups 对齐的结构域名提示（评估表不写区间而写域名时） */
+    groupDomainHints?: Array<Array<string | undefined>>
+    invalid: string[]
+    duplicates: string[]
+  }
   /** v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列） */
   seqGroups: HtSeqTarget[][]
   onSeqGroupsChange: (groups: HtSeqTarget[][]) => void
@@ -65,6 +72,8 @@ interface ExcelImportMeta {
   seqTargetCount: number
   /** v2.27：携带构建区间的靶点数（截短构建感知） */
   rangeTargetCount: number
+  /** v2.29：携带结构域名提示的靶点数（管线内与 UniProt domain 匹配推导区间） */
+  domainHintTargetCount: number
   invalid: string[]
   note?: string
 }
@@ -118,8 +127,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       }
       setPreImportText(value)
       setPreImportSeqGroups(seqGroups)
-      // v2.27：区间以后缀形式写进分组文本（「P0DTD1:4393-5324」）— 文本往返中保活，
-      // 用户可直接增删改；无区间靶点保持原样
+      // v2.27/v2.29：区间与域名提示均以后缀形式写进分组文本（「P0DTD1:4393-5324」/
+      // 「P51685:胞外域」）— 文本往返中保活，用户可直接增删改；无后缀靶点保持原样
       if (r.groups.length > 0) {
         onChange(
           r.groups
@@ -127,7 +136,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
               g
                 .map((t, ti) => {
                   const rr = r.groupRanges?.[gi]?.[ti]
-                  return rr ? `${t}:${rr[0]}-${rr[1]}` : t
+                  const dh = r.groupDomainHints?.[gi]?.[ti]
+                  return rr ? `${t}:${rr[0]}-${rr[1]}` : dh ? `${t}:${dh}` : t
                 })
                 .join(', '),
             )
@@ -145,6 +155,9 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         rangeTargetCount:
           r.meta?.rangeTargets ??
           (r.groupRanges ?? []).reduce((n, gr) => n + gr.filter(Boolean).length, 0),
+        domainHintTargetCount:
+          r.meta?.domainHintTargets ??
+          (r.groupDomainHints ?? []).reduce((n, gh) => n + gh.filter(Boolean).length, 0),
         invalid: r.invalid ?? [],
         note: r.note,
       })
@@ -249,9 +262,17 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           {importMeta.rangeTargetCount > 0 && (
             <span
               className="font-mono text-[11px] text-primary"
-              title="行内解析出截短构建区间（UniProt 列括号注释 / 构建列 / 序列标签头）→ 评估仅保留链范围重叠的结构；区间以「ID:起始-结束」后缀填入，可手改"
+              title="行内解析出截短构建区间（UniProt 列括号注释 / 构建列 / 序列标签头）→ 范围重叠结构优先展示，无重叠折叠保留；区间以「ID:起始-结束」后缀填入，可手改"
             >
-              其中 {importMeta.rangeTargetCount} 靶点带构建区间（仅统计链范围重叠的结构）
+              其中 {importMeta.rangeTargetCount} 靶点带构建区间（范围重叠优先展示）
+            </span>
+          )}
+          {importMeta.domainHintTargetCount > 0 && (
+            <span
+              className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400"
+              title="评估表不写区间而写结构域名（如胞外域/kinase domain）→ 管线内与 UniProt domain 划分匹配推导区间，优先展示该区段结构（无重叠折叠保留）；域名以「ID:域名」后缀填入，可手改"
+            >
+              其中 {importMeta.domainHintTargetCount} 靶点带结构域名（UniProt domain 匹配推导区间）
             </span>
           )}
           {importMeta.seqGroupCount > 0 && (
@@ -308,10 +329,22 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
               </span>
               {g.map((t, ti) => {
                 const rr = parsed.groupRanges?.[i]?.[ti]
+                const dh = parsed.groupDomainHints?.[i]?.[ti]
                 return (
-                  <span key={t} className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground/90" title={rr ? `评估区间 ${rr[0]}-${rr[1]}（仅保留链范围重叠的结构）` : undefined}>
+                  <span
+                    key={t}
+                    className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground/90"
+                    title={
+                      rr
+                        ? `评估区间 ${rr[0]}-${rr[1]}（范围重叠结构优先展示，无重叠折叠保留）`
+                        : dh
+                          ? `结构域名提示「${dh}」— 管线内与 UniProt domain 划分匹配推导区间，优先展示该区段结构`
+                          : undefined
+                    }
+                  >
                     {t}
                     {rr && <span className="text-primary/90">:{rr[0]}-{rr[1]}</span>}
+                    {dh && <span className="text-emerald-600 dark:text-emerald-400">:{dh}</span>}
                   </span>
                 )
               })}

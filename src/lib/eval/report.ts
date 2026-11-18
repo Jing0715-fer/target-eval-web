@@ -33,6 +33,12 @@ export interface ReportContext {
   providedSequence?: { sequence: string; comparison: SequenceComparison }
   /** v1.23：用户指定的评估范围（UniProt 残基编号，1-based 闭区间）；报告题目与摘要中体现 */
   range?: [number, number]
+  /** v2.29：生效区间来源标签（手动指定 / 构建比对推导 / 结构域匹配（UniProt 注释））— 结构章节范围说明用 */
+  rangeSource?: string
+  /** v2.29：与评估区间无链范围重叠的 PDB 结构（折叠保留展示 — 灰色行，不参与评分/覆盖口径） */
+  rangeOutsidePdbs?: PdbEntry[]
+  /** v2.29：与评估区间无重叠的 BLAST 同源命中（折叠保留展示 — 灰色行） */
+  rangeOutsideBlastHits?: BlastHit[]
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
   /** BLAST 执行状态（跳过/失败原因 — 供报告说明） */
