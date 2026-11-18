@@ -198,6 +198,8 @@ export interface MergedTargetLite {
   jobId: string
   uniprotId?: string
   proteinName: string
+  /** v2.31：评估区间归属的 nsp 标注（聚合蛋白截短 — 展示名追加；历史报告缺省） */
+  nspLabel?: string
   geneNames: string[]
   organism: string
   sequenceLength: number
@@ -386,6 +388,10 @@ export interface UniprotInfo {
   geneNames: string[]
   organism: string
   sequenceLength: number
+  /** v2.31：评估区间归属的 nsp 标注（聚合蛋白截短 — 展示名追加；历史作业缺省） */
+  nspLabel?: string
+  /** v2.31：PTM/Processing 加工条目（后端摘要携带 — 前端展示名计算用；历史作业缺省） */
+  processingChains?: Array<{ name: string; begin: number; end: number }>
 }
 
 export interface ScoreItem {

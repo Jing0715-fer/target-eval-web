@@ -33,7 +33,7 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
-import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo } from './types'
+import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
@@ -51,6 +51,10 @@ export interface MergedTargetData {
   label: string
   uniprotId?: string
   proteinName: string
+  /** v2.31：PTM/Processing 加工条目（聚合蛋白 nsp 归属 — 各靶点单独评估页题目/刊头用；历史作业缺省） */
+  processingChains?: UniprotProcessingChain[]
+  /** v2.31：评估区间归属的 nsp 标注（如 "nsp12"；展示名追加 — 同名截短靶点可区分；历史作业缺省） */
+  nspLabel?: string
   geneNames: string[]
   organism: string
   sequenceLength: number
@@ -106,6 +110,8 @@ export interface MergedTargetLite {
   jobId: string
   uniprotId?: string
   proteinName: string
+  /** v2.31：评估区间归属的 nsp 标注（聚合蛋白截短 — 前端展示名追加；历史报告缺省） */
+  nspLabel?: string
   geneNames: string[]
   organism: string
   sequenceLength: number
@@ -148,6 +154,8 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     jobId: t.jobId,
     uniprotId: t.uniprotId,
     proteinName: t.proteinName,
+    // v2.31：nsp 标注（聚合蛋白截短靶点区分）
+    nspLabel: t.nspLabel,
     geneNames: t.geneNames,
     organism: t.organism,
     sequenceLength: t.sequenceLength,
@@ -186,7 +194,7 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
     const job = await db.evaluationJob.findUnique({ where: { id } })
     if (!job || job.status !== 'done') continue
     let summary: {
-      uniprot?: { uniprotId: string; entryName?: string; proteinName: string; geneNames: string[]; organism: string; sequenceLength: number }
+      uniprot?: { uniprotId: string; entryName?: string; proteinName: string; geneNames: string[]; organism: string; sequenceLength: number; processingChains?: UniprotProcessingChain[]; nspLabel?: string }
       scores?: Scores & { rationale: { xray: string; cryoem: string; nmr: string; overall: string } }
       methodStats?: MethodStats; coverage?: number; ligandCount?: number; literatureCount?: number
       blast?: BlastStatusInfo; construct?: ConstructInfo; durationMs?: number; coverageText?: string; gapText?: string
@@ -231,6 +239,9 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       label: job.uniprotId ?? summary.uniprot?.proteinName ?? '未知靶点',
       uniprotId: job.uniprotId ?? undefined,
       proteinName: summary.uniprot?.proteinName || job.uniprotId || '未知靶点',
+      // v2.31：聚合蛋白加工归属（nsp 标注 — 题目/卡片/矩阵区分同名截短靶点）
+      processingChains: summary.uniprot?.processingChains,
+      nspLabel: summary.uniprot?.nspLabel,
       geneNames: summary.uniprot?.geneNames ?? [],
       organism: summary.uniprot?.organism ?? '',
       sequenceLength: summary.uniprot?.sequenceLength ?? 0,
@@ -361,7 +372,9 @@ const SYSTEM = `你是一位资深结构生物学专家（CRO 结构解析项目
 
 function targetDigest(t: MergedTargetData): string {
   const lines: string[] = []
-  lines.push(`### ${t.label}${t.proteinName && t.proteinName !== t.label ? `（${t.proteinName}）` : ''}`)
+  // v2.31：展示名追加 nsp 标注（聚合蛋白截短 — 同名靶点可区分）
+  const dispName = t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName
+  lines.push(`### ${t.label}${dispName && dispName !== t.label ? `（${dispName}）` : ''}`)
   // v2.16：序列靶点身份证据（无 UniProt 归属时 — LLM 用识别名称呼靶点并注明推断性质）
   if (!t.uniprotId && t.targetIdentity) {
     const ti = t.targetIdentity
@@ -1134,7 +1147,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       return `
       <div class="oligo-card">
         <div class="oligo-head">
-          <span class="tgt-inline">${esc(t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''}</span>
+          <span class="tgt-inline">${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)}${t.uniprotId ? `（${t.uniprotId}）` : ''}</span>
           <span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>
           ${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}
           <span class="oligo-conf">置信度：${esc(describeOligoConfidence(o.confidence))}</span>
@@ -1157,8 +1170,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const o = t.oligomer
     const ms = t.methodStats
     return `
-    <div class="tgt-card" data-goto="target-${targetKeyOf(t)}" title="查看 ${esc(t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
-      <div class="tgt-name">${esc(t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : t.targetIdentity ? ` <span class="tgt-idsrc" title="${esc(t.targetIdentity.note ?? t.targetIdentity.sourceLabel)}">${esc(t.targetIdentity.sourceLabel)}${t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}</span>` : ''}</div>
+    <div class="tgt-card" data-goto="target-${targetKeyOf(t)}" title="查看 ${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
+      <div class="tgt-name">${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : t.targetIdentity ? ` <span class="tgt-idsrc" title="${esc(t.targetIdentity.note ?? t.targetIdentity.sourceLabel)}">${esc(t.targetIdentity.sourceLabel)}${t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}</span>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
       <div class="tgt-score">总体 <b>${t.scores.overall.score}</b>/10 · ${esc(t.scores.overall.rating)}${t.scores.llmAdjust ? `<span class="tgt-ai-adj${t.scores.llmAdjust.applied ? '' : ' keep'}" title="${esc(t.scores.llmAdjust.notes.overall || 'AI 复核意见')}">AI 复核${t.scores.llmAdjust.applied ? (() => { const d = Math.trunc(Number(t.scores.llmAdjust!.overall)) || 0; return d > 0 ? ` +${d}` : d < 0 ? ` −${Math.abs(d)}` : '' })() : '维持'}</span>` : ''}${t.scores.oligomerAdjust ? '<span class="tgt-oligo-adj">含聚集形式调整</span>' : ''}</div>
@@ -1222,7 +1235,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const matrixRows = targets.map(t => `
     <tr>
       <td class="td-id">${t.uniprotId ? `<a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : '—'}</td>
-      <td class="t-title">${esc(t.proteinName)}</td>
+      <td class="t-title">${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)}</td>
       <td class="num">${t.directPdbs.length}</td>
       <td class="num">${t.methodStats.bestResolution != null ? t.methodStats.bestResolution.toFixed(2) + 'Å' : '—'}</td>
       <td class="num">${t.coveragePercent}%</td>
@@ -1417,6 +1430,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       uniprot: t.uniprotId ? {
         uniprotId: t.uniprotId, entryName: t.entryName ?? '', proteinName: t.proteinName,
         geneNames: t.geneNames, organism: t.organism, sequenceLength: t.sequenceLength,
+        // v2.31：加工条目（聚合蛋白 nsp 归属 — 单独评估页题目标注与刊头「加工归属」行）
+        processingChains: t.processingChains,
       } : null,
       sequence: '',
       // v2.16：序列靶点身份（题目/刊头用识别名，不再「序列靶点评估」笼统命名）
@@ -1780,7 +1795,7 @@ ${receptorBodyHtml}
   <header class="rpt-head">
     <div class="rpt-eyebrow">TargetEval · Merged Structure Feasibility Report</div>
     <h1 class="rpt-title">${esc(reportTitle)}</h1>
-    <div class="rpt-subtitle">${esc(targets.map(t => t.proteinName).join(' · '))}</div>
+    <div class="rpt-subtitle">${esc(targets.map(t => (t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)).join(' · '))}</div>
     <div class="meta-grid">
       <div><b>靶点数</b> ${targets.length} 个（${esc(relName)} · 置信度${relation.confidence === 'high' ? '高' : relation.confidence === 'medium' ? '中' : '低'}）</div>
       <div><b>PDB 结构合计</b> ${pdbTotal} 个${bestRes != null ? ` · 最佳 ${bestRes.toFixed(2)}Å` : ''}（X-ray ${msAgg.xray} · Cryo-EM ${msAgg.cryoem} · NMR ${msAgg.nmr}）</div>

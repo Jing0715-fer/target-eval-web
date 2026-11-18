@@ -953,9 +953,11 @@ export function useEvaluationFlow() {
       try {
         const report = await fetchBatchReport(id)
         // 各靶点标签：优先取 targets 中的 uniprot/蛋白名；降级用 jobIds 序号
+        // v2.31：蛋白名追加 nsp 标注（聚合蛋白截短 — 同名靶点可区分）
         const labels = (report.targets ?? []).map(t => {
           const id = t.uniprotId || t.jobId?.slice(0, 6) || '?'
-          return t.proteinName ? `${id} · ${t.proteinName}` : `靶点 ${id}`
+          const dispName = t.proteinName ? (t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName) : null
+          return dispName ? `${id} · ${dispName}` : `靶点 ${id}`
         })
         while (labels.length < report.jobIds.length) {
           labels.push(`靶点 ${report.jobIds[labels.length]?.slice(0, 6) ?? '?'}`)

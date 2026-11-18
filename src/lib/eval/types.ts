@@ -63,6 +63,20 @@ export interface UniprotInfo {
   keywords?: string[]
   /** PDB 交叉引用的 UniProt 残基编号范围（pdbId → Chains 原值，如 "A=695-1022"） */
   pdbChainRanges?: Record<string, string>
+  /** v2.31：PTM/Processing 分子加工条目（UniProt「Molecule processing」— Chain/Peptide
+   *  features；聚合蛋白的蛋白酶切割产物区段，如 P0DTD1 的 nsp1-16，不含覆盖全长的
+   *  条目自身链）。评估区间据此标注 nsp 归属 — 报告题目区分同名截短靶点 */
+  processingChains?: UniprotProcessingChain[]
+}
+
+/** v2.31：PTM/Processing 分子加工条目（聚合蛋白蛋白酶切割产物区段） */
+export interface UniprotProcessingChain {
+  /** 加工产物名（如 "RNA-directed RNA polymerase nsp12" / "Non-structural protein 2"） */
+  name: string
+  /** 区段起点（UniProt 残基编号，1-based 闭区间） */
+  begin: number
+  /** 区段终点 */
+  end: number
 }
 
 // ─── PDB（RCSB + PDBe 合并视角）───────────────────────────────────────────────
@@ -632,6 +646,10 @@ export interface JobSummary {
     geneNames: string[]
     organism: string
     sequenceLength: number
+    /** v2.31：PTM/Processing 分子加工条目（聚合蛋白切割产物区段 — nsp 归属计算用；历史作业缺省） */
+    processingChains?: UniprotProcessingChain[]
+    /** v2.31：评估区间归属的 nsp 标注（如 "nsp5" / "nsp12-nsp16"；题目/列表区分同名截短靶点；历史作业缺省） */
+    nspLabel?: string
   }
   directPdbCount: number
   blastHitCount: number

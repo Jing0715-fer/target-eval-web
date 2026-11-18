@@ -15,6 +15,7 @@ import { describeBlastStatus } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
+import { matchProcessingSegments } from './uniprot'
 
 export interface ReportContext {
   uniprot: UniprotInfo | null
@@ -147,6 +148,12 @@ function buildDigest(ctx: ReportContext): string {
             ? '（结构域名匹配推导）'
             : ''
       lines.push(`评估范围: 残基 ${ctx.range[0]}-${ctx.range[1]}${srcNote}（仅分析与该区间重叠的结构）`)
+      // v2.31：聚合蛋白加工归属（PTM/Processing）— 截短区间的 nsp 标注
+      // （如 P0DTD1 不同截短均名 Replicase polyprotein 1ab — 归属 nsp12 后可区分）
+      const procMatch = matchProcessingSegments(ctx.range, u.processingChains, u.sequenceLength)
+      if (procMatch) {
+        lines.push(`加工归属（UniProt PTM/Processing）: ${procMatch.note}${procMatch.nspLabel ? ` — 报告题目与正文用「${u.proteinName} ${procMatch.nspLabel}」称呼该靶点（聚合蛋白的蛋白酶切割产物区段，非独立 UniProt 条目）` : ''}`)
+      }
     }
     if (u.functionText) lines.push(`功能注释: ${u.functionText.slice(0, 600)}`)
     if (u.subcellularLocations?.length) lines.push(`亚细胞定位: ${u.subcellularLocations.join('; ')}`)

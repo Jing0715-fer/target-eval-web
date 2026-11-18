@@ -29,6 +29,25 @@ import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb 
 import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { matchProcessingSegments, type ProcessingSegmentMatch } from './uniprot'
+
+// ─── v2.31 聚合蛋白加工归属（PTM/Processing）────────────────────────────────
+
+/** 报告题目 nsp 标注后缀（"Replicase polyprotein 1ab nsp12"；非聚合蛋白/全长时空串） */
+function nspTitleSuffix(
+  u: Pick<UniprotInfo, 'processingChains' | 'sequenceLength'> | null | undefined,
+  range?: [number, number],
+): string {
+  const m = matchProcessingSegments(range, u?.processingChains, u?.sequenceLength)
+  return m?.nspLabel ? ` ${m.nspLabel}` : ''
+}
+
+/** 刊头「加工归属」行（评估区间在聚合蛋白中的蛋白酶切割产物归属 — meta-grid） */
+function processingRowHtml(m: ProcessingSegmentMatch): string {
+  const names = m.segments.slice(0, 3).map(s => `${s.name}（${s.begin}-${s.end}）`).join('、')
+  const more = m.segments.length > 3 ? ` 等 ${m.segments.length} 段` : ''
+  return `<div><b>加工归属</b> <span title="评估区间在聚合蛋白中的蛋白酶切割产物归属 — 源自 UniProt PTM/Processing（Molecule processing）注释">${esc(m.nspLabel ? `${m.nspLabel} · ` : '')}${esc(names + more)}</span></div>`
+}
 
 // ─── v2.7.3 响应式版心（单源规则）────────────────────────────────────────────
 //  版心随视口分级放宽（920 → 1088 → 1224 → 1360 → 1480 → 1600），宽屏两侧不再大片留白；
@@ -1422,8 +1441,9 @@ const LIT_PREVIEW = 10
 
 export type SingleBodyCtx = Omit<ReportContext, 'sequence' | 'uniprot'> & {
   sequence?: string
-  /** 报告主体仅消费刊头元信息字段 — 合并报告从作业摘要重建时无需完整 UniprotInfo */
-  uniprot?: Pick<UniprotInfo, 'uniprotId' | 'entryName' | 'proteinName' | 'geneNames' | 'organism' | 'sequenceLength'> | null
+  /** 报告主体仅消费刊头元信息字段 — 合并报告从作业摘要重建时无需完整 UniprotInfo
+   *  v2.31：补 processingChains（聚合蛋白 nsp 归属 — 题目标注与刊头「加工归属」行） */
+  uniprot?: Pick<UniprotInfo, 'uniprotId' | 'entryName' | 'proteinName' | 'geneNames' | 'organism' | 'sequenceLength' | 'processingChains'> | null
 }
 
 /** v2.13：合并报告嵌入模式（各靶点单独评估页复用单靶点报告主体 — 格式一模一样） */
@@ -1490,8 +1510,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   // v2.16：序列靶点有身份识别（评估表名/nr 识别/同源推断）时题目用识别名 —
   // 不再笼统写「序列靶点评估」；后缀注明识别来源与一致性（评估表来源无后缀）
   const ti = ctx.targetIdentity
+  // v2.31：聚合蛋白截短题目标注（P0DTD1 不同截短均为「Replicase polyprotein 1ab」—
+  // 从 PTM/Processing 加工条目归属 nsp，题目区分同名截短靶点）
+  const nspSuffix = nspTitleSuffix(u, ctx.range)
+  const procMatch = u ? matchProcessingSegments(ctx.range, u.processingChains, u.sequenceLength) : null
   const proteinTitle = u
-    ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspSuffix}（${u.uniprotId}${rangeSuffix}）`
     : ti
       ? `${ti.name}（序列靶点${targetIdentityTitleSuffix(ti)}${rangeSuffix}）`
       : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
@@ -2044,6 +2068,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <div class="meta-grid">
       <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
       <div><b>蛋白名称</b> ${esc(u?.proteinName ?? ctx.targetIdentity?.name ?? '—')}</div>
+      ${procMatch ? processingRowHtml(procMatch) : ''}
       <div><b>基因</b> ${esc(geneStr)}</div>
       <div><b>物种</b> ${esc(u?.organism ?? ctx.targetIdentity?.organism ?? '—')}</div>
       <div><b>序列长度</b> ${u ? u.sequenceLength + ' aa' : ctx.sequence ? ctx.sequence.length + ' aa' : '—'}</div>
@@ -2559,7 +2584,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const u = input.ctx.uniprot
   const rangeSuffix = input.ctx.range ? ` · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : ''
   const proteinTitle = u
-    ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspTitleSuffix(u, input.ctx.range)}（${u.uniprotId}${rangeSuffix}）`
     : input.ctx.targetIdentity
       ? `${input.ctx.targetIdentity.name}（序列靶点${targetIdentityTitleSuffix(input.ctx.targetIdentity)}${rangeSuffix}）`
       : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')

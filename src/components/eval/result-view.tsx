@@ -555,6 +555,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </p>
         <h1 className="text-2xl leading-snug font-semibold tracking-[-0.02em] text-foreground sm:text-[28px]">
           {u.proteinName || u.entryName || u.uniprotId}
+          {/* v2.31：聚合蛋白截短的 nsp 标注（如 P0DTD1 不同 nsp 构建 — 同名靶点可区分） */}
+          {u.nspLabel && <span className="ml-1.5 font-mono text-[0.72em] font-semibold text-primary">{u.nspLabel}</span>}
         </h1>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-xs text-muted-foreground">
           {u.entryName && <span className="font-semibold">{u.entryName}</span>}
@@ -1446,7 +1448,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <DialogHeader className="flex-row items-center justify-between gap-4 border-b border-border px-5 py-3 pr-14 text-left">
             <div className="flex flex-col gap-0.5">
               <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-[-0.01em]">
-                评估报告 · {u.proteinName || u.uniprotId}
+                评估报告 · {u.proteinName || u.uniprotId}{u.nspLabel ? ` ${u.nspLabel}` : ''}
               </DialogTitle>
               <DialogDescription className="font-mono text-[11px] text-muted-foreground/70">
                 完整 HTML 报告 · 可直接打印

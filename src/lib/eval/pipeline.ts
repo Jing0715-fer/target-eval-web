@@ -24,7 +24,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
-import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput } from './uniprot'
+import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput, matchProcessingSegments } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges, restrictCoverageToRange, uncoveredRangesWithin } from './pdbe'
 import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, type BlastPollState, type BlastNrHit } from './blast'
@@ -2167,6 +2167,16 @@ class SegmentRunner {
 
     // ─── 持久化 ──────────────────────────────────────────────────────────────
     const durationMs = Date.now() - st.t0
+    // v2.31：评估区间 → PTM/Processing 加工条目归属（聚合蛋白如 P0DTD1 的 nsp 标注 —
+    // 同名截短靶点的题目/列表区分依据；非聚合蛋白或全长提交时缺省）
+    const processingMatch = matchProcessingSegments(
+      this.effectiveRange(),
+      st.uniprotInfo?.processingChains,
+      st.uniprotInfo?.sequenceLength,
+    )
+    if (processingMatch?.nspLabel) {
+      this.log(`截短区间归属 ${processingMatch.nspLabel}（UniProt PTM/Processing 加工注释）— 报告题目标注为「${st.uniprotInfo?.proteinName ?? ''} ${processingMatch.nspLabel}」`)
+    }
     const summary: JobSummary = {
       uniprot: {
         uniprotId: st.uniprotInfo?.uniprotId ?? '',
@@ -2177,6 +2187,9 @@ class SegmentRunner {
         geneNames: st.uniprotInfo?.geneNames ?? st.insights?.geneNames ?? [],
         organism: st.uniprotInfo?.organism ?? st.targetIdentity?.organism ?? st.insights?.organism ?? '',
         sequenceLength: st.uniprotInfo?.sequenceLength ?? st.sequence.length,
+        // v2.31：加工条目 + nsp 标注（合并报告/前端展示/历史重渲染计算用）
+        processingChains: st.uniprotInfo?.processingChains,
+        nspLabel: processingMatch?.nspLabel,
       },
       directPdbCount: st.directPdbs.length,
       blastHitCount: st.blastHits.length,
@@ -2244,7 +2257,8 @@ class SegmentRunner {
         where: { id: this.input.jobId },
         data: {
           status: 'done',
-          title: summary.uniprot.proteinName,
+          // v2.31：标题追加 nsp 标注 — 同一聚合蛋白的不同截短构建在历史列表可区分
+          title: summary.uniprot.proteinName + (summary.uniprot.nspLabel ? ` ${summary.uniprot.nspLabel}` : ''),
           uniprotId: st.uniprotInfo?.uniprotId ?? null,
           summary: JSON.stringify(summary),
           pdbs: JSON.stringify(st.directPdbs),

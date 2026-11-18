@@ -3,7 +3,7 @@
  * 内存策略：一次请求取回整个 JSON，提取小字段后即释放；apiCache 缓存。
  */
 import { cachedJsonFetch } from './cache'
-import type { UniprotInfo, UniprotFeature } from './types'
+import type { UniprotInfo, UniprotFeature, UniprotProcessingChain } from './types'
 import { cleanSequence, looksLikeProteinSequence } from './types'
 
 interface UniprotRaw {
@@ -75,6 +75,22 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
 
   const sequence = raw.sequence?.value ?? ''
   const sequenceLength = raw.sequence?.length ?? sequence.length
+
+  // v2.31：PTM/Processing 分子加工条目（UniProt「Molecule processing」— Chain/Peptide
+  // features）。聚合蛋白（如 SARS-CoV-2 P0DTD1 Replicase polyprotein 1ab）的蛋白酶
+  // 切割产物区段（nsp1-16 等）从这里来 — 评估区间（截短构建/BLAST 推导）据此标注
+  // nsp 归属，报告题目区分同名截短靶点。覆盖全长的链 = 条目自身，不算加工产物。
+  const processingChains: UniprotProcessingChain[] = []
+  for (const f of raw.features ?? []) {
+    if (f.type !== 'Chain' && f.type !== 'Peptide') continue
+    const begin = f.location?.start?.value ?? 0
+    const end = f.location?.end?.value ?? 0
+    const name = (f.description ?? '').trim()
+    if (!begin || !end || end < begin || !name) continue
+    if (begin <= 1 && end >= sequenceLength) continue
+    processingChains.push({ name, begin, end })
+    if (processingChains.length >= 40) break // 防御上限
+  }
 
   // features：结构域/跨膜/信号肽/活性位点/重复序列等关键类型
   // v2.29：补 Topological domain（胞外域/胞内域等拓扑区段 — 评估表「结构域名 →
@@ -176,7 +192,89 @@ export async function fetchUniprotInfo(uniprotId: string): Promise<UniprotInfo |
     features,
     keywords,
     pdbChainRanges,
+    processingChains: processingChains.length ? processingChains : undefined,
   }
+}
+
+// ─── v2.31：评估区间 → PTM/Processing 加工条目归属 ───────────────────────────
+
+/** 加工产物名中的 nsp 编号 — 两种命名风格：
+ *  "RNA-directed RNA polymerase nsp12" / "nsP1"（显式 nspN）
+ *  "Non-structural protein 6"（冠状病毒聚合蛋白的常见写法，无 nsp 字样） */
+const NSP_NUM_RE = /nsp\s*0*(\d{1,2})/i
+const NSP_NUM_RE2 = /non-?structural\s+protein\s*0*(\d{1,2})/i
+
+function nspNumOf(name: string): number | undefined {
+  const m = NSP_NUM_RE.exec(name) ?? NSP_NUM_RE2.exec(name)
+  return m ? Number(m[1]) : undefined
+}
+
+/** 评估区间与加工条目的归属匹配结果 */
+export interface ProcessingSegmentMatch {
+  /** 与评估区间重叠的加工条目（begin 升序） */
+  segments: UniprotProcessingChain[]
+  /** 各段名中解析出的 nsp 编号（与 segments 一一对应；无名者 undefined） */
+  nspNumbers: Array<number | undefined>
+  /** 标题 nsp 标注：所有匹配段均带 nsp 编号时生成（"nsp5" / "nsp5-nsp9" / "nsp3/nsp5"） */
+  nspLabel?: string
+  /** 展示/LLM 用说明（如 "RNA-directed RNA polymerase nsp12（残基 4393-5324）"） */
+  note: string
+}
+
+/**
+ * v2.31：评估区间（截短构建/BLAST 推导）→ 聚合蛋白加工条目归属。
+ *
+ * 背景：同一 UniProt 条目（如 SARS-CoV-2 P0DTD1 Replicase polyprotein 1ab）的
+ * 不同截短构建题目全部同名 — 从 UniProt PTM/Processing 的分子加工注释识别
+ * 蛋白酶切割产物区段（nsp1-16 的残基范围），将评估区间覆盖的 nsp 标注到
+ * 报告题目（「Replicase polyprotein 1ab nsp12」），区分同名截短靶点。
+ *
+ * 边界口径：区间与区段重叠 ≥5 aa 且 ≥ 区段长 5% 才算覆盖（BLAST 比对端点
+ * 抖动/标签头残留导致的少量越界不误判）；近全长（≥98%）提交不标注。
+ */
+export function matchProcessingSegments(
+  range: Readonly<[number, number]> | null | undefined,
+  chains: readonly UniprotProcessingChain[] | null | undefined,
+  fullLength?: number,
+): ProcessingSegmentMatch | null {
+  if (!range || !chains || chains.length < 2) return null
+  // 近全长提交（覆盖 ≥98% 全序列）与全长无实质差别 — 不标注
+  if (fullLength && fullLength > 0 && range[1] - range[0] + 1 >= fullLength * 0.98) return null
+  const segments = chains
+    .filter(c => {
+      const segLen = c.end - c.begin + 1
+      const ov = Math.min(range[1], c.end) - Math.max(range[0], c.begin) + 1
+      return ov > 0 && ov >= 5 && ov >= segLen * 0.05
+    })
+    .sort((a, b) => a.begin - b.begin)
+  if (!segments.length) return null
+
+  const nspNumbers = segments.map(c => nspNumOf(c.name))
+
+  // nsp 标注：所有匹配段都带编号时生成（连续编号合并为区间，断档用 / 分隔）
+  let nspLabel: string | undefined
+  if (nspNumbers.every(n => n != null)) {
+    const nums = [...new Set(nspNumbers.filter((n): n is number => n != null))].sort((a, b) => a - b)
+    const parts: string[] = []
+    let i = 0
+    while (i < nums.length) {
+      let j = i
+      while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++
+      parts.push(i === j ? `nsp${nums[i]}` : `nsp${nums[i]}-nsp${nums[j]}`)
+      i = j + 1
+    }
+    nspLabel = parts.join('/')
+  }
+
+  const segText = segments
+    .slice(0, 8)
+    .map(c => `${c.name}（残基 ${c.begin}-${c.end}）`)
+    .join('、') + (segments.length > 8 ? ` 等 ${segments.length} 段` : '')
+  const note = nspLabel
+    ? `评估区间归属 ${nspLabel}：${segText}`
+    : `评估区间覆盖加工产物：${segText}`
+
+  return { segments, nspNumbers, nspLabel, note }
 }
 
 /** 若序列未知来源，尝试用 BLAST 式的 UniProt 精确肽段搜索定位 accession（best effort）。 */

@@ -161,7 +161,7 @@ function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }
       <span className="rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary">
         {t.uniprotId ?? '—'}
       </span>
-      <span className="text-sm font-semibold text-foreground">{t.proteinName}</span>
+      <span className="text-sm font-semibold text-foreground">{t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}</span>
       {/* v2.16：序列靶点身份徽标（无 UniProt 归属 — 识别来源与一致性） */}
       {!t.uniprotId && t.targetIdentity && (
         <span
@@ -239,7 +239,7 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 border-b border-border/70 bg-muted/30 px-4 py-3">
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-foreground font-mono text-[11px] font-bold text-background">{index + 1}</span>
-        <span className="text-sm font-semibold text-foreground">{t.proteinName}</span>
+        <span className="text-sm font-semibold text-foreground">{t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}</span>
         {t.uniprotId ? (
           <a
             href={`https://www.uniprot.org/uniprotkb/${t.uniprotId}`}
@@ -731,7 +731,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                   <div key={t.jobId} className="flex flex-col gap-2.5 rounded-xl border border-border bg-card px-5 py-4">
                     <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-sm font-semibold text-foreground">
-                        {t.proteinName}
+                        {t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}
                         {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground/70">{t.uniprotId}</span>}
                       </span>
                       <span className={cn('inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-semibold', badgeCls)}>{catZh}</span>

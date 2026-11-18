@@ -125,7 +125,9 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[]): Promise<
       jobId: job.id,
       label: (entry.label || job.uniprotId || job.title || job.id).slice(0, 60),
       uniprotId: job.uniprotId ?? undefined,
-      proteinName: String(uni.proteinName || job.uniprotId || entry.label || '未知靶点').slice(0, 80),
+      proteinName: String(uni.proteinName || job.uniprotId || entry.label || '未知靶点').slice(0, 80)
+        // v2.31：聚合蛋白截短追加 nsp 标注（同名靶点行可区分 — 如 P0DTD1 的不同 nsp 构建）
+        + (uni.nspLabel ? ` ${String(uni.nspLabel).slice(0, 24)}` : ''),
       organism: String(uni.organism ?? ''),
       range: Array.isArray(range) && range.length === 2 && range[0] >= 1 && range[1] >= range[0] ? [range[0], range[1]] : undefined,
       overall: num(scores.overall?.score),
