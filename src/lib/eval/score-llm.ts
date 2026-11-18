@@ -38,6 +38,8 @@ export interface ScoreReviewInput extends ScoreInput {
   ligandCount?: number
   /** 文献量（规则未消费） */
   literatureCount?: number
+  /** v2.33：binary 互作伙伴可信度分级摘要（如 "3 个：SKP1（同源复合物支持 2 个）…"；规则层已在评分中 gating，复核层作语境） */
+  interactionBinarySummary?: string
 }
 
 export interface ScoreReviewProposal {
@@ -105,6 +107,7 @@ function buildReviewDigest(input: ScoreReviewInput, scores: FullScoreResult): st
   if (oligo) lines.push(`- 聚集形式：${oligo.label}${oligo.stoichiometry ? `（${oligo.stoichiometry}）` : ''}，置信度 ${oligo.confidence} — 规则调整 X-ray ${oligo.xray >= 0 ? '+' : ''}${oligo.xray} / Cryo-EM ${oligo.cryoem >= 0 ? '+' : ''}${oligo.cryoem} / NMR ${oligo.nmr >= 0 ? '+' : ''}${oligo.nmr}：${oligo.note}`)
   if (mwAdj) lines.push(`- 分子量增重：单体 ~${mwAdj.monomerKda} kDa${mwAdj.assemblyKda != null ? ` → 装配 ~${mwAdj.assemblyKda} kDa（${mwAdj.assemblyPath}）` : ''} — Cryo-EM 调整 ${mwAdj.cryoem >= 0 ? '+' : ''}${mwAdj.cryoem}：${mwAdj.note}`)
   if (intAdj) lines.push(`- 互作复合物证据（${intAdj.level}）：X-ray ${intAdj.xray >= 0 ? '+' : ''}${intAdj.xray} / Cryo-EM ${intAdj.cryoem >= 0 ? '+' : ''}${intAdj.cryoem} / NMR ${intAdj.nmr >= 0 ? '+' : ''}${intAdj.nmr}：${intAdj.note}`)
+  if (input.interactionBinarySummary) lines.push(`- binary 互作可信度分级（v2.33）：${input.interactionBinarySummary}`)
   const extra: string[] = []
   if (input.ligandCount) extra.push(`配体种类 ${input.ligandCount} 种`)
   if (input.literatureCount != null) extra.push(`文献 ${input.literatureCount} 篇`)
@@ -115,6 +118,7 @@ function buildReviewDigest(input: ScoreReviewInput, scores: FullScoreResult): st
   lines.push('- 已有结构的构象/配体态单一性（如全部为同一配体态 → 未覆盖状态仍是风险，但已解析状态是强先例）')
   lines.push('- 结构域组合与柔性 linker 对结晶/成像的实际影响（超出规则中长度/结构域数的粗粒度判断）')
   lines.push('- 方法学先例分布与靶点真实状态的匹配度（如先例全部为复合物形式时单体路线的现实性）')
+  lines.push('- binary 互作蛋白可信度：仅复合物结构（靶点与伙伴共 PDB）或同源复合物结构支持的互作才可完全信任；仅实验互作证据（IntAct）的伙伴不得作为「可用增大分子量做 Cryo-EM」的可信依据 — 不得据此上调 Cryo-EM 分数')
   return lines.join('\n')
 }
 

@@ -1256,15 +1256,33 @@ function complexCardHtml(c: InteractionComplexInfo, expandAll = false): string {
   </div>`
 }
 
+/** v2.33 binary 互作可信度 chip（复合物结构 / 同源复合物结构 / 仅实验证据） */
+function evidenceChipHtml(level: string | undefined): string {
+  if (level === 'complex') return '<span class="ev-chip ev-complex">复合物结构</span>'
+  if (level === 'homolog') return '<span class="ev-chip ev-homolog">同源复合物结构</span>'
+  return '<span class="ev-chip ev-exp">仅实验证据</span>'
+}
+
 /** 互作复合物证据全景（v1.30 接入 PDB 章节）：curated 复合物卡片（共有突出/单独折叠）+ binary 伙伴 */
 export function interactionEvidenceHtml(itx: InteractionAnalysis | null | undefined, expandAll = false): string {
   if (!itx || !itx.applicable || !itx.hasEvidence) return ''
   const complexes = itx.complexes.map(c => complexCardHtml(c, expandAll)).join('')
+  const structuralCount = itx.binaryPartners.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog').length
   const binaries = itx.binaryPartners.length ? `
   <details class="fold">
-    <summary>IntAct binary 互作伙伴（复合物之外，${itx.binaryPartners.length} 个有结构 — 互作界面参考，默认折叠）</summary>
-    <ul class="mw-list">${itx.binaryPartners.map(b => `<li><b>${esc(b.geneName ?? b.accession)}</b> <span class="mono">${esc(b.accession)}</span> — ${b.pdbCount} 个结构${b.representativePdbs.length ? `（${b.representativePdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}）` : ''}</li>`).join('')}</ul>
-    <p class="note">binary 互作（IntAct 实验证据）伙伴有结构 — 互作界面建模与 pull-down/SPR 验证设计可参考，非 curated 复合物，化学计量需实验确认。</p>
+    <summary>IntAct binary 互作伙伴（复合物之外 ${itx.binaryPartners.length} 个 · 可信度分级：${structuralCount} 个有结构证据 / ${itx.binaryPartners.length - structuralCount} 个仅实验证据 — 默认折叠）</summary>
+    <ul class="mw-list">${itx.binaryPartners.map(b => {
+      const evPdbs = b.evidencePdbs ?? []
+      const evCount = b.evidencePdbCount ?? 0
+      const evidenceHtml = (b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog') && evCount > 0
+        ? `${evCount} 个证据结构${evPdbs.length ? `（${evPdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}${evCount > evPdbs.length ? ` 等` : ''}）` : ''}`
+        : '无复合物结构/同源结构支持'
+      const partnerOwn = b.pdbCount > 0
+        ? `${b.pdbCount} 个结构${b.representativePdbs.length ? `（代表：${b.representativePdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}）` : ''} — 伙伴条目自身`
+        : '无结构'
+      return `<li><b>${esc(b.geneName ?? b.accession)}</b> <span class="mono">${esc(b.accession)}</span>${evidenceChipHtml(b.evidenceLevel)}— 互作证据：${evidenceHtml}；伙伴自身 ${partnerOwn}${b.evidenceNote ? `<br><span class="ev-note">${esc(b.evidenceNote)}</span>` : ''}</li>`
+    }).join('')}</ul>
+    <p class="note">可信度口径（v2.33）：仅当存在<b>复合物结构</b>（靶点与伙伴出现在同一 PDB 条目）或<b>同源复合物结构</b>（靶点同源链与伙伴/伙伴同源基因共结构）时，binary 互作才可完全信任并用于共表达增重路线设计与分子量估算；仅有实验互作证据（IntAct）的伙伴可信度有限 — <b>不应据此认定可用于增大蛋白分子量做 Cryo-EM</b>，如需采用须先 pull-down/SPR/SEC-MALS 验证互作、化学计量与组装效率。伙伴自身结构仅代表该伙伴条目已解析，不构成靶点-伙伴互作的结构证据。</p>
   </details>` : ''
   return `
   <h3 class="itx-h3">互作复合物组分结构 <span class="itx-h3-sub">Complex Portal curated · ${itx.complexes.length} 个复合物</span></h3>
@@ -1702,7 +1720,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   // v1.26/v1.27：分子量增重策略（小分子量靶点）— 评分卡内嵌（不单独成章，与聚集形式同区呈现）
   const mwA = ctx.mwAugment
   const mwAdj = ctx.scores.mwAugmentAdjust
-  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? (mwA.assemblyEvidence === 'complex' ? '互作伙伴推断（复合物结构支持）' : mwA.assemblyEvidence === 'homolog' ? '互作伙伴推断（同源复合物结构支持）' : '互作伙伴推断') : '无生物装配路径'
   const mwBadgeColor = mwA?.assemblyPath === 'homolog-complex'
     ? (mwA.assemblyKda != null && mwA.assemblyKda >= 100 ? '#0f766e' : '#b45309')
     : mwA?.assemblyKda != null && mwA.assemblyKda >= 100 ? '#065f46' : mwA?.assemblyKda != null && mwA.assemblyKda >= 50 ? '#b45309' : '#78716c'
@@ -1746,8 +1764,8 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
             </tr>`).join('')}</tbody>
         </table></div>` : ''}
         ${(() => { const ps = mwA.partners.filter(p => p.kda != null); return ps.length ? `
-        <p class="note"><b>UniProt 互作伙伴</b>（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
-        <ul class="mw-list">${ps.slice(0, 8).map(p => `<li><span class="mw-partner">${esc((p.geneName ?? p.proteinName ?? p.accession).slice(0, 40))}</span> <span class="mono">${esc(p.accession)}</span> — ${p.lengthAa} aa，~${p.kda} kDa${mwA.assemblyPath === 'partner' ? '（已按最大伙伴计入装配估计）' : ''}</li>`).join('')}</ul>` : '' })()}
+        <p class="note"><b>UniProt 互作伙伴</b>（按 1:1 估计；v2.33 可信度分级 — 仅复合物/同源复合物结构证据支持的伙伴计入装配估计，其余仅作参考并警示）</p>
+        <ul class="mw-list">${ps.slice(0, 8).map(p => `<li><span class="mw-partner">${esc((p.geneName ?? p.proteinName ?? p.accession).slice(0, 40))}</span> <span class="mono">${esc(p.accession)}</span>${evidenceChipHtml(p.evidenceLevel)}— ${p.lengthAa} aa，~${p.kda} kDa${p.evidencePdbIds?.length ? `（证据：${p.evidencePdbIds.map(id => `<a href="https://www.rcsb.org/structure/${id}" target="_blank" rel="noopener">${id}</a>`).join(' ')}）` : (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog') ? '' : '（无结构证据支持，未计入装配估计 — 不可据此认定可用于 Cryo-EM 增重）'}${mwA.assemblyPath === 'partner' && (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog') && p.kda === Math.max(...ps.filter(x => x.evidenceLevel === 'complex' || x.evidenceLevel === 'homolog').map(x => x.kda ?? 0)) ? '（已计入装配估计）' : ''}</li>`).join('')}</ul>` : '' })()}
         <p class="note"><b>技术增重工具箱</b>（无生物装配路径时的兜底策略；需评估开发周期）</p>
         <ul class="mw-list">${mwA.options.map(o => `<li><b>${esc(o.name)}</b>（${esc(o.addKda)}）— ${esc(o.note)}</li>`).join('')}</ul>
         ${mwA.conflicts.length ? `
@@ -1845,9 +1863,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     ? (() => {
         const best = ctx.interaction!.complexes[0]
         const val = best ? best.complexAc : 'binary 伙伴'
+        const binStruct = ctx.interaction!.binaryPartners.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog').length
         const sub = best
           ? `${best.componentsWithStructure}/${best.components.length - 1} 组分有结构${best.sharedPdbTotal ? ` · 共有 ${best.sharedPdbTotal}` : ''}${best.assemblyKda != null ? ` · 装配 ~${best.assemblyKda} kDa` : ''}`
-          : `${ctx.interaction!.binaryPartners.length} 个伙伴有结构`
+          : ctx.interaction!.binaryPartners.length
+            ? `${ctx.interaction!.binaryPartners.length} 个伙伴 · ${binStruct} 个有结构证据可信`
+            : 'binary 伙伴均无结构'
         return `<div class="glance-tile"><div class="gt-label">互作复合物</div><div class="gt-value">${esc(val)}</div><div class="gt-sub">${esc(sub)} · ${best ? 'Complex Portal' : 'IntAct'}</div></div>`
       })()
     : ''
@@ -2424,6 +2445,12 @@ export const SINGLE_REPORT_CSS = `  :root {
   .mw-target { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; border-radius:3px; padding:0 5px; font-weight:600; }
   .mw-partner { background:#fffbeb; color:#92400e; border:1px solid #fde68a; border-radius:3px; padding:0 5px; font-weight:600; }
   .mw-basis { font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  /* ── v2.33 binary 互作可信度分级 chips ── */
+  .ev-chip { display:inline-block; margin:0 6px; padding:0 7px; border-radius:99px; font-family:var(--mono); font-size:10px; font-weight:700; vertical-align:1px; }
+  .ev-complex { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
+  .ev-homolog { background:#f0fdfa; color:#0f766e; border:1px solid #99f6e4; }
+  .ev-exp { background:#fef3c7; color:#b45309; border:1px solid #fde68a; }
+  .ev-note { font-family:var(--mono); font-size:10.5px; color:var(--faint); }
   ul.mw-list { list-style:none; margin:2px 0 10px; }
   ul.mw-list li { position:relative; padding:5px 0 5px 16px; border-bottom:1px solid var(--hairline); font-size:12.5px; color:var(--sub); line-height:1.7; }
   ul.mw-list li:last-child { border-bottom:none; }

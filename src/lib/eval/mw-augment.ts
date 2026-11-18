@@ -23,6 +23,7 @@
  * 同源扩展两阶段），全部防御式降级，失败不阻塞主管线（返回已有数据 + 说明）。
  */
 import { cachedJsonFetch } from './cache'
+import { evaluateBinaryEvidence, type BinaryEvidence } from './binary-evidence'
 import type {
   BlastHit,
   MwAugmentAnalysis,
@@ -567,6 +568,8 @@ export interface MwAugmentInput {
   blastHits?: BlastHit[]
   /** v1.27：同源复合物扩展检索结果（第二阶段填充 — fetchHomologComplexInfo 产出） */
   homologSearch?: { searched: number; complexes: HomologComplexInfo[] }
+  /** v2.33：binary 互作伙伴可信度评估结果（analyzeMwAugmentation 拉取；无结构证据的伙伴不计入可靠装配估计） */
+  partnerEvidence?: Map<string, BinaryEvidence>
 }
 
 /** 单体分子量区间解读 */
@@ -679,17 +682,25 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
     : null
   const oligoAssemblyKda = oligoCopies != null && oligoCopies >= 2 ? Math.round(monomerKda * oligoCopies) : null
 
-  // ── 路径 3：互作伙伴（1:1 二元装配估计）──
+  // ── 路径 3：互作伙伴（1:1 二元装配估计）— v2.33 可信度 gating ──
+  // 用户需求：binary 互作蛋白可信度需谨慎评估 — 只有存在复合物结构或同源结构
+  // 才可完全信任；否则不应据此认为互作可用于增大蛋白分子量做 Cryo-EM。
+  // → 仅 evidenceLevel ∈ {complex, homolog} 的伙伴可计入可靠装配估计；
+  //   仅实验证据的伙伴保留展示（低可信警示），不再按共装配抬升 assemblyKda。
   const partners = input.partners.map(p => ({
     accession: p.accession,
     geneName: p.geneName,
     proteinName: p.proteinName,
     lengthAa: p.lengthAa,
     kda: p.lengthAa != null ? aaToKda(p.lengthAa) : undefined,
+    evidenceLevel: input.partnerEvidence?.get(p.accession)?.level,
+    evidencePdbIds: input.partnerEvidence?.get(p.accession)?.evidencePdbIds.slice(0, 3),
   }))
   const sizedPartners = partners.filter(p => p.kda != null && p.kda >= 10)
-  const largestPartner = sizedPartners.reduce<typeof partners[number] | null>((best, p) => (!best || (p.kda ?? 0) > (best.kda ?? 0)) ? p : best, null)
-  const partnerAssemblyKda = largestPartner?.kda != null ? Math.round(monomerKda + largestPartner.kda) : null
+  const trustedPartners = sizedPartners.filter(p => p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog')
+  const largestTrusted = trustedPartners.reduce<typeof partners[number] | null>((best, p) => (!best || (p.kda ?? 0) > (best.kda ?? 0)) ? p : best, null)
+  const partnerAssemblyKda = largestTrusted?.kda != null ? Math.round(monomerKda + largestTrusted.kda) : null
+  let assemblyEvidence: MwAugmentAnalysis['assemblyEvidence'] = null
 
   // ── 装配路径择优（分子量最高者为有效装配）──
   let assemblyKda: number | null = null
@@ -707,8 +718,9 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
   } else if (partnerAssemblyKda != null) {
     assemblyKda = partnerAssemblyKda
     assemblyPath = 'partner'
-    const p = largestPartner!
-    assemblyBasis = `UniProt 互作伙伴推断：单体 + ${p.geneName ?? p.proteinName ?? p.accession}（${p.accession}，~${p.kda} kDa）按 1:1 估计 = ~${partnerAssemblyKda} kDa（无结构先例，实际化学计量需 SEC-MALS 验证）`
+    const p = largestTrusted!
+    assemblyEvidence = p.evidenceLevel ?? null
+    assemblyBasis = `互作伙伴推断（${p.evidenceLevel === 'complex' ? '复合物结构支持' : '同源复合物结构支持'}${p.evidencePdbIds?.length ? `：${p.evidencePdbIds.join('、')}` : ''}）：单体 + ${p.geneName ?? p.proteinName ?? p.accession}（${p.accession}，~${p.kda} kDa）按 1:1 估计 = ~${partnerAssemblyKda} kDa（实际化学计量需 SEC-MALS 验证）`
   }
 
   // ── v1.27 路径 4：同源复合物推断（BLAST 扩展检索 — 直接路径装配均不足 50 kDa 时接管）──
@@ -738,7 +750,9 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
       ? `直接路径（寡聚/已有复合物/伙伴）装配均不足 ${EM_MARGINAL_KDA} kDa`
       : assemblyKda != null
         ? `直接路径装配仅 ~${assemblyKda} kDa（不足 ${EM_MARGINAL_KDA} kDa）`
-        : '无生物装配路径'
+        : sizedPartners.length
+          ? `无可靠生物装配路径（互作伙伴均无复合物/同源复合物结构支持，未计入装配估计）`
+          : '无生物装配路径'
     const hs = input.homologSearch
     if (hs != null && hs.searched > 0 && hs.complexes.length > 0) {
       const maxId = Math.max(...hs.complexes.map(c => Math.round(c.identity)))
@@ -781,6 +795,15 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
   if (homologComplexes.length > 1) {
     notes.push(`共 ${homologComplexes.length} 个同源结构形成 ≥${EM_MARGINAL_KDA} kDa 复合物可作增重路径参考（${homologComplexes.map(c => `${c.pdbId} ~${c.estimatedKda} kDa/identity ${Math.round(c.identity)}%`).slice(0, 4).join('、')}）— 同源证据按 identity 高低排序取舍，组装验证前置`)
   }
+  // v2.33：无结构证据的互作伙伴警示（保留展示但不计入可靠装配估计）
+  const untrustedPartners = sizedPartners.filter(p => p.evidenceLevel !== 'complex' && p.evidenceLevel !== 'homolog')
+  if (untrustedPartners.length) {
+    const biggest = untrustedPartners.reduce<typeof partners[number] | null>((best, p) => (!best || (p.kda ?? 0) > (best.kda ?? 0)) ? p : best, null)
+    notes.push(`互作伙伴可信度警示（v2.33）：${untrustedPartners.length} 个 UniProt 互作伙伴无复合物结构/同源复合物结构支持（最大者 ${biggest?.geneName ?? biggest?.proteinName ?? biggest?.accession ?? ''}${biggest?.kda != null ? ` ~${biggest.kda} kDa` : ''}）— 按 1:1 估计的共装配分子量可信度有限，未计入装配估计；不可据此认定可用于增大蛋白分子量做 Cryo-EM，如需采用须先 pull-down/SPR/SEC-MALS 验证互作、化学计量与组装效率`)
+  }
+  if (trustedPartners.length) {
+    notes.push(`互作伙伴可信度分级（v2.33）：${trustedPartners.map(p => `${p.geneName ?? p.proteinName ?? p.accession}（${p.evidenceLevel === 'complex' ? '复合物结构支持' : '同源复合物结构支持'}${p.evidencePdbIds?.length ? `：${p.evidencePdbIds.join('、')}` : ''}）`).join('、')} — 有结构证据支持，共装配增重路线可信（化学计量仍需 SEC-MALS 验证）`)
+  }
   notes.push('NMR 维度：增重对 NMR 无益（分子量越大越难）— 小分子量本身是 NMR 优势区间，装配分子量超出 ~50 kDa 后 NMR 需分段/截短策略')
   notes.push('X-ray 维度：分子量不是结晶瓶颈；Fab/MBP 等伴侣策略同时是助结晶手段（伴侣界面可主导晶格堆积）')
 
@@ -791,6 +814,7 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
     assemblyKda,
     assemblyBasis,
     assemblyPath,
+    assemblyEvidence,
     complexes: complexes.slice(0, 6),
     homologComplexes,
     homologSearchNote,
@@ -822,18 +846,26 @@ export async function analyzeMwAugmentation(
       complexes: new Map(),
     })
   }
-  const [partners, complexes] = await Promise.all([
+  const [partners, complexes, partnerEvidence] = await Promise.all([
     fetchPartnerLengths(input.uniprot).catch(() => [] as PartnerMwInfo[]),
     fetchComplexAssemblyInfo(input.directPdbs, input.signal).catch(() => new Map<string, ComplexAssemblyInfo>()),
+    // v2.33：binary 互作伙伴可信度评估（复合物/同源结构检索；失败降级为空 → 全部按低可信处理）
+    evaluateBinaryEvidence({
+      targetAcc: input.uniprot?.uniprotId ?? '',
+      partners: (input.uniprot?.interactions ?? []).filter(i => !i.selfInteraction).slice(0, MAX_PARTNERS_FETCH).map(i => ({ accession: i.accession, geneName: i.geneName })),
+      directPdbIds: input.directPdbs.map(p => p.pdbId),
+      blastHits: input.blastHits ?? [],
+      signal: input.signal,
+    }).catch(() => new Map<string, BinaryEvidence>()),
   ])
-  let analysis = buildMwAugmentAnalysis({ ...input, partners, complexes })
+  let analysis = buildMwAugmentAnalysis({ ...input, partners, complexes, partnerEvidence })
 
   // v1.27 阶段 2：直接路径装配不足 50 kDa 且有 BLAST 同源命中 → 扩展检索同源大复合物
   if (analysis.applicable && (analysis.assemblyKda ?? 0) < EM_MARGINAL_KDA && (input.blastHits?.length ?? 0) > 0 && !input.signal?.aborted) {
     const directIds = new Set(input.directPdbs.map(p => p.pdbId.toUpperCase()))
     const hs = await fetchHomologComplexInfo(input.blastHits ?? [], directIds, seqLen, input.signal).catch(() => null)
     if (hs != null) {
-      analysis = buildMwAugmentAnalysis({ ...input, partners, complexes, homologSearch: hs })
+      analysis = buildMwAugmentAnalysis({ ...input, partners, complexes, partnerEvidence, homologSearch: hs })
     }
   }
   return analysis

@@ -498,7 +498,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   /** v1.26/v1.27：分子量增重策略（小分子量靶点）— 融入评分卡（不单独成章） */
   const mw = summary.mwAugment?.applicable ? summary.mwAugment : null
   const mwAdj = summary.scores?.mwAugmentAdjust ?? null
-  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mw?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mw?.assemblyPath === 'partner' ? (mw.assemblyEvidence === 'complex' ? '互作伙伴推断（复合物结构支持）' : mw.assemblyEvidence === 'homolog' ? '互作伙伴推断（同源复合物结构支持）' : '互作伙伴推断') : '无生物装配路径'
   const mwHomologs = mw?.homologComplexes ?? []
   const mwIsHomologPath = mw?.assemblyPath === 'homolog-complex'
   const mwBadgeCls = mwIsHomologPath
@@ -957,10 +957,33 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                       )}
                       {sizedPartners.length > 0 && (
                         <div className="flex flex-col gap-1.5">
-                          <p className="text-[11px] font-semibold text-foreground/90">UniProt 互作伙伴（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
-                          <p className="text-xs leading-6 text-foreground/80">
-                            {sizedPartners.slice(0, 6).map(p => `${p.geneName ?? p.proteinName ?? p.accession}（${p.accession}，${p.lengthAa} aa ~${p.kda} kDa）`).join('、')}
-                          </p>
+                          <p className="text-[11px] font-semibold text-foreground/90">UniProt 互作伙伴（按 1:1 估计；可信度分级 — 仅复合物/同源复合物结构证据支持者计入装配估计，其余仅作参考并警示）</p>
+                          <ul className="flex flex-col gap-1">
+                            {sizedPartners.slice(0, 8).map(p => (
+                              <li key={`mwp-${p.accession}`} className="text-xs leading-6 text-foreground/80">
+                                <b className="text-foreground">{p.geneName ?? p.proteinName ?? p.accession}</b>
+                                <span className="mx-1.5 font-mono text-[10.5px] text-muted-foreground/70">{p.accession}</span>
+                                <span className="mr-1.5 font-mono text-[11px]">{p.lengthAa} aa ~{p.kda} kDa</span>
+                                <span
+                                  className={cn(
+                                    'mr-1.5 inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold',
+                                    p.evidenceLevel === 'complex'
+                                      ? 'border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-700 dark:text-emerald-400'
+                                      : p.evidenceLevel === 'homolog'
+                                        ? 'border-teal-500/30 bg-teal-500/[0.08] text-teal-700 dark:text-teal-400'
+                                        : 'border-amber-500/30 bg-amber-500/[0.08] text-amber-700 dark:text-amber-400',
+                                  )}
+                                >
+                                  {p.evidenceLevel === 'complex' ? '复合物结构' : p.evidenceLevel === 'homolog' ? '同源复合物结构' : '仅实验证据'}
+                                </span>
+                                {p.evidencePdbIds?.length
+                                  ? <span className="font-mono text-[10.5px] text-muted-foreground/70">证据：{p.evidencePdbIds.join('、')}</span>
+                                  : (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog')
+                                    ? null
+                                    : <span className="text-amber-700 dark:text-amber-400">无结构证据支持，未计入装配估计 — 不可据此认定可用于 Cryo-EM 增重</span>}
+                              </li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                       <div className="flex flex-col gap-1.5">

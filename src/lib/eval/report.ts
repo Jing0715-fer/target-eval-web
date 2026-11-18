@@ -274,7 +274,7 @@ function buildDigest(ctx: ReportContext): string {
     }
     lines.push('系统要点（报告中需展开呼应）:')
     lines.push(mw.notes.map(n => `  - ${n}`).join('\n'))
-    lines.push('（分子量是小靶点结构解析方法选择的第一约束：请将上述判定融入「结构解析可行性评估」章节 — 三方法对比矩阵中 Cryo-EM 的分子量适配行按装配分子量而非单体分子量评估；推荐技术路线与构建设计中给出增重路径优先级（生理装配 → 已有复合物 → 同源复合物（BLAST 推断，组装需验证）→ 互作伙伴 → 技术组分），并逐条回应冲突分析；执行摘要用一句话点明分子量结论。同源复合物为推断证据时，需按 identity 说明置信度（≥40% 界面通常保守 / 30-40% 边缘 / <30% 仅参考）并前置组装验证建议。禁止将本分析另列为独立章节）')
+    lines.push('（分子量是小靶点结构解析方法选择的第一约束：请将上述判定融入「结构解析可行性评估」章节 — 三方法对比矩阵中 Cryo-EM 的分子量适配行按装配分子量而非单体分子量评估；推荐技术路线与构建设计中给出增重路径优先级（生理装配 → 已有复合物 → 同源复合物（BLAST 推断，组装需验证）→ 互作伙伴（仅复合物/同源复合物结构证据支持者可信，其余须验证后再用）→ 技术组分），并逐条回应冲突分析；执行摘要用一句话点明分子量结论。同源复合物为推断证据时，需按 identity 说明置信度（≥40% 界面通常保守 / 30-40% 边缘 / <30% 仅参考）并前置组装验证建议。禁止将本分析另列为独立章节）')
   }
 
   // v1.29：互作复合物证据（无直接结构时）— 融入可行性评估，不单独成章
@@ -298,11 +298,19 @@ function buildDigest(ctx: ReportContext): string {
         }
       }
       if (itx.binaryPartners.length) {
-        lines.push(`binary 互作伙伴（IntAct 实验证据，复合物之外）: ${itx.binaryPartners.map(b => `${b.geneName ?? b.accession}（${b.accession}，${b.pdbCount} 个结构）`).join('、')}`)
+        lines.push(`binary 互作伙伴（IntAct 实验证据，复合物之外 — v2.33 可信度分级）: ${itx.binaryPartners.map(b => {
+          const lvl = b.evidenceLevel ?? 'experimental'
+          const ev = lvl === 'complex'
+            ? `复合物结构支持${b.evidencePdbCount ? ` ${b.evidencePdbCount} 个（${(b.evidencePdbs ?? []).slice(0, 2).map(p => p.pdbId).join('、')}）` : ''}`
+            : lvl === 'homolog'
+              ? `同源复合物结构支持${b.evidencePdbCount ? ` ${b.evidencePdbCount} 个（${(b.evidencePdbs ?? []).slice(0, 2).map(p => p.pdbId).join('、')}）` : ''}`
+              : `仅实验互作证据，无复合物/同源结构支持（低可信${b.pdbCount ? `；伙伴自身 ${b.pdbCount} 个结构不构成互作证据` : ''}）`
+          return `${b.geneName ?? b.accession}（${b.accession}，${ev}）`
+        }).join('、')}`)
       }
       lines.push('系统要点（报告中需展开呼应）:')
       lines.push(itx.notes.map(n => `  - ${n}`).join('\n'))
-      lines.push('（互作复合物是本靶点无直接/同源结构时的核心评估依据：Complex Portal 复合物为人工审核的装配证据，化学计量可靠 — 请融入「结构解析可行性评估」与「实验方案建议」：推荐技术路线中给出复合物组装路线（共表达/体外组装）与单体路线的优先级比对，组分结构用作构建边界参考与组装验证对照；存在共有结构（同一 PDB 含 ≥2 组分）时重点说明其作为共组装先例的价值与可借鉴的组装形式；并说明该路线与客户目的是否契合（若客户需要靶点单独结构，复合物路线为间接路径）。禁止将本分析另列为独立章节）')
+      lines.push('（互作复合物是本靶点无直接/同源结构时的核心评估依据：Complex Portal 复合物为人工审核的装配证据，化学计量可靠 — 请融入「结构解析可行性评估」与「实验方案建议」：推荐技术路线中给出复合物组装路线（共表达/体外组装）与单体路线的优先级比对，组分结构用作构建边界参考与组装验证对照；存在共有结构（同一 PDB 含 ≥2 组分）时重点说明其作为共组装先例的价值与可借鉴的组装形式；并说明该路线与客户目的是否契合（若客户需要靶点单独结构，复合物路线为间接路径）。binary 互作证据须按可信度分级表述：仅当存在复合物结构（靶点与伙伴共 PDB）或同源复合物结构（靶点同源链与伙伴/伙伴同源基因共 PDB）时才可作为增重路线的可信依据；仅实验互作证据的伙伴不得作为 Cryo-EM 增重的可信依据，需明确警示验证前置。禁止将本分析另列为独立章节）')
     } else {
       lines.push('（互作通道已检索：无 curated 复合物、binary 伙伴无结构 — 如实说明，不要虚构互作证据）')
     }

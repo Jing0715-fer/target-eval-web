@@ -88,6 +88,12 @@ export type FullScoreResult = ScoreResult & { methodStats: MethodStats }
  *  - 换算装配 ≥100 kDa 且 identity ≥40%：+1（寡聚界面在同一家族内常保守）
  *  - 换算装配 ≥100 kDa 但 identity <40%（远缘）：0（界面保守性弱，按边缘证据处理）
  *  - 换算装配 50-100 kDa：0（边缘区间，与直接路径同口径 — 需 VPP/优化条件）
+ *
+ * v2.33 partner 路径可信度 gating（用户需求：binary 互作蛋白可信度需谨慎评估 —
+ * 只有有复合物结构或同源结构才能完全信任，否则不应据此认为互作可用于增大
+ * 蛋白分子量做 Cryo-EM）：
+ *  - 伙伴装配证据 assemblyEvidence ∈ {complex, homolog}：按原口径加分（可信）
+ *  - 无结构证据（含历史作业缺省）：装配 ≥100 kDa 也不加分，按低可信处理并警示
  */
 export function computeMwAugmentAdjust(
   mw: MwAugmentAnalysis | null | undefined,
@@ -95,6 +101,11 @@ export function computeMwAugmentAdjust(
   if (!mw || !mw.applicable) return null
   const assemblyKda = mw.assemblyKda
   const isHomolog = mw.assemblyPath === 'homolog-complex'
+  const isPartner = mw.assemblyPath === 'partner'
+  // v2.33：partner 路径可信度 — 仅复合物/同源复合物结构证据支持的伙伴装配才可
+  // 完全信任（用户需求：无结构支持的互作不应被认为可用于增大分子量做 Cryo-EM）。
+  // 历史作业无 assemblyEvidence 字段 → 按 experimental（无证据）处理，不加分。
+  const partnerTrusted = isPartner && (mw.assemblyEvidence === 'complex' || mw.assemblyEvidence === 'homolog')
   const homologIdentity = mw.homologComplexes?.[0] != null ? Math.round(mw.homologComplexes[0].identity) : null
   const hasConflict = mw.conflicts.some(c => c.level === 'conflict')
   let cryoem = 0
@@ -108,20 +119,31 @@ export function computeMwAugmentAdjust(
         cryoem = 0
         note = `同源复合物推断（identity ${homologIdentity ?? '—'}%，远缘）：换算装配 ~${assemblyKda} kDa — 同源互作界面保守性较弱，按边缘证据评估（不加分）；组装验证与互作确认前置`
       }
+    } else if (isPartner && !partnerTrusted) {
+      // v2.33 防御：无结构证据的伙伴 1:1 装配估计不加分（新作业不会产出该组合，
+      // 历史作业命中时按低可信处理）
+      cryoem = 0
+      note = `互作伙伴推断（无复合物结构/同源结构支持）：1:1 估计 ~${assemblyKda} kDa 可信度有限 — 不可据此认定可用于 Cryo-EM 增重（不计分）；采用前需 pull-down/SPR/SEC-MALS 验证互作与化学计量`
     } else {
       cryoem = 1
-      note = `装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间${mw.assemblyPath === 'complex' ? '（已有复合物结构先例）' : mw.assemblyPath === 'partner' ? '（互作伙伴推断，无结构先例，组装需验证）' : '（自身寡聚装配）'}`
+      note = `装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间${isPartner
+        ? `（互作伙伴推断，${mw.assemblyEvidence === 'complex' ? '复合物结构支持' : '同源复合物结构支持'} — 组装先例可信，化学计量建议 SEC-MALS 验证）`
+        : mw.assemblyPath === 'complex' ? '（已有复合物结构先例）' : '（自身寡聚装配）'}`
     }
   } else if (assemblyKda != null && assemblyKda >= 50) {
     cryoem = 0
     note = isHomolog
       ? `同源复合物推断（identity ${homologIdentity ?? '—'}%）：换算装配 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件，且靶点组装需实验验证`
-      : `装配后 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件`
+      : isPartner && !partnerTrusted
+        ? `互作伙伴推断（无结构支持）：1:1 估计 ~${assemblyKda} kDa 处于边缘区间且可信度有限 — 不可据此认定可用于 Cryo-EM 增重；需验证互作后再评估`
+        : `装配后 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件`
   } else if (assemblyKda != null) {
     cryoem = -1
     note = isHomolog
       ? `同源复合物换算后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
-      : `装配后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
+      : isPartner && !partnerTrusted
+        ? `互作伙伴推断（无结构支持）1:1 估计仅 ~${assemblyKda} kDa（<50 kDa）且可信度有限 — 不可据此认定可用于 Cryo-EM 增重；需技术增重（Fab/支架融合）并验证互作`
+        : `装配后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
   } else {
     cryoem = hasConflict ? -1 : 0
     note = hasConflict
@@ -160,6 +182,8 @@ export function computeInteractionAdjust(
   if (!best || best.componentsWithStructure === 0) {
     if (!interaction.binaryPartners.length) return null
     const top = interaction.binaryPartners[0]
+    // v2.33：binary 伙伴可信度分级情况（无结构支持的伙伴 — 低可信警示）
+    const structCount = interaction.binaryPartners.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog').length
     return {
       complexAc: '',
       complexName: '',
@@ -169,7 +193,9 @@ export function computeInteractionAdjust(
       xray: 0,
       cryoem: 0,
       nmr: 0,
-      note: `IntAct binary 互作伙伴 ${top.geneName ?? top.accession} 等有结构（${interaction.binaryPartners.length} 个伙伴）— 互作界面建模与验证设计可参考，但非 curated 复合物，不改变三方法评分（评估依据已在报告中列出）`,
+      note: `IntAct binary 互作伙伴 ${top.geneName ?? top.accession} 等（${interaction.binaryPartners.length} 个）已作可信度分级${structCount
+        ? `：${structCount} 个有复合物/同源复合物结构证据（可信，可作增重路线依据）`
+        : '：均无复合物结构/同源结构支持（仅实验互作证据，低可信 — 不可据此认定可用于增大分子量做 Cryo-EM）'}；非 curated 复合物，不改变三方法评分（评估依据已在报告中列出）`,
     }
   }
 

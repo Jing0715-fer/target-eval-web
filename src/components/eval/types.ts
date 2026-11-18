@@ -519,12 +519,23 @@ export interface InteractionComplexInfo {
   soloPdbTotal?: number
 }
 
+/** v2.33 binary 互作证据分级：complex = 复合物结构；homolog = 同源复合物结构；experimental = 仅实验互作证据（低可信） */
+export type BinaryEvidenceLevel = 'complex' | 'homolog' | 'experimental'
+
 /** binary 互作伙伴的结构证据（IntAct） */
 export interface InteractionBinaryInfo {
   accession: string
   geneName?: string
   pdbCount: number
   representativePdbs: PdbEntry[]
+  /** v2.33 互作可信度分级（历史作业缺省按 experimental 处理） */
+  evidenceLevel?: BinaryEvidenceLevel
+  /** 复合物/同源复合物证据结构代表（≤3 个；历史作业缺省） */
+  evidencePdbs?: PdbEntry[]
+  /** 证据结构总数（历史作业缺省 0） */
+  evidencePdbCount?: number
+  /** 证据说明（历史作业缺省） */
+  evidenceNote?: string
 }
 
 /** 互作复合物证据分析（无直接结构时作为评估依据） */
@@ -633,12 +644,14 @@ export interface MwAugmentAnalysis {
   assemblyKda: number | null
   assemblyBasis: string
   assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  /** v2.33：partner 装配路径证据级别（历史作业缺省） */
+  assemblyEvidence?: BinaryEvidenceLevel | null
   complexes: MwComplex[]
   /** v1.27：同源结构形成的大复合物（历史作业缺省） */
   homologComplexes?: MwHomologComplex[]
   /** v1.27：同源扩展检索说明（历史作业缺省） */
   homologSearchNote?: string
-  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number; evidenceLevel?: BinaryEvidenceLevel; evidencePdbIds?: string[] }>
   options: MwAugmentOption[]
   conflicts: MwConflictNote[]
   notes: string[]

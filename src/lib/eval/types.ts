@@ -347,12 +347,23 @@ export interface InteractionComplexInfo {
   soloPdbTotal?: number
 }
 
+/** v2.33 binary 互作证据分级：complex = 复合物结构（靶点+伙伴同 PDB）；homolog = 同源复合物结构（靶点同源链与伙伴/伙伴同源基因共 PDB）；experimental = 仅实验互作证据（IntAct），无结构支持 — 低可信 */
+export type BinaryEvidenceLevel = 'complex' | 'homolog' | 'experimental'
+
 /** binary 互作伙伴的结构证据（IntAct，非 curated 复合物路径） */
 export interface InteractionBinaryInfo {
   accession: string
   geneName?: string
   pdbCount: number
   representativePdbs: PdbEntry[]
+  /** v2.33 互作可信度分级（历史作业缺省按 experimental 处理） */
+  evidenceLevel?: BinaryEvidenceLevel
+  /** 复合物/同源复合物证据结构代表（≤3 个；experimental 为空；历史作业缺省） */
+  evidencePdbs?: PdbEntry[]
+  /** 证据结构总数（历史作业缺省 0） */
+  evidencePdbCount?: number
+  /** 证据说明（同源 identity / 同源基因 accession 等；历史作业缺省） */
+  evidenceNote?: string
 }
 
 /** v1.29 互作复合物证据分析（interaction.ts 产出；无直接结构时作为评估依据） */
@@ -508,16 +519,18 @@ export interface MwAugmentAnalysis {
   assemblyKda: number | null
   /** 装配分子量计算依据（展示用） */
   assemblyBasis: string
-  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（无结构） */
+  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（v2.33 起仅复合物/同源复合物结构证据支持的伙伴计入） */
   assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  /** v2.33：partner 装配路径的证据级别（assemblyPath='partner' 时非空；历史作业缺省 — 无证据的旧伙伴装配按 experimental 处理不加分） */
+  assemblyEvidence?: BinaryEvidenceLevel | null
   /** 已有复合物结构（组分明细 + 总分子量；按分辨率排序） */
   complexes: MwComplex[]
   /** v1.27：同源结构形成的大复合物（直接路径不足 50 kDa 时 BLAST 扩展检索；历史作业缺省） */
   homologComplexes?: MwHomologComplex[]
   /** v1.27：同源扩展检索说明（检索范围/未触发原因；未触发时为空串，历史作业缺省） */
   homologSearchNote?: string
-  /** UniProt 互作伙伴（非自身；长度已知时含 lengthAa/kda） */
-  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  /** UniProt 互作伙伴（非自身；长度已知时含 lengthAa/kda；v2.33 附可信度分级） */
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number; evidenceLevel?: BinaryEvidenceLevel; evidencePdbIds?: string[] }>
   /** 通用增重策略（小靶点场景的技术工具箱） */
   options: MwAugmentOption[]
   /** 与用户目的的冲突分析（无目的信息时给 caution 默认条目） */

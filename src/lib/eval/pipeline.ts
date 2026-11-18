@@ -1841,16 +1841,19 @@ class SegmentRunner {
       }
     }
 
-    // ─── 阶段 6.6：互作复合物证据（v1.29，无直接结构时）────────────────────
+    // ─── 阶段 6.6：互作复合物证据（v1.29，无直接结构时；v2.33 binary 伙伴可信度分级）───
     if (st.uniprotInfo && st.directPdbs.length === 0 && !st.interaction) {
-      this.report('blast', '无直接结构 — 检索 UniProt 互作复合物证据（Complex Portal curated 复合物 + IntAct binary 伙伴）…', 0.92)
+      this.report('blast', '无直接结构 — 检索 UniProt 互作复合物证据（Complex Portal curated 复合物 + IntAct binary 伙伴可信度分级）…', 0.92)
       st.interaction = await analyzeInteractionEvidence({
         uniprot: st.uniprotInfo,
+        blastHits: st.blastHits,
+        directPdbIds: st.directPdbs.map(p => p.pdbId),
         signal: this.signal,
         onProgress: msg => this.log(msg),
       })
       if (st.interaction.hasEvidence) {
-        this.log(`互作复合物证据：${st.interaction.summary}${st.interaction.complexes.length ? `；组分结构已列出（复合物 ${st.interaction.complexes.length} 个）` : ''}`)
+        const structural = st.interaction.binaryPartners.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog').length
+        this.log(`互作复合物证据：${st.interaction.summary}${st.interaction.complexes.length ? `；组分结构已列出（复合物 ${st.interaction.complexes.length} 个）` : ''}${st.interaction.binaryPartners.length ? `；binary 伙伴可信度分级：${structural} 个有结构证据 / ${st.interaction.binaryPartners.length - structural} 个仅实验证据` : ''}`)
       } else {
         this.log('互作复合物证据：无可用证据（无 curated 复合物、binary 伙伴无结构）', 'warn')
       }
@@ -1954,6 +1957,13 @@ class SegmentRunner {
         gapText: st.gapText || undefined,
         ligandCount: new Set(st.directPdbs.flatMap(p => p.ligands.map(l => l.split('(')[0].trim()))).size || undefined,
         literatureCount: st.literature.length,
+        // v2.33：binary 互作伙伴可信度分级摘要（复核层语境 — 规则层已在评分中 gating）
+        interactionBinarySummary: st.interaction?.binaryPartners.length
+          ? st.interaction.binaryPartners.map(b => {
+              const lvl = b.evidenceLevel ?? 'experimental'
+              return `${b.geneName ?? b.accession}（${lvl === 'complex' ? `复合物结构支持${b.evidencePdbCount ? ` ${b.evidencePdbCount} 个` : ''}` : lvl === 'homolog' ? `同源复合物结构支持${b.evidencePdbCount ? ` ${b.evidencePdbCount} 个` : ''}` : `仅实验证据（低可信${b.pdbCount ? `，伙伴自身 ${b.pdbCount} 个结构不构成互作证据` : ''}）`}）`
+            }).join('、')
+          : undefined,
       }, st.scores, AbortSignal.any([this.signal, AbortSignal.timeout(timeoutMs)]))
       st.scoreLlmAttempts += 1
       // v2.18.1（代码审查 P1-2）：用户取消必须传播（与管线其他阶段同口径 —
