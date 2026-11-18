@@ -335,7 +335,8 @@ export function useHighThroughputFlow() {
             sequenceHeader: item.sequenceHeader,
             goal: runState.goal,
             ligands: runState.ligands,
-            options: { ...runState.options, reportMode: 'single' },
+            // v2.27：行内构建区间（UniProt 归属后区间过滤；手动值优先于比对推导）
+            options: { ...runState.options, reportMode: 'single', range: item.range },
           }
         : {
             mode: 'uniprot',
@@ -344,7 +345,8 @@ export function useHighThroughputFlow() {
             ligands: runState.ligands,
             batchNote,
             homologBlast: group,
-            options: { ...runState.options, reportMode: related ? 'deferred' : 'single' },
+            // v2.27：截短构建感知 — options.range（仅保留链范围重叠的结构）
+            options: { ...runState.options, reportMode: related ? 'deferred' : 'single', range: item.range },
           }
       const created = await createJob(req)
       if (cancelRef.current || pausedRef.current) {
@@ -520,7 +522,13 @@ export function useHighThroughputFlow() {
         ...groups.map((targets, i) => ({
           index: i,
           targets,
-          items: targets.map((t, j) => ({ key: `${i}-${j}-${t}`, label: t, status: 'pending' as const })),
+          items: targets.map((t, j) => ({
+            key: `${i}-${j}-${t}`,
+            label: t,
+            // v2.27：逐靶点评估区间（Excel 构建区间 / 手输「:起-止」后缀）— 提交时随 options.range
+            range: payload.groupRanges?.[i]?.[j],
+            status: 'pending' as const,
+          })),
           status: 'pending' as const,
         })),
         ...seqGroups.map((seqs, k) => ({
@@ -530,6 +538,7 @@ export function useHighThroughputFlow() {
           items: seqs.map((s: HtSeqTarget, j: number) => ({
             key: `sq-${k}-${j}-${s.length}`,
             label: s.header ? `${s.header.slice(0, 24)} · ${s.length}aa` : `序列${j + 1} · ${s.length}aa`,
+            range: s.range,
             sequence: s.seq,
             sequenceHeader: s.header || undefined,
             status: 'pending' as const,

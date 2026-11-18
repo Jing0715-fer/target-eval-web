@@ -136,15 +136,21 @@ export const MAX_HT_TARGETS_TOTAL = 600
  *  - 「;」（半角/全角分号）分隔组：每组按复合物批量评估（关系判断 → 逐靶点 → 合并报告），单独出报告
  *  - 组内「,」（半角/全角逗号）或空白/换行分隔靶点
  *  - 组内仅一个靶点 = 独立评估（单作业独立报告）
- * 全局去重保序（重复出现的靶点在后出现的组内剔除，不入重复评估）；
- * 返回分组列表 + 无效 token + 跨组重复的 token（仅提示用）。
+ *  - v2.27 截短构建感知：靶点可带评估区间后缀「:起始-结束」（UniProt 残基编号，
+ *    如「P0DTD1:4393-5324」= 聚蛋白 nsp12 片段）— Excel 导入自动填入，也可手输；
+ *    仅保留链范围与该区间重叠的结构
+ * 去重键 = accession|区间（全局保序去重；同 accession 不同区间 = 不同靶点 — 聚蛋白
+ * 片段不再被合并为一次全长评估）；返回分组列表 + 对齐的区间 + 无效 token + 跨组重复。
  */
 export function parseGroupedUniprotIds(text: string): {
   groups: string[][]
+  /** 与 groups 逐组逐位对齐的评估区间（undefined = 该靶点不过滤） */
+  groupRanges: Array<Array<[number, number] | undefined>>
   invalid: string[]
   duplicates: string[]
 } {
   const groups: string[][] = []
+  const groupRanges: Array<Array<[number, number] | undefined>> = []
   const invalid: string[] = []
   const duplicates: string[] = []
   const seen = new Set<string>()
@@ -152,18 +158,41 @@ export function parseGroupedUniprotIds(text: string): {
     const tokens = chunk.split(/[\s,，]+/).map((t) => t.trim().toUpperCase()).filter(Boolean)
     if (tokens.length === 0) continue
     const ids: string[] = []
+    const ranges: Array<[number, number] | undefined> = []
     for (const t of tokens) {
       if (seen.has(t)) {
         if (!duplicates.includes(t)) duplicates.push(t)
         continue
       }
       seen.add(t)
-      if (isValidUniprotId(t)) ids.push(t)
-      else if (!invalid.includes(t)) invalid.push(t)
+      // v2.27：可选区间后缀「:起始-结束」（1 ≤ 起 ≤ 止；格式不合法按无效 token 提示）
+      let id = t
+      let range: [number, number] | undefined
+      const rm = t.match(/^([A-Z0-9-]+):(\d{1,5})-(\d{1,5})$/)
+      if (rm) {
+        id = rm[1]
+        const s = Number(rm[2])
+        const e = Number(rm[3])
+        if (Number.isFinite(s) && Number.isFinite(e) && s >= 1 && e >= s && e <= 100000) {
+          range = [s, e]
+        } else {
+          if (!invalid.includes(t)) invalid.push(t)
+          continue
+        }
+      }
+      if (isValidUniprotId(id)) {
+        ids.push(id)
+        ranges.push(range)
+      } else if (!invalid.includes(t)) {
+        invalid.push(t)
+      }
     }
-    if (ids.length > 0) groups.push(ids)
+    if (ids.length > 0) {
+      groups.push(ids)
+      groupRanges.push(ranges)
+    }
   }
-  return { groups, invalid, duplicates }
+  return { groups, groupRanges, invalid, duplicates }
 }
 
 /** 单条 FASTA 序列（解析多 FASTA 用） */

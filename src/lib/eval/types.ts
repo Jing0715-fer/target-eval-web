@@ -634,6 +634,8 @@ export interface JobSummary {
   literatureCount: number
   imageCount: number
   durationMs: number
+  /** v2.27：实际生效的评估范围（UniProt 残基编号 — 手动指定或构建比对/表格区间推导；历史作业缺省） */
+  range?: [number, number]
   /** 合并评估（UniProt+序列同靶点）时的构建信息 */
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+ 作业存在；历史作业缺省） */

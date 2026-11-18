@@ -372,7 +372,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   </span>
                 </div>
 
-                {/* 靶点 chips（状态点 + 标签 + 错误摘要；紧凑字号） */}
+                {/* 靶点 chips（状态点 + 标签 + 区间后缀 + 错误摘要；紧凑字号） */}
                 <div className="flex flex-wrap gap-1">
                   {g.items.map((it) => (
                     <span
@@ -381,10 +381,13 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                         'inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10px]',
                         it.status === 'error' ? 'border-red-500/30 bg-red-500/[0.05] text-red-700 dark:text-red-400' : 'border-border bg-muted/40 text-foreground/90',
                       )}
-                      title={it.error ?? it.label}
+                      title={it.error ?? (it.range ? `${it.label} · 评估区间 ${it.range[0]}-${it.range[1]}（仅保留链范围重叠的结构）` : it.label)}
                     >
                       <span className={cn('size-1.5 shrink-0 rounded-full', itemDotCls(it.status))} aria-hidden />
-                      <span className="truncate">{it.label}</span>
+                      <span className="truncate">
+                        {it.label}
+                        {it.range && <span className="text-primary/90">:{it.range[0]}-{it.range[1]}</span>}
+                      </span>
                     </span>
                   ))}
                 </div>

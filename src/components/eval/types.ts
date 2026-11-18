@@ -663,6 +663,8 @@ export interface JobSummary {
   literatureCount: number
   imageCount: number
   durationMs: number
+  /** v2.27：实际生效的评估范围（UniProt 残基编号 — 手动或构建比对/表格区间推导；历史作业缺省） */
+  range?: [number, number]
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+） */
   blast?: BlastStatusInfo
@@ -891,6 +893,8 @@ export interface HtSeqTarget {
   header: string
   seq: string
   length: number
+  /** v2.27：行内构建区间（UniProt 编号；作业 options.range — 仅保留链范围重叠的结构） */
+  range?: [number, number]
 }
 
 /** 高通量运行的一组内单个靶点（作业）状态 */
@@ -898,6 +902,8 @@ export interface HTGroupItemState {
   key: string
   /** 展示标签（UniProt ID 或序列构建头摘要） */
   label: string
+  /** v2.27：该靶点的评估区间（UniProt 残基编号；提交时随 options.range — 截短构建感知） */
+  range?: [number, number]
   /** v2.23.1 序列靶点：提交 mode=sequence 作业的原始序列（无则 UniProt 靶点） */
   sequence?: string
   /** v2.23.1 序列靶点：构建标签头（评估表/Excel 序列命名证据） */
@@ -952,6 +958,8 @@ export interface HTRunState {
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
 export interface HTStartPayload {
   groups: string[][]
+  /** v2.27：与 groups 逐组逐位对齐的评估区间（Excel 导入解析/手动「:起-止」后缀；无则不过滤） */
+  groupRanges?: Array<Array<[number, number] | undefined>>
   /** v2.23.1 序列兜底组（Excel 行缺 UniProt 但有构建序列；每行一组，逐序列独立评估） */
   seqGroups?: HtSeqTarget[][]
   goal?: string

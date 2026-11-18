@@ -135,6 +135,11 @@ export async function POST(req: Request) {
                 // v2.23.1 序列兜底计数（行缺 UniProt 但有构建序列 → 按序列评估）
                 seqGroups: result.seqGroups.length,
                 seqTargets: result.seqGroups.reduce((n, g) => n + g.length, 0),
+                // v2.27：携带构建区间的靶点数（截短构建感知 — 仅保留链范围重叠的结构）
+                rangeTargets: result.groups.reduce(
+                  (n, g, gi) => n + (result.groupRanges[gi] ?? []).filter(Boolean).length,
+                  0,
+                ),
               },
             })
           } finally {

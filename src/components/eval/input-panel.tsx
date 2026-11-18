@@ -200,7 +200,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const companionInfo = useMemo(() => countResidues(companionText), [companionText])
   const companionValid = companionInfo.count >= MIN_COMPANION_LENGTH
 
-  // v1.23 评估范围限定（UniProt 残基编号，1-based 闭区间）— 仅 UniProt 单靶点无伴随序列时启用
+  // v1.23 评估范围限定（UniProt 残基编号，1-based 闭区间）— 仅单靶点时启用；
+  // v2.27：有伴随序列时也可用（构建比对自动推导区间，手动值优先；BLAST 命中按
+  // 比对起点平移到构建坐标后过滤）
   const [rangeOpen, setRangeOpen] = useState(false)
   const [rangeStart, setRangeStart] = useState('')
   const [rangeEnd, setRangeEnd] = useState('')
@@ -208,8 +210,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const rangeEndN = parseInt(rangeEnd, 10)
   const rangeValid = Number.isFinite(rangeStartN) && Number.isFinite(rangeEndN)
     && rangeStartN >= 1 && rangeEndN >= rangeStartN && rangeEndN <= 100000
-  // 多靶点或有伴随序列时不启用范围（语义不适用：多靶点各自范围不同；伴随序列已隐含构建边界）
-  const rangeEnabled = uniprotParsed.valid.length === 1 && !companionValid
+  const rangeEnabled = uniprotParsed.valid.length === 1
   const range = rangeEnabled && rangeValid ? [rangeStartN, rangeEndN] as [number, number] : undefined
 
   // 序列输入（v1.22：支持多 FASTA，每个 `>` 标题段一条）
@@ -468,27 +469,35 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       // v2.22 高通量评估：分组载荷交给独立编排 hook — 组间串行、每组单独出报告、
       // 限流自动暂停 + 断点续跑；goal/配体/高级选项与单次评估共享同一套字段。
       // v2.23.1：seqGroups = Excel 导入的序列兜底组（行缺 UniProt，按序列评估）。
+      // v2.27：groupRanges = 逐组逐位对齐的评估区间（Excel 构建区间 / 手输「:起-止」后缀）。
       if (!htValid) return
-      const groups = htParsed.groups
-        .map((g) => g.slice(0, MAX_HT_TARGETS_PER_GROUP))
-        .slice(0, MAX_HT_GROUPS)
-        .filter((g) => g.length > 0)
+      const groups: string[][] = []
+      const groupRanges: Array<Array<[number, number] | undefined>> = []
+      for (let i = 0; i < htParsed.groups.length && groups.length < MAX_HT_GROUPS; i++) {
+        const ids = htParsed.groups[i].slice(0, MAX_HT_TARGETS_PER_GROUP)
+        if (ids.length === 0) continue
+        groups.push(ids)
+        groupRanges.push(
+          htParsed.groupRanges[i]?.slice(0, MAX_HT_TARGETS_PER_GROUP)
+            ?? ids.map(() => undefined),
+        )
+      }
       const seqGroups = htSeqGroups
         .map((g) => g.slice(0, MAX_HT_TARGETS_PER_GROUP))
         .slice(0, Math.max(0, MAX_HT_GROUPS - groups.length))
         .filter((g) => g.length > 0)
       if (groups.length === 0 && seqGroups.length === 0) return
-      const payload: HTStartPayload = { groups, seqGroups, goal: trimmedGoal, ligands, options }
+      const payload: HTStartPayload = { groups, groupRanges, seqGroups, goal: trimmedGoal, ligands, options }
       await onStartHighThroughput(payload)
       return
     }
     if (mode === 'uniprot') {
       // v1.22：支持多 UniProt ID — 每个 ID 一份独立作业（批量编排 + 关系判断 + 共有结构）。
       // 单 ID 时保留可选伴随序列（同靶点合并评估）；多 ID 时伴随序列不附加（语义不适用）。
-      // v1.23：单 ID 无伴随序列时支持评估范围限定（range）。
+      // v1.23：单 ID 支持评估范围限定；v2.27 伴随序列存在时亦可（手动值优先于比对推导）。
       const ids = uniprotParsed.valid.slice(0, MAX_BATCH_UNIPROT)
       const companion = companionText.trim() && companionValid && ids.length === 1 ? companionText.trim() : undefined
-      const reqRange = ids.length === 1 && !companion ? range : undefined
+      const reqRange = ids.length === 1 ? range : undefined
       requests = ids.map(id => ({
         mode: 'uniprot' as const,
         uniprot: id,
@@ -763,7 +772,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                         )}
                         <span className="ml-auto hidden font-mono text-[10px] font-normal text-muted-foreground/70 sm:inline">
                           {!rangeEnabled
-                            ? '多靶点/有伴随序列时不可用'
+                            ? '多靶点时不可用'
                             : rangeValid
                               ? '过滤为该区间重叠的结构'
                               : '限定重叠结构'}
@@ -813,7 +822,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                           </div>
                           {!rangeEnabled && (
                             <p className="text-[11px] leading-relaxed text-muted-foreground/80">
-                              仅单个 UniProt ID 且无伴随序列时可用（多靶点各自范围不同；伴随序列已隐含构建边界）。
+                              仅单个 UniProt ID 时可用（多靶点各自范围不同，可在高通量分组中用「ID:起始-结束」后缀分别指定）。
                             </p>
                           )}
                           {rangeEnabled && (rangeStart !== '' || rangeEnd !== '') && !rangeValid && (
@@ -824,7 +833,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                           )}
                           {rangeValid && (
                             <p className="text-[11px] leading-relaxed text-muted-foreground">
-                              将过滤 PDB 列表与 BLAST 同源命中，仅保留链范围（UniProt 交叉引用）或查询区间与 {rangeStartN}-{rangeEndN} 重叠的结构；报告题目与摘要中也会体现该范围。无范围信息的结构默认保留。
+                              将过滤 PDB 列表与 BLAST 同源命中，仅保留链范围（UniProt 交叉引用）或查询区间与 {rangeStartN}-{rangeEndN} 重叠的结构；报告题目与摘要中也会体现该范围。填写伴随序列时会自动推导构建区间（比对定位），此处手动值优先；无范围信息的结构默认保留。
                             </p>
                           )}
                         </div>

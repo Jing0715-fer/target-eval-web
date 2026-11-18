@@ -26,7 +26,7 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
-import { fetchPdbeCoverage, describeCoverage, uncoveredRanges } from './pdbe'
+import { fetchPdbeCoverage, describeCoverage, uncoveredRanges, restrictCoverageToRange, uncoveredRangesWithin } from './pdbe'
 import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, type BlastPollState, type BlastNrHit } from './blast'
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
@@ -40,7 +40,7 @@ import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
-import { filterPdbsByRange, filterBlastByRange } from './range-filter'
+import { filterPdbsByRange, filterBlastByRange, type ResidueRange } from './range-filter'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
 import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
 import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
@@ -751,6 +751,49 @@ class SegmentRunner {
     if (st.phase === 'init') this.report('input', '输入解析完成', 1)
   }
 
+  // ─── v2.27 有效评估范围（截短构建感知）──────────────────────────────────
+  // 优先级：手动 options.range > 构建比对推导（同靶点序列 → compareSequences
+  // 定位的全长区间；UniProt 伴随/序列模式/docx 回填路径均含）。无区间 = 不过滤。
+
+  /** 有效评估范围（UniProt 残基编号，1-based 闭区间；undefined = 不过滤） */
+  private effectiveRange(): ResidueRange | undefined {
+    if (this.input.options.range) return this.input.options.range
+    const c = this.st.comparison
+    if (c?.sameTarget && c.start != null && c.end != null && c.start >= 1 && c.end >= c.start) {
+      return [c.start, c.end]
+    }
+    return undefined
+  }
+
+  /** 区间来源标签（日志/摘要说明用） */
+  private rangeSourceLabel(): string {
+    if (this.input.options.range) return '手动指定'
+    return this.st.comparison ? '构建比对推导' : '—'
+  }
+
+  /**
+   * BLAST 命中过滤用的查询坐标区间：queryFrom/To 以「本次提交 BLAST 的序列」编号 —
+   * 查询序列 = 全长时即 UniProt 编号，直接用；查询序列 = 构建序列（同靶点伴随/
+   * 序列模式）时为构建坐标 → 按比对起点平移（标签头导致的 ± 少许残基误差由
+   * 「重叠」语义吸收）。构建坐标无法换算（k-mer 兜底/区间在构建外）→ 不过滤。
+   */
+  private blastQueryRange(): ResidueRange | undefined {
+    const r = this.effectiveRange()
+    if (!r) return undefined
+    const full = this.st.uniprotInfo?.sequence
+    if (!full) return undefined // 未归属 UniProt：无直接结构，同源命中不做区间过滤
+    if (this.st.sequence === full) return r
+    const c = this.st.comparison
+    if (c?.sameTarget && c.start != null) {
+      const off = c.start - 1
+      const s = r[0] - off
+      const e = r[1] - off
+      if (e < 1) return undefined
+      return [Math.max(1, s), Math.max(1, e)]
+    }
+    return undefined
+  }
+
   // ─── 阶段 2：UniProt 元数据 ────────────────────────────────────────────────
 
   private async phaseUniprot(): Promise<PipelineSegmentResult | null> {
@@ -798,6 +841,14 @@ class SegmentRunner {
             st.uniprotInfo = info
             this.log(`序列识别命中 UniProt ${peptideAcc}（${info.proteinName}）`)
           }
+        }
+      }
+      // v2.27：纯序列输入归属 UniProt 后同样做构建比对（构建区间推导 + construct 摘要；
+      // 同靶点时区间用于结构范围过滤与覆盖率口径 — 与 UniProt/docx 伴随序列路径同口径）
+      if (st.uniprotInfo && st.sequence && st.sequence !== st.uniprotInfo.sequence && !st.comparison) {
+        st.comparison = compareSequences(st.sequence, st.uniprotInfo.sequence)
+        if (st.comparison.sameTarget) {
+          this.log(`序列比对：${describeComparison(st.comparison)} → 判定同一靶点（构建区间已用于结构范围过滤与覆盖率口径）`)
         }
       }
       if (!st.uniprotInfo) {
@@ -931,10 +982,14 @@ class SegmentRunner {
         return this.handoff()
       }
       backfillChainRanges(st.directPdbs, st.uniprotInfo)
-      if (this.input.options.range) {
+      // v2.27：有效评估范围（手动 > 构建比对推导）— 仅保留链范围重叠的结构
+      const er = this.effectiveRange()
+      if (er) {
         const before = st.directPdbs.length
-        st.directPdbs = filterPdbsByRange(st.directPdbs, this.input.options.range)
-        if (before !== st.directPdbs.length) this.log(`PDB 范围过滤：${before} → ${st.directPdbs.length}（限定 ${this.input.options.range[0]}-${this.input.options.range[1]}）`)
+        st.directPdbs = filterPdbsByRange(st.directPdbs, er)
+        if (before !== st.directPdbs.length) {
+          this.log(`PDB 范围过滤：${before} → ${st.directPdbs.length}（限定 ${er[0]}-${er[1]}，${this.rangeSourceLabel()}）`)
+        }
       }
       const ligCount = st.directPdbs.filter(p => p.ligands.length > 0).length
       this.log(`PDB 详情完成：${st.directPdbs.length} 个结构（含配体 ${ligCount} 个）`)
@@ -1093,10 +1148,20 @@ class SegmentRunner {
       this.report('pdbe', 'PDBe 计算结构覆盖率…', 0.5)
       try {
         st.coverage = await fetchPdbeCoverage(st.uniprotInfo.uniprotId, st.uniprotInfo.sequenceLength)
-        st.coverageText = describeCoverage(st.coverage.coveredRanges, st.uniprotInfo.sequenceLength)
-        const gaps = uncoveredRanges(st.coverage.coveredRanges, st.uniprotInfo.sequenceLength)
-        st.gapText = gaps.map(([a, b]) => `${a}-${b} (${b - a + 1} aa)`).join(', ')
-        this.log(`PDBe 覆盖率：${st.coverage.coveragePercent}%${st.gapText ? `，未覆盖区间：${st.gapText.slice(0, 200)}` : ''}`)
+        // v2.27：限定评估范围时覆盖率/未覆盖区间改为「区间内」口径（截短构建/聚蛋白片段）
+        const erPdbe = this.effectiveRange()
+        if (erPdbe) {
+          st.coverage = restrictCoverageToRange(st.coverage, erPdbe)
+          st.coverageText = describeCoverage(st.coverage.coveredRanges, erPdbe[1] - erPdbe[0] + 1)
+          const gaps = uncoveredRangesWithin(st.coverage.coveredRanges, erPdbe)
+          st.gapText = gaps.map(([a, b]) => `${a}-${b} (${b - a + 1} aa)`).join(', ')
+          this.log(`PDBe 覆盖率（限定 ${erPdbe[0]}-${erPdbe[1]}）：${st.coverage.coveragePercent}%${st.gapText ? `，区间内未覆盖：${st.gapText.slice(0, 200)}` : ''}`)
+        } else {
+          st.coverageText = describeCoverage(st.coverage.coveredRanges, st.uniprotInfo.sequenceLength)
+          const gaps = uncoveredRanges(st.coverage.coveredRanges, st.uniprotInfo.sequenceLength)
+          st.gapText = gaps.map(([a, b]) => `${a}-${b} (${b - a + 1} aa)`).join(', ')
+          this.log(`PDBe 覆盖率：${st.coverage.coveragePercent}%${st.gapText ? `，未覆盖区间：${st.gapText.slice(0, 200)}` : ''}`)
+        }
       } catch (e) {
         this.log(`PDBe 覆盖率计算失败：${e instanceof Error ? e.message : e}`, 'warn')
       }
@@ -1199,7 +1264,9 @@ class SegmentRunner {
         const directSet = new Set(st.directPdbs.map(p => p.pdbId))
         const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
         st.blastHits = await enrichBlastHits(filtered, directSet)
-        if (this.input.options.range) st.blastHits = filterBlastByRange(st.blastHits, this.input.options.range)
+        // v2.27：有效区间过滤（构建坐标换算 — 仅保留查询区间重叠的同源命中）
+        const bq = this.blastQueryRange()
+        if (bq) st.blastHits = filterBlastByRange(st.blastHits, bq)
         st.blastStatus = {
           status: st.blastHits.length > 0 ? 'ok' : 'no-hits',
           note: st.blastHits.length > 0 ? `${st.blastHits.length} 个同源命中${st.familyRep ? `（家族代表检索：结果将共享给 ≥${this.input.homologBlast?.minIdentity ?? 90}% 一致性的同源成员）` : ''}` : undefined,
@@ -1246,7 +1313,9 @@ class SegmentRunner {
         const directSet = new Set(st.directPdbs.map(p => p.pdbId))
         const filtered = rawHits.filter(h => h.pdbId && !directSet.has(h.pdbId))
         st.blastHits = await enrichBlastHits(filtered, directSet)
-        if (this.input.options.range) st.blastHits = filterBlastByRange(st.blastHits, this.input.options.range)
+        // v2.27：有效区间过滤（构建坐标换算）
+        const bq = this.blastQueryRange()
+        if (bq) st.blastHits = filterBlastByRange(st.blastHits, bq)
         st.blastStatus = {
           status: st.blastHits.length > 0 ? 'ok' : 'no-hits',
           note: st.blastHits.length > 0 ? `${st.blastHits.length} 个同源命中` : undefined,
@@ -1385,6 +1454,13 @@ class SegmentRunner {
    *  PDB BLAST 回填与 nr 回填共用（原 PDB 路径的回填体抽出为方法）。 */
   private async rebuildStructureDataAfterBackfill(info: UniprotInfo): Promise<void> {
     const st = this.st
+    // v2.27：序列模式回填归属后补做构建比对（构建区间推导 + construct 摘要 — 与主路径同口径）
+    if (st.sequence && st.sequence !== info.sequence && !st.comparison) {
+      st.comparison = compareSequences(st.sequence, info.sequence)
+      if (st.comparison.sameTarget) {
+        this.log(`序列比对：${describeComparison(st.comparison)} → 判定同一靶点（构建区间已用于结构范围过滤与覆盖率口径）`)
+      }
+    }
     // 回填后补做 RCSB + PDBe（一次性，不再展开子进度）
     this.report('rcsb', '回填 UniProt 后补检索 PDB…', 0.5)
     // v2.5：不限模式同样拉满检索分页（与主路径一致），普通模式维持 500 检索窗口
@@ -1396,10 +1472,13 @@ class SegmentRunner {
       st.pdbCompletedIds = r.entries.map(e => e.pdbId)
       st.pdbFinalized = true
       backfillChainRanges(st.directPdbs, info)
-      if (this.input.options.range) st.directPdbs = filterPdbsByRange(st.directPdbs, this.input.options.range)
+      // v2.27：有效区间过滤（回填路径同主路径口径）
+      const erRb = this.effectiveRange()
+      if (erRb) st.directPdbs = filterPdbsByRange(st.directPdbs, erRb)
       const directSet2 = new Set(st.directPdbs.map(p => p.pdbId))
       st.blastHits = (await enrichBlastHits(st.blastHits.filter(h => !directSet2.has(h.pdbId)), directSet2))
-      if (this.input.options.range) st.blastHits = filterBlastByRange(st.blastHits, this.input.options.range)
+      const bqRb = this.blastQueryRange()
+      if (bqRb) st.blastHits = filterBlastByRange(st.blastHits, bqRb)
     }
     this.report('pdbe', '补算 PDBe 覆盖率…', 0.5)
     try {
@@ -1440,7 +1519,9 @@ class SegmentRunner {
           const directSet = new Set(st.directPdbs.map(p => p.pdbId))
           const filtered = rescue.hits.filter(h => h.pdbId && !directSet.has(h.pdbId))
           st.blastHits = await enrichBlastHits(filtered, directSet)
-          if (this.input.options.range) st.blastHits = filterBlastByRange(st.blastHits, this.input.options.range)
+          // v2.27：有效区间过滤（构建坐标换算）
+          const bq = this.blastQueryRange()
+          if (bq) st.blastHits = filterBlastByRange(st.blastHits, bq)
           st.blastStatus = {
             status: st.blastHits.length > 0 ? 'ok' : 'no-hits',
             note: st.blastHits.length > 0
@@ -1712,7 +1793,7 @@ class SegmentRunner {
       providedSequence: st.providedSequence && st.comparison
         ? { sequence: st.providedSequence, comparison: st.comparison }
         : undefined,
-      range: this.input.options.range,
+      range: this.effectiveRange(), // v2.27：手动 > 构建比对推导（摘要/报告题目「残基 X-Y」）
       directPdbs: st.directPdbs,
       blastHits: st.blastHits,
       blastStatus: st.blastStatus,
@@ -1918,6 +1999,8 @@ class SegmentRunner {
       literatureCount: st.literature.length,
       imageCount: st.images.length,
       durationMs,
+      /** v2.27：实际生效的评估范围（手动指定或构建比对/表格区间推导；无则缺省） */
+      range: this.effectiveRange(),
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,

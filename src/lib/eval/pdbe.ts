@@ -89,6 +89,39 @@ export function describeCoverage(ranges: Array<[number, number]>, seqLen: number
   return `${parts.join(', ')}${rest}`
 }
 
+/**
+ * v2.27：把覆盖率限定到评估区间（截短构建/聚蛋白片段口径）。
+ * 覆盖率 = 区间内并集长度 / 区间长度；coveredRanges 裁剪为与区间相交的段
+ * （仍为 UniProt 绝对编号 — 与 PDB 链范围同口径）。mappings 原样保留。
+ */
+export function restrictCoverageToRange(coverage: PdbeCoverageResult, range: [number, number]): PdbeCoverageResult {
+  const clipped: Array<[number, number]> = []
+  for (const [a, b] of coverage.coveredRanges) {
+    const s = Math.max(a, range[0])
+    const e = Math.min(b, range[1])
+    if (e >= s) clipped.push([s, e])
+  }
+  const span = range[1] - range[0] + 1
+  const covered = clipped.reduce((s, [a, b]) => s + (b - a + 1), 0)
+  const coveragePercent = span > 0 ? Math.min(100, Math.round((covered / span) * 1000) / 10) : 0
+  return { ...coverage, coveragePercent, coveredRanges: mergeRanges(clipped) }
+}
+
+/** v2.27：评估区间内的未覆盖段（uncoveredRanges 的区间限定版 — gap 坐标为 UniProt 绝对编号） */
+export function uncoveredRangesWithin(ranges: Array<[number, number]>, range: [number, number]): Array<[number, number]> {
+  const merged = mergeRanges(ranges.filter(r => r[1] > r[0]))
+  const gaps: Array<[number, number]> = []
+  let cursor = range[0]
+  for (const [a, b] of merged) {
+    if (a > cursor) gaps.push([cursor, Math.min(a - 1, range[1])])
+    cursor = Math.max(cursor, b + 1)
+    if (cursor > range[1]) break
+  }
+  if (cursor <= range[1]) gaps.push([cursor, range[1]])
+  // 过滤掉 <20aa 的琐碎空隙（与 uncoveredRanges 同口径）
+  return gaps.filter(([a, b]) => b - a + 1 >= 20)
+}
+
 /** 找出未覆盖区间（研究空白分析用） */
 export function uncoveredRanges(ranges: Array<[number, number]>, seqLen: number): Array<[number, number]> {
   const merged = mergeRanges(ranges.filter(r => r[1] > r[0]))

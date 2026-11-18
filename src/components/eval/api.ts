@@ -437,10 +437,12 @@ async function fetchInsightsStream(body: Record<string, unknown>): Promise<Insig
 
 import type { HtSeqTarget } from './types'
 
-/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组（v2.23.1 增序列兜底组） */
+/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组（v2.23.1 增序列兜底组；v2.27 增构建区间） */
 export interface HtExcelExtractResult {
   ok: boolean
   groups: string[][]
+  /** v2.27：与 groups 逐组逐位对齐的评估区间（undefined = 不过滤；截短构建感知） */
+  groupRanges?: Array<Array<[number, number] | undefined>>
   /** 序列兜底组：行缺 UniProt 但有构建序列 → 按序列评估（每行一组） */
   seqGroups?: HtSeqTarget[][]
   invalid: string[]
@@ -454,6 +456,8 @@ export interface HtExcelExtractResult {
     bytes?: number
     seqGroups?: number
     seqTargets?: number
+    /** v2.27：携带构建区间的靶点数 */
+    rangeTargets?: number
   }
 }
 
