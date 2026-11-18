@@ -173,6 +173,9 @@ interface PipelineState {
   domainRange: { start: number; end: number; label: string } | null
   /** 域名匹配已尝试（无 rangeHint 或无 UniProt 时为 true — 防止每段重复尝试） */
   domainRangeDone: boolean
+  /** v2.30：BLAST nr 命中 HSP 推导的评估区间（提交序列 ↔ UniProt 条目主体比对坐标；
+ *  构建比对（种子链/锚定）未产出区间时启用 — 非全长同样按截短口径分流） */
+  blastRange: { start: number; end: number; queryFrom?: number; hitFrom?: number } | null
   // ── 配体 ──
   ligandUnique: LigandInput[]
   ligandResolved: LigandResolution[]
@@ -266,6 +269,7 @@ function freshState(): PipelineState {
     rangeOutsideBlastHits: [],
     domainRange: null,
     domainRangeDone: false,
+    blastRange: null,
     ligandUnique: [],
     ligandResolved: [],
     ligandResolveDone: false,
@@ -561,6 +565,7 @@ export async function runPipelineSegment(
   if (!st.rangeOutsidePdbs) st.rangeOutsidePdbs = []
   if (!st.rangeOutsideBlastHits) st.rangeOutsideBlastHits = []
   if (st.domainRangeDone == null) st.domainRangeDone = false
+  if (!st.blastRange) st.blastRange = null // v2.30 防御性回填：旧 checkpoint 无此字段
   const seg = new SegmentRunner(input, cb, st)
   return seg.run()
 }
@@ -774,11 +779,21 @@ class SegmentRunner {
     if (st.phase === 'init') this.report('input', '输入解析完成', 1)
   }
 
-  // ─── v2.27/v2.29 有效评估范围（截短构建感知 + 结构域匹配）──────────────────
+  // ─── v2.27/v2.29/v2.30 有效评估范围（截短构建感知 + 结构域匹配 + BLAST 比对）───
   // 优先级：手动 options.range > 构建比对推导（同靶点序列 → compareSequences
-  // 定位的全长区间）> 结构域名提示（options.rangeHint → UniProt domain 划分匹配）。
-  // 无区间 = 不过滤。v2.29 口径：区间不再丢弃无重叠结构，而是「重叠者优先展示，
-  // 无重叠折叠保留（灰色行）」— rangeOutsidePdbs / rangeOutsideBlastHits。
+  // 定位的全长区间；v2.30 种子链比对覆盖首尾突变/标签头场景）> BLAST nr HSP 比对
+  // 坐标（提交序列 ↔ UniProt 主体区间 — v2.30）> 结构域名提示（options.rangeHint
+  // → UniProt domain 划分匹配）。无区间 = 不过滤。v2.29 口径：区间不再丢弃无重叠
+  // 结构，而是「重叠者优先展示，无重叠折叠保留（灰色行）」— rangeOutsidePdbs /
+  // rangeOutsideBlastHits。v2.30 全长守卫：区间覆盖 ≥99% 且两端贴边（±2）→ 视为
+  // 全长提交，不按截短分流（用户口径：非全长才按截短对待）。
+
+  /** v2.30 全长守卫：区间是否覆盖几乎全长（两端贴边 ±2）→ true = 非截短 */
+  private isTruncatedRange(r: ResidueRange): boolean {
+    const n = this.st.uniprotInfo?.sequenceLength ?? 0
+    if (n <= 0) return true
+    return !(r[0] <= 2 && r[1] >= n - 2)
+  }
 
   /** v2.29：结构域提示 → UniProt domain 区间（一次性解析缓存；无提示/无 UniProt/未命中 → null） */
   private resolveDomainRange(): { start: number; end: number; label: string } | null {
@@ -806,9 +821,15 @@ class SegmentRunner {
   /** 有效评估范围（UniProt 残基编号，1-based 闭区间；undefined = 不过滤） */
   private effectiveRange(): ResidueRange | undefined {
     if (this.input.options.range) return this.input.options.range
-    const c = this.st.comparison
-    if (c?.sameTarget && c.start != null && c.end != null && c.start >= 1 && c.end >= c.start) {
+    const st = this.st
+    const c = st.comparison
+    if (c?.sameTarget && c.start != null && c.end != null && c.start >= 1 && c.end >= c.start && this.isTruncatedRange([c.start, c.end])) {
       return [c.start, c.end]
+    }
+    // v2.30：BLAST nr HSP 比对坐标（构建比对未产出区间时 — 提交序列在 UniProt 条目内的覆盖区间）
+    const br = st.blastRange
+    if (br && br.start >= 1 && br.end >= br.start && this.isTruncatedRange([br.start, br.end])) {
+      return [br.start, br.end]
     }
     const dr = this.resolveDomainRange()
     if (dr) return [dr.start, dr.end]
@@ -818,7 +839,9 @@ class SegmentRunner {
   /** 区间来源标签（日志/摘要说明用） */
   private rangeSourceLabel(): string {
     if (this.input.options.range) return '手动指定'
-    if (this.st.comparison?.sameTarget && this.st.comparison.start != null && this.st.comparison.end != null) return '构建比对推导'
+    const c = this.st.comparison
+    if (c?.sameTarget && c.start != null && c.end != null) return '构建比对推导'
+    if (this.st.blastRange) return 'BLAST nr 比对推导'
     if (this.st.domainRange) return '结构域匹配（UniProt 注释）'
     return '—'
   }
@@ -870,6 +893,8 @@ class SegmentRunner {
    * 查询序列 = 全长时即 UniProt 编号，直接用；查询序列 = 构建序列（同靶点伴随/
    * 序列模式）时为构建坐标 → 按比对起点平移（标签头导致的 ± 少许残基误差由
    * 「重叠」语义吸收）。构建坐标无法换算（k-mer 兜底/区间在构建外）→ 不过滤。
+   * v2.30：种子链比对携带提供序列覆盖区段（provStart — 标签头不计入平移量）；
+   * 构建比对无区间时用 BLAST nr HSP 的查询↔主体平移量（hitFrom - queryFrom）。
    */
   private blastQueryRange(): ResidueRange | undefined {
     const r = this.effectiveRange()
@@ -879,7 +904,17 @@ class SegmentRunner {
     if (this.st.sequence === full) return r
     const c = this.st.comparison
     if (c?.sameTarget && c.start != null) {
-      const off = c.start - 1
+      const provStart = c.provStart ?? 1
+      const off = c.start - provStart
+      const s = r[0] - off
+      const e = r[1] - off
+      if (e < 1) return undefined
+      return [Math.max(1, s), Math.max(1, e)]
+    }
+    // v2.30：BLAST nr HSP 平移量（查询位置 q ↔ 主体位置 q + hitFrom - queryFrom）
+    const br = this.st.blastRange
+    if (br && br.hitFrom != null && br.queryFrom != null) {
+      const off = br.hitFrom - br.queryFrom
       const s = r[0] - off
       const e = r[1] - off
       if (e < 1) return undefined
@@ -939,10 +974,11 @@ class SegmentRunner {
       }
       // v2.27：纯序列输入归属 UniProt 后同样做构建比对（构建区间推导 + construct 摘要；
       // 同靶点时区间用于结构范围过滤与覆盖率口径 — 与 UniProt/docx 伴随序列路径同口径）
+      // v2.30：种子链比对 — 首尾突变/标签头/种间同源时锚定失效，内部种子仍可定位区间
       if (st.uniprotInfo && st.sequence && st.sequence !== st.uniprotInfo.sequence && !st.comparison) {
         st.comparison = compareSequences(st.sequence, st.uniprotInfo.sequence)
         if (st.comparison.sameTarget) {
-          this.log(`序列比对：${describeComparison(st.comparison)} → 判定同一靶点（构建区间已用于结构范围过滤与覆盖率口径）`)
+          this.log(`序列比对：${describeComparison(st.comparison)} → 判定同一靶点${st.comparison.start != null ? `（区间 ${st.comparison.start}-${st.comparison.end} 用于结构范围过滤与覆盖率口径）` : '（锚定与种子链均未定位区间 — 范围不过滤）'}`)
         }
       }
       if (!st.uniprotInfo) {
@@ -1562,6 +1598,19 @@ class SegmentRunner {
               ...buildNrIdentity(best),
               note: `BLAST nr 识别（一致性 ${best.identity}%）→ 已归属 UniProt ${best.accession}`,
             }
+            // v2.30：nr HSP 比对坐标 → 提交序列在 UniProt 条目内的覆盖区间（在重建结构数据前
+            // 落位 — 优先级低于构建比对，但两者都进入 effectiveRange 口径：非全长按截短对待）
+            if (best.hitFrom != null && best.hitTo != null && best.hitFrom > 0 && best.hitTo >= best.hitFrom) {
+              const s = Math.max(1, best.hitFrom)
+              const e = Math.min(info.sequenceLength, best.hitTo)
+              if (e >= s) {
+                st.blastRange = { start: s, end: e, queryFrom: best.queryFrom, hitFrom: best.hitFrom }
+                const queryNote = best.queryFrom != null && best.queryTo != null && (best.queryFrom > 1 || best.queryTo < st.sequence.length)
+                  ? `（查询序列 ${best.queryFrom}-${best.queryTo} 段比对 — 端部标签/未匹配段不计入）`
+                  : ''
+                this.log(`BLAST nr 比对坐标：提交序列 ↔ ${best.accession} 主体 ${best.hitFrom}-${best.hitTo} → 评估区间 ${s}-${e}${queryNote}（构建比对未产出区间时采用；非全长按截短口径分流）`)
+              }
+            }
             await this.rebuildStructureDataAfterBackfill(info)
           } else {
             // accession 查询失败（网络）→ 仍记录近似身份（有 accession 与描述）
@@ -1592,10 +1641,11 @@ class SegmentRunner {
   private async rebuildStructureDataAfterBackfill(info: UniprotInfo): Promise<void> {
     const st = this.st
     // v2.27：序列模式回填归属后补做构建比对（构建区间推导 + construct 摘要 — 与主路径同口径）
+    // v2.30：种子链比对 — 首尾突变/标签头/种间同源时锚定失效，内部种子仍可定位区间
     if (st.sequence && st.sequence !== info.sequence && !st.comparison) {
       st.comparison = compareSequences(st.sequence, info.sequence)
       if (st.comparison.sameTarget) {
-        this.log(`序列比对：${describeComparison(st.comparison)} → 判定同一靶点（构建区间已用于结构范围过滤与覆盖率口径）`)
+        this.log(`序列比对：${describeComparison(st.comparison)} → 判定同一靶点${st.comparison.start != null ? `（区间 ${st.comparison.start}-${st.comparison.end} 已用于结构范围过滤与覆盖率口径）` : '（锚定与种子链均未定位区间 — 范围不过滤）'}`)
       }
     }
     // 回填后补做 RCSB + PDBe（一次性，不再展开子进度）
@@ -1618,9 +1668,20 @@ class SegmentRunner {
     this.report('pdbe', '补算 PDBe 覆盖率…', 0.5)
     try {
       st.coverage = await fetchPdbeCoverage(info.uniprotId, info.sequenceLength)
-      st.coverageText = describeCoverage(st.coverage.coveredRanges, info.sequenceLength)
-      const gaps = uncoveredRanges(st.coverage.coveredRanges, info.sequenceLength)
-      st.gapText = gaps.map(([a, b]) => `${a}-${b} (${b - a + 1} aa)`).join(', ')
+      // v2.30：限定评估范围时覆盖率/未覆盖区间改为「区间内」口径（与 phasePdbe 同口径 —
+      // 序列模式回填归属的截短构建此前按全长口径计算，覆盖率被区间外区段稀释）
+      const erBackfill = this.effectiveRange()
+      if (erBackfill) {
+        st.coverage = restrictCoverageToRange(st.coverage, erBackfill)
+        st.coverageText = describeCoverage(st.coverage.coveredRanges, erBackfill[1] - erBackfill[0] + 1)
+        const gaps = uncoveredRangesWithin(st.coverage.coveredRanges, erBackfill)
+        st.gapText = gaps.map(([a, b]) => `${a}-${b} (${b - a + 1} aa)`).join(', ')
+        this.log(`PDBe 覆盖率（限定 ${erBackfill[0]}-${erBackfill[1]}，${this.rangeSourceLabel()}）：${st.coverage.coveragePercent}%${st.gapText ? `，区间内未覆盖：${st.gapText.slice(0, 200)}` : ''}`)
+      } else {
+        st.coverageText = describeCoverage(st.coverage.coveredRanges, info.sequenceLength)
+        const gaps = uncoveredRanges(st.coverage.coveredRanges, info.sequenceLength)
+        st.gapText = gaps.map(([a, b]) => `${a}-${b} (${b - a + 1} aa)`).join(', ')
+      }
     } catch { /* 忽略 */ }
   }
 

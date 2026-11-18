@@ -416,7 +416,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   /** v2.29：评估区间与范围外结构（重叠优先展示 / 折叠保留） */
   const rangeInfo = summary.range ?? null
   const rangeLabel = rangeInfo
-    ? `${rangeInfo[0]}-${rangeInfo[1]}${summary.rangeSource === '结构域匹配（UniProt 注释）' ? ' · 结构域匹配' : summary.rangeSource === '构建比对推导' ? ' · 截短构建推导' : summary.rangeSource === '手动指定' ? ' · 手动指定' : ''}`
+    ? `${rangeInfo[0]}-${rangeInfo[1]}${summary.rangeSource === '结构域匹配（UniProt 注释）' ? ' · 结构域匹配' : summary.rangeSource === '构建比对推导' ? ' · 截短构建推导' : summary.rangeSource === 'BLAST nr 比对推导' ? ' · BLAST 比对推导' : summary.rangeSource === '手动指定' ? ' · 手动指定' : ''}`
     : undefined
   const outsidePdbs = summary.rangeOutsidePdbs ?? []
   const outsideBlastHits = summary.rangeOutsideBlastHits ?? []
@@ -1210,7 +1210,9 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 ? '评估表结构域名 → UniProt domain 匹配'
                 : summary.rangeSource === '构建比对推导'
                   ? '截短构建比对推导'
-                  : '手动指定'}）—
+                  : summary.rangeSource === 'BLAST nr 比对推导'
+                    ? 'BLAST 比对推导（提交序列在 UniProt 条目内的覆盖区间）'
+                    : '手动指定'}）—
               结构列表按「链范围与区间重叠优先」展示{outsidePdbs.length + outsideBlastHits.length > 0
                 ? `；无重叠的结构已折叠保留在下方（灰色行：PDB ${outsidePdbs.length} 条${outsideBlastHits.length ? ` · 同源 ${outsideBlastHits.length} 条` : ''}）`
                 : '；当前全部结构均与区间重叠'}。

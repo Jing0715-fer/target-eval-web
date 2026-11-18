@@ -904,7 +904,11 @@ export interface SequenceComparison {
   start: number | null
   /** 估计对应全长 1-based 结束位 */
   end: number | null
-  method: 'exact-substring' | 'anchored' | 'kmer'
+  method: 'exact-substring' | 'anchored' | 'seed-chain' | 'kmer'
+  /** v2.30：种子链比对的提供序列覆盖区段（1-based 闭区间；标签头等未覆盖段不计入 —
+   *  BLAST 查询坐标换算用。锚定法隐含 provStart=1/provEnd=providedLength，缺省） */
+  provStart?: number
+  provEnd?: number
 }
 
 /** 作业汇总中的构建信息（合并评估时存在） */

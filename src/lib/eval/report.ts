@@ -136,7 +136,18 @@ function buildDigest(ctx: ReportContext): string {
     lines.push(`基因: ${u.geneNames.join(', ') || '-'}`)
     lines.push(`物种: ${u.organism}`)
     lines.push(`序列长度: ${u.sequenceLength} aa`)
-    if (ctx.range) lines.push(`评估范围: 残基 ${ctx.range[0]}-${ctx.range[1]}（仅分析与该区间重叠的结构）`)
+    if (ctx.range) {
+      // v2.30：区间来源随行 — BLAST nr 比对推导（提交序列在 UniProt 条目内的覆盖区间，
+      // 非全长按截短口径）时 LLM 需知晓边界依据，避免误述为全长靶点
+      const srcNote = ctx.rangeSource === 'BLAST nr 比对推导'
+        ? '（BLAST 比对推导 — 提交序列在 UniProt 条目内的覆盖区间，非全长截短构建）'
+        : ctx.rangeSource === '构建比对推导'
+          ? '（截短构建比对推导）'
+          : ctx.rangeSource?.startsWith('结构域匹配')
+            ? '（结构域名匹配推导）'
+            : ''
+      lines.push(`评估范围: 残基 ${ctx.range[0]}-${ctx.range[1]}${srcNote}（仅分析与该区间重叠的结构）`)
+    }
     if (u.functionText) lines.push(`功能注释: ${u.functionText.slice(0, 600)}`)
     if (u.subcellularLocations?.length) lines.push(`亚细胞定位: ${u.subcellularLocations.join('; ')}`)
     if (u.keywords?.length) lines.push(`关键词: ${u.keywords.join(', ')}`)

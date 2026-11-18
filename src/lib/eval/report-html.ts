@@ -1040,6 +1040,7 @@ function rangeSourceShort(s: string | undefined): string {
   if (!s || s === '—') return '评估区间'
   if (s === '手动指定') return '手动指定区间'
   if (s === '构建比对推导') return '截短构建比对推导区间'
+  if (s === 'BLAST nr 比对推导') return 'BLAST 比对推导区间（提交序列在 UniProt 条目内的覆盖范围）'
   if (s.startsWith('结构域匹配')) return '评估表结构域名 → UniProt domain 匹配区间'
   return `${s}区间`
 }
