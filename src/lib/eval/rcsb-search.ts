@@ -15,7 +15,7 @@ import type { BlastHit } from './types'
 const SEARCH_URL = 'https://search.rcsb.org/rcsbsearch/v2/query'
 
 export interface RcsbSearchOptions {
-  /** 最多保留的命中条目数（按 identity 降序） */
+  /** 最多保留的命中条目数（v2.32 起按显著性 e-value 升序保留前 N） */
   maxRows?: number
   /** 序列一致性阈值（0–1，mmseqs2 预过滤） */
   identityCutoff?: number
@@ -116,12 +116,25 @@ export async function searchRcsbHomologs(
       resolution: null,
     }
     const existing = seen.get(pdbId)
-    if (!existing || hit.identity > existing.identity) seen.set(pdbId, hit)
+    if (
+      !existing
+      || hit.evalue < existing.evalue
+      || (hit.evalue === existing.evalue
+        && (hit.identity > existing.identity
+          || (hit.identity === existing.identity && hit.queryCoverage > existing.queryCoverage)))
+    ) seen.set(pdbId, hit)
     if (seen.size >= maxRows * 2) break // 实体级条目上限保护（内存策略：命中集恒小）
   }
 
+  // v2.32 排序改为显著性口径（e-value 升序，identity/覆盖率打破平局）— 旧 identity
+  // 降序排序会把短片段 100% 巧合命中浮到首位（用户实测：526 aa ADSL 截短构建的
+  // 24EW 命中仅覆盖查询 20-40 位 21 aa，却因 100% 一致性排第一，导致靶点被错绑
+  // 到 SARS-CoV-2 P0DTD1）。mmseqs2 E-value 与 BLAST 同口径，长比对高覆盖命中
+  // （如 487 aa / 99.3%）天然显著于短片段全同命中。
   return [...seen.values()]
-    .sort((a, b) => b.identity - a.identity || a.evalue - b.evalue)
+    .sort(
+      (a, b) => a.evalue - b.evalue || b.identity - a.identity || b.queryCoverage - a.queryCoverage,
+    )
     .slice(0, maxRows)
 }
 

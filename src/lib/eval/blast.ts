@@ -68,14 +68,24 @@ function parseBlastXml(xml: string): BlastHit[] {
     })
     if (hits.length >= 50) break
   }
-  // 同 PDB 去重取最高 identity
+  // v2.32 同 PDB 去重与排序改为显著性口径（e-value 升序，一致性/覆盖率打破平局）—
+  // 旧 identity 降序排序会把「短片段 100% 巧合命中」（如信号肽样 21 aa 片段恰好
+  // 完全匹配大蛋白局部）浮到首位，下游靶点回填/命名被误导（用户实测：ADSL 截短
+  // 构建被错绑到 SARS-CoV-2 P0DTD1）。E-value 才是比对显著性的正统度量，
+  // 与 NCBI BLAST 原生输出顺序一致。
   const seen = new Map<string, BlastHit>()
   for (const h of hits) {
     const key = h.pdbId || h.description.slice(0, 40)
     const existing = seen.get(key)
-    if (!existing || h.identity > existing.identity) seen.set(key, h)
+    if (!existing || h.evalue < existing.evalue
+      || (h.evalue === existing.evalue && (h.identity > existing.identity
+        || (h.identity === existing.identity && h.queryCoverage > existing.queryCoverage)))) {
+      seen.set(key, h)
+    }
   }
-  return [...seen.values()].sort((a, b) => b.identity - a.identity)
+  return [...seen.values()].sort(
+    (a, b) => a.evalue - b.evalue || b.identity - a.identity || b.queryCoverage - a.queryCoverage,
+  )
 }
 
 export interface BlastSubmitResult {
@@ -502,6 +512,13 @@ export interface BlastNrHit {
   evalue: number
   evalueRaw: string
   queryCoverage: number
+  /** v2.30：首个 HSP 的查询（提交序列）1-based 起止位（提交序列在命中主体上的覆盖范
+   *  围证据 — 用于推导提交序列在 UniProt 条目内的残基区间，非全长按截短口径对待） */
+  queryFrom?: number
+  queryTo?: number
+  /** v2.30：首个 HSP 的命中主体（nr 条目 = UniProt 序列）1-based 起止位 */
+  hitFrom?: number
+  hitTo?: number
   /** sp = SwissProt（已审校条目，UniProt 归属可信度高）；tr = TrEMBL；其他（gb/ref/pdb/无前缀） */
   db: 'sp' | 'tr' | 'other'
 }
@@ -558,6 +575,8 @@ export function parseBlastNrXml(xml: string): BlastNrHit[] {
     const evalueRaw = hsp.match(/<Hsp_evalue>([\s\S]*?)<\/Hsp_evalue>/)?.[1]?.trim() ?? '0'
     const queryFrom = parseInt(hsp.match(/<Hsp_query-from>([\s\S]*?)<\/Hsp_query-from>/)?.[1] ?? '0', 10)
     const queryTo = parseInt(hsp.match(/<Hsp_query-to>([\s\S]*?)<\/Hsp_query-to>/)?.[1] ?? '0', 10)
+    const hitFrom = parseInt(hsp.match(/<Hsp_hit-from>([\s\S]*?)<\/Hsp_hit-from>/)?.[1] ?? '0', 10)
+    const hitTo = parseInt(hsp.match(/<Hsp_hit-to>([\s\S]*?)<\/Hsp_hit-to>/)?.[1] ?? '0', 10)
     const queryCoverage = queryTo > queryFrom ? queryTo - queryFrom + 1 : 0
     const parsed = parseNrDefline(def)
     const accession = parsed.accession || acc
@@ -572,6 +591,10 @@ export function parseBlastNrXml(xml: string): BlastNrHit[] {
       evalue: parseFloat(evalueRaw) || 0,
       evalueRaw,
       queryCoverage,
+      queryFrom: queryFrom > 0 ? queryFrom : undefined,
+      queryTo: queryTo > 0 ? queryTo : undefined,
+      hitFrom: hitFrom > 0 ? hitFrom : undefined,
+      hitTo: hitTo > 0 ? hitTo : undefined,
       db: parsed.db,
     })
     if (hits.length >= 20) break

@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
-import { generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation } from './api'
+import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
@@ -37,6 +37,21 @@ const POLL_INTERVAL_MS = 2000
 const MAX_CONSECUTIVE_FAILURES = 3
 /** 组内并发窗口（与服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=2 对齐） */
 const HT_WINDOW = 2
+
+/** v2.25 目录段安全化：非法字符折叠为空格并限长 */
+function safeDir(s: string, max = 60): string {
+  return (s || '')
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.\s]+$/, '')
+    .slice(0, max)
+}
+
+/** v2.25 组号段（G01_…：0-based index → 1-based 两位序号） */
+function groupFolderLabel(index: number): string {
+  return `G${String(index + 1).padStart(2, '0')}`
+}
 
 /**
  * 限流 / 配额特征指纹（v2.22）：
@@ -69,9 +84,16 @@ export function useHighThroughputFlow() {
   const [elapsedSec, setElapsedSec] = useState(0)
   const [canceling, setCanceling] = useState(false)
   const [starting, setStarting] = useState(false)
+  /** v2.25 批量下载中（视图禁用入口 + spinner） */
+  const [archiving, setArchiving] = useState(false)
 
   /** 权威运行状态（可变引用；每次关键节点 snapshot() 落 localStorage + 刷视图） */
   const runRef = useRef<HTRunState | null>(null)
+  /** v2.25：一次高通量运行的自动下载统一目录前缀 — 默认下载目录下新建文件夹，
+   *  同次运行的全部报告（每靶点独立报告 + 合并报告）都落在同一文件夹内。
+   *  命名：TargetEval_HT_日期_Ng（恢复运行/openRunById 时按 run 元数据重建，
+   *  页面刷新后自动下载继续落在同一文件夹）。 */
+  const runFolderRef = useRef<string>('')
   const pausedRef = useRef(false)
   const cancelRef = useRef(false)
   const activeJobIdsRef = useRef<Set<string>>(new Set())
@@ -229,8 +251,14 @@ export function useHighThroughputFlow() {
         } else {
           item.status = 'done'
           // 非关联批次 — 各靶点独立报告，完成即自动下载（关联批次 deferred 无独立 HTML）
+          // v2.25：目录前缀 = 运行文件夹 + 组号段（G01_…），同次运行集中在一个新文件夹
           if (!related && item.jobId) {
-            autoDownloadHtmlReport(`/api/jobs/${item.jobId}/report?download=1`, `job:${item.jobId}`, label)
+            autoDownloadHtmlReport(
+              `/api/jobs/${item.jobId}/report?download=1`,
+              `job:${item.jobId}`,
+              label,
+              `${runFolderRef.current}/${groupFolderLabel(groupNo - 1)}`,
+            )
           }
         }
       } else if (r.status === 'error') {
@@ -307,7 +335,8 @@ export function useHighThroughputFlow() {
             sequenceHeader: item.sequenceHeader,
             goal: runState.goal,
             ligands: runState.ligands,
-            options: { ...runState.options, reportMode: 'single' },
+            // v2.27/v2.29：行内构建区间与域名提示（手动值优先于比对推导；域名匹 UniProt domain 推导）
+            options: { ...runState.options, reportMode: 'single', range: item.range, rangeHint: item.domainHint },
           }
         : {
             mode: 'uniprot',
@@ -316,7 +345,8 @@ export function useHighThroughputFlow() {
             ligands: runState.ligands,
             batchNote,
             homologBlast: group,
-            options: { ...runState.options, reportMode: related ? 'deferred' : 'single' },
+            // v2.27/v2.29：截短构建感知与域名提示 — options.range / rangeHint
+            options: { ...runState.options, reportMode: related ? 'deferred' : 'single', range: item.range, rangeHint: item.domainHint },
           }
       const created = await createJob(req)
       if (cancelRef.current || pausedRef.current) {
@@ -410,6 +440,7 @@ export function useHighThroughputFlow() {
           `/api/evaluate/batch-report?id=${encodeURIComponent(merged.id)}&download=1`,
           `batch:${merged.id}`,
           `第 ${g.index + 1} 组合并评估报告`,
+          `${runFolderRef.current}/${groupFolderLabel(g.index)}`,
         )
       } catch (e) {
         const msg = e instanceof Error ? e.message : '合并报告生成失败'
@@ -461,12 +492,68 @@ export function useHighThroughputFlow() {
     setPhase('done')
     stopTick()
     snapshot()
+    // ── v2.28 运行完成 → 统计看板（评分统计 + AI 整体可行性报告 + 每靶点一句话
+    //    结论；离线 HTML 自动下载；生成后存入运行状态供回看与 zip 归档）──
+    void finalizeHtDashboard()
     const doneGroups = runState.groups.filter((g) => g.status === 'done').length
     const reports = runState.groups.filter((g) => g.mergedReportId || g.items.some((it) => it.status === 'done')).length
     toast({
       title: '高通量评估完成',
-      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；运行日志可在每组卡片中回看。`,
+      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；统计看板正在生成（评分统计 + AI 整体可行性报告，完成后自动下载）。运行日志可在每组卡片中回看。`,
     })
+  }
+
+  /**
+   * v2.28：运行完成后生成统计看板 — entries 与 zip 归档同构（服务端据此计算离线
+   * 链接命名）；≥1 个成功靶点才生成。幂等：已有 dashboardId 的运行不重复生成
+   * （恢复/重开场景）。失败不阻塞（运行已完成）；限流/超时记入 dashboardError，
+   * 可从「批量下载全部」入口重试。
+   */
+  const finalizeHtDashboard = async (): Promise<void> => {
+    const runState = runRef.current
+    if (!runState || runState.dashboardId || runState.dashboardError === '__done__') return
+    const entries: HtArchiveEntry[] = []
+    for (const g of runState.groups) {
+      for (const it of g.items) {
+        if (it.status === 'done' && it.jobId) entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
+      }
+      if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
+    }
+    if (!entries.some((e) => e.jobId)) return
+    try {
+      const dash = await generateHtDashboard({ entries, goal: runState.goal })
+      if (dash.status === 'done') {
+        runState.dashboardId = dash.id
+        runState.dashboardError = undefined
+        // 离线 HTML 自动下载（与其他报告同机制 — 服务器端数据不长期保留）
+        autoDownloadHtmlReport(
+          `/api/evaluate/ht-dashboard?id=${encodeURIComponent(dash.id)}&download=1`,
+          `htdash:${dash.id}`,
+          '高通量统计看板（评分统计 + AI 整体可行性报告）',
+          runFolderRef.current,
+        )
+        toast({
+          title: '统计看板已生成',
+          description: `评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
+        })
+      } else {
+        runState.dashboardError = dash.error ?? '统计看板生成失败'
+        toast({
+          title: '统计看板生成失败',
+          description: `${runState.dashboardError}（运行结果不受影响；可在历史运行中重试）`,
+          variant: 'destructive',
+        })
+      }
+    } catch (e) {
+      runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
+      toast({
+        title: '统计看板生成失败',
+        description: `${runState.dashboardError}（运行结果不受影响）`,
+          variant: 'destructive',
+      })
+    }
+    saveHTRun(runState)
+    setRun(cloneRun(runState))
   }
 
   /** 启动一次高通量运行（HT Tab → 开始高通量评估） */
@@ -491,7 +578,15 @@ export function useHighThroughputFlow() {
         ...groups.map((targets, i) => ({
           index: i,
           targets,
-          items: targets.map((t, j) => ({ key: `${i}-${j}-${t}`, label: t, status: 'pending' as const })),
+          items: targets.map((t, j) => ({
+            key: `${i}-${j}-${t}`,
+            label: t,
+            // v2.27：逐靶点评估区间（Excel 构建区间 / 手输「:起-止」后缀）— 提交时随 options.range
+            range: payload.groupRanges?.[i]?.[j],
+            // v2.29：结构域名提示（Excel 域名 / 手输「:域名」后缀）— 提交时随 options.rangeHint
+            domainHint: payload.groupDomainHints?.[i]?.[j],
+            status: 'pending' as const,
+          })),
           status: 'pending' as const,
         })),
         ...seqGroups.map((seqs, k) => ({
@@ -501,6 +596,7 @@ export function useHighThroughputFlow() {
           items: seqs.map((s: HtSeqTarget, j: number) => ({
             key: `sq-${k}-${j}-${s.length}`,
             label: s.header ? `${s.header.slice(0, 24)} · ${s.length}aa` : `序列${j + 1} · ${s.length}aa`,
+            range: s.range,
             sequence: s.seq,
             sequenceHeader: s.header || undefined,
             status: 'pending' as const,
@@ -521,6 +617,7 @@ export function useHighThroughputFlow() {
         totalTargetCount: groupStates.reduce((n, g) => n + g.items.length, 0),
       }
       runRef.current = newRun
+      runFolderRef.current = safeDir(`TargetEval_HT_${new Date(now).toISOString().slice(0, 10)}_${groupStates.length}g`)
       pausedRef.current = false
       cancelRef.current = false
       activeJobIdsRef.current = new Set()
@@ -545,6 +642,9 @@ export function useHighThroughputFlow() {
   const resumeRun = useCallback(async (): Promise<StartResult> => {
     const r = runRef.current
     if (!r || r.status === 'done') return { ok: false, error: '没有可恢复的运行' }
+    if (!runFolderRef.current) {
+      runFolderRef.current = safeDir(`TargetEval_HT_${new Date(r.createdAt).toISOString().slice(0, 10)}_${r.groups.length}g`)
+    }
     pausedRef.current = false
     cancelRef.current = false
     r.status = 'running'
@@ -568,6 +668,7 @@ export function useHighThroughputFlow() {
         return
       }
       runRef.current = r
+      runFolderRef.current = safeDir(`TargetEval_HT_${new Date(r.createdAt).toISOString().slice(0, 10)}_${r.groups.length}g`)
       setRun(cloneRun(r))
       setDisplayJob(null)
       displayJobIdRef.current = null
@@ -592,6 +693,47 @@ export function useHighThroughputFlow() {
     },
     [refreshRecentRuns],
   )
+
+  /** v2.25：批量下载运行报告（zip：每组一个子文件夹 + 合并报告 + README 清单）。
+   *  - 无参数：归档整个当前运行；
+   *  - 传 id：归档任意历史运行（最近评估列表入口）；
+   *  - 传 groupIndex：归档当前运行的指定单组（组卡「本组打包」）。 */
+  const archiveRun = useCallback(async (id?: string, groupIndex?: number): Promise<void> => {
+    const r = id ? getHTRun(id) : runRef.current
+    if (!r) {
+      toast({ title: '无法批量下载', description: '运行记录不存在（浏览器数据被清理）', variant: 'destructive' })
+      return
+    }
+    // 归档条目：组内成功靶点的独立报告 + 组合并报告（组号→zip 子文件夹）
+    // v2.28：统计看板（若有）作为根级 00_ 文件一并打包 — 内含离线链接指向本包各报告
+    const entries: HtArchiveEntry[] = []
+    for (const g of r.groups) {
+      if (groupIndex != null && g.index !== groupIndex) continue
+      for (const it of g.items) {
+        if (it.status === 'done' && it.jobId) entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
+      }
+      if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
+    }
+    if (groupIndex == null && r.dashboardId) entries.push({ dashboardId: r.dashboardId })
+    if (entries.length === 0) {
+      toast({ title: '没有可下载的报告', description: '该运行没有已完成的评估报告（全部失败/未开始或已清理）。', variant: 'destructive' })
+      return
+    }
+    setArchiving(true)
+    try {
+      await downloadHtReportArchive(entries, groupIndex != null ? `G${String(groupIndex + 1).padStart(2, '0')}` : `${r.groups.length}g`)
+      toast({
+        title: '批量下载已开始',
+        description: groupIndex != null
+          ? `已打包第 ${groupIndex + 1} 组 ${entries.length} 份报告为 zip。`
+          : `已打包 ${entries.length} 份报告为 zip（每组一个子文件夹，含合并报告与 README 清单）。`,
+      })
+    } catch (e) {
+      toast({ title: '批量下载失败', description: e instanceof Error ? e.message : '归档服务暂不可用，请稍后重试', variant: 'destructive' })
+    } finally {
+      setArchiving(false)
+    }
+  }, [])
 
   /** 手动停止：取消服务器侧活跃作业 + 未开始的组标 canceled；已完成组结果保留 */
   const cancelRun = useCallback(async (): Promise<void> => {
@@ -637,10 +779,14 @@ export function useHighThroughputFlow() {
     networkIssue,
     canceling,
     starting,
+    /** v2.25 批量下载中（入口禁用 + spinner） */
+    archiving,
     startRun,
     resumeRun,
     openRunById,
     removeRun,
+    /** v2.25 批量下载运行报告（当前运行或按 id 的历史运行 → zip） */
+    archiveRun,
     cancelRun,
     exitToIdle,
   }

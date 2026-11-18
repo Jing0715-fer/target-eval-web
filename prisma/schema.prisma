@@ -85,3 +85,27 @@ model BatchReport {
   @@index([createdAt])
   @@index([ownerKey, createdAt])
 }
+
+// 高通量运行统计看板（v2.28：运行完成后生成的评分统计 + AI 整体可行性报告；
+// 含每靶点一句话结论与单独报告链接 — 离线自包含 HTML，随 zip 归档）
+model HtDashboard {
+  id        String   @id @default(cuid())
+  jobIds    String // JSON: string[]（参与的评估作业，与运行状态一致）
+  entries   String? // JSON: [{jobId, group?, label?, mergedId?}]（zip 相对链接命名依据）
+  goal      String? // 运行的客户目标
+  stats     String? // JSON: HtDashboardStats（评分分布/方法可用性/汇总统计）
+  verdicts  String? // JSON: HtVerdict[]（每靶点一句话结论）
+  title     String? // 标题（运行时间 + 靶点数）
+  markdown  String? // AI 整体可行性报告 markdown（LLM 失败时为空 → 规则结论块）
+  htmlPath  String? // 磁盘 HTML 看板路径
+  engine    String? // 生成引擎摘要
+  status    String   @default("running") // running / done / error
+  error     String? // 生成失败原因（status=error 时）
+  ownerKey  String? // 创建者归属键（与 EvaluationJob 一致）
+  ownerMask String? // 创建者来源 IP 掩码
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([ownerKey, createdAt])
+}

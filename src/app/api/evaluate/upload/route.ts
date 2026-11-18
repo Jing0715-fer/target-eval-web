@@ -161,7 +161,7 @@ export async function POST(req: Request) {
       const images = await inlineImages(uploadId, parsed.images)
       const { fullText, ...parsedLite } = parsed
       const hint = parsed.uniprotIds.length === 0 && parsed.sequences.length === 0
-        ? '提示：未在评估表中识别出 UniProt ID 或蛋白序列，请检查文档内容或改用其他输入方式'
+        ? '提示：未在评估表中识别出 UniProt ID 或蛋白序列 — AI 智能解析稍后将尝试按靶点名称（基因符号/别名，如 TL1A）检索 UniProt ID'
         : undefined
       return NextResponse.json({ ok: true, uploadId, parsed: { ...parsedLite, images }, fullText, stateless: true, error: hint })
     }
@@ -176,7 +176,7 @@ export async function POST(req: Request) {
         ok: true,
         uploadId,
         parsed: parsedLite,
-        error: '提示：未在评估表中识别出 UniProt ID 或蛋白序列，请检查文档内容或改用其他输入方式',
+        error: '提示：未在评估表中识别出 UniProt ID 或蛋白序列 — AI 智能解析稍后将尝试按靶点名称（基因符号/别名，如 TL1A）检索 UniProt ID',
       })
     }
     return NextResponse.json({ ok: true, uploadId, parsed: parsedLite })

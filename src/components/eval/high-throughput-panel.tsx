@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   CircleAlert,
   CircleCheckBig,
+  Download,
   FileSpreadsheet,
   FileStack,
   LoaderCircle,
@@ -35,13 +36,23 @@ import type { HTRunState, HtSeqTarget } from './types'
 export interface HighThroughputPanelProps {
   value: string
   onChange: (v: string) => void
-  parsed: { groups: string[][]; invalid: string[]; duplicates: string[] }
+  parsed: {
+    groups: string[][]
+    groupRanges?: Array<Array<[number, number] | undefined>>
+    /** v2.29：与 groups 对齐的结构域名提示（评估表不写区间而写域名时） */
+    groupDomainHints?: Array<Array<string | undefined>>
+    invalid: string[]
+    duplicates: string[]
+  }
   /** v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列） */
   seqGroups: HtSeqTarget[][]
   onSeqGroupsChange: (groups: HtSeqTarget[][]) => void
   recentRuns: HTRunState[]
   onResumeRun: (id: string) => void
   onDeleteRun: (id: string) => void
+  /** v2.25 批量下载该次运行报告（zip 归档；archiving = 打包中禁用） */
+  onArchiveRun?: (id: string) => void
+  archiving?: boolean
 }
 
 const inputBase =
@@ -59,6 +70,10 @@ interface ExcelImportMeta {
   /** v2.23.1 序列兜底：行缺 UniProt 但有构建序列 → 按序列评估 */
   seqGroupCount: number
   seqTargetCount: number
+  /** v2.27：携带构建区间的靶点数（截短构建感知） */
+  rangeTargetCount: number
+  /** v2.29：携带结构域名提示的靶点数（管线内与 UniProt domain 匹配推导区间） */
+  domainHintTargetCount: number
   invalid: string[]
   note?: string
 }
@@ -76,7 +91,7 @@ function runStatusPill(run: HTRunState): { label: string; cls: string } {
   }
 }
 
-export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, recentRuns, onResumeRun, onDeleteRun }: HighThroughputPanelProps) {
+export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving }: HighThroughputPanelProps) {
   const totalTargets = parsed.groups.reduce((n, g) => n + g.length, 0)
   const seqTargetTotal = seqGroups.reduce((n, g) => n + g.length, 0)
   const groupTotal = parsed.groups.length + seqGroups.length
@@ -112,7 +127,23 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       }
       setPreImportText(value)
       setPreImportSeqGroups(seqGroups)
-      if (r.groups.length > 0) onChange(r.groups.map((g) => g.join(', ')).join(';\n'))
+      // v2.27/v2.29：区间与域名提示均以后缀形式写进分组文本（「P0DTD1:4393-5324」/
+      // 「P51685:胞外域」）— 文本往返中保活，用户可直接增删改；无后缀靶点保持原样
+      if (r.groups.length > 0) {
+        onChange(
+          r.groups
+            .map((g, gi) =>
+              g
+                .map((t, ti) => {
+                  const rr = r.groupRanges?.[gi]?.[ti]
+                  const dh = r.groupDomainHints?.[gi]?.[ti]
+                  return rr ? `${t}:${rr[0]}-${rr[1]}` : dh ? `${t}:${dh}` : t
+                })
+                .join(', '),
+            )
+            .join(';\n'),
+        )
+      }
       onSeqGroupsChange(seqs)
       setImportMeta({
         fileName: file.name,
@@ -121,6 +152,12 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         targetCount: r.groups.reduce((n, g) => n + g.length, 0),
         seqGroupCount: seqs.length,
         seqTargetCount: seqs.reduce((n, g) => n + g.length, 0),
+        rangeTargetCount:
+          r.meta?.rangeTargets ??
+          (r.groupRanges ?? []).reduce((n, gr) => n + gr.filter(Boolean).length, 0),
+        domainHintTargetCount:
+          r.meta?.domainHintTargets ??
+          (r.groupDomainHints ?? []).reduce((n, gh) => n + gh.filter(Boolean).length, 0),
         invalid: r.invalid ?? [],
         note: r.note,
       })
@@ -150,8 +187,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         placeholder={
           '按组输入 UniProt ID — 组间用分号「;」分隔，组内用逗号「,」分隔：\n'
           + 'P04637, P00533, Q9Y6K9; O14746\n'
-          + 'Q04206; Q14296, Q8N5K9\n'
-          + '（组内多个靶点按复合物批量评估并出合并报告；单个靶点则独立评估）'
+          + 'P0DTD1:4393-5324; P0DTD1:181-818（截短/聚蛋白片段可带「:起始-结束」区间）\n'
+          + '（组内多个靶点按复合物批量评估并出合并报告；单个靶点则独立评估；带区间靶点仅统计链范围重叠的结构）'
         }
         className={cn(inputBase, 'min-h-[128px] resize-y px-3.5 py-2.5 font-mono text-[13px] leading-[22px] uppercase placeholder:font-sans placeholder:normal-case placeholder:text-[12px] placeholder:leading-[20px]')}
         spellCheck={false}
@@ -222,6 +259,22 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           <span className="font-mono text-[11px] text-foreground/90">
             提取 {importMeta.groupCount} 组 · {importMeta.targetCount} 靶点，已填入下方分组
           </span>
+          {importMeta.rangeTargetCount > 0 && (
+            <span
+              className="font-mono text-[11px] text-primary"
+              title="行内解析出截短构建区间（UniProt 列括号注释 / 构建列 / 序列标签头）→ 范围重叠结构优先展示，无重叠折叠保留；区间以「ID:起始-结束」后缀填入，可手改"
+            >
+              其中 {importMeta.rangeTargetCount} 靶点带构建区间（范围重叠优先展示）
+            </span>
+          )}
+          {importMeta.domainHintTargetCount > 0 && (
+            <span
+              className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400"
+              title="评估表不写区间而写结构域名（如胞外域/kinase domain）→ 管线内与 UniProt domain 划分匹配推导区间，优先展示该区段结构（无重叠折叠保留）；域名以「ID:域名」后缀填入，可手改"
+            >
+              其中 {importMeta.domainHintTargetCount} 靶点带结构域名（UniProt domain 匹配推导区间）
+            </span>
+          )}
           {importMeta.seqGroupCount > 0 && (
             <span className="font-mono text-[11px] text-teal-600 dark:text-teal-400" title="行内无 UniProt ID 但有构建序列（≥90 aa）→ 每条序列作为独立序列靶点评估">
               另提取 {importMeta.seqGroupCount} 组 · {importMeta.seqTargetCount} 条序列靶点（无 UniProt 行，按序列评估）
@@ -274,11 +327,27 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
               <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary">
                 G{String(i + 1).padStart(2, '0')}
               </span>
-              {g.map((t) => (
-                <span key={t} className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground/90">
-                  {t}
-                </span>
-              ))}
+              {g.map((t, ti) => {
+                const rr = parsed.groupRanges?.[i]?.[ti]
+                const dh = parsed.groupDomainHints?.[i]?.[ti]
+                return (
+                  <span
+                    key={t}
+                    className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground/90"
+                    title={
+                      rr
+                        ? `评估区间 ${rr[0]}-${rr[1]}（范围重叠结构优先展示，无重叠折叠保留）`
+                        : dh
+                          ? `结构域名提示「${dh}」— 管线内与 UniProt domain 划分匹配推导区间，优先展示该区段结构`
+                          : undefined
+                    }
+                  >
+                    {t}
+                    {rr && <span className="text-primary/90">:{rr[0]}-{rr[1]}</span>}
+                    {dh && <span className="text-emerald-600 dark:text-emerald-400">:{dh}</span>}
+                  </span>
+                )
+              })}
               <span
                 className={cn(
                   'ml-auto shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[9.5px] font-semibold',
@@ -374,6 +443,23 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                       >
                         <Play className="size-3" aria-hidden />
                         回看
+                      </Button>
+                    )}
+                    {/* v2.25 批量下载（zip：每组子文件夹 + 合并报告 + README 清单） */}
+                    {onArchiveRun && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={archiving || !r.groups.some((g) => g.mergedReportId || g.items.some((it) => it.status === 'done' && it.jobId))}
+                        onClick={() => onArchiveRun(r.id)}
+                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium"
+                        title="打包该次运行全部报告为单个 zip（每组一个子文件夹，含合并报告与 README 清单）"
+                      >
+                        {archiving
+                          ? <LoaderCircle className="size-3 animate-spin" aria-hidden />
+                          : <Download className="size-3" aria-hidden />}
+                        批量下载
                       </Button>
                     )}
                     <button

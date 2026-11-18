@@ -29,6 +29,25 @@ import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb 
 import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { matchProcessingSegments, type ProcessingSegmentMatch } from './uniprot'
+
+// ─── v2.31 聚合蛋白加工归属（PTM/Processing）────────────────────────────────
+
+/** 报告题目 nsp 标注后缀（"Replicase polyprotein 1ab nsp12"；非聚合蛋白/全长时空串） */
+function nspTitleSuffix(
+  u: Pick<UniprotInfo, 'processingChains' | 'sequenceLength'> | null | undefined,
+  range?: [number, number],
+): string {
+  const m = matchProcessingSegments(range, u?.processingChains, u?.sequenceLength)
+  return m?.nspLabel ? ` ${m.nspLabel}` : ''
+}
+
+/** 刊头「加工归属」行（评估区间在聚合蛋白中的蛋白酶切割产物归属 — meta-grid） */
+function processingRowHtml(m: ProcessingSegmentMatch): string {
+  const names = m.segments.slice(0, 3).map(s => `${s.name}（${s.begin}-${s.end}）`).join('、')
+  const more = m.segments.length > 3 ? ` 等 ${m.segments.length} 段` : ''
+  return `<div><b>加工归属</b> <span title="评估区间在聚合蛋白中的蛋白酶切割产物归属 — 源自 UniProt PTM/Processing（Molecule processing）注释">${esc(m.nspLabel ? `${m.nspLabel} · ` : '')}${esc(names + more)}</span></div>`
+}
 
 // ─── v2.7.3 响应式版心（单源规则）────────────────────────────────────────────
 //  版心随视口分级放宽（920 → 1088 → 1224 → 1360 → 1480 → 1600），宽屏两侧不再大片留白；
@@ -962,17 +981,18 @@ export function coverageFigureHtml(
   </figure>`
 }
 
-/** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题） */
-function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, LiteratureItem>): string {
+/** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题；
+ *  v2.29 outside=true → 范围外行（灰色 + chip — 与评估区间无链范围重叠）） */
+function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, LiteratureItem>, outside = false): string {
   return pdbs.slice(0, max).map(p => {
     const lit = p.pubmedId ? litByPmid.get(p.pubmedId) : undefined
     const ligShow = p.ligands.slice(0, 2).map(l => shortLigand(l)).join('; ')
     return `
-    <tr>
+    <tr${outside ? ' class="tr-outside"' : ''}>
       <td class="td-id"><a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a></td>
       <td><span class="mth mth-${p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'}">${esc(methodLabel(p))}</span></td>
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
-      <td class="t-rng"${p.chainRanges ? ` title="${esc(p.chainRanges)}（UniProt 残基编号范围）"` : ''}>${esc(p.chainRanges || '—')}</td>
+      <td class="t-rng"${p.chainRanges ? ` title="${esc(p.chainRanges)}（UniProt 残基编号范围）"` : ''}>${esc(p.chainRanges || '—')}${outside ? '<span class="rng-outside-chip">范围外</span>' : ''}</td>
       <td class="t-title">${esc(p.title)}</td>
       <td class="num">${esc(p.releaseDate || '—')}</td>
       <td class="t-lig" title="${esc(p.ligands.slice(0, 5).join('; '))}">${ligShow ? esc(ligShow) : '—'}${p.ligands.length > 2 ? `<span class="lig-more"> 等${p.ligands.length}</span>` : ''}</td>
@@ -990,10 +1010,13 @@ const PDB_COLGROUP = `<colgroup>
   <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:72px">
 </colgroup>`
 
+/** PDB 表头（v2.29 提为模块级常量 — 主表/范围外折叠表共用） */
+const PDB_TABLE_THEAD = '<thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>'
+
 /** PDB 表格：前 preview 条直出，剩余放入 details 折叠；expandAll=true 全量直出（v2.13 单独评估页要求） */
 function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid: Map<string, LiteratureItem>, expandAll = false): string {
   const shown = pdbs.slice(0, max)
-  const PDB_THEAD = '<thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>'
+  const PDB_THEAD = PDB_TABLE_THEAD
   if (expandAll) {
     return `
   <div class="tbl-wrap"><table class="tbl-data">
@@ -1027,6 +1050,52 @@ function methodLabel(p: PdbEntry): string {
   if (p.isCryoem) return 'Cryo-EM'
   if (p.isNmr) return 'NMR'
   return p.method.slice(0, 12) || '—'
+}
+
+// ─── v2.29 评估区间说明横幅 + 范围外结构折叠区 ─────────────────────────────
+
+/** 区间来源 → 短说明（横幅内） */
+function rangeSourceShort(s: string | undefined): string {
+  if (!s || s === '—') return '评估区间'
+  if (s === '手动指定') return '手动指定区间'
+  if (s === '构建比对推导') return '截短构建比对推导区间'
+  if (s === 'BLAST nr 比对推导') return 'BLAST 比对推导区间（提交序列在 UniProt 条目内的覆盖范围）'
+  if (s.startsWith('结构域匹配')) return '评估表结构域名 → UniProt domain 匹配区间'
+  return `${s}区间`
+}
+
+/** 评估区间横幅（有区间且存在范围外结构时展示：优先展示/折叠保留口径说明） */
+function rangeBannerHtml(
+  range: Array<[number, number]> | [number, number] | undefined,
+  rangeSource: string | undefined,
+  outsideCount: number,
+  outsideBlastCount: number,
+): string {
+  if (!range) return ''
+  const [a, b] = range
+  const parts: string[] = []
+  if (outsideCount > 0) parts.push(`PDB 结构 ${outsideCount} 条`)
+  if (outsideBlastCount > 0) parts.push(`同源结构 ${outsideBlastCount} 条`)
+  const tail = parts.length
+    ? `；链范围与该区间<b>无重叠</b>的 ${parts.join('、')} 已折叠保留在下方（灰色行，同样可查 — 聚蛋白名下其他片段/其他结构域的参考结构）`
+    : `；当前全部结构链范围均与该区间重叠（无折叠区）`
+  return `<div class="rng-banner"><b>评估区间 ${a}-${b}</b>（${rangeSourceShort(rangeSource)}）— 结构列表按「与区间链范围重叠优先」展示${tail}。</div>`
+}
+
+/** 范围外 PDB 结构折叠区（灰色行 + 范围外 chip；默认折叠，打印自动展开同 .fold） */
+function pdbOutsideFoldHtml(pdbs: PdbEntry[], litByPmid: Map<string, LiteratureItem>, range: [number, number] | undefined): string {
+  if (!range || pdbs.length === 0) return ''
+  const shown = pdbs.slice(0, 150)
+  return `
+  <details class="fold fold-outside">
+    <summary>范围外结构 ${pdbs.length} 条（与评估区间 ${range[0]}-${range[1]} 无链范围重叠 — 折叠保留，灰色行${pdbs.length > 150 ? `，展示前 150 条` : ''}）</summary>
+    <div class="tbl-wrap"><table class="tbl-data">
+      ${PDB_COLGROUP}
+      ${PDB_TABLE_THEAD}
+      <tbody>${pdbRowsHtml(shown, 150, litByPmid, true)}</tbody>
+    </table></div>
+    <p class="note">以上结构的链覆盖区间与本次评估区间无重叠（多为该 UniProt 名下其他片段/其他结构域的结构）；按「重叠优先」原则折叠保留于此，行颜色区别于上表。范围外结构不计入评分、覆盖率与「已有结构先例」统计。</p>
+  </details>`
 }
 
 // ─── v1.29/v1.30 互作复合物证据（Complex Portal / IntAct，无直接结构时）──────────
@@ -1187,15 +1256,33 @@ function complexCardHtml(c: InteractionComplexInfo, expandAll = false): string {
   </div>`
 }
 
+/** v2.33 binary 互作可信度 chip（复合物结构 / 同源复合物结构 / 仅实验证据） */
+function evidenceChipHtml(level: string | undefined): string {
+  if (level === 'complex') return '<span class="ev-chip ev-complex">复合物结构</span>'
+  if (level === 'homolog') return '<span class="ev-chip ev-homolog">同源复合物结构</span>'
+  return '<span class="ev-chip ev-exp">仅实验证据</span>'
+}
+
 /** 互作复合物证据全景（v1.30 接入 PDB 章节）：curated 复合物卡片（共有突出/单独折叠）+ binary 伙伴 */
 export function interactionEvidenceHtml(itx: InteractionAnalysis | null | undefined, expandAll = false): string {
   if (!itx || !itx.applicable || !itx.hasEvidence) return ''
   const complexes = itx.complexes.map(c => complexCardHtml(c, expandAll)).join('')
+  const structuralCount = itx.binaryPartners.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog').length
   const binaries = itx.binaryPartners.length ? `
   <details class="fold">
-    <summary>IntAct binary 互作伙伴（复合物之外，${itx.binaryPartners.length} 个有结构 — 互作界面参考，默认折叠）</summary>
-    <ul class="mw-list">${itx.binaryPartners.map(b => `<li><b>${esc(b.geneName ?? b.accession)}</b> <span class="mono">${esc(b.accession)}</span> — ${b.pdbCount} 个结构${b.representativePdbs.length ? `（${b.representativePdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}）` : ''}</li>`).join('')}</ul>
-    <p class="note">binary 互作（IntAct 实验证据）伙伴有结构 — 互作界面建模与 pull-down/SPR 验证设计可参考，非 curated 复合物，化学计量需实验确认。</p>
+    <summary>IntAct binary 互作伙伴（复合物之外 ${itx.binaryPartners.length} 个 · 可信度分级：${structuralCount} 个有结构证据 / ${itx.binaryPartners.length - structuralCount} 个仅实验证据 — 默认折叠）</summary>
+    <ul class="mw-list">${itx.binaryPartners.map(b => {
+      const evPdbs = b.evidencePdbs ?? []
+      const evCount = b.evidencePdbCount ?? 0
+      const evidenceHtml = (b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog') && evCount > 0
+        ? `${evCount} 个证据结构${evPdbs.length ? `（${evPdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}${evCount > evPdbs.length ? ` 等` : ''}）` : ''}`
+        : '无复合物结构/同源结构支持'
+      const partnerOwn = b.pdbCount > 0
+        ? `${b.pdbCount} 个结构${b.representativePdbs.length ? `（代表：${b.representativePdbs.map(p => `<a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a><span class="cx-res">${p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}</span>`).join(' ')}）` : ''} — 伙伴条目自身`
+        : '无结构'
+      return `<li><b>${esc(b.geneName ?? b.accession)}</b> <span class="mono">${esc(b.accession)}</span>${evidenceChipHtml(b.evidenceLevel)}— 互作证据：${evidenceHtml}；伙伴自身 ${partnerOwn}${b.evidenceNote ? `<br><span class="ev-note">${esc(b.evidenceNote)}</span>` : ''}</li>`
+    }).join('')}</ul>
+    <p class="note">可信度口径（v2.33）：仅当存在<b>复合物结构</b>（靶点与伙伴出现在同一 PDB 条目）或<b>同源复合物结构</b>（靶点同源链与伙伴/伙伴同源基因共结构）时，binary 互作才可完全信任并用于共表达增重路线设计与分子量估算；仅有实验互作证据（IntAct）的伙伴可信度有限 — <b>不应据此认定可用于增大蛋白分子量做 Cryo-EM</b>，如需采用须先 pull-down/SPR/SEC-MALS 验证互作、化学计量与组装效率。伙伴自身结构仅代表该伙伴条目已解析，不构成靶点-伙伴互作的结构证据。</p>
   </details>` : ''
   return `
   <h3 class="itx-h3">互作复合物组分结构 <span class="itx-h3-sub">Complex Portal curated · ${itx.complexes.length} 个复合物</span></h3>
@@ -1204,23 +1291,42 @@ export function interactionEvidenceHtml(itx: InteractionAnalysis | null | undefi
   ${binaries}`
 }
 
-function blastRowsHtml(hits: BlastHit[]): string {
+function blastRowsHtml(hits: BlastHit[], outside = false): string {
   return hits.map(h => {
     const range = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
       ? `${h.queryFrom}-${h.queryTo}`
       : (h.queryCoverage != null && h.queryCoverage > 0 ? `${h.queryCoverage} aa` : '—')
     return `
-    <tr>
+    <tr${outside ? ' class="tr-outside"' : ''}>
       <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
       <td class="t-desc">${esc(h.description)}</td>
       <td class="num">${h.identity.toFixed(1)}%</td>
       <td class="num">${esc(h.evalueRaw)}</td>
-      <td class="num">${esc(range)}</td>
+      <td class="num">${esc(range)}${outside ? '<span class="rng-outside-chip">范围外</span>' : ''}</td>
       <td class="t-nowrap">${esc(h.method || '—')}</td>
       <td class="num">${h.resolution != null ? h.resolution.toFixed(2) : '—'}</td>
       <td class="td-id">${pmidLink(h.pubmedId)}</td>
     </tr>`
   }).join('')
+}
+
+/** 范围外 BLAST 同源命中折叠区（灰色行 + 范围外 chip — v2.29） */
+function blastOutsideFoldHtml(hits: BlastHit[], range: [number, number] | undefined): string {
+  if (!range || hits.length === 0) return ''
+  const shown = hits.slice(0, 100)
+  return `
+  <details class="fold fold-outside">
+    <summary>范围外同源结构 ${hits.length} 条（查询覆盖区间与评估区间 ${range[0]}-${range[1]} 无重叠 — 折叠保留，灰色行${hits.length > 100 ? '，展示前 100 条' : ''}）</summary>
+    <div class="tbl-wrap"><table class="tbl-data tbl-blast">
+      <colgroup>
+        <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
+        <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
+      </colgroup>
+      <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖范围</th><th>方法</th><th class="num">分辨率 (Å)</th><th>文献</th></tr></thead>
+      <tbody>${blastRowsHtml(shown, true)}</tbody>
+    </table></div>
+    <p class="note">以上同源命中的查询覆盖区间与评估区间无重叠（对应其他片段/其他结构域的同源参考）；折叠保留于此，行颜色区别于上表，不计入评分与「已有同源先例」统计。</p>
+  </details>`
 }
 
 /** 文献条目（附关联 PDB chips）；expandAll=true 全量直出（v2.13 单独评估页要求） */
@@ -1353,8 +1459,9 @@ const LIT_PREVIEW = 10
 
 export type SingleBodyCtx = Omit<ReportContext, 'sequence' | 'uniprot'> & {
   sequence?: string
-  /** 报告主体仅消费刊头元信息字段 — 合并报告从作业摘要重建时无需完整 UniprotInfo */
-  uniprot?: Pick<UniprotInfo, 'uniprotId' | 'entryName' | 'proteinName' | 'geneNames' | 'organism' | 'sequenceLength'> | null
+  /** 报告主体仅消费刊头元信息字段 — 合并报告从作业摘要重建时无需完整 UniprotInfo
+   *  v2.31：补 processingChains（聚合蛋白 nsp 归属 — 题目标注与刊头「加工归属」行） */
+  uniprot?: Pick<UniprotInfo, 'uniprotId' | 'entryName' | 'proteinName' | 'geneNames' | 'organism' | 'sequenceLength' | 'processingChains'> | null
 }
 
 /** v2.13：合并报告嵌入模式（各靶点单独评估页复用单靶点报告主体 — 格式一模一样） */
@@ -1421,8 +1528,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   // v2.16：序列靶点有身份识别（评估表名/nr 识别/同源推断）时题目用识别名 —
   // 不再笼统写「序列靶点评估」；后缀注明识别来源与一致性（评估表来源无后缀）
   const ti = ctx.targetIdentity
+  // v2.31：聚合蛋白截短题目标注（P0DTD1 不同截短均为「Replicase polyprotein 1ab」—
+  // 从 PTM/Processing 加工条目归属 nsp，题目区分同名截短靶点）
+  const nspSuffix = nspTitleSuffix(u, ctx.range)
+  const procMatch = u ? matchProcessingSegments(ctx.range, u.processingChains, u.sequenceLength) : null
   const proteinTitle = u
-    ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspSuffix}（${u.uniprotId}${rangeSuffix}）`
     : ti
       ? `${ti.name}（序列靶点${targetIdentityTitleSuffix(ti)}${rangeSuffix}）`
       : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
@@ -1609,7 +1720,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   // v1.26/v1.27：分子量增重策略（小分子量靶点）— 评分卡内嵌（不单独成章，与聚集形式同区呈现）
   const mwA = ctx.mwAugment
   const mwAdj = ctx.scores.mwAugmentAdjust
-  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? (mwA.assemblyEvidence === 'complex' ? '互作伙伴推断（复合物结构支持）' : mwA.assemblyEvidence === 'homolog' ? '互作伙伴推断（同源复合物结构支持）' : '互作伙伴推断') : '无生物装配路径'
   const mwBadgeColor = mwA?.assemblyPath === 'homolog-complex'
     ? (mwA.assemblyKda != null && mwA.assemblyKda >= 100 ? '#0f766e' : '#b45309')
     : mwA?.assemblyKda != null && mwA.assemblyKda >= 100 ? '#065f46' : mwA?.assemblyKda != null && mwA.assemblyKda >= 50 ? '#b45309' : '#78716c'
@@ -1653,8 +1764,8 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
             </tr>`).join('')}</tbody>
         </table></div>` : ''}
         ${(() => { const ps = mwA.partners.filter(p => p.kda != null); return ps.length ? `
-        <p class="note"><b>UniProt 互作伙伴</b>（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
-        <ul class="mw-list">${ps.slice(0, 8).map(p => `<li><span class="mw-partner">${esc((p.geneName ?? p.proteinName ?? p.accession).slice(0, 40))}</span> <span class="mono">${esc(p.accession)}</span> — ${p.lengthAa} aa，~${p.kda} kDa${mwA.assemblyPath === 'partner' ? '（已按最大伙伴计入装配估计）' : ''}</li>`).join('')}</ul>` : '' })()}
+        <p class="note"><b>UniProt 互作伙伴</b>（按 1:1 估计；v2.33 可信度分级 — 仅复合物/同源复合物结构证据支持的伙伴计入装配估计，其余仅作参考并警示）</p>
+        <ul class="mw-list">${ps.slice(0, 8).map(p => `<li><span class="mw-partner">${esc((p.geneName ?? p.proteinName ?? p.accession).slice(0, 40))}</span> <span class="mono">${esc(p.accession)}</span>${evidenceChipHtml(p.evidenceLevel)}— ${p.lengthAa} aa，~${p.kda} kDa${p.evidencePdbIds?.length ? `（证据：${p.evidencePdbIds.map(id => `<a href="https://www.rcsb.org/structure/${id}" target="_blank" rel="noopener">${id}</a>`).join(' ')}）` : (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog') ? '' : '（无结构证据支持，未计入装配估计 — 不可据此认定可用于 Cryo-EM 增重）'}${mwA.assemblyPath === 'partner' && (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog') && p.kda === Math.max(...ps.filter(x => x.evidenceLevel === 'complex' || x.evidenceLevel === 'homolog').map(x => x.kda ?? 0)) ? '（已计入装配估计）' : ''}</li>`).join('')}</ul>` : '' })()}
         <p class="note"><b>技术增重工具箱</b>（无生物装配路径时的兜底策略；需评估开发周期）</p>
         <ul class="mw-list">${mwA.options.map(o => `<li><b>${esc(o.name)}</b>（${esc(o.addKda)}）— ${esc(o.note)}</li>`).join('')}</ul>
         ${mwA.conflicts.length ? `
@@ -1752,9 +1863,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     ? (() => {
         const best = ctx.interaction!.complexes[0]
         const val = best ? best.complexAc : 'binary 伙伴'
+        const binStruct = ctx.interaction!.binaryPartners.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog').length
         const sub = best
           ? `${best.componentsWithStructure}/${best.components.length - 1} 组分有结构${best.sharedPdbTotal ? ` · 共有 ${best.sharedPdbTotal}` : ''}${best.assemblyKda != null ? ` · 装配 ~${best.assemblyKda} kDa` : ''}`
-          : `${ctx.interaction!.binaryPartners.length} 个伙伴有结构`
+          : ctx.interaction!.binaryPartners.length
+            ? `${ctx.interaction!.binaryPartners.length} 个伙伴 · ${binStruct} 个有结构证据可信`
+            : 'binary 伙伴均无结构'
         return `<div class="glance-tile"><div class="gt-label">互作复合物</div><div class="gt-value">${esc(val)}</div><div class="gt-sub">${esc(sub)} · ${best ? 'Complex Portal' : 'IntAct'}</div></div>`
       })()
     : ''
@@ -1975,6 +2089,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <div class="meta-grid">
       <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
       <div><b>蛋白名称</b> ${esc(u?.proteinName ?? ctx.targetIdentity?.name ?? '—')}</div>
+      ${procMatch ? processingRowHtml(procMatch) : ''}
       <div><b>基因</b> ${esc(geneStr)}</div>
       <div><b>物种</b> ${esc(u?.organism ?? ctx.targetIdentity?.organism ?? '—')}</div>
       <div><b>序列长度</b> ${u ? u.sequenceLength + ' aa' : ctx.sequence ? ctx.sequence.length + ' aa' : '—'}</div>
@@ -2049,12 +2164,14 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   </section>
 
   <section class="sec" id="${idOf('pdbs')}">
-    <h2>${secHead(pdbsNo, 'PDB 结构清单', ctx.directPdbs.length ? `Structures · ${ctx.directPdbs.length}` : (ctx.interaction?.hasEvidence ? 'Structures · 互作组分证据' : 'Structures · 0'))}</h2>
+    <h2>${secHead(pdbsNo, 'PDB 结构清单', ctx.directPdbs.length ? `Structures · ${ctx.directPdbs.length}${(ctx.rangeOutsidePdbs?.length ?? 0) > 0 ? ` · 范围外 ${(ctx.rangeOutsidePdbs?.length ?? 0)}` : ''}` : (ctx.interaction?.hasEvidence ? 'Structures · 互作组分证据' : 'Structures · 0'))}</h2>
+    ${rangeBannerHtml(ctx.range, ctx.rangeSource, ctx.rangeOutsidePdbs?.length ?? 0, ctx.rangeOutsideBlastHits?.length ?? 0)}
     ${covFigHtml}
-    ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。${expandAll ? '本页为单独评估页 — 全量结构默认展开。' : ''}</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid, expandAll)}` +
+    ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。${expandAll ? '本页为单独评估页 — 全量结构默认展开。' : ''}${ctx.range ? ' 本表仅含链范围与评估区间重叠（或范围未知）的结构。' : ''}</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid, expandAll)}` +
       (input.totalPdbFound > 150 ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示前 150 个（按分辨率排序）。</p>`
-      : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : ''))
-    : `<div class="callout callout-amber"><b>暂无直接关联的 PDB 结构 — 全新结构靶点</b>该靶点（或该 UniProt）在 RCSB 无直接关联结构条目${ctx.interaction?.hasEvidence ? '，但存在互作复合物证据 — 下方列出其复合物其他组分的结构清单（共有结构突出显示、单独结构默认折叠），作为组装路线与构建边界设计的评估依据' : '，结构可行性判断主要依据同源结构先例（见 BLAST 章节）与文献证据'}；构建边界与实验策略需从零设计，风险与周期相应增加。</div>${interactionEvidenceHtml(ctx.interaction, expandAll)}`}
+      : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : '')) +
+      pdbOutsideFoldHtml(ctx.rangeOutsidePdbs ?? [], litByPmid, ctx.range)
+    : `<div class="callout callout-amber"><b>暂无直接关联的 PDB 结构 — 全新结构靶点</b>该靶点（或该 UniProt）在 RCSB 无直接关联结构条目${ctx.interaction?.hasEvidence ? '，但存在互作复合物证据 — 下方列出其复合物其他组分的结构清单（共有结构突出显示、单独结构默认折叠），作为组装路线与构建边界设计的评估依据' : '，结构可行性判断主要依据同源结构先例（见 BLAST 章节）与文献证据'}；构建边界与实验策略需从零设计，风险与周期相应增加。</div>${interactionEvidenceHtml(ctx.interaction, expandAll)}${pdbOutsideFoldHtml(ctx.rangeOutsidePdbs ?? [], litByPmid, ctx.range)}`}
   </section>
 
   ${ligandSecHtml}
@@ -2069,7 +2186,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
       </colgroup>
       <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖范围</th><th>方法</th><th class="num">分辨率 (Å)</th><th>文献</th></tr></thead>
       <tbody>${blastRowsHtml(ctx.blastHits)}</tbody>
-    </table></div>`
+    </table></div>${blastOutsideFoldHtml(ctx.rangeOutsideBlastHits ?? [], ctx.range)}`
     : ctx.blastStatus?.status === 'failed'
       ? `<div class="callout callout-amber"><b>同源检索失败 — 本报告不含同源结构证据</b>${esc(describeBlastStatus(ctx.blastStatus))}。本报告结论主要基于直接结构与文献证据；同源先例缺失可能低估或高估可行性，建议重新评估补齐同源证据。</div>`
       : `<p class="note">${esc(describeBlastStatus(ctx.blastStatus))}。同源结构证据在本报告中缺位，结论主要基于直接结构与文献证据；如需同源检索可重新评估并勾选「强制 BLAST」。</p>`}
@@ -2247,6 +2364,18 @@ export const SINGLE_REPORT_CSS = `  :root {
   details.fold[open] summary::before { content:'－ '; }
   details.fold summary:hover { color:var(--accent); }
 
+  /* ── v2.29 范围外结构折叠区（灰色行 + 范围外 chip）── */
+  details.fold.fold-outside { border:1px dashed #d6d3d1; border-radius:6px; background:#f7f7f6; padding:0 6px 4px; }
+  details.fold.fold-outside summary { color:#78716c; border-top:none; }
+  details.fold.fold-outside summary:hover { color:#57534e; }
+  tr.tr-outside td { color:var(--faint); background:#fafaf9; }
+  tr.tr-outside:hover td { background:#f5f5f4; }
+  tr.tr-outside td a { color:#a8a29e; }
+  tr.tr-outside .t-title, tr.tr-outside .t-desc { color:#a8a29e; }
+  .rng-outside-chip { display:inline-block; margin-left:6px; padding:0 7px; border-radius:99px; background:#f3f4f6; color:#78716c; font-size:10px; font-family:var(--mono); border:1px solid #e7e5e4; vertical-align:middle; }
+  .rng-banner { border:1px solid #bbf7d0; background:#f0fdf4; color:#065f46; border-radius:6px; padding:10px 14px; margin:10px 0 14px; font-size:12.5px; line-height:1.8; }
+  .rng-banner b { font-family:var(--mono); }
+
   /* ── 评分卡 ── */
   .score-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:18px 22px; margin:14px 0 10px; }
   .score-row { display:grid; grid-template-columns:96px 1fr 64px 110px; gap:14px; align-items:center; margin:10px 0; }
@@ -2316,6 +2445,12 @@ export const SINGLE_REPORT_CSS = `  :root {
   .mw-target { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; border-radius:3px; padding:0 5px; font-weight:600; }
   .mw-partner { background:#fffbeb; color:#92400e; border:1px solid #fde68a; border-radius:3px; padding:0 5px; font-weight:600; }
   .mw-basis { font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  /* ── v2.33 binary 互作可信度分级 chips ── */
+  .ev-chip { display:inline-block; margin:0 6px; padding:0 7px; border-radius:99px; font-family:var(--mono); font-size:10px; font-weight:700; vertical-align:1px; }
+  .ev-complex { background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
+  .ev-homolog { background:#f0fdfa; color:#0f766e; border:1px solid #99f6e4; }
+  .ev-exp { background:#fef3c7; color:#b45309; border:1px solid #fde68a; }
+  .ev-note { font-family:var(--mono); font-size:10.5px; color:var(--faint); }
   ul.mw-list { list-style:none; margin:2px 0 10px; }
   ul.mw-list li { position:relative; padding:5px 0 5px 16px; border-bottom:1px solid var(--hairline); font-size:12.5px; color:var(--sub); line-height:1.7; }
   ul.mw-list li:last-child { border-bottom:none; }
@@ -2476,7 +2611,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const u = input.ctx.uniprot
   const rangeSuffix = input.ctx.range ? ` · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : ''
   const proteinTitle = u
-    ? `${u.proteinName}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspTitleSuffix(u, input.ctx.range)}（${u.uniprotId}${rangeSuffix}）`
     : input.ctx.targetIdentity
       ? `${input.ctx.targetIdentity.name}（序列靶点${targetIdentityTitleSuffix(input.ctx.targetIdentity)}${rangeSuffix}）`
       : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')

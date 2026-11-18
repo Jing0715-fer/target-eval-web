@@ -3,7 +3,18 @@
  *
  * multipart/form-data：file（.xlsx/.xlsm/.xls/.csv ≤ 10MB）+ llm（JSON 字符串，
  * v2.19 用户本地引擎配置内联携带，服务端不落盘）+ quick=1（跳过 LLM 直接规则提取）。
- * 返回 { ok, groups: string[][], invalid, source: 'llm'|'regex', note?, meta }。
+ *
+ * v2.26 流式版（NDJSON 心跳保活）：旧版一次性 JSON 响应在 LLM 慢/限流重试时
+ * 超出公网网关 ~30s 空闲转发窗 → 网关 502（用户实测「Excel 解析失败（HTTP 502）」，
+ * 本地 dev server 实测 9.4s 正常 — 502 为网关层切断）。对齐 insights 路由
+ * v2.6.3 的成熟口径：
+ *  - 心跳 beat（1.2s 首拍 + 3s 间隔 + ~1.4KB pad，防小帧被中间层缓冲吞没）
+ *  - LLM 墙钟预算 12s（网关对流式响应的**转发窗实测仅 ~24-28s** — done 事件必须
+ *    落窗内才能到达客户端；超时 abort → 规则兜底即刻 done）
+ *  - 前端三级降级：流式 → 断流重试 → quick 兜底（组件 api.ts）
+ * 校验类错误（400/413/422）仍走普通 JSON（流尚未建立，前端先查 res.ok）。
+ * 成功响应为 application/x-ndjson：行 {"type":"ping"}（心跳）与终态
+ * {"type":"done", ok, groups, seqGroups, invalid, source, note?, meta}。
  *
  * 设计口径与 docx insights 一致：LLM 墙钟预算内出结果，超时/失败静默回退规则提取
  * （保证导入通道永不卡死）；无状态 — 不写盘、不留缓存，重复上传即重复解析。
@@ -16,8 +27,16 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
-/** LLM 墙钟预算：28s（网关非流式响应转发窗内；超时 abort → 规则兜底即刻返回） */
-const LLM_BUDGET_MS = 28_000
+/**
+ * LLM 墙钟预算：12s（对齐 insights v2.6.3 — 网关流转发窗实测 ~24-28s，done 必须
+ * 落窗内；勿超过 ~15s，否则 done 可能再次落窗）。EVAL_HT_EXTRACT_BUDGET_MS
+ * 可调（>10s 生效）。
+ */
+const LLM_BUDGET_MS = Number(process.env.EVAL_HT_EXTRACT_BUDGET_MS) > 10_000 ? Number(process.env.EVAL_HT_EXTRACT_BUDGET_MS) : 12_000
+/** 心跳间隔（复刻 insights/sync 已验证穿透的事件节奏） */
+const HEARTBEAT_MS = 3_000
+/** 心跳 pad 体积：对齐 sync 首个进度事件 ~1.4KB —— 防小帧被中间层缓冲吞没 */
+const BEAT_PAD = 'p'.repeat(1400)
 const ALLOWED_EXT = /\.(xlsx|xlsm|xls|csv)$/i
 
 export async function POST(req: Request) {
@@ -65,31 +84,85 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '表格内容为空（未读取到任何非空行），无法提取靶点' }, { status: 422 })
   }
 
-  return runWithLlmOverride(sanitizeLlmOverride(llmRaw), async () => {
-    // 墙钟预算：超时 abort → llmChat 判失败 → 规则兜底；客户端断开同样中止 LLM 空转
-    const ctrl = new AbortController()
-    const onCallerAbort = () => ctrl.abort()
-    req.signal?.addEventListener('abort', onCallerAbort, { once: true })
-    const timer = quick ? null : setTimeout(() => ctrl.abort(), LLM_BUDGET_MS)
-    try {
-      const result = await extractHtGroups(wb, { quick, signal: ctrl.signal })
-      return NextResponse.json({
-        ok: true,
-        ...result,
-        meta: {
-          fileName,
-          sheets: wb.sheetCount,
-          rows: wb.rowCount,
-          truncated: wb.truncated,
-          bytes: file.size,
-          // v2.23.1 序列兜底计数（行缺 UniProt 但有构建序列 → 按序列评估）
-          seqGroups: result.seqGroups.length,
-          seqTargets: result.seqGroups.reduce((n, g) => n + g.length, 0),
-        },
+  // ── v2.26 流式执行（NDJSON 心跳 — 网关 ~30s 空闲切断对策）──────────────────
+  const encoder = new TextEncoder()
+  const t0 = Date.now()
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false
+      const send = (obj: Record<string, unknown>) => {
+        if (closed) return
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
+        } catch { closed = true }
+      }
+      const sendBeat = () => send({
+        type: 'ping',
+        elapsedMs: Date.now() - t0,
+        budgetMs: LLM_BUDGET_MS,
+        pad: BEAT_PAD,
       })
-    } finally {
-      if (timer) clearTimeout(timer)
-      req.signal?.removeEventListener('abort', onCallerAbort)
-    }
+      const firstBeat = setTimeout(sendBeat, 1_200)
+      const ping = setInterval(sendBeat, HEARTBEAT_MS)
+      const cleanup = () => { clearTimeout(firstBeat); clearInterval(ping) }
+      const closeStream = () => {
+        cleanup()
+        if (!closed) {
+          closed = true
+          try { controller.close() } catch { /* already closed */ }
+        }
+      }
+
+      void runWithLlmOverride(sanitizeLlmOverride(llmRaw), async () => {
+        try {
+          // 墙钟预算：超时 abort → llmChat 判失败 → 规则兜底；客户端断开同样中止 LLM 空转
+          const ctrl = new AbortController()
+          const onCallerAbort = () => ctrl.abort()
+          req.signal?.addEventListener('abort', onCallerAbort, { once: true })
+          const timer = quick ? null : setTimeout(() => ctrl.abort(), LLM_BUDGET_MS)
+          try {
+            const result = await extractHtGroups(wb, { quick, signal: ctrl.signal })
+            send({
+              type: 'done',
+              ok: true,
+              ...result,
+              meta: {
+                fileName,
+                sheets: wb.sheetCount,
+                rows: wb.rowCount,
+                truncated: wb.truncated,
+                bytes: file.size,
+                // v2.23.1 序列兜底计数（行缺 UniProt 但有构建序列 → 按序列评估）
+                seqGroups: result.seqGroups.length,
+                seqTargets: result.seqGroups.reduce((n, g) => n + g.length, 0),
+                // v2.27：携带构建区间的靶点数（截短构建感知 — 仅保留链范围重叠的结构）
+                rangeTargets: result.groups.reduce(
+                  (n, g, gi) => n + (result.groupRanges[gi] ?? []).filter(Boolean).length,
+                  0,
+                ),
+                // v2.29：携带结构域名提示的靶点数（管线内与 UniProt domain 匹配推导区间）
+                domainHintTargets: result.groups.reduce(
+                  (n, g, gi) => n + (result.groupDomainHints[gi] ?? []).filter(Boolean).length,
+                  0,
+                ),
+              },
+            })
+          } finally {
+            if (timer) clearTimeout(timer)
+            req.signal?.removeEventListener('abort', onCallerAbort)
+          }
+        } catch (err) {
+          send({ type: 'done', ok: false, error: err instanceof Error ? err.message : '解析异常' })
+        } finally {
+          closeStream()
+        }
+      })
+    },
+  })
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
   })
 }

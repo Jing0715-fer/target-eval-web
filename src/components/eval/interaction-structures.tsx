@@ -404,25 +404,37 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
         <details className="group overflow-hidden rounded-lg border border-border">
           <summary className="flex cursor-pointer select-none items-center gap-1.5 border-b border-border bg-muted/50 px-3.5 py-2 text-[11px] font-medium text-primary list-none transition-colors hover:bg-muted [&::-webkit-details-marker]:hidden [&::-webkit-details-marker]:hidden">
             <Network className="size-3.5 shrink-0" aria-hidden />
-            IntAct binary 互作伙伴（复合物之外，{itx.binaryPartners.length} 个有结构 — 互作界面参考，默认折叠）
+            IntAct binary 互作伙伴（复合物之外 {itx.binaryPartners.length} 个 · 可信度分级：{itx.binaryPartners.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog').length} 个有结构证据 / {itx.binaryPartners.filter(b => (b.evidenceLevel ?? 'experimental') === 'experimental').length} 个仅实验证据 — 默认折叠）
           </summary>
           <ul className="divide-y divide-border/60">
             {itx.binaryPartners.map(b => (
               <li key={`bin-${b.accession}`} className="flex flex-col gap-1 px-3.5 py-2.5 sm:flex-row sm:items-baseline sm:gap-3">
-                <span className="w-40 shrink-0 text-xs font-semibold text-foreground">
+                <span className="w-44 shrink-0 text-xs font-semibold text-foreground">
                   {b.geneName ?? b.accession} <span className="ml-1 font-mono text-[10.5px] font-normal text-muted-foreground/60">{b.accession}</span>
                 </span>
                 <span className="min-w-0 flex-1 text-xs leading-relaxed text-foreground/80">
-                  {b.pdbCount} 个结构
-                  {b.representativePdbs.length > 0 && (
-                    <span className="ml-1.5">
-                      代表：
-                      {b.representativePdbs.map(p => (
+                  <span
+                    className={cn(
+                      'mr-2 inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold',
+                      b.evidenceLevel === 'complex'
+                        ? 'border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-700 dark:text-emerald-400'
+                        : b.evidenceLevel === 'homolog'
+                          ? 'border-teal-500/30 bg-teal-500/[0.08] text-teal-700 dark:text-teal-400'
+                          : 'border-amber-500/30 bg-amber-500/[0.08] text-amber-700 dark:text-amber-400',
+                    )}
+                  >
+                    {b.evidenceLevel === 'complex' ? '复合物结构' : b.evidenceLevel === 'homolog' ? '同源复合物结构' : '仅实验证据'}
+                  </span>
+                  {(b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog') && (b.evidencePdbCount ?? 0) > 0 ? (
+                    <>
+                      互作证据 {b.evidencePdbCount} 个结构：
+                      {(b.evidencePdbs ?? []).map(p => (
                         <a
-                          key={`bin-${b.accession}-${p.pdbId}`}
+                          key={`bin-ev-${b.accession}-${p.pdbId}`}
                           href={`https://www.rcsb.org/structure/${p.pdbId}`}
                           target="_blank"
                           rel="noreferrer"
+                          title={p.title}
                           className="mx-0.5 font-mono text-[11px] font-semibold text-primary hover:underline"
                         >
                           {p.pdbId}
@@ -431,14 +443,44 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
                           </span>
                         </a>
                       ))}
+                    </>
+                  ) : (
+                    '无复合物结构/同源结构支持'
+                  )}
+                  {b.pdbCount > 0 && (
+                    <span className="ml-1.5 text-muted-foreground/70">
+                      ；伙伴自身 {b.pdbCount} 个结构
+                      {b.representativePdbs.length > 0 && (
+                        <span className="ml-1">
+                          （代表：
+                          {b.representativePdbs.map(p => (
+                            <a
+                              key={`bin-own-${b.accession}-${p.pdbId}`}
+                              href={`https://www.rcsb.org/structure/${p.pdbId}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mx-0.5 font-mono text-[11px] font-semibold text-primary hover:underline"
+                            >
+                              {p.pdbId}
+                              <span className="ml-0.5 font-normal text-muted-foreground/60">
+                                {p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}
+                              </span>
+                            </a>
+                          ))}
+                          <span className="ml-1">— 伙伴条目自身</span>）
+                        </span>
+                      )}
                     </span>
+                  )}
+                  {b.evidenceNote && (
+                    <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/60">{b.evidenceNote}</span>
                   )}
                 </span>
               </li>
             ))}
           </ul>
           <p className="border-t border-border/70 px-3.5 py-2.5 text-[11px] leading-relaxed text-muted-foreground/60">
-            binary 互作（IntAct 实验证据）伙伴有结构 — 互作界面建模与 pull-down/SPR 验证设计可参考，非 curated 复合物，化学计量需实验确认。
+            可信度口径（v2.33）：仅当存在<b className="mx-0.5 text-foreground/80">复合物结构</b>（靶点与伙伴出现在同一 PDB 条目）或<b className="mx-0.5 text-foreground/80">同源复合物结构</b>（靶点同源链与伙伴/伙伴同源基因共结构）时，binary 互作才可完全信任并用于共表达增重路线设计与分子量估算；仅有实验互作证据（IntAct）的伙伴可信度有限 —<b className="mx-0.5 text-foreground/80">不应据此认定可用于增大蛋白分子量做 Cryo-EM</b>，如需采用须先 pull-down/SPR/SEC-MALS 验证互作、化学计量与组装效率。伙伴自身结构仅代表该伙伴条目已解析，不构成靶点-伙伴互作的结构证据。
           </p>
         </details>
       )}

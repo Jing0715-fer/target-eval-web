@@ -16,9 +16,10 @@
  *
  * 内存策略：每复合物组分 ≤6、binary 伙伴 ≤6、每组分代表结构 3 — 命中集恒小。
  */
-import { fetchPdbEntries, fetchPdbIdsForUniprot, fetchEntriesMetaBatch, entryMetaToPdbEntry } from './rcsb'
+import { fetchPdbIdsForUniprot, fetchEntriesMetaBatch, entryMetaToPdbEntry } from './rcsb'
 import { cachedJsonFetch } from './cache'
-import type { InteractionAnalysis, InteractionBinaryInfo, InteractionComplexInfo, InteractionComponent, InteractionSharedPdb, PdbEntry, UniprotInfo } from './types'
+import { evaluateBinaryEvidence } from './binary-evidence'
+import type { InteractionAnalysis, InteractionBinaryInfo, InteractionComplexInfo, InteractionComponent, InteractionSharedPdb, PdbEntry, UniprotInfo, BlastHit } from './types'
 
 const COMPLEX_WS = 'https://www.ebi.ac.uk/intact/complex-ws/complex'
 
@@ -28,8 +29,8 @@ const MAX_COMPONENTS = 6
 const MAX_COMPLEXES = 3
 /** binary 伙伴中检索结构的数量上限（复合物之外的伙伴） */
 const MAX_BINARY_FETCH = 6
-/** binary 展示上限（有结构者） */
-const MAX_BINARY_SHOW = 4
+/** binary 展示上限（v2.33 可信度分级后全部展示 — 含无结构伙伴，便于完整呈现低可信警示） */
+const MAX_BINARY_SHOW = 6
 
 /** aa → kDa 估算（与 mw-augment AA_KDA 一致） */
 const AA_KDA = 0.11
@@ -86,22 +87,6 @@ async function fetchLengths(accessions: string[]): Promise<Map<string, { lengthA
     })
   }
   return out
-}
-
-/** 拉某蛋白的代表结构（按分辨率取优 ≤3 个） */
-async function fetchRepresentativePdbs(accession: string, take: number, signal?: AbortSignal): Promise<{ count: number; entries: PdbEntry[] }> {
-  try {
-    const ids = await fetchPdbIdsForUniprot(accession, 100)
-    if (!ids.length) return { count: 0, entries: [] }
-    if (take <= 0) return { count: ids.length, entries: [] }
-    const res = await fetchPdbEntries(ids.slice(0, Math.max(take, 5)), Math.max(take, 5), undefined, signal)
-    const entries = [...res.entries]
-      .sort((a, b) => (a.resolution ?? 99) - (b.resolution ?? 99))
-      .slice(0, take)
-    return { count: ids.length, entries }
-  } catch {
-    return { count: 0, entries: [] }
-  }
 }
 
 /** 共有结构详情拉取上限（v1.31 全量列表 — 报告展开/折叠均可见，超出仅计数） */
@@ -260,6 +245,10 @@ async function classifyComponentStructures(
 
 export interface InteractionInput {
   uniprot: UniprotInfo | null
+  /** v2.33：靶点 BLAST 同源命中（binary 伙伴同源复合物证据检索） */
+  blastHits?: BlastHit[]
+  /** v2.33：靶点直接结构 PDB IDs（本分析通常在无直接结构时运行；传入以兼容未来场景） */
+  directPdbIds?: string[]
   signal?: AbortSignal
   onProgress?: (msg: string) => void
 }
@@ -365,27 +354,51 @@ export async function analyzeInteractionEvidence(input: InteractionInput): Promi
   }
   complexes.sort((a, b) => b.componentsWithStructure - a.componentsWithStructure || b.totalPdb - a.totalPdb)
 
-  // ── binary 伙伴（IntAct，复合物之外的）──
+  // ── binary 伙伴（IntAct，复合物之外的）— v2.33 可信度分级 ──
+  // 用户需求：binary 互作蛋白可信度需谨慎评估 — 只有存在复合物结构（靶点+伙伴
+  // 同 PDB）或同源结构（靶点同源链与伙伴/伙伴同源基因共 PDB）才可完全信任；
+  // 否则不应据此认为互作可用于增大蛋白分子量做 Cryo-EM。
   const complexAccs = new Set(complexes.flatMap(c => c.components.map(x => x.accession)))
   const binaries: InteractionBinaryInfo[] = []
   const binaryCandidates = (uniprot.interactions ?? [])
     .filter(i => !i.selfInteraction && i.accession !== targetAcc && !complexAccs.has(i.accession))
     .slice(0, MAX_BINARY_FETCH)
   if (binaryCandidates.length) {
-    onProgress?.(`检索 ${binaryCandidates.length} 个 binary 互作伙伴的结构…`)
+    onProgress?.(`评估 ${binaryCandidates.length} 个 binary 互作伙伴的可信度（复合物/同源结构检索）…`)
+    const evidence = await evaluateBinaryEvidence({
+      targetAcc,
+      partners: binaryCandidates.map(b => ({ accession: b.accession, geneName: b.geneName })),
+      directPdbIds: input.directPdbIds ?? [],
+      blastHits: input.blastHits ?? [],
+      signal,
+    })
     for (const b of binaryCandidates) {
-      if (signal?.aborted) break
-      const { count, entries } = await fetchRepresentativePdbs(b.accession, 2, signal)
-      if (count > 0) {
-        binaries.push({ accession: b.accession, geneName: b.geneName, pdbCount: count, representativePdbs: entries })
-      }
+      const ev = evidence.get(b.accession)
+      binaries.push({
+        accession: b.accession,
+        geneName: b.geneName,
+        pdbCount: ev?.partnerPdbCount ?? 0,
+        representativePdbs: ev?.partnerReprPdbs ?? [],
+        evidenceLevel: ev?.level ?? 'experimental',
+        evidencePdbs: ev?.representativePdbs ?? [],
+        evidencePdbCount: ev?.evidencePdbIds.length ?? 0,
+        evidenceNote: ev?.note,
+      })
     }
-    binaries.sort((a, b) => b.pdbCount - a.pdbCount)
+    // 展示排序：复合物结构 → 同源复合物结构 → 仅实验证据；同级按证据数/结构数降序
+    const levelRank = { complex: 0, homolog: 1, experimental: 2 } as const
+    binaries.sort((a, b) =>
+      (levelRank[a.evidenceLevel ?? 'experimental'] - levelRank[b.evidenceLevel ?? 'experimental'])
+      || (b.evidencePdbCount ?? 0) - (a.evidencePdbCount ?? 0)
+      || b.pdbCount - a.pdbCount)
   }
 
   // ── 汇总 ──
   const hasComplex = complexes.length > 0
-  const hasEvidence = hasComplex || binaries.length > 0
+  const structuralBinaries = binaries.filter(b => b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog')
+  const experimentalBinaries = binaries.filter(b => (b.evidenceLevel ?? 'experimental') === 'experimental')
+  // v2.33：伙伴自身有结构 或 伙伴有复合物/同源复合物证据 → 均构成可用证据
+  const hasEvidence = hasComplex || binaries.some(b => b.pdbCount > 0 || b.evidenceLevel === 'complex' || b.evidenceLevel === 'homolog')
   const best = complexes[0]
   const parts: string[] = []
   if (best) {
@@ -393,7 +406,9 @@ export async function analyzeInteractionEvidence(input: InteractionInput): Promi
     if (best.componentsWithStructure > 0) parts.push(`${best.componentsWithStructure}/${best.components.length - 1} 个其他组分有结构（共 ${best.totalPdb} 个 PDB${best.sharedPdbTotal ? `，其中共有结构 ${best.sharedPdbTotal} 个` : ''}）`)
     if (best.assemblyKda != null) parts.push(`装配总分子量 ~${best.assemblyKda} kDa`)
   }
-  if (binaries.length) parts.push(`binary 互作伙伴 ${binaries.length} 个有结构（${binaries.slice(0, 3).map(b => `${b.geneName ?? b.accession} ${b.pdbCount} 结构`).join('、')}）`)
+  if (binaries.length) {
+    parts.push(`binary 互作伙伴 ${binaries.length} 个，可信度分级：${structuralBinaries.length} 个有复合物/同源复合物结构证据${experimentalBinaries.length ? `、${experimentalBinaries.length} 个仅实验互作证据（低可信，不可据此认定可用于 Cryo-EM 增重）` : ''}`)
+  }
   const summary = hasEvidence
     ? `无直接结构 — 互作证据：${parts.join('；')}`
     : '无直接结构，且 UniProt 互作数据未提供可用证据（无 curated 复合物、伙伴无结构）'
@@ -413,7 +428,15 @@ export async function analyzeInteractionEvidence(input: InteractionInput): Promi
     notes.push('组装路线与客户目的需比对：若客户需要的是靶点单体/特定结构域结构，复合物路线为间接路径；若可接受复合物形式，应优先共表达组装')
   }
   if (binaries.length) {
-    notes.push('binary 互作（IntAct 实验证据）伙伴有结构 — 互作界面建模与 pull-down/SPR 验证设计可参考，但非 curated 复合物，化学计量需实验确认')
+    if (structuralBinaries.length) {
+      notes.push(`binary 互作可信度分级（v2.33）：${structuralBinaries.map(b => `${b.geneName ?? b.accession}（${b.evidenceLevel === 'complex' ? '复合物结构支持' : '同源复合物结构支持'}${b.evidencePdbCount ? ` ${b.evidencePdbCount} 个：${b.evidencePdbs?.slice(0, 2).map(p => p.pdbId).join('、')}` : ''}）`).join('、')} — 有结构证据支持，互作可信度高，可作为共表达/组装增重路线与分子量估算的依据（化学计量仍建议 SEC-MALS 验证）`)
+    }
+    if (experimentalBinaries.length) {
+      notes.push(`binary 互作可信度警示（v2.33）：${experimentalBinaries.slice(0, 4).map(b => b.geneName ?? b.accession).join('、')}等 ${experimentalBinaries.length} 个伙伴仅有实验互作证据（IntAct），无复合物结构或同源结构支持 — 可信度有限，不可据此认定可用于增大蛋白分子量做 Cryo-EM；如需采用须先 pull-down/SPR/SEC-MALS 验证互作、化学计量与组装效率`)
+    }
+    if (structuralBinaries.length === 0 && binaries.some(b => b.pdbCount > 0)) {
+      notes.push('binary 伙伴自身结构仅代表该伙伴条目已解析 — 不构成靶点-伙伴互作的结构证据；互作界面建模与 pull-down/SPR 验证设计可参考，非 curated 复合物，化学计量需实验确认')
+    }
   }
 
   return {

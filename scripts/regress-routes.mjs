@@ -140,6 +140,21 @@ for (const ep of ['/api/llm/config', '/api/jobs']) {
   ok(`GET ${ep} 非 404`, r.status !== 404, `HTTP ${r.status}`)
   await r.body?.cancel?.()
 }
+// v2.28 统计看板路由探活（缺条目 → 400；路由不存在才是回归）
+{
+  const r = await fetch(`${base}/api/evaluate/ht-dashboard`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries: [] }),
+    signal: AbortSignal.timeout(15000),
+  })
+  ok('POST /api/evaluate/ht-dashboard 非 404（统计看板生成入口存活）', r.status !== 404, `HTTP ${r.status}`)
+  await r.body?.cancel?.()
+}
+{
+  const r = await fetch(`${base}/api/evaluate/ht-dashboard`, { signal: AbortSignal.timeout(10000) })
+  ok('GET /api/evaluate/ht-dashboard（看板列表入口）非 404', r.status !== 404, `HTTP ${r.status}`)
+  await r.body?.cancel?.()
+}
 
 // ── 4. 收尾 ─────────────────────────────────────────────────────────────────
 if (spawned) {

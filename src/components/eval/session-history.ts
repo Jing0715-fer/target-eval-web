@@ -54,12 +54,15 @@ export function removeSessionJob(id: string): void {
 /** 会话作业 → 历史列表项（与 GET /api/jobs 响应同构） */
 export function sessionJobToListItem(s: SessionJob): JobListItem {
   const summary = s.job.summary
+  // v2.31：聚合蛋白截短追加 nsp 标注（同名截短靶点列表可区分）
+  const nspSuffix = summary?.uniprot?.nspLabel ? ` ${summary.uniprot.nspLabel}` : ''
+  const proteinName = summary?.uniprot?.proteinName ? summary.uniprot.proteinName + nspSuffix : null
   return {
     id: s.job.id,
     status: s.job.status,
-    title: summary?.uniprot?.proteinName ?? s.job.uniprotId ?? '评估作业',
+    title: summary?.uniprot?.proteinName ? summary.uniprot.proteinName + nspSuffix : s.job.uniprotId ?? '评估作业',
     uniprotId: s.job.uniprotId,
-    proteinName: summary?.uniprot?.proteinName ?? null,
+    proteinName,
     createdAt: new Date(s.at).toISOString(),
     coverage: summary?.coverage ?? null,
     pdbCount: summary?.directPdbCount ?? null,

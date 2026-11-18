@@ -161,7 +161,7 @@ function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }
       <span className="rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary">
         {t.uniprotId ?? '—'}
       </span>
-      <span className="text-sm font-semibold text-foreground">{t.proteinName}</span>
+      <span className="text-sm font-semibold text-foreground">{t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}</span>
       {/* v2.16：序列靶点身份徽标（无 UniProt 归属 — 识别来源与一致性） */}
       {!t.uniprotId && t.targetIdentity && (
         <span
@@ -239,7 +239,7 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 border-b border-border/70 bg-muted/30 px-4 py-3">
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-foreground font-mono text-[11px] font-bold text-background">{index + 1}</span>
-        <span className="text-sm font-semibold text-foreground">{t.proteinName}</span>
+        <span className="text-sm font-semibold text-foreground">{t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}</span>
         {t.uniprotId ? (
           <a
             href={`https://www.uniprot.org/uniprotkb/${t.uniprotId}`}
@@ -731,7 +731,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                   <div key={t.jobId} className="flex flex-col gap-2.5 rounded-xl border border-border bg-card px-5 py-4">
                     <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-sm font-semibold text-foreground">
-                        {t.proteinName}
+                        {t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}
                         {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground/70">{t.uniprotId}</span>}
                       </span>
                       <span className={cn('inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-semibold', badgeCls)}>{catZh}</span>
@@ -748,7 +748,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                         <span className="lin-eyebrow mr-1.5 text-primary">分子量增重</span>
                         单体 ~{t.mwAugment.monomerKda} kDa
                         {t.mwAugment.assemblyKda != null
-                          ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa（${t.mwAugment.assemblyPath === 'complex' ? '已有复合物结构' : t.mwAugment.assemblyPath === 'oligomer' ? '自身寡聚' : t.mwAugment.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : '互作伙伴推断'}）`
+                          ? ` → 装配 ~${t.mwAugment.assemblyKda} kDa（${t.mwAugment.assemblyPath === 'complex' ? '已有复合物结构' : t.mwAugment.assemblyPath === 'oligomer' ? '自身寡聚' : t.mwAugment.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : t.mwAugment.assemblyEvidence === 'complex' ? '互作伙伴推断（复合物结构支持）' : t.mwAugment.assemblyEvidence === 'homolog' ? '互作伙伴推断（同源复合物结构支持）' : '互作伙伴推断'}）`
                           : '（无生物装配增重路径 — 需技术增重策略）'}
                         {(t.mwAugment.homologComplexes ?? []).length > 0
                           ? `；同源复合物 ${(t.mwAugment.homologComplexes ?? []).map(h => `${h.pdbId}（identity ${Math.round(h.identity)}%，靶点换算 ~${h.estimatedKda} kDa）`).join('、')}`
@@ -793,8 +793,20 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           <div className="flex flex-col gap-5">
             {pdbTargets.map(t => (
               <div key={t.jobId} className="flex flex-col gap-2">
-                <TargetGroupHeader t={t} right={`${t.directPdbCount} PDB · 覆盖率 ${t.coveragePercent}%`} />
-                <PdbTable pdbs={t.directPdbs} literature={t.literature} />
+                <TargetGroupHeader
+                  t={t}
+                  right={`${t.directPdbCount} PDB · 覆盖率 ${t.coveragePercent}%${(t.rangeOutsidePdbs?.length ?? 0) > 0 ? ` · 范围外 ${t.rangeOutsidePdbs!.length}` : ''}`}
+                />
+                {/* v2.29：评估区间徽标（结构域匹配/截短构建推导/BLAST 比对推导 — 与单独评估页同口径） */}
+                {t.range && (
+                  <span
+                    className="w-fit rounded-md border border-emerald-500/40 bg-emerald-500/[0.07] px-2 py-0.5 font-mono text-[10px] text-emerald-700 dark:text-emerald-300"
+                    title={`评估区间 ${t.range[0]}-${t.range[1]}（范围重叠结构优先展示，无重叠折叠保留）`}
+                  >
+                    评估区间 {t.range[0]}-{t.range[1]}{t.rangeSource === '结构域匹配（UniProt 注释）' ? ' · 结构域匹配' : t.rangeSource === '构建比对推导' ? ' · 截短构建推导' : t.rangeSource === 'BLAST nr 比对推导' ? ' · BLAST 比对推导' : ''}
+                  </span>
+                )}
+                <PdbTable pdbs={t.directPdbs} literature={t.literature} outsidePdbs={t.rangeOutsidePdbs} rangeLabel={t.range ? `${t.range[0]}-${t.range[1]}` : undefined} />
               </div>
             ))}
           </div>
@@ -824,7 +836,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
             {blastTargets.map(t => (
               <div key={t.jobId} className="flex flex-col gap-2">
                 <TargetGroupHeader t={t} right={t.blastHits.length > 0 ? `${t.blastHitCount} 个同源结构` : '无命中'} />
-                {t.blastHits.length > 0 && <BlastTable hits={t.blastHits} />}
+                {t.blastHits.length > 0 && <BlastTable hits={t.blastHits} outsideHits={t.rangeOutsideBlastHits} rangeLabel={t.range ? `${t.range[0]}-${t.range[1]}` : undefined} />}
                 <BlastNote t={t} />
               </div>
             ))}

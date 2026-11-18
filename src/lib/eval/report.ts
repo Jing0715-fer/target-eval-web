@@ -15,6 +15,7 @@ import { describeBlastStatus } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
+import { matchProcessingSegments } from './uniprot'
 
 export interface ReportContext {
   uniprot: UniprotInfo | null
@@ -33,6 +34,12 @@ export interface ReportContext {
   providedSequence?: { sequence: string; comparison: SequenceComparison }
   /** v1.23：用户指定的评估范围（UniProt 残基编号，1-based 闭区间）；报告题目与摘要中体现 */
   range?: [number, number]
+  /** v2.29：生效区间来源标签（手动指定 / 构建比对推导 / 结构域匹配（UniProt 注释））— 结构章节范围说明用 */
+  rangeSource?: string
+  /** v2.29：与评估区间无链范围重叠的 PDB 结构（折叠保留展示 — 灰色行，不参与评分/覆盖口径） */
+  rangeOutsidePdbs?: PdbEntry[]
+  /** v2.29：与评估区间无重叠的 BLAST 同源命中（折叠保留展示 — 灰色行） */
+  rangeOutsideBlastHits?: BlastHit[]
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
   /** BLAST 执行状态（跳过/失败原因 — 供报告说明） */
@@ -82,8 +89,10 @@ function pdbTable(pdbs: PdbEntry[], n: number): string {
 }
 
 function blastTable(hits: BlastHit[], n: number): string {
+  // v2.32：补覆盖列 — 短片段高一致性巧合命中（如信号肽样 21 aa 全同）不可与
+  // 高覆盖真同源混为一谈，LLM 需同时看到一致性与其覆盖的查询范围
   return hits.slice(0, n).map(h =>
-    `| ${h.pdbId || '-'} | ${h.description.slice(0, 70)} | ${h.identity}% | ${h.evalueRaw} |`,
+    `| ${h.pdbId || '-'} | ${h.description.slice(0, 70)} | ${h.identity}% | ${h.evalueRaw} | ${h.queryCoverage > 0 ? `${h.queryCoverage} aa${h.queryFrom != null && h.queryTo != null ? `（${h.queryFrom}-${h.queryTo}）` : ''}` : '—'} |`,
   ).join('\n')
 }
 
@@ -130,7 +139,24 @@ function buildDigest(ctx: ReportContext): string {
     lines.push(`基因: ${u.geneNames.join(', ') || '-'}`)
     lines.push(`物种: ${u.organism}`)
     lines.push(`序列长度: ${u.sequenceLength} aa`)
-    if (ctx.range) lines.push(`评估范围: 残基 ${ctx.range[0]}-${ctx.range[1]}（仅分析与该区间重叠的结构）`)
+    if (ctx.range) {
+      // v2.30：区间来源随行 — BLAST nr 比对推导（提交序列在 UniProt 条目内的覆盖区间，
+      // 非全长按截短口径）时 LLM 需知晓边界依据，避免误述为全长靶点
+      const srcNote = ctx.rangeSource === 'BLAST nr 比对推导'
+        ? '（BLAST 比对推导 — 提交序列在 UniProt 条目内的覆盖区间，非全长截短构建）'
+        : ctx.rangeSource === '构建比对推导'
+          ? '（截短构建比对推导）'
+          : ctx.rangeSource?.startsWith('结构域匹配')
+            ? '（结构域名匹配推导）'
+            : ''
+      lines.push(`评估范围: 残基 ${ctx.range[0]}-${ctx.range[1]}${srcNote}（仅分析与该区间重叠的结构）`)
+      // v2.31：聚合蛋白加工归属（PTM/Processing）— 截短区间的 nsp 标注
+      // （如 P0DTD1 不同截短均名 Replicase polyprotein 1ab — 归属 nsp12 后可区分）
+      const procMatch = matchProcessingSegments(ctx.range, u.processingChains, u.sequenceLength)
+      if (procMatch) {
+        lines.push(`加工归属（UniProt PTM/Processing）: ${procMatch.note}${procMatch.nspLabel ? ` — 报告题目与正文用「${u.proteinName} ${procMatch.nspLabel}」称呼该靶点（聚合蛋白的蛋白酶切割产物区段，非独立 UniProt 条目）` : ''}`)
+      }
+    }
     if (u.functionText) lines.push(`功能注释: ${u.functionText.slice(0, 600)}`)
     if (u.subcellularLocations?.length) lines.push(`亚细胞定位: ${u.subcellularLocations.join('; ')}`)
     if (u.keywords?.length) lines.push(`关键词: ${u.keywords.join(', ')}`)
@@ -152,7 +178,10 @@ function buildDigest(ctx: ReportContext): string {
       lines.push(`序列标签: ${ctx.sequenceHeader.slice(0, 60)}`)
     }
     const topHit = ctx.blastHits[0]
-    if (topHit) lines.push(`BLAST 首命中: ${topHit.description}（identity ${topHit.identity}%）`)
+    if (topHit) {
+      const topCov = topHit.queryCoverage > 0 && ctx.sequence ? `，覆盖查询 ${topHit.queryCoverage}/${ctx.sequence.length} aa` : ''
+      lines.push(`BLAST 首命中（显著性最佳）: ${topHit.description}（identity ${topHit.identity}%${topCov}）`)
+    }
   }
 
   lines.push('')
@@ -245,7 +274,7 @@ function buildDigest(ctx: ReportContext): string {
     }
     lines.push('系统要点（报告中需展开呼应）:')
     lines.push(mw.notes.map(n => `  - ${n}`).join('\n'))
-    lines.push('（分子量是小靶点结构解析方法选择的第一约束：请将上述判定融入「结构解析可行性评估」章节 — 三方法对比矩阵中 Cryo-EM 的分子量适配行按装配分子量而非单体分子量评估；推荐技术路线与构建设计中给出增重路径优先级（生理装配 → 已有复合物 → 同源复合物（BLAST 推断，组装需验证）→ 互作伙伴 → 技术组分），并逐条回应冲突分析；执行摘要用一句话点明分子量结论。同源复合物为推断证据时，需按 identity 说明置信度（≥40% 界面通常保守 / 30-40% 边缘 / <30% 仅参考）并前置组装验证建议。禁止将本分析另列为独立章节）')
+    lines.push('（分子量是小靶点结构解析方法选择的第一约束：请将上述判定融入「结构解析可行性评估」章节 — 三方法对比矩阵中 Cryo-EM 的分子量适配行按装配分子量而非单体分子量评估；推荐技术路线与构建设计中给出增重路径优先级（生理装配 → 已有复合物 → 同源复合物（BLAST 推断，组装需验证）→ 互作伙伴（仅复合物/同源复合物结构证据支持者可信，其余须验证后再用）→ 技术组分），并逐条回应冲突分析；执行摘要用一句话点明分子量结论。同源复合物为推断证据时，需按 identity 说明置信度（≥40% 界面通常保守 / 30-40% 边缘 / <30% 仅参考）并前置组装验证建议。禁止将本分析另列为独立章节）')
   }
 
   // v1.29：互作复合物证据（无直接结构时）— 融入可行性评估，不单独成章
@@ -269,11 +298,19 @@ function buildDigest(ctx: ReportContext): string {
         }
       }
       if (itx.binaryPartners.length) {
-        lines.push(`binary 互作伙伴（IntAct 实验证据，复合物之外）: ${itx.binaryPartners.map(b => `${b.geneName ?? b.accession}（${b.accession}，${b.pdbCount} 个结构）`).join('、')}`)
+        lines.push(`binary 互作伙伴（IntAct 实验证据，复合物之外 — v2.33 可信度分级）: ${itx.binaryPartners.map(b => {
+          const lvl = b.evidenceLevel ?? 'experimental'
+          const ev = lvl === 'complex'
+            ? `复合物结构支持${b.evidencePdbCount ? ` ${b.evidencePdbCount} 个（${(b.evidencePdbs ?? []).slice(0, 2).map(p => p.pdbId).join('、')}）` : ''}`
+            : lvl === 'homolog'
+              ? `同源复合物结构支持${b.evidencePdbCount ? ` ${b.evidencePdbCount} 个（${(b.evidencePdbs ?? []).slice(0, 2).map(p => p.pdbId).join('、')}）` : ''}`
+              : `仅实验互作证据，无复合物/同源结构支持（低可信${b.pdbCount ? `；伙伴自身 ${b.pdbCount} 个结构不构成互作证据` : ''}）`
+          return `${b.geneName ?? b.accession}（${b.accession}，${ev}）`
+        }).join('、')}`)
       }
       lines.push('系统要点（报告中需展开呼应）:')
       lines.push(itx.notes.map(n => `  - ${n}`).join('\n'))
-      lines.push('（互作复合物是本靶点无直接/同源结构时的核心评估依据：Complex Portal 复合物为人工审核的装配证据，化学计量可靠 — 请融入「结构解析可行性评估」与「实验方案建议」：推荐技术路线中给出复合物组装路线（共表达/体外组装）与单体路线的优先级比对，组分结构用作构建边界参考与组装验证对照；存在共有结构（同一 PDB 含 ≥2 组分）时重点说明其作为共组装先例的价值与可借鉴的组装形式；并说明该路线与客户目的是否契合（若客户需要靶点单独结构，复合物路线为间接路径）。禁止将本分析另列为独立章节）')
+      lines.push('（互作复合物是本靶点无直接/同源结构时的核心评估依据：Complex Portal 复合物为人工审核的装配证据，化学计量可靠 — 请融入「结构解析可行性评估」与「实验方案建议」：推荐技术路线中给出复合物组装路线（共表达/体外组装）与单体路线的优先级比对，组分结构用作构建边界参考与组装验证对照；存在共有结构（同一 PDB 含 ≥2 组分）时重点说明其作为共组装先例的价值与可借鉴的组装形式；并说明该路线与客户目的是否契合（若客户需要靶点单独结构，复合物路线为间接路径）。binary 互作证据须按可信度分级表述：仅当存在复合物结构（靶点与伙伴共 PDB）或同源复合物结构（靶点同源链与伙伴/伙伴同源基因共 PDB）时才可作为增重路线的可信依据；仅实验互作证据的伙伴不得作为 Cryo-EM 增重的可信依据，需明确警示验证前置。禁止将本分析另列为独立章节）')
     } else {
       lines.push('（互作通道已检索：无 curated 复合物、binary 伙伴无结构 — 如实说明，不要虚构互作证据）')
     }
@@ -332,9 +369,9 @@ function buildDigest(ctx: ReportContext): string {
 
   if (ctx.blastHits.length) {
     lines.push('')
-    lines.push(`【BLAST 同源结构】前 12 个命中（排除直接命中后）:`)
-    lines.push('| PDB | 描述 | Identity | E-value |')
-    lines.push('|-----|------|----------|---------|')
+    lines.push(`【BLAST 同源结构】前 12 个命中（排除直接命中后，按显著性 E-value 排序；覆盖 = 比对覆盖提交序列的残基数与区段）:`)
+    lines.push('| PDB | 描述 | Identity | E-value | 覆盖 |')
+    lines.push('|-----|------|----------|---------|------|')
     lines.push(blastTable(ctx.blastHits, 12))
   } else if (ctx.blastStatus) {
     // 0 命中/跳过/失败时向 LLM 明确说明，避免报告凭空描述同源结构

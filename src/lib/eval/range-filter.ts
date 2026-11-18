@@ -55,6 +55,29 @@ export function filterBlastByRange(hits: BlastHit[], range: ResidueRange | undef
   return hits.filter(h => blastInRange(h, range))
 }
 
+// ─── v2.29 范围分流（不再丢弃 — 范围重叠者优先展示，范围外者折叠保留）──────────
+
+export interface RangeSplitPdbs { kept: PdbEntry[]; outside: PdbEntry[] }
+export interface RangeSplitBlast { kept: BlastHit[]; outside: BlastHit[] }
+
+/** PDB 列表按区间分流：kept = 链范围重叠（或范围未知，默认保留）；outside = 明确无重叠 */
+export function splitPdbsByRange(pdbs: PdbEntry[], range: ResidueRange | undefined): RangeSplitPdbs {
+  if (!range) return { kept: pdbs, outside: [] }
+  const kept: PdbEntry[] = []
+  const outside: PdbEntry[] = []
+  for (const p of pdbs) (pdbInRange(p, range) ? kept : outside).push(p)
+  return { kept, outside }
+}
+
+/** BLAST 命中按区间分流（语义同上 — queryFrom/To 无效时默认保留） */
+export function splitBlastByRange(hits: BlastHit[], range: ResidueRange | undefined): RangeSplitBlast {
+  if (!range) return { kept: hits, outside: [] }
+  const kept: BlastHit[] = []
+  const outside: BlastHit[] = []
+  for (const h of hits) (blastInRange(h, range) ? kept : outside).push(h)
+  return { kept, outside }
+}
+
 /** 格式化范围为展示字符串 "695-1022" 或 undefined */
 export function formatRange(range: ResidueRange | undefined): string | undefined {
   if (!range) return undefined

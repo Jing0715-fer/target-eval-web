@@ -20,6 +20,7 @@ import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { extractFormInsights, fallbackInsights } from '@/lib/eval/docx-llm'
+import { resolveTargetNames } from '@/lib/eval/name-resolve'
 import { getOwner } from '@/lib/eval/request-guard'
 import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { isUploadId, uploadDir, uploadOwnedBy } from '@/lib/eval/upload-owner'
@@ -51,6 +52,9 @@ interface InsightsBody {
   goalHints?: string[]
   /** v2.6.2 快速兜底模式：跳过 LLM 直接规则提取（前端流式两次失败后的第三级降级） */
   quick?: boolean
+  /** v2.24 非标准评估表兼容：评估表无 UniProt ID/序列时，把提取到的靶点名称经
+   *  UniProt REST 解析为 accession（前端在 parsed 为空时置 true） */
+  resolveNames?: boolean
   /** v2.19：用户本地引擎配置（localStorage → 请求内联携带；服务端不落盘） */
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
 }
@@ -58,6 +62,25 @@ interface InsightsBody {
 interface StoredParsed {
   fullText?: string
   goalHints?: string[]
+}
+
+/**
+ * v2.24 非标准评估表兼容：把提取出的靶点名称（insights.targetNames）经 UniProt REST
+ * 解析为 accession（≤12 名称，名称级并行 + 7s 总预算 — 超时取已完成部分）。命中写
+ * resolvedUniprots，未命中写 unresolvedNames（前端提示手动补填）。
+ */
+async function attachNameResolution(insights: FormInsights): Promise<void> {
+  const names = insights.targetNames ?? []
+  if (!names.length) return
+  const r = await resolveTargetNames(names, { budgetMs: 7_000 })
+  if (r.resolved.length) insights.resolvedUniprots = r.resolved
+  if (r.unresolved.length) insights.unresolvedNames = r.unresolved.slice(0, 8)
+}
+
+/** 规则提取结果按需挂载名称解析（quick 路径复用） */
+async function withNameResolution(insights: FormInsights, on?: boolean): Promise<FormInsights> {
+  if (on) await attachNameResolution(insights)
+  return insights
 }
 
 export async function POST(req: Request) {
@@ -115,10 +138,11 @@ export async function POST(req: Request) {
             const goalHints = Array.isArray(body.goalHints) ? body.goalHints.slice(0, 24) : []
             if (body.quick) {
               // v2.6.2 快速兜底：跳过 LLM，毫秒级返回规则提取（流程永不卡死）
-              send({ type: 'done', ok: true, insights: fallbackInsights(text, goalHints), cached: false, note: '已返回规则提取结果（快速兜底模式；可稍后点击「重新解析」获取 AI 提取）' })
+              send({ type: 'done', ok: true, insights: await withNameResolution(fallbackInsights(text, goalHints), body.resolveNames), cached: false, note: '已返回规则提取结果（快速兜底模式；可稍后点击「重新解析」获取 AI 提取）' })
               return
             }
             const { insights, timedOut } = await runExtraction(text, goalHints, req.signal)
+            if (body.resolveNames) await attachNameResolution(insights)
             send(timedOut
               ? { type: 'done', ok: true, insights, cached: false, note: '智能解析响应较慢，已返回规则提取结果；可点击“重新解析”重试' }
               : { type: 'done', ok: true, insights, cached: false })
@@ -154,10 +178,11 @@ export async function POST(req: Request) {
             if (inlineText.length >= 8) {
               const inlineGoalHints = Array.isArray(body.goalHints) ? body.goalHints.slice(0, 24) : []
               if (body.quick) {
-                send({ type: 'done', ok: true, insights: fallbackInsights(inlineText.slice(0, 14000), inlineGoalHints), cached: false, note: '已返回规则提取结果（快速兜底模式；可稍后点击「重新解析」获取 AI 提取）' })
+                send({ type: 'done', ok: true, insights: await withNameResolution(fallbackInsights(inlineText.slice(0, 14000), inlineGoalHints), body.resolveNames), cached: false, note: '已返回规则提取结果（快速兜底模式；可稍后点击「重新解析」获取 AI 提取）' })
                 return
               }
               const { insights, timedOut } = await runExtraction(inlineText.slice(0, 14000), inlineGoalHints, req.signal)
+              if (body.resolveNames) await attachNameResolution(insights)
               send(timedOut
                 ? { type: 'done', ok: true, insights, cached: false, note: '智能解析响应较慢，已返回规则提取结果；可点击“重新解析”重试' }
                 : { type: 'done', ok: true, insights, cached: false })
@@ -174,11 +199,12 @@ export async function POST(req: Request) {
 
           // v2.6.2 快速兜底（uploadId 模式）：跳过 LLM 直接规则提取，不写缓存
           if (body.quick) {
-            send({ type: 'done', ok: true, insights: fallbackInsights(text, parsed.goalHints ?? []), cached: false, note: '已返回规则提取结果（快速兜底模式；可稍后点击「重新解析」获取 AI 提取）' })
+            send({ type: 'done', ok: true, insights: await withNameResolution(fallbackInsights(text, parsed.goalHints ?? []), body.resolveNames), cached: false, note: '已返回规则提取结果（快速兜底模式；可稍后点击「重新解析」获取 AI 提取）' })
             return
           }
 
           const { insights, timedOut } = await runExtraction(text, parsed.goalHints ?? [], req.signal)
+          if (body.resolveNames) await attachNameResolution(insights)
           // 持久化（失败不阻塞返回；超时兜底结果不写缓存 — 重试可获真实 LLM 结果）
           if (!timedOut) {
             try {

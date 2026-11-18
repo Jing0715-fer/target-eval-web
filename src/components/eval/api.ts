@@ -356,6 +356,8 @@ export async function fetchDocxInsights(
   uploadId: string,
   force = false,
   inline?: { text: string; goalHints?: string[] },
+  /** v2.24：评估表无 UniProt/序列时，服务端把提取到的靶点名称经 UniProt REST 解析为 accession */
+  resolveNames = false,
 ): Promise<InsightsResponse> {
   // v2.6.2：uploadId 与内联 text 同时携带 — 磁盘路径优先，多实例磁盘不共享时
   // 服务端自动降级为内联全文（纯 text 无 uploadId 时为无状态直传回退通道）
@@ -365,6 +367,7 @@ export async function fetchDocxInsights(
     uploadId,
     force,
     ...(inline ? { text: inline.text, goalHints: inline.goalHints ?? [] } : {}),
+    ...(resolveNames ? { resolveNames: true } : {}),
     ...(llm ? { llm } : {}),
   }
   // v2.6 流式：NDJSON 心跳保活（修复部署网关 ~30s 空闲切断导致的 HTTP 502 —
@@ -434,10 +437,15 @@ async function fetchInsightsStream(body: Record<string, unknown>): Promise<Insig
 
 import type { HtSeqTarget } from './types'
 
-/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组（v2.23.1 增序列兜底组） */
+/** POST /api/evaluate/ht-extract 响应 — LLM/规则提取的靶点分组（v2.23.1 增序列兜底组；v2.27 增构建区间；v2.29 增结构域名提示） */
 export interface HtExcelExtractResult {
   ok: boolean
   groups: string[][]
+  /** v2.27：与 groups 逐组逐位对齐的评估区间（undefined = 不过滤；截短构建感知） */
+  groupRanges?: Array<Array<[number, number] | undefined>>
+  /** v2.29：与 groups 逐组逐位对齐的结构域名提示（评估表不写区间而写域名时 —
+   *  管线内与 UniProt domain 划分匹配推导区间） */
+  groupDomainHints?: Array<Array<string | undefined>>
   /** 序列兜底组：行缺 UniProt 但有构建序列 → 按序列评估（每行一组） */
   seqGroups?: HtSeqTarget[][]
   invalid: string[]
@@ -451,6 +459,10 @@ export interface HtExcelExtractResult {
     bytes?: number
     seqGroups?: number
     seqTargets?: number
+    /** v2.27：携带构建区间的靶点数 */
+    rangeTargets?: number
+    /** v2.29：携带结构域名提示的靶点数（管线内匹配 UniProt domain 推导区间） */
+    domainHintTargets?: number
   }
 }
 
@@ -458,22 +470,72 @@ export interface HtExcelExtractResult {
  * 上传 Excel/CSV 靶点表 → 服务端 LLM 解析分组（LLM 超时/失败时服务端自动回退
  * 规则提取，通道不卡死）。v2.19：本地引擎配置随请求内联携带（导入解析 LLM
  * 走用户本人的引擎）。quick=true 跳过 LLM 直接规则提取（调试/兜底通道）。
+ * v2.26 流式版（三级降级，同 fetchDocxInsights 口径 — 修复公网网关 ~30s 空闲
+ * 切断导致的 HTTP 502）：流式（NDJSON 心跳）→ 断流自动重试一次 → quick 兜底。
  */
 export async function extractHtTargetsFromExcel(
   file: File,
   opts: { quick?: boolean } = {},
 ): Promise<HtExcelExtractResult> {
   const llm = getLlmEngineOverride()
+  // v2.6.2 同款三级降级：0→1 流式重试，1→2 quick 快速兜底（毫秒级规则提取）
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchHtExtractStream(file, attempt >= 2 ? { quick: true } : opts, llm)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (attempt >= 2) throw err // quick 也失败（几乎不可能）— 彻底失败
+      if (attempt === 0 && !STREAM_BROKEN_RE.test(msg)) throw err // 语义错误（4xx 等）不重试
+      continue // 断流/5xx/网关 502 → 重试
+    }
+  }
+}
+
+/** v2.26：ht-extract NDJSON 流式读取（心跳保活 — 终态 done 行携带提取结果） */
+async function fetchHtExtractStream(
+  file: File,
+  opts: { quick?: boolean },
+  llm: ReturnType<typeof getLlmEngineOverride>,
+): Promise<HtExcelExtractResult> {
   const fd = new FormData()
   fd.append('file', file)
   if (opts.quick) fd.append('quick', '1')
   if (llm) fd.append('llm', JSON.stringify(llm))
   const res = await fetch('/api/evaluate/ht-extract', { method: 'POST', body: fd })
-  const data = (await res.json().catch(() => null)) as (HtExcelExtractResult & { ok?: boolean; error?: string }) | null
-  if (!res.ok || !data?.ok) {
-    throw new Error(data?.error ?? `Excel 解析失败（HTTP ${res.status}）`)
+  // 校验类错误（400/413/422）仍为普通 JSON 错误响应（流尚未建立）
+  if (!res.ok || !res.body) {
+    const err = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(err?.error ?? `Excel 解析失败（HTTP ${res.status}）`)
   }
-  return data
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        let ev: { type?: string; ok?: boolean; error?: string } & Partial<HtExcelExtractResult> | null = null
+        try {
+          ev = JSON.parse(line)
+        } catch { ev = null /* 半行/坏行丢弃，等下一块补齐 */ }
+        if (ev?.type === 'done') {
+          if (!ev.ok || !Array.isArray(ev.groups)) {
+            throw new Error(ev.error ?? 'Excel 解析失败')
+          }
+          const { type: _t, ok: _ok, error: _e, ...data } = ev
+          return { ok: true, ...data } as HtExcelExtractResult
+        }
+        // ping 心跳：仅保活
+      }
+      nl = buffer.indexOf('\n')
+    }
+  }
+  throw new Error('Excel 解析流中断（网络波动/网关超时），正在自动重试…')
 }
 
 // ─── 靶点关系判断 + 合并报告（v1.8 批量评估）─────────────────
@@ -579,6 +641,97 @@ export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
     throw new Error(data?.error ?? `合并报告列表读取失败（HTTP ${res.status}）`)
   }
   return data.items
+}
+
+// ─── 高通量批量下载（v2.25）──────────────────────────────────────
+
+/** HT 归档条目（组结构化：组号 + 组内靶点标签 → 服务端按 G01_/G02_… 建文件夹） */
+export interface HtArchiveEntry {
+  jobId?: string
+  mergedId?: string
+  /** v2.28：统计看板（根级 00_ 文件 — 评分统计 + AI 整体可行性报告） */
+  dashboardId?: string
+  /** 1-based 组序号（省略 → zip 根目录平铺） */
+  group?: number
+  label?: string
+}
+
+// ─── 高通量统计看板（v2.28）──────────────────────────────────────
+
+/** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告） */
+export interface HtDashboardInfo {
+  id: string
+  status: 'running' | 'done' | 'error'
+  title?: string
+  error?: string | null
+  createdAt?: string
+}
+
+/** 看板条目（与 zip 归档同构 — 服务端据此计算离线链接命名） */
+export interface HtDashboardEntry {
+  jobId?: string
+  mergedId?: string
+  group?: number
+  label?: string
+}
+
+/**
+ * POST /api/evaluate/ht-dashboard — 高通量运行完成后生成统计看板（服务端异步：
+ * POST 立即返回 running，此处轮询 GET 至终态）。LLM 失败不阻塞 — 统计与每靶点
+ * 规则结论仍渲染。v2.19：本地引擎配置随请求内联携带。
+ */
+export async function generateHtDashboard(input: {
+  entries: HtDashboardEntry[]
+  goal?: string
+}): Promise<HtDashboardInfo> {
+  const llm = getLlmEngineOverride()
+  const res = await fetch('/api/evaluate/ht-dashboard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(llm ? { ...input, llm } : input),
+  })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo; error?: string } | null
+  if (!res.ok || !data?.ok || !data.dashboard) {
+    throw new Error(data?.error ?? `统计看板生成失败（HTTP ${res.status}）`)
+  }
+  if (data.dashboard.status !== 'running') return data.dashboard
+  // 轮询至终态（LLM 整体报告 ≤2 分钟；失败/超时均如实返回 — 调用方降级提示）
+  const t0 = Date.now()
+  for (;;) {
+    await new Promise(r => setTimeout(r, 3000))
+    const d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store' })
+      .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
+    if (d?.dashboard && d.dashboard.status !== 'running') return d.dashboard
+    if (Date.now() - t0 > 240_000) {
+      return { id: data.dashboard.id, status: 'error', error: '统计看板生成超时（可稍后从历史重试）' }
+    }
+  }
+}
+
+/** GET /api/evaluate/ht-archive — 一次高通量运行的全部报告打包 zip 下载
+ *  （每组一个子文件夹 + 合并报告 + _README.txt 清单）。失败抛错。 */
+export async function downloadHtReportArchive(entries: HtArchiveEntry[], fallbackName = '报告'): Promise<void> {
+  if (!entries.length) throw new Error('没有可下载的报告')
+  const res = await fetch(`/api/evaluate/ht-archive?entries=${encodeURIComponent(JSON.stringify(entries))}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(data?.error ?? `批量下载失败（HTTP ${res.status}）`)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('content-disposition') ?? ''
+  const m = /filename="?([^";\n]+)/i.exec(cd)
+  const filename = m?.[1]?.trim() || `TargetEval_HT_${fallbackName}_${new Date().toISOString().slice(0, 10)}.zip`
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 30_000)
 }
 
 // ─── LLM 引擎配置 ──────────────────────────────────────────────

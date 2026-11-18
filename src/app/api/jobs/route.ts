@@ -42,12 +42,14 @@ export async function GET(req: Request) {
   const list = rows.map(r => {
     let summary: JobSummary | null = null
     try { summary = r.summary ? (JSON.parse(r.summary) as JobSummary) : null } catch { /* ignore */ }
+    // v2.31：聚合蛋白截短追加 nsp 标注（同名截短靶点列表可区分）
+    const nspSuffix = summary?.uniprot?.nspLabel ? ` ${summary.uniprot.nspLabel}` : ''
     return {
       id: r.id,
       status: r.status as JobStatus,
       title: r.title ?? '未命名评估',
       uniprotId: r.uniprotId,
-      proteinName: summary?.uniprot.proteinName ?? r.title ?? null,
+      proteinName: summary?.uniprot.proteinName ? summary.uniprot.proteinName + nspSuffix : r.title ?? null,
       createdAt: r.createdAt.toISOString(),
       coverage: summary?.coverage ?? null,
       pdbCount: summary?.directPdbCount ?? null,

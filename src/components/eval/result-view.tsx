@@ -19,6 +19,7 @@ import {
   ChevronDown,
   Printer,
   RotateCcw,
+  Ruler,
   SearchX,
   ShieldCheck,
   Sparkles,
@@ -412,6 +413,13 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const reportMd = job.reportMarkdown?.trim() || null
   const reportLlmFailed = summary.reportLlmOk === false
   const reportDeferred = summary.reportDeferred === true
+  /** v2.29：评估区间与范围外结构（重叠优先展示 / 折叠保留） */
+  const rangeInfo = summary.range ?? null
+  const rangeLabel = rangeInfo
+    ? `${rangeInfo[0]}-${rangeInfo[1]}${summary.rangeSource === '结构域匹配（UniProt 注释）' ? ' · 结构域匹配' : summary.rangeSource === '构建比对推导' ? ' · 截短构建推导' : summary.rangeSource === 'BLAST nr 比对推导' ? ' · BLAST 比对推导' : summary.rangeSource === '手动指定' ? ' · 手动指定' : ''}`
+    : undefined
+  const outsidePdbs = summary.rangeOutsidePdbs ?? []
+  const outsideBlastHits = summary.rangeOutsideBlastHits ?? []
   /** v2.4：内联 HTML 报告（无状态同步评估）— srcDoc 渲染 + Blob 下载，不经 /api/jobs/{id}/report */
   const inlineReportHtml = job.stateless ? (job.reportHtml ?? null) : null
   /** v1.31：web 端直接内嵌完整 HTML 报告（与「下载 HTML」同一份文件，样式 100% 一致）。
@@ -490,7 +498,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   /** v1.26/v1.27：分子量增重策略（小分子量靶点）— 融入评分卡（不单独成章） */
   const mw = summary.mwAugment?.applicable ? summary.mwAugment : null
   const mwAdj = summary.scores?.mwAugmentAdjust ?? null
-  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mw?.assemblyPath === 'partner' ? '互作伙伴推断' : '无生物装配路径'
+  const mwPathZh = mw?.assemblyPath === 'complex' ? '已有复合物结构' : mw?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mw?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mw?.assemblyPath === 'partner' ? (mw.assemblyEvidence === 'complex' ? '互作伙伴推断（复合物结构支持）' : mw.assemblyEvidence === 'homolog' ? '互作伙伴推断（同源复合物结构支持）' : '互作伙伴推断') : '无生物装配路径'
   const mwHomologs = mw?.homologComplexes ?? []
   const mwIsHomologPath = mw?.assemblyPath === 'homolog-complex'
   const mwBadgeCls = mwIsHomologPath
@@ -547,6 +555,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         </p>
         <h1 className="text-2xl leading-snug font-semibold tracking-[-0.02em] text-foreground sm:text-[28px]">
           {u.proteinName || u.entryName || u.uniprotId}
+          {/* v2.31：聚合蛋白截短的 nsp 标注（如 P0DTD1 不同 nsp 构建 — 同名靶点可区分） */}
+          {u.nspLabel && <span className="ml-1.5 font-mono text-[0.72em] font-semibold text-primary">{u.nspLabel}</span>}
         </h1>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-xs text-muted-foreground">
           {u.entryName && <span className="font-semibold">{u.entryName}</span>}
@@ -947,10 +957,33 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                       )}
                       {sizedPartners.length > 0 && (
                         <div className="flex flex-col gap-1.5">
-                          <p className="text-[11px] font-semibold text-foreground/90">UniProt 互作伙伴（可作增重路径，按 1:1 估计；无结构先例，化学计量需 SEC-MALS 验证）</p>
-                          <p className="text-xs leading-6 text-foreground/80">
-                            {sizedPartners.slice(0, 6).map(p => `${p.geneName ?? p.proteinName ?? p.accession}（${p.accession}，${p.lengthAa} aa ~${p.kda} kDa）`).join('、')}
-                          </p>
+                          <p className="text-[11px] font-semibold text-foreground/90">UniProt 互作伙伴（按 1:1 估计；可信度分级 — 仅复合物/同源复合物结构证据支持者计入装配估计，其余仅作参考并警示）</p>
+                          <ul className="flex flex-col gap-1">
+                            {sizedPartners.slice(0, 8).map(p => (
+                              <li key={`mwp-${p.accession}`} className="text-xs leading-6 text-foreground/80">
+                                <b className="text-foreground">{p.geneName ?? p.proteinName ?? p.accession}</b>
+                                <span className="mx-1.5 font-mono text-[10.5px] text-muted-foreground/70">{p.accession}</span>
+                                <span className="mr-1.5 font-mono text-[11px]">{p.lengthAa} aa ~{p.kda} kDa</span>
+                                <span
+                                  className={cn(
+                                    'mr-1.5 inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold',
+                                    p.evidenceLevel === 'complex'
+                                      ? 'border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-700 dark:text-emerald-400'
+                                      : p.evidenceLevel === 'homolog'
+                                        ? 'border-teal-500/30 bg-teal-500/[0.08] text-teal-700 dark:text-teal-400'
+                                        : 'border-amber-500/30 bg-amber-500/[0.08] text-amber-700 dark:text-amber-400',
+                                  )}
+                                >
+                                  {p.evidenceLevel === 'complex' ? '复合物结构' : p.evidenceLevel === 'homolog' ? '同源复合物结构' : '仅实验证据'}
+                                </span>
+                                {p.evidencePdbIds?.length
+                                  ? <span className="font-mono text-[10.5px] text-muted-foreground/70">证据：{p.evidencePdbIds.join('、')}</span>
+                                  : (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog')
+                                    ? null
+                                    : <span className="text-amber-700 dark:text-amber-400">无结构证据支持，未计入装配估计 — 不可据此认定可用于 Cryo-EM 增重</span>}
+                              </li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                       <div className="flex flex-col gap-1.5">
@@ -1187,12 +1220,30 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           en="Structures"
           count={
             pdbs.length > 0
-              ? `${pdbs.length} 个`
+              ? `${pdbs.length} 个${outsidePdbs.length > 0 ? ` · 范围外 ${outsidePdbs.length}` : ''}`
               : itx
                 ? `直接结构 0 · 互作组分证据${itxBest?.sharedPdbTotal ? `（共有 ${itxBest.sharedPdbTotal}）` : ''}`
                 : '0 个'
           }
         />
+        {rangeInfo && (
+          <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] px-4 py-3 text-xs leading-relaxed text-emerald-800 dark:text-emerald-300">
+            <Ruler className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+            <span>
+              <b>评估区间 {rangeInfo[0]}-{rangeInfo[1]}</b>
+              （{summary.rangeSource === '结构域匹配（UniProt 注释）'
+                ? '评估表结构域名 → UniProt domain 匹配'
+                : summary.rangeSource === '构建比对推导'
+                  ? '截短构建比对推导'
+                  : summary.rangeSource === 'BLAST nr 比对推导'
+                    ? 'BLAST 比对推导（提交序列在 UniProt 条目内的覆盖区间）'
+                    : '手动指定'}）—
+              结构列表按「链范围与区间重叠优先」展示{outsidePdbs.length + outsideBlastHits.length > 0
+                ? `；无重叠的结构已折叠保留在下方（灰色行：PDB ${outsidePdbs.length} 条${outsideBlastHits.length ? ` · 同源 ${outsideBlastHits.length} 条` : ''}）`
+                : '；当前全部结构均与区间重叠'}。
+            </span>
+          </div>
+        )}
         {itx && pdbs.length === 0 && (
           <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3.5 text-xs leading-relaxed text-amber-800 dark:text-amber-300">
             <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
@@ -1204,7 +1255,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           </div>
         )}
         {itx && pdbs.length === 0 && <InteractionStructures itx={itx} />}
-        <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} />
+        <PdbTable pdbs={pdbs} ligandCount={summary.ligandCount} literature={literature} outsidePdbs={outsidePdbs} rangeLabel={rangeLabel} />
       </motion.section>
 
       {/* 7.5 配体研究数据（v2.0：非标准输入归一 + 含该配体结构） */}
@@ -1357,7 +1408,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           </div>
         )}
         {blastHits.length > 0 ? (
-          <BlastTable hits={blastHits} />
+          <BlastTable hits={blastHits} outsideHits={outsideBlastHits} rangeLabel={rangeLabel} />
         ) : (
           <BlastStatusBox status={blastInfo?.status} note={blastInfo?.note} provider={blastInfo?.provider} />
         )}
@@ -1420,7 +1471,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <DialogHeader className="flex-row items-center justify-between gap-4 border-b border-border px-5 py-3 pr-14 text-left">
             <div className="flex flex-col gap-0.5">
               <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-[-0.01em]">
-                评估报告 · {u.proteinName || u.uniprotId}
+                评估报告 · {u.proteinName || u.uniprotId}{u.nspLabel ? ` ${u.nspLabel}` : ''}
               </DialogTitle>
               <DialogDescription className="font-mono text-[11px] text-muted-foreground/70">
                 完整 HTML 报告 · 可直接打印

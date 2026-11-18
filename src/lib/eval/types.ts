@@ -21,9 +21,14 @@ export interface EvaluationOptions {
   /** 报告生成模式：single = 各靶点独立报告（默认）；deferred = 跳过单靶点报告，数据并入合并报告（关联靶点批量评估用） */
   reportMode?: 'single' | 'deferred'
   /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）。
-   *  设置后：PDB/BLAST 命中过滤为与该区间重叠的结构；报告题目显示范围。
-   *  仅 UniProt 单靶点模式（无伴随序列时）有效。 */
+   *  设置后：PDB/BLAST 命中中链范围与该区间重叠者优先展示，无重叠的折叠保留
+   *  （v2.29 口径）；报告题目显示范围。仅 UniProt 单靶点模式（无伴随序列时）有效。 */
   range?: [number, number]
+  /** v2.29：结构域名提示（评估表不写区间而写域名时携带，如「胞外域」/「kinase
+   *  domain」/「跨膜区」）— 管线取得 UniProt features 后由 domain-range.ts 与
+   *  UniProt domain 划分匹配推导评估区间（层级：手动区间 > 构建比对 > 域名匹配）；
+   *  匹配失败按无区间评估，不阻塞。 */
+  rangeHint?: string
 }
 
 // ─── UniProt ──────────────────────────────────────────────────────────────────
@@ -58,6 +63,20 @@ export interface UniprotInfo {
   keywords?: string[]
   /** PDB 交叉引用的 UniProt 残基编号范围（pdbId → Chains 原值，如 "A=695-1022"） */
   pdbChainRanges?: Record<string, string>
+  /** v2.31：PTM/Processing 分子加工条目（UniProt「Molecule processing」— Chain/Peptide
+   *  features；聚合蛋白的蛋白酶切割产物区段，如 P0DTD1 的 nsp1-16，不含覆盖全长的
+   *  条目自身链）。评估区间据此标注 nsp 归属 — 报告题目区分同名截短靶点 */
+  processingChains?: UniprotProcessingChain[]
+}
+
+/** v2.31：PTM/Processing 分子加工条目（聚合蛋白蛋白酶切割产物区段） */
+export interface UniprotProcessingChain {
+  /** 加工产物名（如 "RNA-directed RNA polymerase nsp12" / "Non-structural protein 2"） */
+  name: string
+  /** 区段起点（UniProt 残基编号，1-based 闭区间） */
+  begin: number
+  /** 区段终点 */
+  end: number
 }
 
 // ─── PDB（RCSB + PDBe 合并视角）───────────────────────────────────────────────
@@ -138,6 +157,9 @@ export interface PdbeCoverageResult {
   mappings: PdbeMapping[]
   /** 合并后的覆盖区间 */
   coveredRanges: Array<[number, number]>
+  /** v2.28：每 PDB 全部链的 SIFTS 范围字符串（pdbId → "A=695-1024,B=25-646"；
+   *  结构范围过滤回填 — UniProt 交叉引用 Chains 缺失的条目由此补齐后复滤） */
+  chainRangesByPdb?: Record<string, string>
 }
 
 // ─── BLAST ────────────────────────────────────────────────────────────────────
@@ -325,12 +347,23 @@ export interface InteractionComplexInfo {
   soloPdbTotal?: number
 }
 
+/** v2.33 binary 互作证据分级：complex = 复合物结构（靶点+伙伴同 PDB）；homolog = 同源复合物结构（靶点同源链与伙伴/伙伴同源基因共 PDB）；experimental = 仅实验互作证据（IntAct），无结构支持 — 低可信 */
+export type BinaryEvidenceLevel = 'complex' | 'homolog' | 'experimental'
+
 /** binary 互作伙伴的结构证据（IntAct，非 curated 复合物路径） */
 export interface InteractionBinaryInfo {
   accession: string
   geneName?: string
   pdbCount: number
   representativePdbs: PdbEntry[]
+  /** v2.33 互作可信度分级（历史作业缺省按 experimental 处理） */
+  evidenceLevel?: BinaryEvidenceLevel
+  /** 复合物/同源复合物证据结构代表（≤3 个；experimental 为空；历史作业缺省） */
+  evidencePdbs?: PdbEntry[]
+  /** 证据结构总数（历史作业缺省 0） */
+  evidencePdbCount?: number
+  /** 证据说明（同源 identity / 同源基因 accession 等；历史作业缺省） */
+  evidenceNote?: string
 }
 
 /** v1.29 互作复合物证据分析（interaction.ts 产出；无直接结构时作为评估依据） */
@@ -486,16 +519,18 @@ export interface MwAugmentAnalysis {
   assemblyKda: number | null
   /** 装配分子量计算依据（展示用） */
   assemblyBasis: string
-  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（无结构） */
+  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（v2.33 起仅复合物/同源复合物结构证据支持的伙伴计入） */
   assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  /** v2.33：partner 装配路径的证据级别（assemblyPath='partner' 时非空；历史作业缺省 — 无证据的旧伙伴装配按 experimental 处理不加分） */
+  assemblyEvidence?: BinaryEvidenceLevel | null
   /** 已有复合物结构（组分明细 + 总分子量；按分辨率排序） */
   complexes: MwComplex[]
   /** v1.27：同源结构形成的大复合物（直接路径不足 50 kDa 时 BLAST 扩展检索；历史作业缺省） */
   homologComplexes?: MwHomologComplex[]
   /** v1.27：同源扩展检索说明（检索范围/未触发原因；未触发时为空串，历史作业缺省） */
   homologSearchNote?: string
-  /** UniProt 互作伙伴（非自身；长度已知时含 lengthAa/kda） */
-  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  /** UniProt 互作伙伴（非自身；长度已知时含 lengthAa/kda；v2.33 附可信度分级） */
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number; evidenceLevel?: BinaryEvidenceLevel; evidencePdbIds?: string[] }>
   /** 通用增重策略（小靶点场景的技术工具箱） */
   options: MwAugmentOption[]
   /** 与用户目的的冲突分析（无目的信息时给 caution 默认条目） */
@@ -624,6 +659,10 @@ export interface JobSummary {
     geneNames: string[]
     organism: string
     sequenceLength: number
+    /** v2.31：PTM/Processing 分子加工条目（聚合蛋白切割产物区段 — nsp 归属计算用；历史作业缺省） */
+    processingChains?: UniprotProcessingChain[]
+    /** v2.31：评估区间归属的 nsp 标注（如 "nsp5" / "nsp12-nsp16"；题目/列表区分同名截短靶点；历史作业缺省） */
+    nspLabel?: string
   }
   directPdbCount: number
   blastHitCount: number
@@ -634,6 +673,16 @@ export interface JobSummary {
   literatureCount: number
   imageCount: number
   durationMs: number
+  /** v2.27：实际生效的评估范围（UniProt 残基编号 — 手动指定或构建比对/表格区间推导；历史作业缺省） */
+  range?: [number, number]
+  /** v2.29：生效区间的来源标签（手动指定 / 构建比对推导 / 结构域匹配（UniProt 注释））
+   *  — 结果页与折叠区文案用；历史作业缺省 */
+  rangeSource?: string
+  /** v2.29：与评估区间无链范围重叠的 PDB 结构（折叠保留展示 — 灰色行；上限 200）
+   *  上表仅展示范围重叠优先结构。历史作业缺省。 */
+  rangeOutsidePdbs?: PdbEntry[]
+  /** v2.29：与评估区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100）；历史作业缺省 */
+  rangeOutsideBlastHits?: BlastHit[]
   /** 合并评估（UniProt+序列同靶点）时的构建信息 */
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+ 作业存在；历史作业缺省） */
@@ -823,6 +872,24 @@ export interface DocxParsed {
 
 // ─── 评估表 LLM 智能解析（FormInsights）───────────────────────────────────
 
+/** v2.24 非标准评估表兼容：蛋白名称 → UniProt accession 解析结果（UniProt REST 权威命中） */
+export interface ResolvedUniprot {
+  /** 输入名称（如 TL1A / PD-L1 / 中文蛋白名译出的英文名） */
+  name: string
+  accession: string
+  entryName?: string
+  proteinName?: string
+  geneNames?: string[]
+  organism?: string
+  /** Swiss-Prot reviewed 条目 */
+  reviewed: boolean
+  /** 命中字段：gene = 基因符号/别名精确命中；protein = 蛋白名命中；text = 全文检索兜底 */
+  matchedOn: 'gene' | 'protein' | 'text'
+  seqLength?: number
+  /** 备选命中（最多 2 条：近缘物种 / 未评审异构体） */
+  alternates?: Array<{ accession: string; proteinName?: string; organism?: string; reviewed: boolean }>
+}
+
 /** LLM 从评估表内容中提取的结构化要点 */
 export interface FormInsights {
   /** 靶点蛋白名（如“表皮生长因子受体”） */
@@ -844,8 +911,15 @@ export interface FormInsights {
   /** 解析来源：llm = 大模型提取；regex = 规则兜底 */
   /** v2.0：文档中提及的配体/化合物（中英文名均可，最多 8 条 — 供配体归一管线消费） */
   ligands?: string[]
+  /** v2.24：提取出的靶点名称（基因符号/别名，用于 UniProt 检索，≤12 条） */
+  targetNames?: string[]
+  /** v2.24：名称→accession 解析命中（评估表无 UniProt/序列时由 UniProt REST 解析） */
+  resolvedUniprots?: ResolvedUniprot[]
+  /** v2.24：未能解析出 UniProt 的名称（≤8 条，前端提示用户手动补填） */
+  unresolvedNames?: string[]
   source: 'llm' | 'regex'
 }
+
 
 // ─── 同靶点 UniProt+序列合并评估（构建信息）─────────────────────────────────
 
@@ -861,7 +935,11 @@ export interface SequenceComparison {
   start: number | null
   /** 估计对应全长 1-based 结束位 */
   end: number | null
-  method: 'exact-substring' | 'anchored' | 'kmer'
+  method: 'exact-substring' | 'anchored' | 'seed-chain' | 'kmer'
+  /** v2.30：种子链比对的提供序列覆盖区段（1-based 闭区间；标签头等未覆盖段不计入 —
+   *  BLAST 查询坐标换算用。锚定法隐含 provStart=1/provEnd=providedLength，缺省） */
+  provStart?: number
+  provEnd?: number
 }
 
 /** 作业汇总中的构建信息（合并评估时存在） */

@@ -24,8 +24,11 @@ export interface EvaluateOptions {
   maxPdb: number
   /** 报告模式：single = 独立报告（默认）；deferred = 数据并入合并报告（关联靶点批量） */
   reportMode?: 'single' | 'deferred'
-  /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）；PDB/BLAST 命中过滤为与该区间重叠的结构 */
+  /** v1.23：评估范围限定（UniProt 残基编号，1-based 闭区间）；范围重叠结构优先展示，无重叠折叠保留（v2.29） */
   range?: [number, number]
+  /** v2.29：结构域名提示（评估表不写区间而写域名时，如「胞外域」/「kinase domain」）—
+   *  管线内与 UniProt domain 划分匹配推导评估区间 */
+  rangeHint?: string
 }
 
 export interface EvaluateRequest {
@@ -195,6 +198,8 @@ export interface MergedTargetLite {
   jobId: string
   uniprotId?: string
   proteinName: string
+  /** v2.31：评估区间归属的 nsp 标注（聚合蛋白截短 — 展示名追加；历史报告缺省） */
+  nspLabel?: string
   geneNames: string[]
   organism: string
   sequenceLength: number
@@ -217,6 +222,11 @@ export interface MergedTargetLite {
   coverageText?: string
   gapText?: string
   construct?: ConstructInfo
+  /** v2.29：评估区间 + 范围外结构（PdbTable/BlastTable 折叠区用；历史报告缺省） */
+  range?: [number, number]
+  rangeSource?: string
+  rangeOutsidePdbs?: PdbEntry[]
+  rangeOutsideBlastHits?: BlastHit[]
   /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
@@ -260,6 +270,24 @@ export interface BatchReportListItem {
 
 // ─── 评估表 LLM 智能解析 ──────────────────────────────────────
 
+/** v2.24 非标准评估表兼容：蛋白名称 → UniProt accession 解析命中（UniProt REST 权威结果） */
+export interface ResolvedUniprot {
+  /** 输入名称（如 TL1A） */
+  name: string
+  accession: string
+  entryName?: string
+  proteinName?: string
+  geneNames?: string[]
+  organism?: string
+  /** Swiss-Prot reviewed 条目 */
+  reviewed: boolean
+  /** 命中字段：gene / protein / text（全文兜底） */
+  matchedOn: 'gene' | 'protein' | 'text'
+  seqLength?: number
+  /** 备选命中（最多 2 条：近缘物种 / 未评审异构体） */
+  alternates?: Array<{ accession: string; proteinName?: string; organism?: string; reviewed: boolean }>
+}
+
 /** LLM 从评估表内容中提取的结构化要点 */
 export interface FormInsights {
   proteinName?: string
@@ -273,6 +301,12 @@ export interface FormInsights {
   keyConcerns?: string[]
   /** v2.3：文档中提及的配体/化合物（LLM 提取，最多 8 条 — 自动填入配体输入） */
   ligands?: string[]
+  /** v2.24：提取出的靶点名称（基因符号/别名，≤12 条） */
+  targetNames?: string[]
+  /** v2.24：名称→accession 解析命中（评估表无 UniProt/序列时由 UniProt REST 解析） */
+  resolvedUniprots?: ResolvedUniprot[]
+  /** v2.24：未能解析出 UniProt 的名称（提示手动补填） */
+  unresolvedNames?: string[]
   source: 'llm' | 'regex'
 }
 
@@ -354,6 +388,10 @@ export interface UniprotInfo {
   geneNames: string[]
   organism: string
   sequenceLength: number
+  /** v2.31：评估区间归属的 nsp 标注（聚合蛋白截短 — 展示名追加；历史作业缺省） */
+  nspLabel?: string
+  /** v2.31：PTM/Processing 加工条目（后端摘要携带 — 前端展示名计算用；历史作业缺省） */
+  processingChains?: Array<{ name: string; begin: number; end: number }>
 }
 
 export interface ScoreItem {
@@ -481,12 +519,23 @@ export interface InteractionComplexInfo {
   soloPdbTotal?: number
 }
 
+/** v2.33 binary 互作证据分级：complex = 复合物结构；homolog = 同源复合物结构；experimental = 仅实验互作证据（低可信） */
+export type BinaryEvidenceLevel = 'complex' | 'homolog' | 'experimental'
+
 /** binary 互作伙伴的结构证据（IntAct） */
 export interface InteractionBinaryInfo {
   accession: string
   geneName?: string
   pdbCount: number
   representativePdbs: PdbEntry[]
+  /** v2.33 互作可信度分级（历史作业缺省按 experimental 处理） */
+  evidenceLevel?: BinaryEvidenceLevel
+  /** 复合物/同源复合物证据结构代表（≤3 个；历史作业缺省） */
+  evidencePdbs?: PdbEntry[]
+  /** 证据结构总数（历史作业缺省 0） */
+  evidencePdbCount?: number
+  /** 证据说明（历史作业缺省） */
+  evidenceNote?: string
 }
 
 /** 互作复合物证据分析（无直接结构时作为评估依据） */
@@ -595,12 +644,14 @@ export interface MwAugmentAnalysis {
   assemblyKda: number | null
   assemblyBasis: string
   assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  /** v2.33：partner 装配路径证据级别（历史作业缺省） */
+  assemblyEvidence?: BinaryEvidenceLevel | null
   complexes: MwComplex[]
   /** v1.27：同源结构形成的大复合物（历史作业缺省） */
   homologComplexes?: MwHomologComplex[]
   /** v1.27：同源扩展检索说明（历史作业缺省） */
   homologSearchNote?: string
-  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number }>
+  partners: Array<{ accession: string; geneName?: string; proteinName?: string; lengthAa?: number; kda?: number; evidenceLevel?: BinaryEvidenceLevel; evidencePdbIds?: string[] }>
   options: MwAugmentOption[]
   conflicts: MwConflictNote[]
   notes: string[]
@@ -639,6 +690,14 @@ export interface JobSummary {
   literatureCount: number
   imageCount: number
   durationMs: number
+  /** v2.27：实际生效的评估范围（UniProt 残基编号 — 手动或构建比对/表格区间推导；v2.29 域名匹配亦可；历史作业缺省） */
+  range?: [number, number]
+  /** v2.29：区间来源标签（手动指定 / 构建比对推导 / 结构域匹配（UniProt 注释）） */
+  rangeSource?: string
+  /** v2.29：与区间无链范围重叠的 PDB 结构（折叠保留展示 — 灰色行；上限 200） */
+  rangeOutsidePdbs?: PdbEntry[]
+  /** v2.29：与区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100） */
+  rangeOutsideBlastHits?: BlastHit[]
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+） */
   blast?: BlastStatusInfo
@@ -867,6 +926,8 @@ export interface HtSeqTarget {
   header: string
   seq: string
   length: number
+  /** v2.27：行内构建区间（UniProt 编号；作业 options.range — 仅保留链范围重叠的结构） */
+  range?: [number, number]
 }
 
 /** 高通量运行的一组内单个靶点（作业）状态 */
@@ -874,6 +935,11 @@ export interface HTGroupItemState {
   key: string
   /** 展示标签（UniProt ID 或序列构建头摘要） */
   label: string
+  /** v2.27：该靶点的评估区间（UniProt 残基编号；提交时随 options.range — 截短构建感知） */
+  range?: [number, number]
+  /** v2.29：结构域名提示（如胞外域/kinase domain — 提交时随 options.rangeHint，
+   *  管线内与 UniProt domain 划分匹配推导区间） */
+  domainHint?: string
   /** v2.23.1 序列靶点：提交 mode=sequence 作业的原始序列（无则 UniProt 靶点） */
   sequence?: string
   /** v2.23.1 序列靶点：构建标签头（评估表/Excel 序列命名证据） */
@@ -923,11 +989,20 @@ export interface HTRunState {
   resumedCount: number
   finishedAt?: number
   totalTargetCount: number
+  /** v2.28：运行完成后的统计看板 id（评分统计 + AI 整体可行性报告；回看/zip 归档用） */
+  dashboardId?: string
+  /** v2.28：看板生成失败原因（null/undefined = 正常；「__done__」= 无可统计靶点已跳过） */
+  dashboardError?: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
 export interface HTStartPayload {
   groups: string[][]
+  /** v2.27：与 groups 逐组逐位对齐的评估区间（Excel 导入解析/手动「:起-止」后缀；无则不过滤） */
+  groupRanges?: Array<Array<[number, number] | undefined>>
+  /** v2.29：与 groups 逐组逐位对齐的结构域名提示（评估表不写区间而写域名时；
+   *  管线内与 UniProt domain 划分匹配推导区间） */
+  groupDomainHints?: Array<Array<string | undefined>>
   /** v2.23.1 序列兜底组（Excel 行缺 UniProt 但有构建序列；每行一组，逐序列独立评估） */
   seqGroups?: HtSeqTarget[][]
   goal?: string

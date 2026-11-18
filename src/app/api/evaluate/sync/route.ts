@@ -132,6 +132,9 @@ export async function POST(req: Request) {
     maxPdb: body.options?.maxPdb === MAX_PDB_UNLIMITED ? MAX_PDB_UNLIMITED : Math.min(300, Math.max(20, body.options?.maxPdb ?? 150)),
     reportMode: 'single', // 无状态批次不支持合并报告 → 恒为独立报告
     range,
+    // v2.29：结构域名提示（评估表不写区间而写域名 — 管线内与 UniProt domain 匹配推导区间）
+    rangeHint: typeof body.options?.rangeHint === 'string' && body.options.rangeHint.trim()
+      ? body.options.rangeHint.trim().slice(0, 60) : undefined,
   }
 
   const rawLigands = Array.isArray(body.ligands) ? body.ligands : []
