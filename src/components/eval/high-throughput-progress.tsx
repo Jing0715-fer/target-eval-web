@@ -21,6 +21,7 @@ import {
   Download,
   FileDown,
   FileText,
+  Gauge,
   Hourglass,
   Layers,
   LoaderCircle,
@@ -433,10 +434,43 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         </ol>
       </section>
 
+      {/* ── v2.28 统计看板横幅（运行完成：回看入口 / 生成失败提示 / 生成中提示） ── */}
+      {isDone && (run.dashboardId || run.dashboardError) && (
+        <div className={cn(
+          'flex flex-wrap items-center gap-2.5 rounded-xl border px-4 py-3',
+          run.dashboardId ? 'border-primary/30 bg-primary/[0.05]' : 'border-amber-500/30 bg-amber-500/[0.06]',
+        )}>
+          <Gauge className={cn('size-4 shrink-0', run.dashboardId ? 'text-primary' : 'text-amber-600 dark:text-amber-400')} aria-hidden />
+          {run.dashboardId ? (
+            <>
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-semibold text-foreground">统计看板 · AI 整体可行性报告已生成</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  评分统计（分布/方法可用性/覆盖率）+ 每靶点一句话结论（能否做）+ 单独报告离线链接；HTML 已自动下载，zip「批量下载全部」后链接可直接点开。
+                </p>
+              </div>
+              <a
+                href={`/api/evaluate/ht-dashboard?id=${encodeURIComponent(run.dashboardId)}&inline=1`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-primary px-3 text-[12px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                <Gauge className="size-3.5" aria-hidden />
+                打开统计看板
+              </a>
+            </>
+          ) : (
+            <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
+              统计看板生成失败：{run.dashboardError}（运行结果不受影响；重新下载 zip 会重试打包可用的看板）
+            </p>
+          )}
+        </div>
+      )}
+
       {/* ── 底部操作（v2.25：取消按钮与内容区拉开间距 mt-2；说明文字上移） ── */}
       <div className="flex flex-col gap-2.5">
         <span className="font-mono text-[10.5px] text-muted-foreground/60">
-          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器（最近 5 次）
+          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后统计看板（评分统计 + AI 整体可行性报告）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器（最近 5 次）
         </span>
         <div className="flex flex-wrap items-center gap-2.5">
           {isRunning && (

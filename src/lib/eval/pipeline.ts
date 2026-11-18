@@ -176,6 +176,8 @@ interface PipelineState {
   coverageText: string
   gapText: string
   literature: LiteratureItem[]
+  /** v2.28：BLAST 同源命中的主引文已并入文献列表（重入守卫） */
+  blastLitMerged: boolean
   // ── 守门 / 分析 ──
   blastRetryFailed: boolean
   /** last-resort 重试下一段待执行（gate 子步骤跨段） */
@@ -259,6 +261,7 @@ function freshState(): PipelineState {
     coverageText: '',
     gapText: '',
     literature: [],
+    blastLitMerged: false,
     blastRetryFailed: false,
     blastRetryPending: false,
     blastRetrySegments: 0,
@@ -1148,6 +1151,23 @@ class SegmentRunner {
       this.report('pdbe', 'PDBe 计算结构覆盖率…', 0.5)
       try {
         st.coverage = await fetchPdbeCoverage(st.uniprotInfo.uniprotId, st.uniprotInfo.sequenceLength)
+        // v2.28：SIFTS 链范围回填 — UniProt 交叉引用 Chains 缺失的直接结构补上
+        // 链范围（用户反馈：手动范围下部分结构无范围信息而未被过滤）→ 回填后复滤
+        const erBackfill = this.effectiveRange()
+        if (erBackfill && st.coverage.chainRangesByPdb) {
+          let filled = 0
+          for (const p of st.directPdbs) {
+            if (p.chainRanges) continue
+            const r = st.coverage.chainRangesByPdb[p.pdbId]
+            if (r) { p.chainRanges = r; filled++ }
+          }
+          if (filled > 0) {
+            const before = st.directPdbs.length
+            st.directPdbs = filterPdbsByRange(st.directPdbs, erBackfill)
+            st.pdbCompletedIds = st.directPdbs.map(e => e.pdbId)
+            this.log(`SIFTS 链范围回填 ${filled} 个结构后复滤：${before} → ${st.directPdbs.length}（限定 ${erBackfill[0]}-${erBackfill[1]}）`)
+          }
+        }
         // v2.27：限定评估范围时覆盖率/未覆盖区间改为「区间内」口径（截短构建/聚蛋白片段）
         const erPdbe = this.effectiveRange()
         if (erPdbe) {
@@ -1193,6 +1213,8 @@ class SegmentRunner {
     }
 
     // PDB 主引文（结构解析论文）并入文献列表，建立 PDB ↔ 文献关联
+    // v2.28：上限 20 → 120（用户反馈「很多 PDB 结构的文献没有列在列表中」—
+    // 大靶点百余结构携带的不同 PMID 远超旧 20 上限）；efetch 批次同步加大（20 → 50）
     const structPmids: string[] = []
     const seenPmid = new Set<string>(st.literature.map(l => String(l.pmid)))
     for (const p of st.directPdbs) {
@@ -1201,7 +1223,7 @@ class SegmentRunner {
         seenPmid.add(pid)
         structPmids.push(pid)
       }
-      if (structPmids.length >= 20) break
+      if (structPmids.length >= 120) break
     }
     if (structPmids.length > 0) {
       this.report('pubmed', `拉取 ${structPmids.length} 篇 PDB 主引文文献详情…`, 0.7)
@@ -1302,6 +1324,37 @@ class SegmentRunner {
           }
         }
         st.blastBackfillDone = true
+      }
+
+      // ── v2.28：BLAST 同源命中的主引文并入文献列表（用户反馈文献列表不全 —
+      // 同源命中经 RCSB GraphQL enrich 已携带 PMID，此前未纳入；结构解析文献块
+      // 按年份降序与直接结构引文合并，重入守卫 blastLitMerged）──
+      if (st.blastHits.length > 0 && !st.blastLitMerged) {
+        st.blastLitMerged = true
+        const seen = new Set(st.literature.map(l => String(l.pmid)))
+        const blastPmids: string[] = []
+        for (const h of st.blastHits) {
+          const pid = (h.pubmedId ?? '').trim()
+          if (pid && !seen.has(pid)) {
+            seen.add(pid)
+            blastPmids.push(pid)
+          }
+          if (blastPmids.length >= 40) break
+        }
+        if (blastPmids.length > 0) {
+          try {
+            const blastLits = (await fetchPubmedByPmids(blastPmids))
+              .map(l => ({ ...l, fromPdb: true as const }))
+              .filter(l => !st.literature.some(x => String(x.pmid) === String(l.pmid)))
+            if (blastLits.length) {
+              // 结构解析文献块（fromPdb）按年份降序置前，检索文献块在后 — 与既有排序口径一致
+              const pdbBlock = [...st.literature.filter(l => l.fromPdb), ...blastLits]
+                .sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
+              st.literature = [...pdbBlock, ...st.literature.filter(l => !l.fromPdb)]
+              this.log(`同源结构主引文并入：${blastLits.length} 篇（文献列表合计 ${st.literature.length} 篇）`)
+            }
+          } catch { /* 增量并入失败不影响主链路 */ }
+        }
       }
       this.report('blast', `BLAST 完成（${st.blastHits.length} 个同源结构）`, 1)
     } else if (st.blastStatus.status === 'failed' && st.sequence.length >= 30 && !st.blastRescueDone) {

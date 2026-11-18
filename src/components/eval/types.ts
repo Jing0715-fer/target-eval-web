@@ -953,6 +953,10 @@ export interface HTRunState {
   resumedCount: number
   finishedAt?: number
   totalTargetCount: number
+  /** v2.28：运行完成后的统计看板 id（评分统计 + AI 整体可行性报告；回看/zip 归档用） */
+  dashboardId?: string
+  /** v2.28：看板生成失败原因（null/undefined = 正常；「__done__」= 无可统计靶点已跳过） */
+  dashboardError?: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */

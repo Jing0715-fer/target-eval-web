@@ -644,9 +644,63 @@ export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
 export interface HtArchiveEntry {
   jobId?: string
   mergedId?: string
+  /** v2.28：统计看板（根级 00_ 文件 — 评分统计 + AI 整体可行性报告） */
+  dashboardId?: string
   /** 1-based 组序号（省略 → zip 根目录平铺） */
   group?: number
   label?: string
+}
+
+// ─── 高通量统计看板（v2.28）──────────────────────────────────────
+
+/** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告） */
+export interface HtDashboardInfo {
+  id: string
+  status: 'running' | 'done' | 'error'
+  title?: string
+  error?: string | null
+  createdAt?: string
+}
+
+/** 看板条目（与 zip 归档同构 — 服务端据此计算离线链接命名） */
+export interface HtDashboardEntry {
+  jobId?: string
+  mergedId?: string
+  group?: number
+  label?: string
+}
+
+/**
+ * POST /api/evaluate/ht-dashboard — 高通量运行完成后生成统计看板（服务端异步：
+ * POST 立即返回 running，此处轮询 GET 至终态）。LLM 失败不阻塞 — 统计与每靶点
+ * 规则结论仍渲染。v2.19：本地引擎配置随请求内联携带。
+ */
+export async function generateHtDashboard(input: {
+  entries: HtDashboardEntry[]
+  goal?: string
+}): Promise<HtDashboardInfo> {
+  const llm = getLlmEngineOverride()
+  const res = await fetch('/api/evaluate/ht-dashboard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(llm ? { ...input, llm } : input),
+  })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo; error?: string } | null
+  if (!res.ok || !data?.ok || !data.dashboard) {
+    throw new Error(data?.error ?? `统计看板生成失败（HTTP ${res.status}）`)
+  }
+  if (data.dashboard.status !== 'running') return data.dashboard
+  // 轮询至终态（LLM 整体报告 ≤2 分钟；失败/超时均如实返回 — 调用方降级提示）
+  const t0 = Date.now()
+  for (;;) {
+    await new Promise(r => setTimeout(r, 3000))
+    const d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store' })
+      .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
+    if (d?.dashboard && d.dashboard.status !== 'running') return d.dashboard
+    if (Date.now() - t0 > 240_000) {
+      return { id: data.dashboard.id, status: 'error', error: '统计看板生成超时（可稍后从历史重试）' }
+    }
+  }
 }
 
 /** GET /api/evaluate/ht-archive — 一次高通量运行的全部报告打包 zip 下载

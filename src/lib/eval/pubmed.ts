@@ -50,11 +50,11 @@ export async function fetchPubmedByPmids(pmids: string[]): Promise<LiteratureIte
   return efetchArticles(pmids)
 }
 
-// 2) efetch（每批 20，批间 400ms 防 429）
+// 2) efetch（每批 50，批间 400ms 防 429 — v2.28：20 → 50，PDB 主引文上限提升后批次对齐）
 async function efetchArticles(pmids: string[]): Promise<LiteratureItem[]> {
   const out: LiteratureItem[] = []
-  for (let i = 0; i < pmids.length; i += 20) {
-    const batch = pmids.slice(i, i + 20)
+  for (let i = 0; i < pmids.length; i += 50) {
+    const batch = pmids.slice(i, i + 50)
     const url = new URL(`${EUTILS}/efetch.fcgi`)
     url.searchParams.set('db', 'pubmed')
     url.searchParams.set('id', batch.join(','))
@@ -75,7 +75,7 @@ async function efetchArticles(pmids: string[]): Promise<LiteratureItem[]> {
         if (item) out.push(item)
       }
     } catch { /* 批次失败忽略 */ }
-    if (i + 20 < pmids.length) await new Promise(r => setTimeout(r, 400))
+    if (i + 50 < pmids.length) await new Promise(r => setTimeout(r, 400))
   }
   return out
 }

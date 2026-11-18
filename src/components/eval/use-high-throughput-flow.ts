@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
-import { downloadHtReportArchive, generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
+import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
@@ -492,12 +492,68 @@ export function useHighThroughputFlow() {
     setPhase('done')
     stopTick()
     snapshot()
+    // ── v2.28 运行完成 → 统计看板（评分统计 + AI 整体可行性报告 + 每靶点一句话
+    //    结论；离线 HTML 自动下载；生成后存入运行状态供回看与 zip 归档）──
+    void finalizeHtDashboard()
     const doneGroups = runState.groups.filter((g) => g.status === 'done').length
     const reports = runState.groups.filter((g) => g.mergedReportId || g.items.some((it) => it.status === 'done')).length
     toast({
       title: '高通量评估完成',
-      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；运行日志可在每组卡片中回看。`,
+      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；统计看板正在生成（评分统计 + AI 整体可行性报告，完成后自动下载）。运行日志可在每组卡片中回看。`,
     })
+  }
+
+  /**
+   * v2.28：运行完成后生成统计看板 — entries 与 zip 归档同构（服务端据此计算离线
+   * 链接命名）；≥1 个成功靶点才生成。幂等：已有 dashboardId 的运行不重复生成
+   * （恢复/重开场景）。失败不阻塞（运行已完成）；限流/超时记入 dashboardError，
+   * 可从「批量下载全部」入口重试。
+   */
+  const finalizeHtDashboard = async (): Promise<void> => {
+    const runState = runRef.current
+    if (!runState || runState.dashboardId || runState.dashboardError === '__done__') return
+    const entries: HtArchiveEntry[] = []
+    for (const g of runState.groups) {
+      for (const it of g.items) {
+        if (it.status === 'done' && it.jobId) entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
+      }
+      if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
+    }
+    if (!entries.some((e) => e.jobId)) return
+    try {
+      const dash = await generateHtDashboard({ entries, goal: runState.goal })
+      if (dash.status === 'done') {
+        runState.dashboardId = dash.id
+        runState.dashboardError = undefined
+        // 离线 HTML 自动下载（与其他报告同机制 — 服务器端数据不长期保留）
+        autoDownloadHtmlReport(
+          `/api/evaluate/ht-dashboard?id=${encodeURIComponent(dash.id)}&download=1`,
+          `htdash:${dash.id}`,
+          '高通量统计看板（评分统计 + AI 整体可行性报告）',
+          runFolderRef.current,
+        )
+        toast({
+          title: '统计看板已生成',
+          description: `评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
+        })
+      } else {
+        runState.dashboardError = dash.error ?? '统计看板生成失败'
+        toast({
+          title: '统计看板生成失败',
+          description: `${runState.dashboardError}（运行结果不受影响；可在历史运行中重试）`,
+          variant: 'destructive',
+        })
+      }
+    } catch (e) {
+      runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
+      toast({
+        title: '统计看板生成失败',
+        description: `${runState.dashboardError}（运行结果不受影响）`,
+          variant: 'destructive',
+      })
+    }
+    saveHTRun(runState)
+    setRun(cloneRun(runState))
   }
 
   /** 启动一次高通量运行（HT Tab → 开始高通量评估） */
@@ -647,6 +703,7 @@ export function useHighThroughputFlow() {
       return
     }
     // 归档条目：组内成功靶点的独立报告 + 组合并报告（组号→zip 子文件夹）
+    // v2.28：统计看板（若有）作为根级 00_ 文件一并打包 — 内含离线链接指向本包各报告
     const entries: HtArchiveEntry[] = []
     for (const g of r.groups) {
       if (groupIndex != null && g.index !== groupIndex) continue
@@ -655,6 +712,7 @@ export function useHighThroughputFlow() {
       }
       if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
     }
+    if (groupIndex == null && r.dashboardId) entries.push({ dashboardId: r.dashboardId })
     if (entries.length === 0) {
       toast({ title: '没有可下载的报告', description: '该运行没有已完成的评估报告（全部失败/未开始或已清理）。', variant: 'destructive' })
       return

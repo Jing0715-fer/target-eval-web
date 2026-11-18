@@ -138,6 +138,9 @@ export interface PdbeCoverageResult {
   mappings: PdbeMapping[]
   /** 合并后的覆盖区间 */
   coveredRanges: Array<[number, number]>
+  /** v2.28：每 PDB 全部链的 SIFTS 范围字符串（pdbId → "A=695-1024,B=25-646"；
+   *  结构范围过滤回填 — UniProt 交叉引用 Chains 缺失的条目由此补齐后复滤） */
+  chainRangesByPdb?: Record<string, string>
 }
 
 // ─── BLAST ────────────────────────────────────────────────────────────────────
