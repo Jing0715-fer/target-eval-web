@@ -68,14 +68,24 @@ function parseBlastXml(xml: string): BlastHit[] {
     })
     if (hits.length >= 50) break
   }
-  // 同 PDB 去重取最高 identity
+  // v2.32 同 PDB 去重与排序改为显著性口径（e-value 升序，一致性/覆盖率打破平局）—
+  // 旧 identity 降序排序会把「短片段 100% 巧合命中」（如信号肽样 21 aa 片段恰好
+  // 完全匹配大蛋白局部）浮到首位，下游靶点回填/命名被误导（用户实测：ADSL 截短
+  // 构建被错绑到 SARS-CoV-2 P0DTD1）。E-value 才是比对显著性的正统度量，
+  // 与 NCBI BLAST 原生输出顺序一致。
   const seen = new Map<string, BlastHit>()
   for (const h of hits) {
     const key = h.pdbId || h.description.slice(0, 40)
     const existing = seen.get(key)
-    if (!existing || h.identity > existing.identity) seen.set(key, h)
+    if (!existing || h.evalue < existing.evalue
+      || (h.evalue === existing.evalue && (h.identity > existing.identity
+        || (h.identity === existing.identity && h.queryCoverage > existing.queryCoverage)))) {
+      seen.set(key, h)
+    }
   }
-  return [...seen.values()].sort((a, b) => b.identity - a.identity)
+  return [...seen.values()].sort(
+    (a, b) => a.evalue - b.evalue || b.identity - a.identity || b.queryCoverage - a.queryCoverage,
+  )
 }
 
 export interface BlastSubmitResult {

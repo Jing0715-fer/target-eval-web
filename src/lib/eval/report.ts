@@ -89,8 +89,10 @@ function pdbTable(pdbs: PdbEntry[], n: number): string {
 }
 
 function blastTable(hits: BlastHit[], n: number): string {
+  // v2.32：补覆盖列 — 短片段高一致性巧合命中（如信号肽样 21 aa 全同）不可与
+  // 高覆盖真同源混为一谈，LLM 需同时看到一致性与其覆盖的查询范围
   return hits.slice(0, n).map(h =>
-    `| ${h.pdbId || '-'} | ${h.description.slice(0, 70)} | ${h.identity}% | ${h.evalueRaw} |`,
+    `| ${h.pdbId || '-'} | ${h.description.slice(0, 70)} | ${h.identity}% | ${h.evalueRaw} | ${h.queryCoverage > 0 ? `${h.queryCoverage} aa${h.queryFrom != null && h.queryTo != null ? `（${h.queryFrom}-${h.queryTo}）` : ''}` : '—'} |`,
   ).join('\n')
 }
 
@@ -176,7 +178,10 @@ function buildDigest(ctx: ReportContext): string {
       lines.push(`序列标签: ${ctx.sequenceHeader.slice(0, 60)}`)
     }
     const topHit = ctx.blastHits[0]
-    if (topHit) lines.push(`BLAST 首命中: ${topHit.description}（identity ${topHit.identity}%）`)
+    if (topHit) {
+      const topCov = topHit.queryCoverage > 0 && ctx.sequence ? `，覆盖查询 ${topHit.queryCoverage}/${ctx.sequence.length} aa` : ''
+      lines.push(`BLAST 首命中（显著性最佳）: ${topHit.description}（identity ${topHit.identity}%${topCov}）`)
+    }
   }
 
   lines.push('')
@@ -356,9 +361,9 @@ function buildDigest(ctx: ReportContext): string {
 
   if (ctx.blastHits.length) {
     lines.push('')
-    lines.push(`【BLAST 同源结构】前 12 个命中（排除直接命中后）:`)
-    lines.push('| PDB | 描述 | Identity | E-value |')
-    lines.push('|-----|------|----------|---------|')
+    lines.push(`【BLAST 同源结构】前 12 个命中（排除直接命中后，按显著性 E-value 排序；覆盖 = 比对覆盖提交序列的残基数与区段）:`)
+    lines.push('| PDB | 描述 | Identity | E-value | 覆盖 |')
+    lines.push('|-----|------|----------|---------|------|')
     lines.push(blastTable(ctx.blastHits, 12))
   } else if (ctx.blastStatus) {
     // 0 命中/跳过/失败时向 LLM 明确说明，避免报告凭空描述同源结构
