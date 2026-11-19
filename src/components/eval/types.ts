@@ -952,9 +952,12 @@ export interface HTGroupItemState {
   /** v2.23.1 序列靶点：构建标签头（评估表/Excel 序列命名证据） */
   sequenceHeader?: string
   jobId?: string
-  /** pending = 尚未提交作业（未进入并发窗口）；running = 已提交未终态 */
-  status: 'pending' | 'running' | 'done' | 'error' | 'canceled'
+  /** pending = 尚未提交作业（未进入并发窗口）；running = 已提交未终态；
+   *  skipped = v2.38 用户选择跳过 / zip 导入既有报告（不评估，计入已处理） */
+  status: 'pending' | 'running' | 'done' | 'error' | 'canceled' | 'skipped'
   error?: string
+  /** v2.38：跳过原因备注（如「已导入 xxx.zip 的既有报告」；手动跳过时缺省） */
+  skipNote?: string
 }
 
 /** 高通量运行的一组（组分隔符「;」切出的单元）：组内按复合物批量评估，单独出报告 */
@@ -966,7 +969,8 @@ export interface HTGroupState {
   /** v2.23.1 序列兜底组的序列靶点（恢复运行时重新提交未启动项所需） */
   seqTargets?: HtSeqTarget[]
   items: HTGroupItemState[]
-  /** pending → judging → evaluating → merging → done；paused = 组间暂停标记 */
+  /** pending → judging → evaluating → merging → done；paused = 组间暂停标记；
+   *  canceled = v2.38 手动停止时未开始的组（可恢复 — resume 重置为 pending） */
   status: 'pending' | 'judging' | 'evaluating' | 'merging' | 'done' | 'paused' | 'canceled'
   relation?: RelationJudgment | null
   relationError?: string
@@ -977,7 +981,7 @@ export interface HTGroupState {
   finishedAt?: number
 }
 
-export type HTRunStatus = 'running' | 'paused' | 'done' | 'interrupted'
+export type HTRunStatus = 'running' | 'paused' | 'done' | 'interrupted' | 'stopped'
 
 /** 一次高通量运行（持久化到 localStorage te_ht_runs_v1，保留多份历史） */
 export interface HTRunState {
@@ -1004,6 +1008,8 @@ export interface HTRunState {
   dashboardPending?: boolean
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；导入时留存） */
   excelRows?: Array<{ label: string; text: string }>
+  /** v2.38：zip 导入备注（导入了几份报告、跳过了几个靶点 — 结果页提示用） */
+  importedNote?: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
@@ -1018,6 +1024,9 @@ export interface HTStartPayload {
   seqGroups?: HtSeqTarget[][]
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；label+折叠文本） */
   excelRows?: Array<{ label: string; text: string }>
+  /** v2.38：启动时的靶点选择（true = 跳过不评估；与 groups/seqGroups 逐组逐位对齐。
+   *  未选中项仍入运行记录（status=skipped，可恢复评估），便于事后勾选补跑） */
+  skipFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

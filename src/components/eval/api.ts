@@ -665,6 +665,14 @@ export interface HtArchiveEntry {
   /** 1-based 组序号（省略 → zip 根目录平铺） */
   group?: number
   label?: string
+  /** v2.38：以下元数据写入 zip 内 _TargetEval_manifest.json — 新建运行导入该
+   *  zip 时据此精确匹配靶点（已有报告的直接跳过，不重复评估） */
+  uniprot?: string
+  range?: [number, number]
+  /** 序列靶点：提交序列的 SHA-256 前 16 hex（精确匹配） */
+  seqSha?: string
+  seqLength?: number
+  sequenceHeader?: string
 }
 
 // ─── 高通量统计看板（v2.28）──────────────────────────────────────

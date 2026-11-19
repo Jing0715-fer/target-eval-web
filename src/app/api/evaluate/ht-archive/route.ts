@@ -10,6 +10,8 @@
  *    一并打包；命名与 ht-dashboard 内链接同源（共享 planArchiveNames）。
  * 公网加固：仅创建者本人可下载（ownerKey 归属校验，与 jobs/[id]/report 同口径）。
  * zip 用 jszip（纯内存；单报告 HTML 截断 2MB，份数上限 600 对齐高通量上限）。
+ * v2.38：附 _TargetEval_manifest.json（每报告的靶点元数据 + zip 路径）— 用户把 zip
+ * 导回新建运行时精确匹配已完成的靶点直接跳过（见 ht-archive-import.ts）。
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
@@ -33,6 +35,13 @@ interface ArchiveEntryInput {
   group?: number
   /** 组内展示名（文件名组成部分） */
   label?: string
+  /** v2.38：靶点元数据 — 原样写入包内 _TargetEval_manifest.json（新建运行导入该 zip
+   *  时据此精确匹配靶点，已有报告的直接跳过；详见 ht-archive-import.ts） */
+  uniprot?: string
+  range?: [number, number]
+  seqSha?: string
+  seqLength?: number
+  sequenceHeader?: string
 }
 
 /** 单条 HTML 上限（防超大报告撑爆内存；正常报告 ≤1MB） */
@@ -185,8 +194,37 @@ export async function GET(req: Request) {
     '文件清单：',
     ...(dashboardItem ? [`  ${HT_DASHBOARD_ZIP_NAME}`] : []),
     ...fileLines.map(f => `  ${f}`),
+    '',
+    '提示：新建高通量评估时可「导入已完成报告（zip）」选择本文件 — 已完成的靶点会自动跳过，只评估新增靶点。',
   ].join('\n')
   zip.file('_README.txt', readme)
+
+  // v2.38 靶点元数据清单 — 新建运行导入本 zip 时精确匹配靶点（ht-archive-import.ts 解析）
+  const manifest = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    entries: [
+      ...(dashboardItem ? [{
+        kind: 'dashboard' as const,
+        path: HT_DASHBOARD_ZIP_NAME,
+        dashboardId: dashboardItem.entry.dashboardId,
+      }] : []),
+      ...plannable.map((item, i) => ({
+        kind: item.kind,
+        path: planned[i],
+        jobId: item.entry.jobId,
+        mergedId: item.entry.mergedId,
+        group: item.entry.group,
+        label: item.entry.label,
+        uniprot: item.entry.uniprot,
+        range: item.entry.range,
+        seqSha: item.entry.seqSha,
+        seqLength: item.entry.seqLength,
+        sequenceHeader: item.entry.sequenceHeader,
+      })),
+    ],
+  }
+  zip.file('_TargetEval_manifest.json', JSON.stringify(manifest))
 
   const buf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } })
   const zipName = `TargetEval_HT_${new Date().toISOString().slice(0, 10)}_${loaded.length}reports.zip`

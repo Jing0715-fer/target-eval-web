@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { PillBottle,
   ChevronDown,
   CircleAlert,
@@ -185,16 +185,38 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const [htSeqGroups, setHtSeqGroups] = useState<HtSeqTarget[][]>([])
   // v2.36：原始 Excel 行快照（导入时留存 → 运行状态 → 汇总报告「原表内容」列）
   const [htExcelRows, setHtExcelRows] = useState<Array<{ label: string; text: string }>>([])
+  // v2.38：靶点选择（启动前勾选；未勾选 = 跳过，入运行记录可恢复）— 键：`g:${组}:${项}` / `sq:${组}:${项}`
+  // （输入变化时经包装 setter 重置 — 索引重排后旧键无意义）
+  const [htSkipKeys, setHtSkipKeys] = useState<string[]>([])
+  const handleHtTextChange = useCallback((v: string) => {
+    setHtText(v)
+    setHtSkipKeys([])
+  }, [])
+  const handleHtSeqGroupsChange = useCallback((g: HtSeqTarget[][]) => {
+    setHtSeqGroups(g)
+    setHtSkipKeys([])
+  }, [])
   const htParsed = useMemo(() => parseGroupedUniprotIds(htText), [htText])
   const htTargetTotal = htParsed.groups.reduce((n, g) => n + g.length, 0)
   const htSeqTargetTotal = htSeqGroups.reduce((n, g) => n + g.length, 0)
   const htGroupTotal = htParsed.groups.length + htSeqGroups.length
+  const htSkipSet = useMemo(() => new Set(htSkipKeys), [htSkipKeys])
+  /** 有效选择数（仍在当前清单里的未勾选靶点） */
+  const htSelectedTotal = useMemo(() => {
+    let n = htTargetTotal + htSeqTargetTotal
+    for (const k of htSkipSet) {
+      const [kind, gi, ti] = k.split(':')
+      if (kind === 'g' ? htParsed.groups[Number(gi)]?.[Number(ti)] != null : htSeqGroups[Number(gi)]?.[Number(ti)] != null) n--
+    }
+    return n
+  }, [htSkipSet, htTargetTotal, htSeqTargetTotal, htParsed, htSeqGroups])
   const htOverLimit =
     htGroupTotal > MAX_HT_GROUPS ||
     htTargetTotal + htSeqTargetTotal > MAX_HT_TARGETS_TOTAL ||
     htParsed.groups.some((g) => g.length > MAX_HT_TARGETS_PER_GROUP) ||
     htSeqGroups.some((g) => g.length > MAX_HT_TARGETS_PER_GROUP)
-  const htValid = htGroupTotal >= 1 && htParsed.invalid.length === 0 && !htOverLimit
+  // v2.38：至少勾选 1 个靶点才可启动（全部跳过无意义）
+  const htValid = htGroupTotal >= 1 && htParsed.invalid.length === 0 && !htOverLimit && htSelectedTotal >= 1
 
   // UniProt Tab 的可选伴随序列（合并评估）
   const [companionOpen, setCompanionOpen] = useState(false)
@@ -477,6 +499,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       const groups: string[][] = []
       const groupRanges: Array<Array<[number, number] | undefined>> = []
       const groupDomainHints: Array<Array<string | undefined>> = []
+      // v2.38：跳过标记随组对齐收集（源索引 → 载荷索引，防空组错位）
+      const groupSkipFlags: boolean[][] = []
       for (let i = 0; i < htParsed.groups.length && groups.length < MAX_HT_GROUPS; i++) {
         const ids = htParsed.groups[i].slice(0, MAX_HT_TARGETS_PER_GROUP)
         if (ids.length === 0) continue
@@ -489,13 +513,20 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
           htParsed.groupDomainHints[i]?.slice(0, MAX_HT_TARGETS_PER_GROUP)
             ?? ids.map(() => undefined),
         )
+        groupSkipFlags.push(ids.map((_, j) => htSkipSet.has(`g:${i}:${j}`)))
       }
-      const seqGroups = htSeqGroups
-        .map((g) => g.slice(0, MAX_HT_TARGETS_PER_GROUP))
-        .slice(0, Math.max(0, MAX_HT_GROUPS - groups.length))
-        .filter((g) => g.length > 0)
+      const seqGroups: HtSeqTarget[][] = []
+      const seqSkipFlags: boolean[][] = []
+      for (let k = 0; k < htSeqGroups.length && groups.length + seqGroups.length < MAX_HT_GROUPS; k++) {
+        const g = htSeqGroups[k].slice(0, MAX_HT_TARGETS_PER_GROUP)
+        if (g.length === 0) continue
+        seqGroups.push(g)
+        seqSkipFlags.push(g.map((_, j) => htSkipSet.has(`sq:${k}:${j}`)))
+      }
       if (groups.length === 0 && seqGroups.length === 0) return
-      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, excelRows: htExcelRows.length ? htExcelRows : undefined, goal: trimmedGoal, ligands, options }
+      // v2.38：启动时的靶点选择（未勾选 → skipped 入运行记录，可事后恢复评估）
+      const skipFlags = { groups: groupSkipFlags, seqGroups: seqSkipFlags }
+      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, skipFlags, excelRows: htExcelRows.length ? htExcelRows : undefined, goal: trimmedGoal, ligands, options }
       await onStartHighThroughput(payload)
       return
     }
@@ -608,7 +639,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const startLabel = submitting
     ? '正在创建评估作业…'
     : mode === 'highthroughput'
-      ? `开始高通量评估（${htGroupTotal} 组 · ${htTargetTotal + htSeqTargetTotal} 靶点）`
+      ? `开始高通量评估（${htGroupTotal} 组 · ${htSelectedTotal} 靶点${htSelectedTotal < htTargetTotal + htSeqTargetTotal ? ` · 跳过 ${htTargetTotal + htSeqTargetTotal - htSelectedTotal}` : ''}）`
       : mode === 'docx' && selectedUniprots.length > 1
         ? `开始评估（${selectedUniprots.length} 个靶点）`
         : mode === 'uniprot' && uniprotMulti
@@ -930,10 +961,10 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
               <TabsContent value="highthroughput" className="mt-0">
                 <HighThroughputPanel
                   value={htText}
-                  onChange={setHtText}
+                  onChange={handleHtTextChange}
                   parsed={htParsed}
                   seqGroups={htSeqGroups}
-                  onSeqGroupsChange={setHtSeqGroups}
+                  onSeqGroupsChange={handleHtSeqGroupsChange}
                   excelRows={htExcelRows}
                   onExcelRowsChange={setHtExcelRows}
                   recentRuns={recentHTRuns}
@@ -941,6 +972,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   onDeleteRun={onDeleteHTRun}
                   onArchiveRun={onArchiveHTRun}
                   archiving={htArchiving}
+                  skipKeys={htSkipKeys}
+                  onSkipKeysChange={setHtSkipKeys}
                 />
                 {htOverLimit && (
                   <p className="mt-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
