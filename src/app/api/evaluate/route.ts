@@ -141,11 +141,18 @@ export async function POST(req: Request) {
     : undefined
 
   // 创建 DB 记录（pending）— 记录归属（哈希键 + 掩码）
+  // v2.34：序列靶点标题用 sequenceHeader（结构交付行 = 「文件名·链N」）— 百行级
+  // 高通量运行中全部叫「序列靶点」无法区分；无标签时退回长度描述
+  const seqTitle = mode === 'sequence'
+    ? (sequenceHeader
+        ? sequenceHeader.slice(0, 60)
+        : `序列靶点 ${typeof sequence === 'string' ? sequence.length : '?'}aa`)
+    : '评估表靶点'
   const job = await db.evaluationJob.create({
     data: {
       status: 'pending',
       mode,
-      title: mode === 'uniprot' ? `UniProt ${uniprot}` : mode === 'sequence' ? '序列靶点' : '评估表靶点',
+      title: mode === 'uniprot' ? `UniProt ${uniprot}` : seqTitle,
       uniprotId: uniprot?.toUpperCase() ?? null,
       goal: body.goal?.slice(0, 2000) ?? null,
       options: JSON.stringify(options),

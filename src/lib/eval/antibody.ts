@@ -10,6 +10,12 @@
  *  - 命中任一强基序（IgG 恒定区/铰链区高度保守片段、J 段末端）→ 抗体
  *  - 命中 ≥2 个弱基序（VH/VL 框架区签名）→ 抗体（覆盖无恒定区的 VHH/nanobody）
  *  - 其余 → 非抗体
+ *
+ * v2.34 强化（高通量结构清单实测漏检反馈）：仅靠恒定区/J 段末端的老基序会漏掉
+ * 大量「无恒定区的 Fab 可变域片段」（结构交付表里常见只截 VH/VL 结构域的行）。
+ * 新增可变域框架签名（VLκ/VLλ FW1-FW2、VH/VHH N 端与 FW1-FW2 核心、J 段
+ * L/E/R 变体、VH→CH1 衔接段），全部按「强基序任一命中 / 弱基序 ≥2 命中」的
+ * 保守口径合入，不改变原有假阳性风险量级（弱基序均为 Ig 框架特异 6+ 位片段）。
  */
 
 export interface AntibodyVerdict {
@@ -18,7 +24,7 @@ export interface AntibodyVerdict {
   evidence: string[]
 }
 
-/** IgG 恒定区/铰链区强保守基序（任一命中即判抗体） */
+/** IgG 恒定区/铰链区强保守基序（任一命中即判抗体）；v2.34 新增可变域强签名 */
 const STRONG_MOTIFS: Array<[RegExp, string]> = [
   [/CPPCP/, 'IgG 铰链区 CPPCP 基序'],
   [/PREEQYNSTYR/, 'IgG CH1 恒定区基序'],
@@ -26,9 +32,14 @@ const STRONG_MOTIFS: Array<[RegExp, string]> = [
   [/PSVFLFPP/, 'CH1 恒定区起始基序'],
   [/WESNGQPENNY/, 'CH2 恒定区基序'],
   [/VDKSRWQQGNVFSCSVMHEALHNHYTQKS/, 'IgG CH3 末端恒定区'],
+  // v2.34：可变域/恒定区衔接强签名（结构交付表中截短的 Fab 链常只剩这些）
+  [/TQSPSS[LM]SASVG/, 'VL κ 框架区 FW1 基序'],
+  [/KVDK[QR]VEPKSC/, 'VH→CH1 衔接段基序'],
+  [/ASTKGPSVFPLAP/, 'CH1 恒定区起始（鼠源）'],
+  [/SLRLSC[AV]A[SG]/, 'VH/VHH 框架区 FW1 基序'],
 ]
 
-/** J 段末端变体（序列结尾匹配 → 抗体可变域的强特征） */
+/** J 段末端变体（序列结尾匹配 → 抗体可变域的强特征）；v2.34 补 L/E/R 与缺末位 S 变体 */
 const J_ENDINGS: Array<[string, string]> = [
   ['GQGTLVTVSS', '重链 J 段末端（VH）'],
   ['GQGTMVTVSS', '重链 J 段末端（VH 变体）'],
@@ -36,14 +47,31 @@ const J_ENDINGS: Array<[string, string]> = [
   ['GQGTKVTVS', '轻链 J 段末端变体'],
   ['GTQVTVSS', 'VHH J 段末端（纳米抗体）'],
   ['SFNRGEC', '轻链恒定区末端（CL κ）'],
+  // v2.34：结构交付表实测出现的 J 段变体
+  ['GQGTRVTVSS', '重链 J 段末端（VH R 变体）'],
+  ['GQGTLVTVS', '重链 J 段末端（VH 缺末位 S）'],
+  ['GTKLEIK', '轻链 J 段核心（κ/λ LE 变体）'],
+  ['GGGTKLEI', '轻链 J 段末端（κ LE 短变体）'],
+  ['GAGTKLEL', '轻链 J 段末端（λ 变体）'],
+  ['GGTKLTVL', '轻链 J 段末端（λ TV 变体）'],
 ]
 
-/** VH/VL 框架区签名（弱基序，≥2 命中判抗体 — 覆盖无恒定区的纳米抗体） */
+/** VH/VL 框架区签名（弱基序，≥2 命中判抗体 — 覆盖无恒定区的纳米抗体）；v2.34 扩充核心签名 */
 const WEAK_MOTIFS: Array<[RegExp, string]> = [
   [/WVRQAPG[KQS]/, 'VH 框架区 FW2 签名'],
   [/WYQQKPG/, 'VL 框架区 FW2 签名'],
   [/RFTIS[SR]DNAK/, 'VH 框架区 FW3 签名'],
   [/SCAASGY|SCAASGF|SCAASGS/, 'VH 框架区 FW1 签名'],
+  // v2.34：框架核心短签名（任一 4-6 位片段单独不判定，≥2 组合才判抗体）
+  [/W[VI][RK]Q/, '重链 FW2 核心签名（WVRQ/WIRQ/WVKQ）'],
+  [/W[FY][QR]Q/, '轻链/VHH FW2 核心签名（WYQQ/WFQQ/WYRQ）'],
+  [/SLSAS[VL]G/, 'VL κ 框架区 FW1 核心签名'],
+  [/LTQPP[SA]/, 'VL λ 框架区 FW1 签名'],
+  [/VQL[QVK][ESD][SG]/, 'VH/VHH 可变域 N 端签名'],
+  [/V[LMT]VTVSS/, 'J 段末端变体签名'],
+  [/GTKV[DE]I[KR]/, '轻链 J 段核心签名'],
+  [/PSN[TR]KVDK/, 'VH J 段→恒定区衔接签名'],
+  [/SC[KAV]ASG/, 'VH 框架区 FW1 核心签名'],
 ]
 
 /** 序列标签/头部中的抗体关键词 */

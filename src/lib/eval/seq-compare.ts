@@ -7,6 +7,10 @@
  *    （用户诉求：BLAST 定位 UniProt 后按提交序列确定条目内范围；首尾突变/
  *     标签头/种间同源时锚定法失效，内部保守片段仍可定位区间）
  *  - 兜底 → 8-mer Jaccard 集合相似度（集合 ≤ 数千条目）
+ *  - 链级半全局比对（v2.35）→ pairwiseChainIdentity：长度相近两条链的
+ *    精确一致率（自由末端缺口 NW）— 高通量跨行去重用（compareSequences 的
+ *    锚定/k-mer 兜底对「同长近同源链对」会失准：实测 WT/Delta 棘突
+ *    ~99% 一致被估为 76）
  * 不引入外部依赖，5000+ aa 序列毫秒级完成。
  */
 import type { SequenceComparison } from './types'
@@ -328,6 +332,129 @@ function seedChainAlign(provided: string, full: string): SequenceComparison | nu
     provStart,
     provEnd,
     method: 'seed-chain',
+  }
+}
+
+// ─── v2.35 链级半全局比对（高通量跨行去重专用） ─────────────────────────────
+
+export interface PairwiseChainIdentity {
+  /** 对齐区一致率（0-100；对齐列 = 匹配 + 错配 + 内部缺口列，末端悬挂不计） */
+  identity: number
+  /** a 参与对齐（非末端悬挂）的残基比例（0-1） */
+  coverageA: number
+  /** b 参与对齐的残基比例（0-1） */
+  coverageB: number
+}
+
+/** 单对比对单元上限（≈2000×2000 — 超长链对返回 null，调用方按不可比处理） */
+const PAIRWISE_MAX_CELLS = 4_000_000
+const PAIRWISE_MATCH = 2
+const PAIRWISE_SUB = -1
+const PAIRWISE_GAP = -1
+/** 回溯方向位标记：1=↖对角 2=↑（a 残基对 b 缺口） 4=←（a 缺口对 b 残基） */
+const DIR_DIAG = 1
+const DIR_UP = 2
+const DIR_LEFT = 4
+
+/**
+ * 两条链的半全局比对（末端缺口自由）：「相同构建 / ≥95% 同源拷贝」判定用的
+ * 精确一致率与覆盖度。调用方（ht-excel 跨行去重）先做长度比闸门（≥0.85 —
+ * 片段 vs 全长不算重复）与 8-mer 包含度预滤，到达这里的链对都是「疑似同源」。
+ *
+ * 为什么不用 compareSequences：其对同长近同源链对会落锚定/k-mer 兜底且失准
+ * （WT/Delta 棘突 ~99% → 76）；本函数用全局 NW 精确解：
+ *  - 首行/首列 0 分起步、末行/末列最优格回溯 → 构建边界差异（253/283 RBD
+ *    一端多 30 aa）作为自由末端悬挂，不影响一致率
+ *  - match +2 / mismatch・gap -1：错配比双侧缺口便宜 → 中段分歧区不会被
+ *    「跳过」拉高一致率（诚实计入分母）
+ *  - identity = 匹配列/对齐列；coverage = 参与对齐残基/自身全长（悬挂不计）
+ */
+export function pairwiseChainIdentity(a: string, b: string): PairwiseChainIdentity | null {
+  const P = a.length
+  const F = b.length
+  if (P === 0 || F === 0) return null
+  if (a === b) return { identity: 100, coverageA: 1, coverageB: 1 }
+  if (P * F > PAIRWISE_MAX_CELLS) return null
+
+  const W = F + 1
+  const score = new Int16Array((P + 1) * W) // 得分域 |s| ≤ 2·min(P,F) 与 -(P+F)，Int16 足够
+  const dir = new Uint8Array((P + 1) * W)
+  // 末端缺口自由：首行/首列 0 分（Int16Array 缺省即 0）；边界方向标记仅供回溯出界
+  for (let j = 1; j <= F; j++) dir[j] = DIR_LEFT
+  for (let i = 1; i <= P; i++) dir[i * W] = DIR_UP
+
+  for (let i = 1; i <= P; i++) {
+    const ai = a.charCodeAt(i - 1)
+    const row = i * W
+    const prev = row - W
+    for (let j = 1; j <= F; j++) {
+      const diag = score[prev + j - 1] + (ai === b.charCodeAt(j - 1) ? PAIRWISE_MATCH : PAIRWISE_SUB)
+      const up = score[prev + j] + PAIRWISE_GAP
+      let best = diag
+      let d = DIR_DIAG
+      if (up > best) {
+        best = up
+        d = DIR_UP
+      }
+      const left = score[row + j - 1] + PAIRWISE_GAP
+      if (left > best) {
+        best = left
+        d = DIR_LEFT
+      }
+      score[row + j] = best
+      dir[row + j] = d
+    }
+  }
+
+  // 对齐终点 = 末行/末列最优格（吃满 a 或吃满 b；另一侧残余为自由末端悬挂）
+  let bi = P
+  let bj = 0
+  let bs = score[P * W]
+  for (let j = 1; j <= F; j++) {
+    const s = score[P * W + j]
+    if (s > bs) {
+      bs = s
+      bi = P
+      bj = j
+    }
+  }
+  for (let i = 0; i < P; i++) {
+    const s = score[i * W + F]
+    if (s > bs) {
+      bs = s
+      bi = i
+      bj = F
+    }
+  }
+
+  // 回溯：统计对齐列与匹配列；退出时 (i, j) 的外侧残余 = 首端悬挂
+  let i = bi
+  let j = bj
+  let matches = 0
+  let cols = 0
+  while (i > 0 && j > 0) {
+    const d = dir[i * W + j]
+    if (d & DIR_DIAG) {
+      if (a.charCodeAt(i - 1) === b.charCodeAt(j - 1)) matches++
+      cols++
+      i--
+      j--
+    } else if (d & DIR_UP) {
+      cols++
+      i--
+    } else {
+      cols++
+      j--
+    }
+  }
+  // 参与对齐的残基数：路径在各自序列上的跨度（不含两侧悬挂）
+  const consumedA = bi - i
+  const consumedB = bj - j
+  const identity = cols > 0 ? (matches / cols) * 100 : 0
+  return {
+    identity,
+    coverageA: P > 0 ? consumedA / P : 0,
+    coverageB: F > 0 ? consumedB / F : 0,
   }
 }
 
