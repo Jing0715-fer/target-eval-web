@@ -1505,76 +1505,6 @@ class SegmentRunner {
         )
       }
 
-      // 序列模式且尚未识别 UniProt：从最佳命中回填（blastBackfillDone 重入守卫）
-      if (!st.uniprotInfo && st.blastHits.length > 0 && !st.blastBackfillDone) {
-        // v2.6.3：闸门随段预算伸缩（原绝对 20s 在小段下永远交还会死锁）
-        const backfillGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.5))
-        if (budgetLeft(this.cb) < backfillGateMs) {
-          return this.handoff() // 回填是多步网络调用 — 预算不足时下一段再做
-        }
-        // v2.32 覆盖度加权的靶点识别：按 score = identity × 查询覆盖率 选最佳命中，
-        // 且覆盖率 ≥40% 才可作身份归属依据 — 短片段 100% 巧合匹配（如信号肽样
-        // 21 aa 全同命中大蛋白局部）不具靶点语义，曾把 ADSL 截短构建错绑到
-        // P0DTD1；覆盖不足时不绑定，交由 BLAST nr 全库序列再识别。
-        const bestCov = bestCoverageHit(st.blastHits, st.sequence.length)
-        const best = bestCov?.hit
-        if (best && best.identity >= 85 && bestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
-          // v2.16：RCSB 提供方命中用命中实体序号定位 UniProt（复合物结构中实体 1 可能是
-          //  伙伴链 — 曾实测 p53 片段命中复合物被归属到 MDM2 的教训）；NCBI pdbaa 命中
-          //  描述无实体信息，仍取主实体
-          const acc = (st.blastStatus.provider ?? 'ncbi') === 'rcsb'
-            ? await fetchUniprotForEntryEntity(best.pdbId, best.entityId ?? 1)
-            : uniprotFromBlastDesc(best.description)
-          if (acc) {
-            this.log(`从同源命中识别 UniProt ${acc}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 100)}% — 覆盖度加权最佳命中 ${best.pdbId}），回填元数据…`)
-            const info = await fetchUniprotInfo(acc)
-            if (info) {
-              st.uniprotInfo = info
-              await this.rebuildStructureDataAfterBackfill(info)
-            }
-          }
-        } else if (best) {
-          // 覆盖/一致性不足 — 不据同源命中绑定靶点（错绑比无归属更糟：报告会按
-          // 无关蛋白的全长口径展开）；保持无归属，本阶段末尾的 BLAST nr 级联接手
-          const maxId = st.blastHits.reduce((m, h) => Math.max(m, h.identity), 0)
-          this.log(
-            `同源命中不足以确定靶点身份：覆盖度加权最佳 ${best.pdbId}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 1000) / 10}%，未达「一致性 85% + 覆盖 40%」归属阈值；单命中最高一致性 ${maxId}% 但覆盖均不足）— 不据此绑定 UniProt，交由 BLAST nr 识别`,
-            'warn',
-          )
-        }
-        st.blastBackfillDone = true
-      }
-
-      // ── v2.28：BLAST 同源命中的主引文并入文献列表（用户反馈文献列表不全 —
-      // 同源命中经 RCSB GraphQL enrich 已携带 PMID，此前未纳入；结构解析文献块
-      // 按年份降序与直接结构引文合并，重入守卫 blastLitMerged）──
-      if (st.blastHits.length > 0 && !st.blastLitMerged) {
-        st.blastLitMerged = true
-        const seen = new Set(st.literature.map(l => String(l.pmid)))
-        const blastPmids: string[] = []
-        for (const h of st.blastHits) {
-          const pid = (h.pubmedId ?? '').trim()
-          if (pid && !seen.has(pid)) {
-            seen.add(pid)
-            blastPmids.push(pid)
-          }
-          if (blastPmids.length >= 40) break
-        }
-        if (blastPmids.length > 0) {
-          try {
-            const blastLits = (await fetchPubmedByPmids(blastPmids))
-              .map(l => ({ ...l, fromPdb: true as const }))
-              .filter(l => !st.literature.some(x => String(x.pmid) === String(l.pmid)))
-            if (blastLits.length) {
-              // 结构解析文献块（fromPdb）按年份降序置前，检索文献块在后 — 与既有排序口径一致
-              const pdbBlock = [...st.literature.filter(l => l.fromPdb), ...blastLits]
-                .sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
-              st.literature = [...pdbBlock, ...st.literature.filter(l => !l.fromPdb)]
-              this.log(`同源结构主引文并入：${blastLits.length} 篇（文献列表合计 ${st.literature.length} 篇）`)
-            }
-          } catch { /* 增量并入失败不影响主链路 */ }
-        }
-      }
       this.report('blast', `BLAST 完成（${st.blastHits.length} 个同源结构）`, 1)
     } else if (st.blastStatus.status === 'failed' && st.sequence.length >= 30 && !st.blastRescueDone) {
       // 提交阶段失败（网络/NCBI 拒收）→ 直接 RCSB 序列检索兜底（v1.9）
@@ -1604,11 +1534,102 @@ class SegmentRunner {
         this.report('blast', '同源检索不可用（已跳过）', 1)
       }
       st.blastRescueDone = true
-    } else {
+    } else if (!st.blastCollected) {
       // 序列过短（<30 aa）未提交等剩余情形
       if (st.blastStatus.status === 'ok') st.blastStatus = { status: 'skipped-covered', note: '序列过短（<30 aa），未提交同源检索' }
       this.report('blast', '未运行同源检索', 1)
       this.log(`BLAST 阶段跳过：${st.blastStatus.note ?? '未提交'}`)
+    } else {
+      // v2.43：重入收尾 — 本段之前已收集完成（NCBI 或 RCSB 兜底），段预算在
+      // 回填/引文并入处切断后重入不再重复收集，也不覆盖已成功的检索状态
+      // （原实现重入会误入「未运行同源检索」分支，把 RCSB 兜底成功态改写成
+      // 「序列过短」并丢失 provider 标注）
+      this.report('blast', `BLAST 完成（${st.blastHits.length} 个同源结构）`, 1)
+    }
+
+    // ── v2.43：UniProt 回填 + 同源主引文并入 — 两条同源检索路径共享 ──────────
+    //  原实现把这两步嵌在「NCBI 提交成功」分支内；NCBI 提交失败直接走 RCSB 兜底
+    //  的路径（上面的 else-if failed 分支）完全没有它们 — 用户实测（J53 序列靶点）：
+    //  NCBI 全停时提交失败 → RCSB mmseqs2 拿到 60 个命中（含 8XXQ 100%/499aa 全长
+    //  命中）→ 但报告仍以序列标签命名、无 UniProt 归属、无直接结构、文献列表为空。
+    //  两条路径收集完成后都置 blastCollected=true，以此作为共享闸门（未收集/无命中
+    //  的跳过路径不受影响）。
+
+    // a) 序列模式且尚未识别 UniProt：从最佳命中回填（blastBackfillDone 重入守卫）
+    if (st.blastCollected && !st.uniprotInfo && st.blastHits.length > 0 && !st.blastBackfillDone) {
+      // v2.6.3：闸门随段预算伸缩（原绝对 20s 在小段下永远交还会死锁）
+      const backfillGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.5))
+      if (budgetLeft(this.cb) < backfillGateMs) {
+        return this.handoff() // 回填是多步网络调用 — 预算不足时下一段再做
+      }
+      // v2.32 覆盖度加权的靶点识别：按 score = identity × 查询覆盖率 选最佳命中，
+      // 且覆盖率 ≥40% 才可作身份归属依据 — 短片段 100% 巧合匹配（如信号肽样
+      // 21 aa 全同命中大蛋白局部）不具靶点语义，曾把 ADSL 截短构建错绑到
+      // P0DTD1；覆盖不足时不绑定，交由 BLAST nr 全库序列再识别。
+      const bestCov = bestCoverageHit(st.blastHits, st.sequence.length)
+      const best = bestCov?.hit
+      if (best && best.identity >= 85 && bestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
+        // v2.16：RCSB 提供方命中用命中实体序号定位 UniProt（复合物结构中实体 1 可能是
+        //  伙伴链 — 曾实测 p53 片段命中复合物被归属到 MDM2 的教训）；NCBI pdbaa 命中
+        //  描述无实体信息，仍取主实体
+        const acc = (st.blastStatus.provider ?? 'ncbi') === 'rcsb'
+          ? await fetchUniprotForEntryEntity(best.pdbId, best.entityId ?? 1)
+          : uniprotFromBlastDesc(best.description)
+        if (acc) {
+          this.log(`从同源命中识别 UniProt ${acc}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 100)}% — 覆盖度加权最佳命中 ${best.pdbId}），回填元数据…`)
+          const info = await fetchUniprotInfo(acc)
+          if (info) {
+            st.uniprotInfo = info
+            await this.rebuildStructureDataAfterBackfill(info)
+          } else {
+            // v2.43：回填链条的静默缺口补日志（此前 acc/info 获取失败均无痕跳过 —
+            // 报告退回序列标签命名且无从排查）
+            this.log(`UniProt ${acc} 元数据获取失败（网络）— 本次不回填，身份交由 BLAST nr 识别`, 'warn')
+          }
+        } else {
+          this.log(`同源最佳命中 ${best.pdbId} 未取得 UniProt 映射（${(st.blastStatus.provider ?? 'ncbi') === 'rcsb' ? 'RCSB data API 实体无 uniprot_ids 或请求失败' : 'pdbaa 描述无 sp/tr accession'}）— 不绑定，交由 BLAST nr 识别`, 'warn')
+        }
+      } else if (best) {
+        // 覆盖/一致性不足 — 不据同源命中绑定靶点（错绑比无归属更糟：报告会按
+        // 无关蛋白的全长口径展开）；保持无归属，本阶段末尾的 BLAST nr 级联接手
+        const maxId = st.blastHits.reduce((m, h) => Math.max(m, h.identity), 0)
+        this.log(
+          `同源命中不足以确定靶点身份：覆盖度加权最佳 ${best.pdbId}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 1000) / 10}%，未达「一致性 85% + 覆盖 40%」归属阈值；单命中最高一致性 ${maxId}% 但覆盖均不足）— 不据此绑定 UniProt，交由 BLAST nr 识别`,
+          'warn',
+        )
+      }
+      st.blastBackfillDone = true
+    }
+
+    // b) BLAST 同源命中的主引文并入文献列表（v2.28：用户反馈文献列表不全 —
+    //    同源命中经 RCSB GraphQL enrich 已携带 PMID，此前未纳入；结构解析文献块
+    //    按年份降序与直接结构引文合并，重入守卫 blastLitMerged）
+    if (st.blastCollected && st.blastHits.length > 0 && !st.blastLitMerged) {
+      st.blastLitMerged = true
+      const seen = new Set(st.literature.map(l => String(l.pmid)))
+      const blastPmids: string[] = []
+      for (const h of st.blastHits) {
+        const pid = (h.pubmedId ?? '').trim()
+        if (pid && !seen.has(pid)) {
+          seen.add(pid)
+          blastPmids.push(pid)
+        }
+        if (blastPmids.length >= 40) break
+      }
+      if (blastPmids.length > 0) {
+        try {
+          const blastLits = (await fetchPubmedByPmids(blastPmids))
+            .map(l => ({ ...l, fromPdb: true as const }))
+            .filter(l => !st.literature.some(x => String(x.pmid) === String(l.pmid)))
+          if (blastLits.length) {
+            // 结构解析文献块（fromPdb）按年份降序置前，检索文献块在后 — 与既有排序口径一致
+            const pdbBlock = [...st.literature.filter(l => l.fromPdb), ...blastLits]
+              .sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
+            st.literature = [...pdbBlock, ...st.literature.filter(l => !l.fromPdb)]
+            this.log(`同源结构主引文并入：${blastLits.length} 篇（文献列表合计 ${st.literature.length} 篇）`)
+          }
+        } catch { /* 增量并入失败不影响主链路 */ }
+      }
     }
 
     // ── v2.16 靶点身份识别级联（纯序列输入且尚无 UniProt 归属时）──────────
