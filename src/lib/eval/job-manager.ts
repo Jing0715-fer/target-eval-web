@@ -1,12 +1,16 @@
 /**
  * 作业管理器 — 4GB 内存沙箱防 OOM 设计：
- *  - 评估作业小并发池执行（默认 2，EVAL_JOB_CONCURRENCY 可调）：
+ *  - 评估作业小并发池执行（默认 6，EVAL_JOB_CONCURRENCY 可调，上限 8）：
  *    评估管线为 I/O 密集（外部 API 检索 + LLM 调用 + BLAST 轮询 sleep），
- *    BLAST 等待期不占内存 — 双并发可让「靶点 A 等 BLAST 期间靶点 B 先做数据检索」，
- *    而内存峰值（docx 解析 mammoth/sharp/VLM）由 gatekeeper 独立信号量约束
+ *    BLAST 等待期不占内存 — 多并发可让「部分靶点等慢 BLAST 期间其余靶点
+ *    先做数据检索/报告生成」（v2.39：2 → 6 — 用户诉求「轮询期间可以先进行
+ *    其他评估，先把 BLAST 都提交起来」）；内存峰值（docx 解析 mammoth/sharp/
+ *    VLM）仍由 gatekeeper 独立信号量约束（≤2），不受本池影响
  *  - 内存注册表 LRU ≤ 20：终态作业超限即逐出（历史从 DB 重建）
  *  - 运行中作业持有 AbortController，支持取消
  *  - 进度/日志回调写入内存（日志环缓冲 60 条），终态持久化到 SQLite
+ *  - v2.39：hasOtherActiveJobs — 全场活跃作业探测（BLAST 软僵尸保险
+ *    「等全场收尾」的判定依据，见 blast.ts）
  */
 import { db } from '@/lib/db'
 import { STAGE_DEFS, STAGE_RANGES, type JobProgress, type JobStatus, type StageInfo } from './types'
@@ -22,10 +26,11 @@ export interface JobSnapshot {
 }
 
 const MAX_MEMORY_JOBS = 20
-/** 评估作业并发数（默认 2：一个作业等 BLAST 时另一个跑数据检索） */
+/** 评估作业并发数（v2.39：默认 2 → 6 — BLAST 轮询等待期推进其余靶点，
+ *  docx/VLM 重负载仍由 gatekeeper 解析信号量独立限流） */
 function jobConcurrency(): number {
   const n = Number(process.env.EVAL_JOB_CONCURRENCY)
-  return Number.isFinite(n) && n >= 1 ? Math.min(4, Math.floor(n)) : 2
+  return Number.isFinite(n) && n >= 1 ? Math.min(8, Math.floor(n)) : 6
 }
 
 const g = globalThis as unknown as {
@@ -85,9 +90,9 @@ export function setJobRunning(id: string): void {
 }
 
 /**
- * 小并发池执行（默认同时 2 个）：
- * BLAST 轮询是纯等待（sleep + 单请求），第二个作业利用该空隙做数据检索，
- * 批量评估总时长显著缩短且内存峰值不变。
+ * 小并发池执行（v2.39 默认同时 6 个）：
+ * BLAST 轮询是纯等待（sleep + 单请求），其余作业利用该空隙做数据检索/报告，
+ * 批量评估总时长显著缩短且内存峰值不变（重负载由解析信号量另限）。
  */
 export function enqueueJob(task: () => Promise<void>): void {
   pool.pending.push(task)
@@ -107,6 +112,21 @@ function schedulePool(): void {
         schedulePool()
       })
   }
+}
+
+/**
+ * v2.39：全场还有其他活跃（pending/running）作业吗（不含 excludeId）—
+ * BLAST 软僵尸保险「等全场收尾」的判定依据：
+ *  - 只要还有别的作业在排队/执行，慢 BLAST 就继续轮询不判超时；
+ *  - 本作业已是全场最后一个时，才进入终局等待窗口（见 blast.ts）。
+ * 内存注册表即权威视图（enqueue 前已建快照；终态即逐出/标态）。
+ */
+export function hasOtherActiveJobs(excludeId?: string): boolean {
+  for (const j of jobs.values()) {
+    if (excludeId && j.id === excludeId) continue
+    if (j.status === 'pending' || j.status === 'running') return true
+  }
+  return pool.pending.length > 0
 }
 
 // ─── 进度与日志 ───────────────────────────────────────────────────────────────

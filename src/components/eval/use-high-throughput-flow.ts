@@ -1,18 +1,24 @@
 'use client'
 
 /**
- * 高通量评估编排（v2.22）。
+ * 高通量评估编排（v2.22 → v2.39 并行化重设计）。
  *
  * 输入契约：「;」分隔组，组内「,」分隔靶点 ——
- *  - 组内多个靶点 = 按现有复合物批量评估链路（关系判断 → 2 并发窗口 → ≥2 成功出合并报告）
+ *  - 组内多个靶点 = 按现有复合物批量评估链路（关系判断 → 并发评估 → ≥2 成功出合并报告）
  *  - 组内仅一个靶点 = 单作业独立评估
- *  - 每组单独出报告；组间严格串行（贴合服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=2）
+ *  - v2.39：组间并行推进（原严格串行）— 全部组同时开动，共享跨组全局并发窗口
+ *    HT_WINDOW（=6，与服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=6 对齐）。
+ *    用户核心诉求：「有些 BLAST 结果很久返不回结果，轮询期间可以先进行其他评估」—
+ *    慢 BLAST 只占用自己的窗口槽位，不阻塞其他组/靶点推进
+ *  - v2.39：启动/恢复时 BLAST 预热（blast-warmup）— 全部待评估序列一次性发服务端
+ *    限速预提交 NCBI（先把 BLAST 都提交起来），作业排队期间 NCBI 已在计算
  *
  * 限流自动暂停（用户核心诉求）：
- *  - 检测点覆盖：作业创建 429（系统配额）、作业终态 error 的限流指纹、
+ *  - 检测点覆盖：作业创建 429（系统配额；瞬时「同时最多/排队较多」型先有界退避重试，
+ *    重试耗尽才判限流暂停）、作业终态 error 的限流指纹、
  *    作业完成但报告 LLM 全部失败（reportLlmOk !== true，常见于供应商限流/额度耗尽）、
  *    关系判断 / 合并报告生成失败的限流指纹
- *  - 暂停 = 不再提交新作业、不开下一组；已在跑的作业让其在服务器自然跑完（数据不浪费），
+ *  - 暂停 = 不再提交新作业；已在跑的作业让其在服务器自然跑完（数据不浪费），
  *    结果照常记入组状态
  *  - 配额恢复后由用户「重新开始运行」：从断点续跑 —— 已完成/已终态的靶点不重复评估，
  *    未提交的继续提交，未开始的组继续开
@@ -48,8 +54,15 @@ export type HTPhase = 'idle' | 'running' | 'paused' | 'stopped' | 'done'
 const POLL_INTERVAL_MS = 2000
 /** 连续轮询失败达到该值 → 网络异常提示（继续重试） */
 const MAX_CONSECUTIVE_FAILURES = 3
-/** 组内并发窗口（与服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=2 对齐） */
-const HT_WINDOW = 2
+/** v2.39 跨组全局并发窗口（原组内窗口 2 → 全局 6 — 与服务端每 IP 并发上限
+ *  EVAL_MAX_ACTIVE_PER_IP=6 / 作业池 EVAL_JOB_CONCURRENCY=6 对齐）：
+ *  组间并行推进，全部组的待评估项共享这 6 个槽位 — 慢 BLAST 只占自己的槽，
+ *  其余靶点照常推进（用户核心诉求） */
+const HT_WINDOW = 6
+/** v2.39：作业创建遇到「同时最多/排队较多」型瞬时 429 的有界退避重试
+ *  （窗口释放即可提交成功；耗尽才按限流暂停处理） */
+const CREATE_JOB_QUOTA_RETRIES = 8
+const CREATE_JOB_QUOTA_RETRY_MS = 15_000
 
 /** v2.25 目录段安全化：非法字符折叠为空格并限长 */
 function safeDir(s: string, max = 60): string {
@@ -195,6 +208,12 @@ export function useHighThroughputFlow() {
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const activeMsRef = useRef(0)
   const lastTickRef = useRef(0)
+  /** v2.39 跨组全局并发窗口状态（active = 占用槽位数；waiters = 排队等待者）。
+ *  组间并行后由全部组共享 — 慢 BLAST 只占自己的槽位，不阻塞其他组/靶点 */
+  const windowRef = useRef<{ active: number; waiters: Array<() => void> }>({ active: 0, waiters: [] })
+  /** v2.39 关系判断串行链（并行组下多组同时打 LLM 关系判断易触发限流；
+ *  判断很快不构成瓶颈 — 单靶点组无判断不受影响） */
+  const judgeChainRef = useRef<Promise<unknown>>(Promise.resolve())
 
   const refreshRecentRuns = useCallback(() => setRecentRuns(listHTRuns()), [])
 
@@ -237,35 +256,80 @@ export function useHighThroughputFlow() {
     }, 1000)
   }, [stopTick])
 
-  /** 运行状态 → localStorage + 视图（组状态关键节点调用） */
+  /** 运行状态 → localStorage + 视图（组状态关键节点调用）。
+ *  v2.39：running 中 currentIndex 指向首个未完成组（并行组视图「当前组」面板/高亮） */
   const snapshot = useCallback(() => {
     const r = runRef.current
     if (!r) return
+    if (r.status === 'running') {
+      const firstActive = r.groups.find((g) => g.status !== 'done' && g.status !== 'canceled')
+      if (firstActive) r.currentIndex = firstActive.index
+    }
     saveHTRun(r)
     setRun(cloneRun(r))
   }, [])
 
-  /** 创建一个评估作业（POST /api/evaluate，本地引擎内联携带 — 与单次评估同路径） */
+  // ── v2.39 全局并发窗口槽位（跨组共享）────────────────────────────────
+
+  /** 获取一个窗口槽位：窗口满则排队等待；暂停/取消时（含等待中被唤醒）直接放弃 */
+  const acquireWindowSlot = useCallback(async (): Promise<boolean> => {
+    const w = windowRef.current
+    if (pausedRef.current || cancelRef.current) return false
+    if (w.active < HT_WINDOW) {
+      w.active++
+      return true
+    }
+    await new Promise<void>((resolve) => {
+      w.waiters.push(resolve)
+    })
+    // 被唤醒：要么槽位已让出（唤醒方保证可用），要么暂停/取消（直接放弃不占槽）
+    if (pausedRef.current || cancelRef.current) return false
+    w.active++
+    return true
+  }, [])
+
+  /** 释放窗口槽位：非停状态下按 FIFO 唤醒一个等待者；暂停/取消时唤醒全部（让其退出） */
+  const releaseWindowSlot = useCallback(() => {
+    const w = windowRef.current
+    w.active = Math.max(0, w.active - 1)
+    if (pausedRef.current || cancelRef.current) {
+      while (w.waiters.length > 0) w.waiters.shift()?.()
+    } else if (w.active < HT_WINDOW && w.waiters.length > 0) {
+      w.waiters.shift()?.()
+    }
+  }, [])
+
+  /** 创建一个评估作业（POST /api/evaluate，本地引擎内联携带 — 与单次评估同路径）。
+ *  v2.39：遇到「同时最多/排队较多」型瞬时 429（并行窗口释放间隙的竞态）时
+ *  有界退避重试（窗口释放即可成功），耗尽才按限流处理交给上层暂停 */
   const createJob = async (request: EvaluateRequest): Promise<{ jobId?: string; error?: string }> => {
-    try {
-      const llm = getLlmEngineOverride()
-      const res = await fetch('/api/evaluate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(llm ? { ...request, llm } : request),
-      })
-      let data: { ok?: boolean; jobId?: string; error?: string } | null = null
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+    for (let attempt = 0; ; attempt++) {
+      if (cancelRef.current || pausedRef.current) return { error: '运行已暂停/停止，不再提交新作业' }
       try {
-        data = (await res.json()) as { ok?: boolean; jobId?: string; error?: string }
-      } catch {
-        data = null
-      }
-      if (!res.ok || !data || !data.jobId) {
+        const llm = getLlmEngineOverride()
+        const res = await fetch('/api/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(llm ? { ...request, llm } : request),
+        })
+        let data: { ok?: boolean; jobId?: string; error?: string; retryAfter?: number } | null = null
+        try {
+          data = (await res.json()) as { ok?: boolean; jobId?: string; error?: string; retryAfter?: number }
+        } catch {
+          data = null
+        }
+        if (res.ok && data?.jobId) return { jobId: data.jobId }
+        // v2.39：瞬时配额 429（并发窗口竞态 / 全局队列瞬时满）— 退避重试而非立即暂停
+        if (res.status === 429 && attempt < CREATE_JOB_QUOTA_RETRIES && /同时最多|排队评估较多/.test(data?.error ?? '')) {
+          const wait = Math.min(data?.retryAfter ?? CREATE_JOB_QUOTA_RETRY_MS, 30_000)
+          await sleep(Math.max(3_000, wait))
+          continue
+        }
         return { error: data?.error ?? `评估服务暂不可用（HTTP ${res.status}）` }
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : '创建评估作业失败，请稍后重试' }
       }
-      return { jobId: data.jobId }
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : '创建评估作业失败，请稍后重试' }
     }
   }
 
@@ -384,10 +448,12 @@ export function useHighThroughputFlow() {
 
   /**
    * 执行一组（可重入 — 恢复运行时从组内 items 状态续）：
-   *  judging（多靶点）→ 2 并发窗口 evaluating → merging（≥2 成功）→ done
+   *  judging（多靶点）→ 全局窗口 evaluating → merging（≥2 成功）→ done
    * 暂停/取消：正在跑的作业收尾后组标 paused/canceled，循环不再推进。
    * v2.38：skipped 靶点不参与评估（关系判断/并发窗口只看非 skipped 项；
    * 全部跳过的组直接标 done）。
+   * v2.39：组间并行 — 本组的待评估项通过全局窗口（windowRef）跨组共享
+   * HT_WINDOW 个槽位，慢 BLAST 只占自己的槽，不阻塞其他组/靶点。
    */
   const runGroup = async (g: HTGroupState): Promise<void> => {
     const runState = runRef.current
@@ -405,12 +471,19 @@ export function useHighThroughputFlow() {
     }
 
     // ── ① 关系判断（多靶点组；重入时已有 relation 则跳过；v2.38 只判非 skipped 靶点）──
+    // v2.39：跨组串行链（并行组下多组同时打 LLM 关系判断易触发限流；判断很快
+    // 不构成瓶颈 — 单靶点组无判断不受影响）
     if (!single && !g.relation) {
       g.status = 'judging'
       snapshot()
-      try {
+      const judge = async (): Promise<RelationJudgment> => {
         const rel = await judgeTargetRelation({ uniprots: activeUniprotTargets, goal: runState.goal })
-        g.relation = rel.judgment
+        return rel.judgment
+      }
+      const chained = judgeChainRef.current.then(judge, judge)
+      judgeChainRef.current = chained.catch(() => undefined)
+      try {
+        g.relation = await chained
       } catch (e) {
         const msg = e instanceof Error ? e.message : '关系判断服务暂不可用'
         if (isRateLimitError(msg)) {
@@ -434,7 +507,9 @@ export function useHighThroughputFlow() {
     // v1.11 ≥90% 高一致组委托：组内首个提交 BLAST 的作业为家族代表，其余共享结果
     const blastGroups = g.relation?.blastGroups ?? []
 
-    // ── ② 2 并发滑动窗口（重入：已终态跳过；running+jobId 接上等待；未提交的重新提交）──
+    // ── ② 全局并发窗口（v2.39：跨组共享 HT_WINDOW 个槽位；重入：已终态跳过；
+    //    running+jobId 接上等待；未提交的重新提交。窗口满则排队等槽位释放，
+    //    暂停/取消时等待者被唤醒直接放弃，不再提交新作业）──
     g.status = 'evaluating'
     snapshot()
 
@@ -500,29 +575,28 @@ export function useHighThroughputFlow() {
       snapshot()
     }
 
-    let next = 0
-    const activePromises: Array<Promise<void>> = []
-    // 恢复场景：先接上服务器侧仍在执行的作业（同组至多 HT_WINDOW 个）
-    for (const item of reattach.slice(0, HT_WINDOW)) {
-      const p = reattachOne(item).finally(() => {
-        const idx = activePromises.indexOf(p)
-        if (idx >= 0) activePromises.splice(idx, 1)
-      })
-      activePromises.push(p)
+    // v2.39：占全局窗口槽位执行（满则排队；暂停/取消时放弃不提交）
+    const runWithSlot = async (fn: () => Promise<void>): Promise<void> => {
+      if (!(await acquireWindowSlot())) return
+      try {
+        await fn()
+      } finally {
+        releaseWindowSlot()
+      }
     }
 
-    while ((next < unstarted.length && !pausedRef.current && !cancelRef.current) || activePromises.length > 0) {
-      while (next < unstarted.length && !pausedRef.current && !cancelRef.current && activePromises.length < HT_WINDOW) {
-        const p = launchOne(unstarted[next]).finally(() => {
-          const idx = activePromises.indexOf(p)
-          if (idx >= 0) activePromises.splice(idx, 1)
-        })
-        activePromises.push(p)
-        next++
-      }
-      if (activePromises.length === 0) break
-      await Promise.race(activePromises)
+    const activePromises: Array<Promise<void>> = []
+    // 恢复场景：接上服务器侧仍在执行的作业（全局窗口统一限流，不设组内截断）
+    for (const item of reattach) {
+      activePromises.push(runWithSlot(() => reattachOne(item)))
     }
+    // 待提交项全部入队 — 实际提交节奏由全局窗口控制（≤ HT_WINDOW 个在飞）
+    for (const item of unstarted) {
+      activePromises.push(runWithSlot(() => launchOne(item)))
+    }
+
+    // 等待本组全部项收尾（暂停时已在跑的作业照常收尾；等待槽位的项被唤醒后放弃）
+    if (activePromises.length > 0) await Promise.all(activePromises)
 
     // 窗口收尾（暂停时后台作业可能仍在跑 — orchestrate 已退出循环，这里的 promise 由自身驱动收尾）
     if (pausedRef.current) {
@@ -587,18 +661,18 @@ export function useHighThroughputFlow() {
     snapshot()
   }
 
-  /** 组循环：串行推进（暂停/取消即停；done 组跳过 — 恢复语义） */
+  /**
+   * v2.39 组编排：全部未完成组并行推进（共享全局 HT_WINDOW 槽位）—
+   * 慢 BLAST 只占自己的窗口槽位，其余组/靶点照常推进（用户核心诉求）。
+   * 暂停/取消：已在跑的作业照常收尾后各组标 paused/canceled；done/canceled 组跳过（恢复语义）。
+   */
   const orchestrate = async (): Promise<void> => {
     const runState = runRef.current
     if (!runState) return
-    for (let gi = 0; gi < runState.groups.length; gi++) {
-      if (pausedRef.current || cancelRef.current) break
-      const g = runState.groups[gi]
-      if (g.status === 'done' || g.status === 'canceled') continue
-      runState.currentIndex = gi
+    const runnable = runState.groups.filter((g) => g.status !== 'done' && g.status !== 'canceled')
+    if (runnable.length > 0) {
       snapshot()
-      await runGroup(g)
-      if (pausedRef.current || cancelRef.current) break
+      await Promise.all(runnable.map((g) => runGroup(g)))
     }
     if (pausedRef.current) return // runGroup/pauseWithReason 已置状态；后台作业继续收尾
     // v2.38 手动停止：未开始的组标 canceled，运行标 stopped（可恢复 — 继续运行时
@@ -707,6 +781,43 @@ export function useHighThroughputFlow() {
     finalizeHtDashboardRef.current = finalizeHtDashboard
   })
 
+  /**
+   * v2.39 BLAST 预热（用户诉求「先把 BLAST 都提交起来，加快进度」）：
+   * 启动/恢复运行时把全部待评估靶点（序列 / UniProt ID）一次性发服务端 —
+   * 服务端按全局节拍（~15s/发）限速预提交 NCBI，作业还在排队时 NCBI 已在计算；
+   * 管线 blast-submit 阶段按序列哈希命中预提交 RID 直接收集。
+   * fire-and-forget：失败静默（管线回退常规提交，预热永不阻塞主流程）。
+   */
+  const warmupBlast = useCallback((r: HTRunState): void => {
+    if (r.options?.skipBlast) return
+    const uniprots = [...new Set(
+      r.groups.flatMap((g) => g.items.filter((it) => !it.sequence && it.status === 'pending' && !it.jobId).map((it) => it.label)),
+    )]
+    const sequences = [...new Set(
+      r.groups.flatMap((g) => g.items.filter((it) => it.sequence && it.status === 'pending' && !it.jobId).map((it) => it.sequence as string)),
+    )]
+    if (uniprots.length + sequences.length === 0) return
+    void (async () => {
+      try {
+        const res = await fetch('/api/evaluate/blast-warmup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sequences, uniprots, forceBlast: r.options?.forceBlast === true }),
+        })
+        if (!res.ok) return
+        const data = (await res.json()) as { ok?: boolean; submitted?: number }
+        if (data.ok && data.submitted && data.submitted > 0) {
+          toast({
+            title: 'BLAST 预热已启动',
+            description: `${data.submitted} 条序列已进入限速预提交队列（~15s/发）— 作业排队期间 NCBI 已在计算，开始评估时自动命中结果。`,
+          })
+        }
+      } catch {
+        /* 预热失败静默 — 管线会常规提交 */
+      }
+    })()
+  }, [])
+
   /** 启动一次高通量运行（HT Tab → 开始高通量评估） */
   const startRun = async (payload: HTStartPayload): Promise<StartResult> => {
     if (isStatelessEnv()) {
@@ -796,6 +907,7 @@ export function useHighThroughputFlow() {
       refreshRecentRuns()
       setPhase('running')
       startTick()
+      warmupBlast(newRun)
       void orchestrate()
       if (skippedAtStart > 0) {
         toast({
@@ -833,9 +945,10 @@ export function useHighThroughputFlow() {
     refreshRecentRuns()
     setPhase('running')
     startTick()
+    warmupBlast(r) // v2.39：恢复时对尚未评估的靶点再预热（幂等 — 已预提交的序列自动去重）
     void orchestrate()
     return { ok: true }
-  }, [refreshRecentRuns, startTick])
+  }, [refreshRecentRuns, startTick, warmupBlast])
 
   /** v2.38 手动暂停：不取消服务器作业（跑完照常记结果），不再开新组/新作业 */
   const pauseRun = useCallback((): void => {

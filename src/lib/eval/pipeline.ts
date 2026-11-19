@@ -27,7 +27,7 @@ import { db } from '@/lib/db'
 import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput, matchProcessingSegments } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges, restrictCoverageToRange, uncoveredRangesWithin } from './pdbe'
-import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, type BlastPollState, type BlastNrHit } from './blast'
+import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, takePresubmittedBlast, type BlastPollState, type BlastNrHit } from './blast'
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
@@ -40,6 +40,7 @@ import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
+import { hasOtherActiveJobs } from './job-manager'
 import { splitPdbsByRange, splitBlastByRange, type ResidueRange } from './range-filter'
 import { matchDomainHint } from './domain-range'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
@@ -1122,13 +1123,24 @@ class SegmentRunner {
         this.log(`本靶点担任同源组（一致性 ≥${hb.minIdentity}%，${hb.members.length} 成员）的 BLAST 家族代表 — 结果将共享给其他成员`)
       }
       try {
-        this.report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
-        // v2.6.3：提交绑定段截止 — in-flight 尝试不越过段边界（checkpoint 不迟到）；
-        // 切断不算 NCBI 真实失败，交还下一段重试提交。
-        const submitSignal = this.deadlineSignal()
-        const submitted = await submitBlastPdb(st.sequence, msg => this.log(msg), submitSignal)
-        st.blastSubmitted = { rid: submitted.rid, rtoe: submitted.rtoe }
-        this.log(`BLAST 提前提交完成（RID=${submitted.rid}，预计 ${submitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
+        // v2.39 预提交命中：高通量启动时 blast-warmup 已按序列哈希提前提交 NCBI
+        //（作业排队期间 NCBI 已在计算）— 命中即跳过提交直接收集；等待有界，
+        // 排队过深则放弃改当场提交（预提交标记 bypassed 防重复）
+        const bl = budgetLeft(this.cb)
+        const graceMs = bl === Infinity ? 20_000 : Math.max(2_000, Math.min(20_000, bl - 5_000))
+        const pre = await takePresubmittedBlast(st.sequence, graceMs, this.deadlineSignal())
+        if (pre) {
+          st.blastSubmitted = { rid: pre.rid, rtoe: pre.rtoe }
+          this.log(`BLAST 预提交命中（RID=${pre.rid}）— 队列排队期间 NCBI 已在计算，跳过提交直接进入收集`)
+        } else {
+          this.report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
+          // v2.6.3：提交绑定段截止 — in-flight 尝试不越过段边界（checkpoint 不迟到）；
+          // 切断不算 NCBI 真实失败，交还下一段重试提交。
+          const submitSignal = this.deadlineSignal()
+          const submitted = await submitBlastPdb(st.sequence, msg => this.log(msg), submitSignal)
+          st.blastSubmitted = { rid: submitted.rid, rtoe: submitted.rtoe }
+          this.log(`BLAST 提前提交完成（RID=${submitted.rid}，预计 ${submitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
+        }
       } catch (e) {
         if (this.signal.aborted) throw e
         const msg = e instanceof Error ? e.message : String(e)
@@ -1459,7 +1471,13 @@ class SegmentRunner {
           msg => this.report('blast', msg, 0.5),
           this.signal,
           {},
-          { deadline: this.cb.deadline, resume: st.blastPoll ?? undefined },
+          {
+            deadline: this.cb.deadline,
+            resume: st.blastPoll ?? undefined,
+            // v2.39：全场还有其他作业在跑 → 慢 BLAST 不判超时（等全场收尾后
+            // 再给 30 分钟终局窗口 — 见 blast.ts 软僵尸保险）
+            othersActive: () => hasOtherActiveJobs(this.input.jobId),
+          },
         )
         if ('stillRunning' in outcome) {
           // v2.6：预算到点 — 保存轮询状态，下一段继续轮询同一 RID

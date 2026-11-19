@@ -7,20 +7,35 @@
  *    collectBlastPdb 在需要命中数据时才回收结果
  *  - 「仍在运行不判失败」：NCBI 侧仍在计算期间持续轮询，
  *    不再因 5 分钟墙钟而超时报错；仅 FAILED / RID 过期 / 网络长期不可达才失败
- *  - 僵尸保险：绝对上限 30 分钟（NCBI 队列极端异常时自愈，日志明确标注）
  *
  * v1.9 RCSB 兜底（用户反馈「提交 30 分钟仍无结果 RID=D3612K1N016」）：
  *  - 实测 2026-10-16：NCBI 队列患病时新任务长期卡 WAITING（排队未计算），
  *    沙箱出口 IP 经 NAT 池轮换也使结果回收不稳定
  *  - collectBlastPdbWithRescue：排队 ~90s / 计算 ~240s / 失败 / 僵尸时自动切换
  *    RCSB 序列搜索（mmseqs2，单请求秒级、无队列），同源结构不再因 NCBI 单点故障丢失
+ *
+ * v2.39 僵尸保险语义重设计（用户诉求「不必 30 分钟一刀切：所有任务都完成后，
+ * 再轮询 30 分钟再超时」）：
+ *  - 常规路径不再从提交时刻起 30 分钟硬超时 — 只要全场（服务端作业注册表）
+ *    还有其他评估作业在跑，本 BLAST 就继续轮询不判超时（BLAST 慢是常态，
+ *    其他作业照常推进，杀掉只会浪费已等待的时间）
+ *  - 当本作业已是全场最后一个未收尾作业时，再给 30 分钟终局等待窗口，
+ *    仍无结果才走 RCSB 兜底 / 报错
+ *  - last-resort 紧预算场景（policy.maxWallMs 显式传入）保留硬性墙钟不变
+ *
+ * v2.39 BLAST 预提交注册表（用户诉求「先把 BLAST 都提交起来，加快进度」）：
+ *  - 高通量启动时 /api/evaluate/blast-warmup 把全部待评估序列按全局节拍（~15s/发）
+ *    提前提交 NCBI — 作业还在队列排队时 NCBI 已在计算
+ *  - 管线 blast-submit 阶段按「规范化序列哈希」命中预提交 RID，命中即跳过提交
+ *    直接收集（慢队列下总时长大幅缩短）；排队过深的条目放弃，改由管线当场提交
  */
+import { createHash } from 'node:crypto'
 import { searchRcsbHomologs } from './rcsb-search'
 import type { BlastHit } from './types'
 
 const BLAST_URL = 'https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi'
-/** RUNNING 状态下的绝对僵尸保险上限（仅极端异常时触发，不是常规超时） */
-const MAX_POLL_WALL_MS = 30 * 60_000
+/** v2.39 终局等待窗口：全场其他作业都收尾后，本 BLAST 再等这么久仍无结果才判失败 */
+const MAX_ALONE_WALL_MS = 30 * 60_000
 /** 连续网络失败次数上限（~3 分钟完全不可达才判失败；单次抖动继续重试） */
 const MAX_CONSECUTIVE_NET_FAILS = 30
 
@@ -181,6 +196,8 @@ export interface BlastPollState {
   netFails: number
   rescueFails: number
   rescueNextAt: number
+  /** v2.39 终局窗口计时锚点：首次观测到「全场只剩本作业」的时刻（null = 尚未孤立） */
+  aloneSince?: number | null
 }
 
 export interface BlastCollectOpts {
@@ -190,6 +207,9 @@ export interface BlastCollectOpts {
   resume?: BlastPollState
   /** v2.16：nr 识别的墙钟覆写（短预算尝试；缺省用 MAX_NR_WALL_MS） */
   maxWallMs?: number
+  /** v2.39 全场还有其他评估作业（pending/running）时返回 true — 僵尸保险不判超时
+   *  （等全场收尾；由管线传入，基于服务端作业注册表判定） */
+  othersActive?: () => boolean
 }
 
 /** 收集返回：终态 outcome 或「仍在运行（预算到点）」的续跑状态 */
@@ -202,7 +222,7 @@ export interface BlastRescuePolicy {
   searchingMs?: number
   maxRows?: number
   /** v1.28 硬性墙钟上限（超过即放弃并拋错，用于 last-resort 重试场景）；
-   *  缺省时沿用 30 分钟僵尸保险（「仍在运行不判失败」语义） */
+   *  缺省（v2.39）走「全场收尾 + 30 分钟终局窗口」的软僵尸保险 */
   maxWallMs?: number
 }
 
@@ -230,8 +250,8 @@ export async function collectBlastPdbWithRescue(
 ): Promise<BlastCollectResult> {
   const waitingMs = policy.waitingMs ?? 90_000
   const searchingMs = policy.searchingMs ?? 240_000
-  /** v1.28：last-resort 重试场景传入硬性墙钟；常规路径维持 30 分钟僵尸保险 */
-  const wallMs = policy.maxWallMs ?? MAX_POLL_WALL_MS
+  /** v1.28：last-resort 重试场景传入硬性墙钟（缺省 null = v2.39 软僵尸保险） */
+  const hardWallMs = policy.maxWallMs ?? null
   const startedAt = opts.resume?.startedAt ?? Date.now()
   let attempts = opts.resume?.attempts ?? 0
   let netFails = opts.resume?.netFails ?? 0
@@ -241,11 +261,13 @@ export async function collectBlastPdbWithRescue(
   /** v1.28：RCSB 兜底多次重试 — 失败后按退避节奏重试，最多 MAX_RESCUE_ATTEMPTS 次 */
   let rescueFails = opts.resume?.rescueFails ?? 0
   let rescueNextAt = opts.resume?.rescueNextAt ?? 0
+  /** v2.39 终局窗口锚点（全场只剩本作业的首个观测时刻；其他作业出现即重置） */
+  let aloneSince = opts.resume?.aloneSince ?? null
 
   const rescueExhausted = () => rescueFails >= MAX_RESCUE_ATTEMPTS
   const secSince = (t: number) => Math.round((Date.now() - t) / 1000)
   /** v2.6：轮询状态快照（预算到点时随 stillRunning 返回，跨段续跑） */
-  const snapshot = (): BlastPollState => ({ rid, rtoe, startedAt, waitingSince, searchingSince, attempts, netFails, rescueFails, rescueNextAt })
+  const snapshot = (): BlastPollState => ({ rid, rtoe, startedAt, waitingSince, searchingSince, attempts, netFails, rescueFails, rescueNextAt, aloneSince })
   /** v2.6：剩余预算不足一轮完整轮询（首等最多 30s / 常规 6s + GET）→ 不开启新轮询，交还续跑 */
   const budgetLeft = () => (opts.deadline != null && opts.deadline > 0 ? opts.deadline - Date.now() : Infinity)
 
@@ -357,15 +379,32 @@ export async function collectBlastPdbWithRescue(
       }
     }
 
-    // 僵尸保险 / 硬性墙钟（v1.28：last-resort 场景可收紧上限；兜底不可用且仍无结果才拋错）
-    if (Date.now() - startedAt > wallMs) {
-      const reason = policy.maxWallMs != null
-        ? `本轮限时 ${Math.round(wallMs / 60000)} 分钟已到`
-        : `NCBI 队列异常：BLAST 已提交 ${Math.round(wallMs / 60000)} 分钟仍无结果`
-      const rescued = await tryRescue(reason)
-      if (rescued) return rescued
-      if (rescueExhausted() || policy.maxWallMs != null) {
-        throw new Error(`${reason}（RID=${rid}；RCSB 兜底${rescueExhausted() ? `重试 ${MAX_RESCUE_ATTEMPTS} 次均失败` : '不可用'}）`)
+    // ── 僵尸保险（v2.39 语义重设计）：硬性墙钟仅保留给 last-resort 紧预算场景；
+    //    常规路径 =「全场收尾 + 终局窗口」—
+    //    · 全场还有其他评估作业在跑（othersActive）→ 不判超时，继续轮询
+    //    · 本作业已是全场最后一个 → 再等 30 分钟终局窗口，仍无结果才兜底/报错
+    if (hardWallMs != null) {
+      if (Date.now() - startedAt > hardWallMs) {
+        const reason = `本轮限时 ${Math.round(hardWallMs / 60000)} 分钟已到`
+        const rescued = await tryRescue(reason)
+        if (rescued) return rescued
+        throw new Error(`${reason}（RID=${rid}；RCSB 兜底不可用或已耗尽）`)
+      }
+    } else if (opts.othersActive?.() === true) {
+      if (aloneSince !== null) {
+        aloneSince = null
+        onProgress?.(`其他评估作业已恢复进行 — 本 BLAST 继续等待不判超时（已等 ${Math.round(elapsed / 60)} 分钟）`)
+      }
+    } else {
+      aloneSince ??= startedAt
+      if (Date.now() - aloneSince > MAX_ALONE_WALL_MS) {
+        const reason = `全场作业均已收尾后等待 ${Math.round(MAX_ALONE_WALL_MS / 60000)} 分钟仍无结果（NCBI 队列异常）`
+        const rescued = await tryRescue(reason)
+        if (rescued) return rescued
+        if (rescueExhausted()) {
+          throw new Error(`${reason}（RID=${rid}；RCSB 兜底重试 ${MAX_RESCUE_ATTEMPTS} 次均失败）`)
+        }
+        // 兜底重试冷却中 — 继续轮询等兜底节拍（与 FAILED 态同策略）
       }
     }
     onProgress?.(
@@ -417,6 +456,112 @@ export async function runBlastPdb(
   const outcome = await collectBlastPdbWithRescue(rid, rtoe, sequence, onProgress, signal)
   if ('hits' in outcome) return outcome.hits
   throw new Error('BLAST 轮询被中断（未预期）')
+}
+
+// ─── v2.39 BLAST 预提交注册表（「先把 BLAST 都提交起来」）──────────────────────
+
+/** 全局提交节拍（对 NCBI 保持 ~4 发/分钟的礼貌速率，防批量限流/封禁） */
+const PRESUBMIT_PACE_MS = 15_000
+/** 注册表容量（终态条目超 1h 淘汰 — 内存有界） */
+const PRESUBMIT_REGISTRY_MAX = 300
+const PRESUBMIT_TTL_MS = 60 * 60_000
+
+interface PresubmitEntry {
+  phase: 'queued' | 'submitting' | 'done' | 'failed' | 'bypassed'
+  startedAt: number
+  rid?: string
+  rtoe?: number
+  error?: string
+  task: Promise<{ rid: string; rtoe: number }>
+}
+
+const pg = globalThis as unknown as {
+  __blastPresubmitMap?: Map<string, PresubmitEntry>
+  __blastPresubmitChain?: Promise<void>
+}
+const presubmitMap: Map<string, PresubmitEntry> = (pg.__blastPresubmitMap ??= new Map())
+let presubmitChain: Promise<void> = (pg.__blastPresubmitChain ??= Promise.resolve())
+
+function presubmitPrune(): void {
+  if (presubmitMap.size <= PRESUBMIT_REGISTRY_MAX) return
+  const now = Date.now()
+  for (const [k, e] of presubmitMap) {
+    if (e.phase !== 'queued' && e.phase !== 'submitting' && now - e.startedAt > PRESUBMIT_TTL_MS) {
+      presubmitMap.delete(k)
+    }
+  }
+}
+
+/** 注册表规模（warmup 路由回显用） */
+export function presubmitRegistrySize(): number {
+  return presubmitMap.size
+}
+
+/** 注册表键：规范化序列的 sha256 前 24 位（管线侧与 warmup 侧同口径） */
+function presubmitKey(sequence: string): string {
+  return createHash('sha256').update(sequence).digest('hex').slice(0, 24)
+}
+
+/**
+ * 排队一条 BLAST 预提交（幂等：同序列只排一次；fire-and-forget，失败静默 —
+ * 管线未命中时回退常规提交，行为不变）。返回是否新入队。
+ */
+export function presubmitBlastSequence(sequence: string): boolean {
+  if (!sequence || sequence.length < 30) return false
+  const key = presubmitKey(sequence)
+  if (presubmitMap.has(key)) return false
+  presubmitPrune()
+  if (presubmitMap.size >= PRESUBMIT_REGISTRY_MAX) return false
+  const entry = { phase: 'queued', startedAt: Date.now() } as PresubmitEntry
+  entry.task = (async () => {
+    // 全局节拍：串行链上排队（每发间隔 PRESUBMIT_PACE_MS — 链上每个条目依次轮到）
+    const turn = presubmitChain.then(() => undefined, () => undefined)
+    presubmitChain = turn.then(() => new Promise<void>((r) => setTimeout(r, PRESUBMIT_PACE_MS)))
+    await turn
+    if (entry.phase === 'bypassed') throw new Error('已被管线直接提交取代')
+    entry.phase = 'submitting'
+    const submitted = await submitBlastPdb(sequence)
+    entry.phase = 'done'
+    entry.rid = submitted.rid
+    entry.rtoe = submitted.rtoe
+    return { rid: submitted.rid, rtoe: submitted.rtoe }
+  })().catch((e: unknown) => {
+    if (entry.phase !== 'bypassed' && entry.phase !== 'done') entry.phase = 'failed'
+    entry.error = e instanceof Error ? e.message : String(e)
+    throw e
+  })
+  // 兜底吞掉 unhandled rejection（消费侧 take 用 race+catch 处理拒绝）
+  entry.task.catch(() => undefined)
+  presubmitMap.set(key, entry)
+  return true
+}
+
+/**
+ * 管线 blast-submit 阶段消费预提交（按规范化序列哈希命中）：
+ *  - done → 立即返回 RID（NCBI 已在计算 — 预提交的意义所在；同序列多作业可复用）
+ *  - submitting / queued → 最多等 graceMs（正在提交/即将轮到时秒级可得；
+ *    排队太深则放弃并标记 bypassed，管线当场提交防重复）
+ *  - failed / bypassed / 无预提交 → null（管线走常规提交）
+ */
+export async function takePresubmittedBlast(
+  sequence: string,
+  graceMs = 20_000,
+  signal?: AbortSignal,
+): Promise<{ rid: string; rtoe: number } | null> {
+  if (!sequence) return null
+  const entry = presubmitMap.get(presubmitKey(sequence))
+  if (!entry) return null
+  if (entry.phase === 'done' && entry.rid) return { rid: entry.rid, rtoe: entry.rtoe ?? 15 }
+  if (entry.phase === 'failed' || entry.phase === 'bypassed') return null
+  const timed = new Promise<null>((resolve) => {
+    const t = setTimeout(() => resolve(null), graceMs)
+    signal?.addEventListener('abort', () => { clearTimeout(t); resolve(null) }, { once: true })
+  })
+  const out = await Promise.race([entry.task.catch(() => null), timed])
+  if (out) return out
+  // 排队中的条目让位（提交在途的不动 — 完成后存为可复用条目）
+  if (entry.phase === 'queued') entry.phase = 'bypassed'
+  return null
 }
 
 // ─── v1.28 last-resort 整周期重试 ─────────────────────────────────────────

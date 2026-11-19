@@ -294,7 +294,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
           <h1 className="text-2xl leading-snug font-semibold tracking-[-0.02em] text-foreground sm:text-[28px]">高通量评估</h1>
           <span className="font-mono text-sm font-normal text-muted-foreground">
-            组 {Math.min(run.currentIndex + 1, run.groups.length)}/{run.groups.length} · 靶点 {doneTargets}/{run.totalTargetCount}
+            组 {doneGroups}/{run.groups.length} 完成 · 靶点 {doneTargets}/{run.totalTargetCount}
             {skippedTargets > 0 ? ` · 跳过 ${skippedTargets}` : ''}
             {!isRunning && failedTargets > 0 ? ` · 失败 ${failedTargets}` : ''}
           </span>
