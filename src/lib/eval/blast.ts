@@ -94,51 +94,69 @@ export interface BlastSubmitResult {
 }
 
 /**
- * 提交 BLASTp 任务（含 2 次退避重试），立即返回 RID。
+ * 提交 BLASTp 任务（含重试），立即返回 RID。
  * 提交后 NCBI 侧即开始排队/计算 —— 调用方可在收集结果前先做其他工作。
+ * v2.36：「HTTP 200 但无 RID」（NCBI 限流页 — resource temporarily unavailable /
+ *  traffic limit）同样可重试 — 之前只重试网络/5xx 错误，限流页直接放弃。
  */
+const BLAST_RETRY_DELAYS_MS = [3000, 8000, 15000]
+
+async function submitBlastPut(
+  opts: {
+    database: string
+    hitlist: number
+    sequence: string
+    label: string
+    onProgress?: (msg: string) => void
+    signal?: AbortSignal
+  },
+): Promise<BlastSubmitResult> {
+  const { database, hitlist, sequence, label, onProgress, signal } = opts
+  const submitBody = new URLSearchParams({
+    CMD: 'Put',
+    PROGRAM: 'blastp',
+    DATABASE: database,
+    QUERY: sequence,
+    HITLIST_SIZE: String(hitlist),
+    EXPECT: '1e-5',
+    FILTER: 'F',
+  })
+  const attempts = BLAST_RETRY_DELAYS_MS.length + 1
+  let lastErr: unknown = null
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const res = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: signal ?? AbortSignal.timeout(30_000) })
+      if (!res.ok) throw new Error(`${label} 提交失败 HTTP ${res.status}`)
+      const text = await res.text()
+      const rid = text.match(/RID\s*=\s*(\S+)/)?.[1]
+      if (rid) {
+        const rtoe = parseInt(text.match(/RTOE\s*=\s*(\d+)/)?.[1] ?? '15', 10)
+        onProgress?.(`${label} 已提交 (RID=${rid}，预计 ${rtoe}s)${attempt > 0 ? `（第 ${attempt + 1} 次尝试成功）` : ''}`)
+        return { rid, rtoe }
+      }
+      // HTTP 200 但无 RID — NCBI 匿名提交限流（高峰期常见），退避后重试
+      throw new Error(`${label} 未返回 RID（NCBI 限流/资源暂时不可用）`)
+    } catch (e) {
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      lastErr = e
+      if (attempt < attempts - 1) {
+        const delay = BLAST_RETRY_DELAYS_MS[attempt] ?? 15000
+        onProgress?.(`${label} 提交失败（第 ${attempt + 1} 次：${e instanceof Error ? e.message : '未知错误'}），${Math.round(delay / 1000)}s 后重试…`)
+        await sleep(delay, signal)
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`${label} 提交失败（已重试 ${attempts} 次）`)
+}
+
 export async function submitBlastPdb(
   sequence: string,
   onProgress?: (msg: string) => void,
   signal?: AbortSignal,
 ): Promise<BlastSubmitResult> {
   if (!sequence || sequence.length < 30) throw new Error('序列过短（<30 aa），无法 BLAST')
-
   onProgress?.('提交 BLASTp 任务到 NCBI (pdbaa)…')
-  const submitBody = new URLSearchParams({
-    CMD: 'Put',
-    PROGRAM: 'blastp',
-    DATABASE: 'pdbaa',
-    QUERY: sequence,
-    HITLIST_SIZE: '50',
-    EXPECT: '1e-5',
-    FILTER: 'F',
-  })
-  // 提交重试（2 次退避重试）：网络抖动/NCBI 瞬时 5xx 不应导致整个 BLAST 阶段放弃
-  let submitText: string | null = null
-  let lastSubmitErr: unknown = null
-  for (let attempt = 0; attempt < 3 && submitText === null; attempt++) {
-    try {
-      const res = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: AbortSignal.timeout(30_000) })
-      if (!res.ok) throw new Error(`BLAST 提交失败 HTTP ${res.status}`)
-      submitText = await res.text()
-    } catch (e) {
-      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
-      lastSubmitErr = e
-      if (attempt < 2) {
-        onProgress?.(`BLAST 提交失败（第 ${attempt + 1} 次），${2 + attempt * 3}s 后重试…`)
-        await sleep(2000 + attempt * 3000, signal)
-      }
-    }
-  }
-  if (submitText === null) {
-    throw lastSubmitErr instanceof Error ? lastSubmitErr : new Error('BLAST 提交失败（已重试 3 次）')
-  }
-  const rid = submitText.match(/RID\s*=\s*(\S+)/)?.[1]
-  const rtoe = parseInt(submitText.match(/RTOE\s*=\s*(\d+)/)?.[1] ?? '15', 10)
-  if (!rid) throw new Error('BLAST 未返回 RID')
-  onProgress?.(`BLAST 已提交 (RID=${rid}，预计 ${rtoe}s)`)
-  return { rid, rtoe }
+  return submitBlastPut({ database: 'pdbaa', hitlist: 50, sequence, label: 'BLAST', onProgress, signal })
 }
 
 /** 收集结果的来源通道（前端/报告据此标注数据来源） */
@@ -615,41 +633,8 @@ export async function submitBlastNr(
   signal?: AbortSignal,
 ): Promise<BlastSubmitResult> {
   if (!sequence || sequence.length < 30) throw new Error('序列过短（<30 aa），无法 BLAST nr')
-
   onProgress?.('提交 BLASTp 任务到 NCBI (nr)…')
-  const submitBody = new URLSearchParams({
-    CMD: 'Put',
-    PROGRAM: 'blastp',
-    DATABASE: 'nr',
-    QUERY: sequence,
-    HITLIST_SIZE: '20',
-    EXPECT: '1e-5',
-    FILTER: 'F',
-  })
-  let submitText: string | null = null
-  let lastSubmitErr: unknown = null
-  for (let attempt = 0; attempt < 3 && submitText === null; attempt++) {
-    try {
-      const res = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: AbortSignal.timeout(30_000) })
-      if (!res.ok) throw new Error(`BLAST nr 提交失败 HTTP ${res.status}`)
-      submitText = await res.text()
-    } catch (e) {
-      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
-      lastSubmitErr = e
-      if (attempt < 2) {
-        onProgress?.(`BLAST nr 提交失败（第 ${attempt + 1} 次），${2 + attempt * 3}s 后重试…`)
-        await sleep(2000 + attempt * 3000, signal)
-      }
-    }
-  }
-  if (submitText === null) {
-    throw lastSubmitErr instanceof Error ? lastSubmitErr : new Error('BLAST nr 提交失败（已重试 3 次）')
-  }
-  const rid = submitText.match(/RID\s*=\s*(\S+)/)?.[1]
-  const rtoe = parseInt(submitText.match(/RTOE\s*=\s*(\d+)/)?.[1] ?? '15', 10)
-  if (!rid) throw new Error('BLAST nr 未返回 RID')
-  onProgress?.(`BLAST nr 已提交 (RID=${rid}，预计 ${rtoe}s)`)
-  return { rid, rtoe }
+  return submitBlastPut({ database: 'nr', hitlist: 20, sequence, label: 'BLAST nr', onProgress, signal })
 }
 
 /** nr 识别的墙钟上限（best-effort 通道：超时优雅放弃，不阻塞评估）。

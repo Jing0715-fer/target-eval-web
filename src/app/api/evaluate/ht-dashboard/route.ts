@@ -28,6 +28,7 @@ import {
   renderHtDashboardHtml,
   resolveZipHrefs,
   htDashboardTitle,
+  attachExcelRows,
   type HtDashboardEntry,
 } from '@/lib/eval/ht-dashboard'
 
@@ -38,7 +39,25 @@ export const maxDuration = 600
 interface DashboardBody {
   entries?: unknown
   goal?: string
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
+  excelRows?: Array<{ label?: unknown; text?: unknown }>
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
+}
+
+/** excelRows 消毒：{label, text} 形态（≤600 行；每字段截断） */
+function sanitizeExcelRows(v: unknown): Array<{ label: string; text: string }> {
+  if (!Array.isArray(v)) return []
+  const out: Array<{ label: string; text: string }> = []
+  for (const e of v) {
+    if (!e || typeof e !== 'object') continue
+    const o = e as { label?: unknown; text?: unknown }
+    const label = typeof o.label === 'string' ? o.label.trim().slice(0, 60) : ''
+    const text = typeof o.text === 'string' ? o.text.trim().slice(0, 400) : ''
+    if (!label && !text) continue
+    out.push({ label, text })
+    if (out.length >= 600) break
+  }
+  return out
 }
 
 /** entries 消毒：jobId/mergedId 形态 + 组号/标签形态（≤600 条对齐归档上限） */
@@ -102,16 +121,19 @@ export async function POST(req: Request) {
       ownerKey: owner.key,
       ownerMask: owner.mask,
       status: 'running',
+      excelRows: JSON.stringify(sanitizeExcelRows(body.excelRows)),
     },
   })
 
   // 后台生成（LLM 在用户引擎作用域内；失败静默降级 — 统计/规则结论不受影响）
   const llmOverride = sanitizeLlmOverride(body.llm)
+  const excelRows = sanitizeExcelRows(body.excelRows)
   void runWithLlmOverride(llmOverride, () => runDashboardGeneration({
     dashboardId: record.id,
     entries,
     goal: body.goal?.trim().slice(0, 500),
     origin: new URL(req.url).origin,
+    excelRows,
   }))
 
   return NextResponse.json({ ok: true, dashboard: { id: record.id, status: 'running', jobIds } })
@@ -123,8 +145,9 @@ async function runDashboardGeneration(ctx: {
   entries: HtDashboardEntry[]
   goal?: string
   origin: string
+  excelRows?: Array<{ label: string; text: string }>
 }): Promise<void> {
-  const { dashboardId, entries, goal } = ctx
+  const { dashboardId, entries, goal, excelRows } = ctx
   const startedAt = Date.now()
   const fail = async (msg: string) => {
     await db.htDashboard.update({
@@ -144,6 +167,8 @@ async function runDashboardGeneration(ctx: {
 
     const generatedAt = new Date().toISOString().replace('T', ' ').slice(0, 16)
     const title = htDashboardTitle(jobCount, generatedAt)
+    // v2.36：原始 Excel 行匹配到各靶点（「原表内容」列）
+    if (excelRows && excelRows.length) attachExcelRows(rows, excelRows)
     const html = renderHtDashboardHtml({
       title,
       goal,
@@ -156,6 +181,7 @@ async function runDashboardGeneration(ctx: {
       engineSummary,
       origin: ctx.origin,
       generatedAt,
+      excelRows,
     })
 
     const dir = path.join(process.cwd(), 'db', 'reports', dashboardId)

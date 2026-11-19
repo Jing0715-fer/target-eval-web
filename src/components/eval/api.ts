@@ -448,6 +448,8 @@ export interface HtExcelExtractResult {
   groupDomainHints?: Array<Array<string | undefined>>
   /** 序列兜底组：行缺 UniProt 但有构建序列 → 按序列评估（每行一组） */
   seqGroups?: HtSeqTarget[][]
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；label + 折叠文本） */
+  excelRows?: Array<{ label: string; text: string }>
   invalid: string[]
   source: 'llm' | 'regex'
   note?: string
@@ -692,6 +694,8 @@ export interface HtDashboardEntry {
 export async function generateHtDashboard(input: {
   entries: HtDashboardEntry[]
   goal?: string
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
+  excelRows?: Array<{ label: string; text: string }>
 }): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
   const res = await fetch('/api/evaluate/ht-dashboard', {

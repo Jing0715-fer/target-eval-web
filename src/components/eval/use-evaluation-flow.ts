@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { evaluateSyncStream, fetchBatchReport, generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation } from './api'
 import { addSessionJob, getSessionJob } from './session-history'
+import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
 /** 主视图状态机：idle（输入）→ running（进度）→ done（结果）；error 单独处理 */
@@ -278,6 +279,9 @@ export function useEvaluationFlow() {
       failCountRef.current = 0
       setNetworkIssue(false)
       applyJobSnapshot(data)
+      // v2.36：终态瞬间把完整详情存入浏览器本地缓存（Serverless 实例回收后
+      // 服务端数据不持久，这层副本是刷新/回看的唯一兑底）
+      if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
       // v1.19：live 轮询到终态完成 → 自动下载 HTML 报告到本机
       // （历史查看路径不经过 pollOnce，不会误触发；deferred 作业 404 静默跳过）
       if (data.status === 'done') {
@@ -993,7 +997,9 @@ export function useEvaluationFlow() {
         setPhase('done')
         if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
       } catch {
-        setSubmitError('无法加载该合并报告，可能已被清理或服务暂不可用')
+        setSubmitError(
+          '无法加载该合并报告：服务端已无此记录（部署平台为 Serverless 实例，空闲回收后运行数据不持久），且合并报告正文未在浏览器留存副本。各靶点的单靶点报告 HTML 已在完成时自动下载到本机下载目录，可从那里查看。',
+        )
       } finally {
         setLoadingHistoryJob(false)
       }
@@ -1016,16 +1022,38 @@ export function useEvaluationFlow() {
           return
         }
         const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        if (!res.ok) {
+          // v2.36：服务端 404（Serverless 实例回收 / 作业被清理）→ 回退浏览器缓存副本
+          if (res.status === 404) {
+            const cached = getCachedJobDetail(id)
+            if (cached) {
+              jobIdRef.current = id
+              displayJobIdRef.current = id
+              applyJobSnapshot(cached)
+              return
+            }
+          }
+          throw new Error(`HTTP ${res.status}`)
+        }
         const data = (await res.json()) as JobDetail
         jobIdRef.current = id
         displayJobIdRef.current = id
         applyJobSnapshot(data)
+        // v2.36：历史打开成功 → 刷新本地缓存副本（更新 cachedAt / 补齐当时未缓存的历史作业）
+        if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
         if (data.status === 'pending' || data.status === 'running') {
           setPhase('running')
           startPolling(id)
         }
       } catch {
+        // v2.36：网络异常时也尝试本地副本（部署站冷启动 403/网络闪断场景）
+        const cached = getCachedJobDetail(id)
+        if (cached) {
+          jobIdRef.current = id
+          displayJobIdRef.current = id
+          applyJobSnapshot(cached)
+          return
+        }
         setSubmitError('无法加载该评估作业，请稍后重试')
       } finally {
         setLoadingHistoryJob(false)

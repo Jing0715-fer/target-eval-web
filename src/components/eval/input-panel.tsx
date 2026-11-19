@@ -183,6 +183,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   // v2.22 高通量分组输入（组间「;」组内「,」）；v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列）
   const [htText, setHtText] = useState('')
   const [htSeqGroups, setHtSeqGroups] = useState<HtSeqTarget[][]>([])
+  // v2.36：原始 Excel 行快照（导入时留存 → 运行状态 → 汇总报告「原表内容」列）
+  const [htExcelRows, setHtExcelRows] = useState<Array<{ label: string; text: string }>>([])
   const htParsed = useMemo(() => parseGroupedUniprotIds(htText), [htText])
   const htTargetTotal = htParsed.groups.reduce((n, g) => n + g.length, 0)
   const htSeqTargetTotal = htSeqGroups.reduce((n, g) => n + g.length, 0)
@@ -493,7 +495,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
         .slice(0, Math.max(0, MAX_HT_GROUPS - groups.length))
         .filter((g) => g.length > 0)
       if (groups.length === 0 && seqGroups.length === 0) return
-      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, goal: trimmedGoal, ligands, options }
+      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, excelRows: htExcelRows.length ? htExcelRows : undefined, goal: trimmedGoal, ligands, options }
       await onStartHighThroughput(payload)
       return
     }
@@ -932,6 +934,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   parsed={htParsed}
                   seqGroups={htSeqGroups}
                   onSeqGroupsChange={setHtSeqGroups}
+                  excelRows={htExcelRows}
+                  onExcelRowsChange={setHtExcelRows}
                   recentRuns={recentHTRuns}
                   onResumeRun={onResumeHTRun}
                   onDeleteRun={onDeleteHTRun}

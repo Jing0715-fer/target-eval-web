@@ -21,7 +21,7 @@
  */
 import { NextResponse } from 'next/server'
 import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
-import { extractHtGroups, HT_EXCEL_MAX_BYTES, parseHtWorkbook } from '@/lib/eval/ht-excel'
+import { buildExcelRowSnapshots, extractHtGroups, HT_EXCEL_MAX_BYTES, parseHtWorkbook } from '@/lib/eval/ht-excel'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -122,10 +122,13 @@ export async function POST(req: Request) {
           const timer = quick ? null : setTimeout(() => ctrl.abort(), LLM_BUDGET_MS)
           try {
             const result = await extractHtGroups(wb, { quick, signal: ctrl.signal })
+            // v2.36：原始表行快照（汇总报告 master 表格的「原 Excel 行」列；序列折叠）
+            const excelRows = buildExcelRowSnapshots(wb.sheets)
             send({
               type: 'done',
               ok: true,
               ...result,
+              excelRows,
               meta: {
                 fileName,
                 sheets: wb.sheetCount,

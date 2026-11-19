@@ -26,6 +26,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
+import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -195,9 +196,17 @@ export function useHighThroughputFlow() {
         }
         try {
           const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
-          // 作业从服务端消失（外部取消/删除/TTL）→ 按 canceled 收尾（不无限重试）
+          // 作业从服务端消失（外部取消/删除/TTL/Serverless 实例回收）：
+          // v2.36 — 本地缓存有终态副本则按真实终态收尾，否则按 canceled（不无限重试）
           if (res.status === 404 || res.status === 410) {
-            finish('canceled')
+            const cached = getCachedJobDetail(id)
+            if (cached && (cached.status === 'done' || cached.status === 'error')) {
+              last = cached
+              if (cached.id === displayJobIdRef.current) setDisplayJob(cached)
+              finish(cached.status)
+            } else {
+              finish('canceled')
+            }
             return
           }
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -206,6 +215,8 @@ export function useHighThroughputFlow() {
           fails = 0
           setNetworkIssue(false)
           if (data.id === displayJobIdRef.current) setDisplayJob(data)
+          // v2.36：终态瞬间存入浏览器本地缓存（Serverless 实例回收后回看的唯一兑底）
+          if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
           if (data.status === 'done') finish('done')
           else if (data.status === 'error') finish('error')
           else if (data.status === 'canceled') finish('canceled')
@@ -507,7 +518,8 @@ export function useHighThroughputFlow() {
    * v2.28：运行完成后生成统计看板 — entries 与 zip 归档同构（服务端据此计算离线
    * 链接命名）；≥1 个成功靶点才生成。幂等：已有 dashboardId 的运行不重复生成
    * （恢复/重开场景）。失败不阻塞（运行已完成）；限流/超时记入 dashboardError，
-   * 可从「批量下载全部」入口重试。
+   * 可从「批量下载全部」入口重试。v2.36：dashboardPending 标记生成中状态（完成
+   * 横幅的「生成中」态 — 用户此前在生成期间看不到任何看板提示）。
    */
   const finalizeHtDashboard = async (): Promise<void> => {
     const runState = runRef.current
@@ -519,9 +531,19 @@ export function useHighThroughputFlow() {
       }
       if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
     }
-    if (!entries.some((e) => e.jobId)) return
+    if (!entries.some((e) => e.jobId)) {
+      runState.dashboardError = '__done__'
+      saveHTRun(runState)
+      setRun(cloneRun(runState))
+      return
+    }
+    // v2.36：生成中标记（横幅立即可见，终态后接替）
+    runState.dashboardPending = true
+    saveHTRun(runState)
+    setRun(cloneRun(runState))
     try {
-      const dash = await generateHtDashboard({ entries, goal: runState.goal })
+      const dash = await generateHtDashboard({ entries, goal: runState.goal, excelRows: runState.excelRows })
+      runState.dashboardPending = false
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
         runState.dashboardError = undefined
@@ -545,6 +567,7 @@ export function useHighThroughputFlow() {
         })
       }
     } catch (e) {
+      runState.dashboardPending = false
       runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
       toast({
         title: '统计看板生成失败',
@@ -618,6 +641,8 @@ export function useHighThroughputFlow() {
         status: 'running',
         resumedCount: 0,
         totalTargetCount: groupStates.reduce((n, g) => n + g.items.length, 0),
+        // v2.36：原始 Excel 行快照（汇总报告「原表内容」列）
+        excelRows: payload.excelRows,
       }
       runRef.current = newRun
       runFolderRef.current = safeDir(`TargetEval_HT_${new Date(now).toISOString().slice(0, 10)}_${groupStates.length}g`)

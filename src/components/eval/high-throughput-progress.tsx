@@ -34,6 +34,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatDuration } from './format'
+import { getCachedJobDetail } from './job-cache'
 import { EvalLogConsole } from './log-console'
 import { ProgressPanel } from './progress-panel'
 import type { BatchState } from './use-evaluation-flow'
@@ -143,7 +144,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       ? { icon: <PauseCircle className="size-3" />, text: run.status === 'interrupted' ? '已中断 · 可恢复' : '已自动暂停（限流）', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
       : { icon: <CircleCheckBig className="size-3" />, text: '已完成', cls: 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' }
 
-  /** 组日志回看：拉取组内全部作业的持久化日志并拼接（打开弹窗时按需拉取一次） */
+  /** 组日志回看：拉取组内全部作业的持久化日志并拼接（打开弹窗时按需拉取一次）
+   *  v2.36：服务端 404（Serverless 实例回收）→ 回退浏览器缓存副本的日志 */
   const openGroupLogs = async (g: HTGroupState) => {
     setLogDialogGroup(g.index)
     if (groupLogs[g.index]) return
@@ -154,15 +156,29 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       fetched.push('（本组没有已提交的作业 — 无运行日志）')
     } else {
       const results = await Promise.allSettled(
-        jobIds.map((id) => fetch(`/api/jobs/${id}`, { cache: 'no-store' }).then((r) => (r.ok ? (r.json() as Promise<JobDetail>) : null))),
+        jobIds.map((id) =>
+          fetch(`/api/jobs/${id}`, { cache: 'no-store' }).then((r) => {
+            if (r.ok) return r.json() as Promise<JobDetail>
+            // 404 → 尝试浏览器本地缓存副本（作业完成时已自动存入）
+            if (r.status === 404) {
+              const cached = getCachedJobDetail(id)
+              if (cached) return cached
+            }
+            return null
+          }),
+        ),
       )
       results.forEach((res, i) => {
         const item = g.items.find((it) => it.jobId === jobIds[i])
         fetched.push(`── 靶点 ${item?.label ?? jobIds[i]} · 作业 ${jobIds[i]} ──`)
         if (res.status === 'fulfilled' && res.value) {
+          if (res.value.fromCache) fetched.push('（服务端数据已随部署实例回收，以下为浏览器缓存副本）')
           fetched.push(...(res.value.logs ?? []))
         } else {
-          fetched.push('（日志不可用：作业已清理或服务暂不可用）')
+          fetched.push(
+            '（日志不可用：服务端已无此作业（部署平台为 Serverless 实例，空闲回收后运行数据不持久），本浏览器当时未留存副本。）',
+            '提示：报告 HTML 已在作业完成时自动下载到本机下载目录（如未拦截弹窗），可从那里查看结果。',
+          )
         }
       })
     }
@@ -212,7 +228,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const logDialogGroupData = logDialogGroup != null ? run.groups.find((g) => g.index === logDialogGroup) : undefined
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-5 pb-5 sm:pb-7">
       {/* ── 刊头 ── */}
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
@@ -434,19 +450,33 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         </ol>
       </section>
 
-      {/* ── v2.28 统计看板横幅（运行完成：回看入口 / 生成失败提示 / 生成中提示） ── */}
-      {isDone && (run.dashboardId || run.dashboardError) && (
+      {/* ── v2.28 统计看板横幅（运行完成：生成中 / 回看入口 / 生成失败提示） ── */}
+      {isDone && (run.dashboardId || run.dashboardError || run.dashboardPending) && (
         <div className={cn(
           'flex flex-wrap items-center gap-2.5 rounded-xl border px-4 py-3',
-          run.dashboardId ? 'border-primary/30 bg-primary/[0.05]' : 'border-amber-500/30 bg-amber-500/[0.06]',
+          run.dashboardId
+            ? 'border-primary/30 bg-primary/[0.05]'
+            : run.dashboardPending
+              ? 'border-border bg-muted/40'
+              : 'border-amber-500/30 bg-amber-500/[0.06]',
         )}>
-          <Gauge className={cn('size-4 shrink-0', run.dashboardId ? 'text-primary' : 'text-amber-600 dark:text-amber-400')} aria-hidden />
+          <Gauge
+            className={cn(
+              'size-4 shrink-0',
+              run.dashboardId
+                ? 'text-primary'
+                : run.dashboardPending
+                  ? 'animate-pulse text-muted-foreground'
+                  : 'text-amber-600 dark:text-amber-400',
+            )}
+            aria-hidden
+          />
           {run.dashboardId ? (
             <>
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-semibold text-foreground">统计看板 · AI 整体可行性报告已生成</p>
+                <p className="text-[13px] font-semibold text-foreground">汇总报告 · 统计看板 + 全靶点总表已生成</p>
                 <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                  评分统计（分布/方法可用性/覆盖率）+ 每靶点一句话结论（能否做）+ 单独报告离线链接；HTML 已自动下载，zip「批量下载全部」后链接可直接点开。
+                  单文件离线自包含：批次统计（分布/方法可用性/覆盖率）+ 全靶点结论总表（评分与原始表内容合一，可筛选可排序，行内展开完整报告正文）+ AI 整体可行性报告；HTML 已自动下载，zip「批量下载全部」后离线链接可直接点开。
                 </p>
               </div>
               <a
@@ -456,12 +486,19 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-primary px-3 text-[12px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
               >
                 <Gauge className="size-3.5" aria-hidden />
-                打开统计看板
+                打开汇总报告
               </a>
             </>
+          ) : run.dashboardPending ? (
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-semibold text-foreground">汇总报告生成中…</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；此过程通常需要 1-3 分钟，期间可自由查看各组结果。
+              </p>
+            </div>
           ) : (
             <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
-              统计看板生成失败：{run.dashboardError}（运行结果不受影响；重新下载 zip 会重试打包可用的看板）
+              汇总报告生成失败：{run.dashboardError}（运行结果不受影响；重新下载 zip 会重试打包可用的看板）
             </p>
           )}
         </div>

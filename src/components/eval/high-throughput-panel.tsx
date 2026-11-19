@@ -47,6 +47,9 @@ export interface HighThroughputPanelProps {
   /** v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列） */
   seqGroups: HtSeqTarget[][]
   onSeqGroupsChange: (groups: HtSeqTarget[][]) => void
+  /** v2.36：原始 Excel 行快照（导入时留存 → 汇总报告「原表内容」列） */
+  excelRows: Array<{ label: string; text: string }>
+  onExcelRowsChange: (rows: Array<{ label: string; text: string }>) => void
   recentRuns: HTRunState[]
   onResumeRun: (id: string) => void
   onDeleteRun: (id: string) => void
@@ -98,7 +101,7 @@ function runStatusPill(run: HTRunState): { label: string; cls: string } {
   }
 }
 
-export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving }: HighThroughputPanelProps) {
+export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, excelRows, onExcelRowsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving }: HighThroughputPanelProps) {
   const totalTargets = parsed.groups.reduce((n, g) => n + g.length, 0)
   const seqTargetTotal = seqGroups.reduce((n, g) => n + g.length, 0)
   const groupTotal = parsed.groups.length + seqGroups.length
@@ -152,6 +155,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         )
       }
       onSeqGroupsChange(seqs)
+      // v2.36：原始行快照留存（汇总报告「原表内容」列；撤销导入时同步清除）
+      onExcelRowsChange((r.excelRows ?? []).slice(0, 600))
       setImportMeta({
         fileName: file.name,
         source: r.source,
@@ -184,6 +189,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
     if (preImportText === null && preImportSeqGroups === null) return
     if (preImportText !== null) onChange(preImportText)
     if (preImportSeqGroups !== null) onSeqGroupsChange(preImportSeqGroups)
+    onExcelRowsChange([])
     setPreImportText(null)
     setPreImportSeqGroups(null)
     setImportMeta(null)
@@ -304,6 +310,14 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           )}
           {importMeta.note && (
             <span className="text-[10px] text-muted-foreground/80">{importMeta.note}</span>
+          )}
+          {excelRows.length > 0 && (
+            <span
+              className="font-mono text-[11px] text-muted-foreground"
+              title="原始表全部数据行已留存折叠快照（序列只保留识别前缀）— 运行完成后的汇总报告「原表内容」列会展示对应行"
+            >
+              原表 {excelRows.length} 行快照已留存（汇总报告含「原表内容」列）
+            </span>
           )}
           {importMeta.invalid.length > 0 && (
             <span className="text-[10px] text-amber-600 dark:text-amber-400">
