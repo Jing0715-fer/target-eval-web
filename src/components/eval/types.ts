@@ -902,6 +902,8 @@ export interface JobDetail {
   reportHtml?: string | null
   /** v2.4：本作业由无状态同步评估产生（前端历史/下载走内联数据） */
   stateless?: boolean
+  /** v2.36：本详情来自浏览器本地缓存副本（服务端实例已回收，仅回看兑底） */
+  fromCache?: boolean
   error: string | null
 }
 
@@ -916,6 +918,8 @@ export interface JobListItem {
   coverage: number | null
   pdbCount: number | null
   overallScore: number | null
+  /** v2.36：本地缓存回退条目（服务端实例已回收） */
+  fromCache?: boolean
 }
 
 // ─── v2.22 高通量评估 ───────────────────────────────────────────────────────
@@ -993,6 +997,10 @@ export interface HTRunState {
   dashboardId?: string
   /** v2.28：看板生成失败原因（null/undefined = 正常；「__done__」= 无可统计靶点已跳过） */
   dashboardError?: string
+  /** v2.36：汇总报告生成中（完成横幅的「生成中」态 — 终态后由 dashboardId/dashboardError 接替） */
+  dashboardPending?: boolean
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；导入时留存） */
+  excelRows?: Array<{ label: string; text: string }>
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
@@ -1005,6 +1013,8 @@ export interface HTStartPayload {
   groupDomainHints?: Array<Array<string | undefined>>
   /** v2.23.1 序列兜底组（Excel 行缺 UniProt 但有构建序列；每行一组，逐序列独立评估） */
   seqGroups?: HtSeqTarget[][]
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；label+折叠文本） */
+  excelRows?: Array<{ label: string; text: string }>
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

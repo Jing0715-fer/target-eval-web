@@ -26,6 +26,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
+import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -89,6 +90,8 @@ export function useHighThroughputFlow() {
 
   /** 权威运行状态（可变引用；每次关键节点 snapshot() 落 localStorage + 刷视图） */
   const runRef = useRef<HTRunState | null>(null)
+  /** v2.36：finalizeHtDashboard 的稳定引用（openRunById 自动续生成用 — 声明先于函数体） */
+  const finalizeHtDashboardRef = useRef<(() => Promise<void>) | null>(null)
   /** v2.25：一次高通量运行的自动下载统一目录前缀 — 默认下载目录下新建文件夹，
    *  同次运行的全部报告（每靶点独立报告 + 合并报告）都落在同一文件夹内。
    *  命名：TargetEval_HT_日期_Ng（恢复运行/openRunById 时按 run 元数据重建，
@@ -195,9 +198,17 @@ export function useHighThroughputFlow() {
         }
         try {
           const res = await fetch(`/api/jobs/${id}`, { cache: 'no-store' })
-          // 作业从服务端消失（外部取消/删除/TTL）→ 按 canceled 收尾（不无限重试）
+          // 作业从服务端消失（外部取消/删除/TTL/Serverless 实例回收）：
+          // v2.36 — 本地缓存有终态副本则按真实终态收尾，否则按 canceled（不无限重试）
           if (res.status === 404 || res.status === 410) {
-            finish('canceled')
+            const cached = getCachedJobDetail(id)
+            if (cached && (cached.status === 'done' || cached.status === 'error')) {
+              last = cached
+              if (cached.id === displayJobIdRef.current) setDisplayJob(cached)
+              finish(cached.status)
+            } else {
+              finish('canceled')
+            }
             return
           }
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -206,6 +217,8 @@ export function useHighThroughputFlow() {
           fails = 0
           setNetworkIssue(false)
           if (data.id === displayJobIdRef.current) setDisplayJob(data)
+          // v2.36：终态瞬间存入浏览器本地缓存（Serverless 实例回收后回看的唯一兑底）
+          if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
           if (data.status === 'done') finish('done')
           else if (data.status === 'error') finish('error')
           else if (data.status === 'canceled') finish('canceled')
@@ -499,7 +512,7 @@ export function useHighThroughputFlow() {
     const reports = runState.groups.filter((g) => g.mergedReportId || g.items.some((it) => it.status === 'done')).length
     toast({
       title: '高通量评估完成',
-      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；统计看板正在生成（评分统计 + AI 整体可行性报告，完成后自动下载）。运行日志可在每组卡片中回看。`,
+      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
     })
   }
 
@@ -507,7 +520,8 @@ export function useHighThroughputFlow() {
    * v2.28：运行完成后生成统计看板 — entries 与 zip 归档同构（服务端据此计算离线
    * 链接命名）；≥1 个成功靶点才生成。幂等：已有 dashboardId 的运行不重复生成
    * （恢复/重开场景）。失败不阻塞（运行已完成）；限流/超时记入 dashboardError，
-   * 可从「批量下载全部」入口重试。
+   * 可从「批量下载全部」入口重试。v2.36：dashboardPending 标记生成中状态（完成
+   * 横幅的「生成中」态 — 用户此前在生成期间看不到任何看板提示）。
    */
   const finalizeHtDashboard = async (): Promise<void> => {
     const runState = runRef.current
@@ -519,9 +533,19 @@ export function useHighThroughputFlow() {
       }
       if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
     }
-    if (!entries.some((e) => e.jobId)) return
+    if (!entries.some((e) => e.jobId)) {
+      runState.dashboardError = '__done__'
+      saveHTRun(runState)
+      setRun(cloneRun(runState))
+      return
+    }
+    // v2.36：生成中标记（横幅立即可见，终态后接替）
+    runState.dashboardPending = true
+    saveHTRun(runState)
+    setRun(cloneRun(runState))
     try {
-      const dash = await generateHtDashboard({ entries, goal: runState.goal })
+      const dash = await generateHtDashboard({ entries, goal: runState.goal, excelRows: runState.excelRows })
+      runState.dashboardPending = false
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
         runState.dashboardError = undefined
@@ -545,6 +569,7 @@ export function useHighThroughputFlow() {
         })
       }
     } catch (e) {
+      runState.dashboardPending = false
       runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
       toast({
         title: '统计看板生成失败',
@@ -555,6 +580,10 @@ export function useHighThroughputFlow() {
     saveHTRun(runState)
     setRun(cloneRun(runState))
   }
+  // ref 赋值须在 effect 内（render 期访问 ref 违反 React 规则；每次渲染后刷新引用）
+  useEffect(() => {
+    finalizeHtDashboardRef.current = finalizeHtDashboard
+  })
 
   /** 启动一次高通量运行（HT Tab → 开始高通量评估） */
   const startRun = async (payload: HTStartPayload): Promise<StartResult> => {
@@ -618,6 +647,8 @@ export function useHighThroughputFlow() {
         status: 'running',
         resumedCount: 0,
         totalTargetCount: groupStates.reduce((n, g) => n + g.items.length, 0),
+        // v2.36：原始 Excel 行快照（汇总报告「原表内容」列）
+        excelRows: payload.excelRows,
       }
       runRef.current = newRun
       runFolderRef.current = safeDir(`TargetEval_HT_${new Date(now).toISOString().slice(0, 10)}_${groupStates.length}g`)
@@ -678,6 +709,8 @@ export function useHighThroughputFlow() {
       setNetworkIssue(false)
       if (r.status === 'running') r.status = 'interrupted'
       setPhase(r.status === 'done' ? 'done' : 'paused')
+      // v2.36：打开时发现汇总报告生成被刷新中断（done + pending 且无结果）→ 自动续生成
+      if (r.status === 'done' && r.dashboardPending && !r.dashboardId) void finalizeHtDashboardRef.current?.()
       if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
     },
     [],

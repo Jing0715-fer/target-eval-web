@@ -23,6 +23,7 @@ import { llmChat } from './llm'
 import { getEngineSummary } from './llm-provider'
 import { renderMarkdown } from './report-html'
 import { planArchiveNames, type ArchivePlanItem } from './ht-archive-names'
+import type { HtExcelRowSnapshot } from './ht-excel'
 import type { PdbEntry, BlastHit } from './types'
 
 // ─── 数据行 ───────────────────────────────────────────────────────────────────
@@ -56,6 +57,10 @@ export interface HtDashboardRow {
   zipHref?: string
   /** 单独报告是否存在（在线链接可用性） */
   hasReport: boolean
+  /** v2.36 汇总报告：LLM 评估报告正文（内嵌展开区渲染） */
+  reportMarkdown?: string
+  /** v2.36 汇总报告：匹配到的原始 Excel 行文本（折叠快照） */
+  excelText?: string
 }
 
 export interface HtVerdict {
@@ -121,6 +126,8 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[]): Promise<
     try { pdbs = job.pdbs ? JSON.parse(job.pdbs) : [] } catch { /* ignore */ }
     try { blastHits = job.blastHits ? JSON.parse(job.blastHits) : [] } catch { /* ignore */ }
     const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+    // v2.36：评估报告正文（汇总报告内嵌展开区）+ 标题（无 label 时的展示兑底）
+    const reportMarkdown = typeof job.reportMarkdown === 'string' && job.reportMarkdown.trim() ? job.reportMarkdown : undefined
     rows.push({
       jobId: job.id,
       label: (entry.label || job.uniprotId || job.title || job.id).slice(0, 60),
@@ -146,9 +153,25 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[]): Promise<
       reportLlmOk: summary.reportLlmOk === true,
       durationMs: num(summary.durationMs),
       hasReport: Boolean(job.reportPath),
+      reportMarkdown,
     })
   }
   return { rows, jobCount }
+}
+
+/** v2.36：评估条目 ↔ 原始 Excel 行匹配（汇总报告「原表内容」列）。
+ *  匹配优先级：label 前缀（结构交付行标签）> Excel 行文本含 label > uniprot 在行文本中。
+ *  每条 Excel 行最多被引用一次后从候选池退位（多靶点同行的场景仍可重复命中 uniprot）。 */
+export function attachExcelRows(rows: HtDashboardRow[], excelRows: HtExcelRowSnapshot[]): void {
+  if (!excelRows.length) return
+  for (const r of rows) {
+    const label = r.label.split('·')[0]?.trim() ?? r.label
+    let hit = excelRows.find((e) => label && (e.label === label || e.label.startsWith(label) || label.startsWith(e.label)))
+    if (!hit && r.uniprotId) {
+      hit = excelRows.find((e) => e.text.toUpperCase().includes(String(r.uniprotId).toUpperCase()))
+    }
+    if (hit) r.excelText = hit.text
+  }
 }
 
 // ─── 统计 ─────────────────────────────────────────────────────────────────────
@@ -324,28 +347,23 @@ export async function resolveZipHrefs(entries: HtDashboardEntry[]): Promise<Map<
   return byJob
 }
 
-// ─── HTML 渲染（自包含离线）──────────────────────────────────────────────────
+// ─── v2.36 汇总报告 HTML 渲染（自包含离线 · 期刊版式与单靶点报告同源）──────────
 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-const VERDICT_META: Record<HtVerdict['verdict'], { label: string; color: string; bg: string }> = {
-  go: { label: '建议推进', color: '#0f766e', bg: '#ccfbf1' },
-  caution: { label: '谨慎推进', color: '#a16207', bg: '#fef3c7' },
-  no: { label: '不建议', color: '#b91c1c', bg: '#fee2e2' },
-}
-
-function scoreBadge(v: number): string {
-  const color = v >= 7 ? '#0f766e' : v >= 5 ? '#a16207' : '#b91c1c'
-  return `<span style="display:inline-block;min-width:34px;text-align:center;border-radius:6px;padding:1px 6px;font-size:12px;font-weight:700;color:${color};background:${v >= 7 ? '#ccfbf1' : v >= 5 ? '#fef3c7' : '#fee2e2'}">${v}</span>`
+const VERDICT_META: Record<HtVerdict['verdict'], { label: string; color: string; bg: string; border: string }> = {
+  go: { label: '建议推进', color: '#0f766e', bg: '#ccfbf1', border: '#99e5d5' },
+  caution: { label: '谨慎推进', color: '#a16207', bg: '#fef3c7', border: '#fde68a' },
+  no: { label: '不建议', color: '#b91c1c', bg: '#fee2e2', border: '#fecaca' },
 }
 
 function distBar(buckets: number[], total: number): string {
   const max = Math.max(1, ...buckets)
-  return `<div style="display:flex;align-items:flex-end;gap:4px;height:88px">${buckets.map((c, i) => {
+  return `<div class="dist">${buckets.map((c, i) => {
     const h = total > 0 ? Math.max(c > 0 ? 6 : 2, Math.round((c / max) * 84)) : 2
     const color = i >= 7 ? '#0d9488' : i >= 5 ? '#d97706' : '#dc2626'
-    return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:2px" title="${i}-${i + 1} 分：${c} 个"><span style="font-size:9px;color:#6b7280">${c || ''}</span><div style="width:100%;border-radius:3px 3px 0 0;background:${color};height:${h}px"></div><span style="font-size:8.5px;color:#9ca3af">${i}</span></div>`
+    return `<div class="dist-col" title="${i}-${i + 1} 分：${c} 个"><span class="dist-n">${c || ''}</span><div class="dist-bar" style="background:${color};height:${h}px"></div><span class="dist-x">${i}</span></div>`
   }).join('')}</div>`
 }
 
@@ -364,97 +382,318 @@ export interface RenderHtDashboardInput {
   /** 运行时长（秒，可选展示） */
   durationSec?: number
   generatedAt: string
+  /** v2.36：原始 Excel 行快照（「原表内容」列；匹配逻辑见 attachExcelRows） */
+  excelRows?: Array<{ label: string; text: string }>
 }
 
+/** 汇总主表（可筛选 · 可排序 · 每行可展开内嵌该靶点完整评估报告） */
 export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   const { rows, stats, verdicts, markdown, llmOk, llmErrors, engineSummary, origin } = input
   const verdictByJob = new Map(verdicts.map(v => [v.jobId, v]))
   const sorted = [...rows].sort((a, b) => b.overall - a.overall)
 
-  const card = (label: string, value: string, sub = ''): string =>
-    `<div style="flex:1;min-width:150px;border:1px solid #e5e7eb;border-radius:10px;padding:10px 14px;background:#fff">
-      <div style="font-size:11px;color:#6b7280;letter-spacing:.4px">${label}</div>
-      <div style="font-size:22px;font-weight:700;color:#111827;margin-top:2px">${value}</div>
-      ${sub ? `<div style="font-size:10.5px;color:#9ca3af;margin-top:1px">${sub}</div>` : ''}
-    </div>`
+  const body = renderMarkdown(markdown || '（AI 整体可行性报告未生成 — 见上方提示；统计与每靶点结论不受影响）', 0)
 
-  const rowHtml = sorted.map(r => {
-    const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
-    const meta = VERDICT_META[v.verdict]
-    return `<tr>
-      <td style="padding:7px 8px;font-size:12px;color:#374151;white-space:nowrap">${esc(r.label)}${r.range ? `<div style="font-size:10px;color:#0d9488">残基 ${r.range[0]}-${r.range[1]}</div>` : ''}${r.uniprotId && r.label !== r.uniprotId ? `<div style="font-size:10px;color:#9ca3af">${esc(r.uniprotId)}</div>` : ''}</td>
-      <td style="padding:7px 8px;text-align:center">${scoreBadge(r.overall)}</td>
-      <td style="padding:7px 8px;text-align:center;font-size:11.5px;color:#374151;white-space:nowrap">${r.xray} · ${r.cryoem} · ${r.nmr}</td>
-      <td style="padding:7px 8px;text-align:center;font-size:11.5px;color:#374151;white-space:nowrap">${r.directPdbCount}${r.blastHitCount ? `<span style="color:#9ca3af"> +${r.blastHitCount}</span>` : ''}${r.bestResolution != null ? `<div style="font-size:10px;color:#9ca3af">${r.bestResolution}Å</div>` : ''}</td>
-      <td style="padding:7px 8px;text-align:center;font-size:11.5px;color:#374151">${Math.round(r.coverage)}%</td>
-      <td style="padding:7px 8px;font-size:11.5px;line-height:1.5;color:#111827"><span style="display:inline-block;border-radius:5px;padding:1px 7px;font-size:10.5px;font-weight:700;color:${meta.color};background:${meta.bg};margin-right:5px">${meta.label}</span>${esc(v.line)}${v.source === 'rule' ? `<span style="color:#9ca3af;font-size:9.5px">（规则推断）</span>` : ''}</td>
-      <td style="padding:7px 8px;font-size:11px;white-space:nowrap">
-        ${r.zipHref ? `<a href="${esc(r.zipHref)}" style="color:#0d9488;font-weight:600;text-decoration:none">离线包</a>` : ''}
-        ${r.hasReport && origin ? `${r.zipHref ? ' · ' : ''}<a href="${esc(origin)}/api/jobs/${esc(r.jobId)}/report?download=1" style="color:#6b7280;text-decoration:none">在线</a>` : ''}
-      </td>
-    </tr>`
-  }).join('')
+  const tile = (label: string, value: string, sub = ''): string =>
+    `<div class="gt"><div class="gt-label">${label}</div><div class="gt-value">${value}</div>${sub ? `<div class="gt-sub">${sub}</div>` : ''}</div>`
 
   const methodBar = (label: string, mean: number, count: number, total: number, color: string): string =>
-    `<div style="margin-bottom:7px"><div style="display:flex;justify-content:space-between;font-size:11px;color:#374151;margin-bottom:2px"><span>${label}</span><span style="color:#6b7280">均分 ${mean}/10 · ${count}/${total} 靶点有结构</span></div><div style="height:9px;border-radius:5px;background:#f3f4f6"><div style="height:9px;border-radius:5px;background:${color};width:${Math.round(mean * 10)}%"></div></div></div>`
+    `<div class="mb-row"><div class="mb-cap"><span>${label}</span><span class="mb-sub">均分 ${mean}/10 · ${count}/${total} 靶点有结构</span></div><div class="mb-track"><div class="mb-fill" style="background:${color};width:${Math.round(mean * 10)}%"></div></div></div>`
 
-  const body = renderMarkdown(markdown || '（AI 整体可行性报告未生成 — 见上方提示；统计与每靶点结论不受影响）', 0)
+  // ── 主表行（数据行 + 内嵌报告展开行成对输出）──
+  const rowPairs = sorted.map((r, idx) => {
+    const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
+    const meta = VERDICT_META[v.verdict]
+    const search = esc([r.label, r.uniprotId ?? '', r.proteinName, r.organism, r.excelText ?? '', v.line].join(' ').toLowerCase())
+    const reportBody = r.reportMarkdown ? renderMarkdown(r.reportMarkdown, 0) : ''
+    const links: string[] = []
+    if (r.zipHref) links.push(`<a href="${esc(r.zipHref)}">离线包</a>`)
+    if (r.hasReport && origin) links.push(`<a href="${esc(origin)}/api/jobs/${esc(r.jobId)}/report?download=1">在线</a>`)
+    return `<tr class="mt-row" data-overall="${r.overall}" data-xray="${r.xray}" data-cryoem="${r.cryoem}" data-nmr="${r.nmr}" data-pdb="${r.directPdbCount}" data-cov="${Math.round(r.coverage)}" data-verdict="${v.verdict}" data-search="${search}">
+<td class="td-idx">${idx + 1}</td>
+<td class="td-target">
+  <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}</div>
+  ${r.uniprotId && r.label !== r.uniprotId ? `<div class="tg-sub mono">${esc(r.uniprotId)}${r.proteinName && r.proteinName !== r.label ? ` · ${esc(r.proteinName)}` : ''}</div>` : (r.proteinName && r.proteinName !== r.label ? `<div class="tg-sub">${esc(r.proteinName)}</div>` : '')}
+  ${r.organism ? `<div class="tg-sub">${esc(r.organism)}</div>` : ''}
+  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已折叠）">${esc(r.excelText)}</div>` : ''}
+</td>
+<td class="td-num"><span class="score s${r.overall >= 7 ? 'hi' : r.overall >= 5 ? 'md' : 'lo'}">${r.overall}</span></td>
+<td class="td-num mono xc">${r.xray} · ${r.cryoem} · ${r.nmr}</td>
+<td class="td-num mono">${r.directPdbCount}${r.blastHitCount ? `<span class="dim"> +${r.blastHitCount}</span>` : ''}${r.bestResolution != null ? `<div class="dim">${r.bestResolution}Å</div>` : ''}</td>
+<td class="td-num mono">${Math.round(r.coverage)}%</td>
+<td class="td-verdict"><span class="vd vd-${v.verdict}">${meta.label}</span><div class="vd-line">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</div></td>
+<td class="td-act">
+  ${reportBody ? `<button type="button" class="mt-exp" data-i="${idx}" aria-expanded="false">展开报告</button>` : ''}
+  ${links.length ? `<div class="mt-links">${links.join(' · ')}</div>` : ''}
+</td>
+</tr>
+${reportBody ? `<tr class="mt-report" data-i="${idx}"><td colspan="8"><div class="md mt-report-body">${reportBody}</div></td></tr>` : ''}`
+  }).join('')
 
   return `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(input.title)}</title>
 <style>
-body{font-family:-apple-system,'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;margin:0;background:#f6f7f9;color:#111827}
-.wrap{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
-h1{font-size:21px;margin:0 0 4px} .sub{color:#6b7280;font-size:12px;margin-bottom:18px}
-.cards{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
-h2{font-size:15px;margin:26px 0 8px;border-left:4px solid #0d9488;padding-left:9px}
-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;font-size:12px}
-th{background:#f9fafb;color:#6b7280;font-weight:600;font-size:11px;padding:7px 8px;text-align:left;border-bottom:1px solid #e5e7eb}
-td{border-bottom:1px solid #f3f4f6}
-.panel{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px}
-.md{font-size:13px;line-height:1.75}.md h2{margin-top:20px}.md table{margin:10px 0}.md th,.md td{padding:6px 8px}
-.md p{margin:8px 0}.md ul,.md ol{margin:8px 0;padding-left:22px}.md code{background:#f3f4f6;border-radius:4px;padding:1px 5px;font-size:11.5px}
-.warn{border:1px solid #fde68a;background:#fffbeb;color:#92400e;border-radius:8px;padding:8px 12px;font-size:12px;margin:10px 0}
-.note{color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.6}
-a{color:#0d9488}
-</style></head><body><div class="wrap">
-<h1>${esc(input.title)}</h1>
-<div class="sub">高通量运行统计看板 · AI 整体可行性报告 · 生成于 ${esc(input.generatedAt)}${input.durationSec ? ` · 运行时长 ${Math.round(input.durationSec / 60)} 分钟` : ''}${engineSummary !== '—' ? ` · 引擎 ${esc(engineSummary)}` : ''}</div>
-${input.goal ? `<div class="sub">客户目标：${esc(input.goal.slice(0, 300))}</div>` : ''}
+:root{--ink:#1c1917;--sub:#57534e;--faint:#a8a29e;--line:#e7e5e4;--hairline:#efedeb;--accent:#065f46;--accent-2:#047857;--accent-bg:#f0fdf7;--bg:#fcfcfb;--paper:#fff;
+--serif:"Source Serif 4","Noto Serif SC",Georgia,"Songti SC","STSong","SimSun","Times New Roman",serif;--mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-print-color-adjust:exact;print-color-adjust:exact;scroll-behavior:smooth}
+body{font-family:var(--serif);color:var(--ink);background:var(--bg);line-height:1.92;font-size:15px;letter-spacing:.006em}
+.mono{font-family:var(--mono)}
+.page{max-width:1224px;margin:0 auto;padding:56px 44px 72px;background:var(--paper);min-height:100vh;box-shadow:0 0 0 1px var(--hairline)}
+@media(max-width:1024px){.page{padding:40px 30px 56px}}
+@media(max-width:640px){.page{padding:26px 16px 38px}}
+@media print{body{background:#fff}.page{padding:0;max-width:none;box-shadow:none}.no-print{display:none!important}.mt-report{display:none!important}}
 
-<div class="cards">
-${card('参与靶点', `${stats.totalTargets}`, `${stats.loadedTargets} 成功${stats.failedTargets ? ` · ${stats.failedTargets} 失败` : ''}`)}
-${card('总体均分', `${stats.overallMean}<span style="font-size:13px;color:#6b7280">/10</span>`, `中位 ${stats.overallMedian} · 区间 ${stats.overallMin}-${stats.overallMax}`)}
-${card('建议推进', `${stats.verdictCounts.go}`, `谨慎 ${stats.verdictCounts.caution} · 不建议 ${stats.verdictCounts.no}`)}
-${card('有结构靶点', `${stats.targetsWithStructures}/${stats.loadedTargets}`, `X-ray ${stats.targetsWithXray} · Cryo-EM ${stats.targetsWithCryoem} · NMR ${stats.targetsWithNmr}`)}
-${card('平均覆盖率', `${Math.round(stats.coverageMean)}%`, `≥50%：${stats.targetsCoverage50} 个 · 带区间 ${stats.rangeTargets} 个`)}
+/* 报告封面头（期刊风双线 — 与单靶点报告同源） */
+.rpt-head{padding-bottom:22px;margin-bottom:30px;border-bottom:1px solid var(--ink);position:relative}
+.rpt-head::after{content:'';display:block;position:absolute;left:0;bottom:3px;width:100%;border-bottom:3px solid var(--ink)}
+.rpt-eyebrow{font-family:var(--mono);color:var(--accent);font-weight:600;font-size:10.5px;letter-spacing:2.4px;text-transform:uppercase;margin-bottom:14px}
+h1.rpt-title{font-size:28px;line-height:1.4;margin-bottom:6px;font-weight:900}
+.rpt-subtitle{font-size:13px;color:var(--sub);font-style:italic;margin-bottom:18px}
+.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px 22px;font-size:12.5px;color:var(--sub)}
+.meta-grid b{color:var(--ink);font-weight:600;margin-right:2px}
+h2.sec{font-size:20px;margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:800}
+h2.sec .k{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:2px;margin-right:10px;font-weight:600;vertical-align:2px}
+
+/* 统计速览（glance 瓦片 — 单靶点报告 At-a-Glance 同源） */
+.glance{border:1.5px solid var(--ink);border-radius:8px;margin:0 0 10px;background:#fff;overflow:hidden}
+.glance-kicker{font-family:var(--mono);font-size:10px;letter-spacing:2.2px;text-transform:uppercase;color:var(--accent);padding:13px 20px 11px;font-weight:700;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#ffffff,#f7fcf9)}
+.glance-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.gt{padding:13px 16px 11px;border-right:1px solid var(--hairline);border-bottom:1px solid var(--hairline);min-width:0}
+.gt-label{font-family:var(--mono);font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--faint);font-weight:600}
+.gt-value{font-size:17px;font-weight:700;margin-top:4px;line-height:1.5}
+.gt-value .u{font-size:11px;color:var(--faint);font-weight:400}
+.gt-sub{font-size:11px;color:var(--sub);margin-top:3px;line-height:1.55}
+
+/* 分布图 / 方法条 */
+.panel{background:#fff;border:1px solid var(--line);border-radius:8px;padding:16px 18px}
+.dist{display:flex;align-items:flex-end;gap:4px;height:96px}
+.dist-col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:2px}
+.dist-n{font-size:9px;color:var(--sub);font-family:var(--mono)}
+.dist-bar{width:100%;border-radius:3px 3px 0 0}
+.dist-x{font-size:8.5px;color:var(--faint);font-family:var(--mono)}
+.mb-row{margin-bottom:9px}
+.mb-cap{display:flex;justify-content:space-between;font-size:12px;color:var(--ink);margin-bottom:3px}
+.mb-sub{color:var(--sub);font-family:var(--mono);font-size:10.5px}
+.mb-track{height:9px;border-radius:5px;background:#f3f4f6}
+.mb-fill{height:9px;border-radius:5px}
+
+/* ── 主表（可筛选 · 可排序 · 行内展开报告）── */
+.mt-tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px}
+.mt-tools input[type=search],.mt-tools select{font-family:var(--mono);font-size:12px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);outline:none}
+.mt-tools input[type=search]{min-width:220px;flex:1;max-width:360px}
+.mt-tools input[type=search]:focus,.mt-tools select:focus{border-color:var(--accent-2);box-shadow:0 0 0 3px rgba(4,120,87,.1)}
+.mt-tools label{font-size:11.5px;color:var(--sub);display:inline-flex;align-items:center;gap:5px}
+.mt-count{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}
+.tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:#fff}
+table.mt{width:100%;min-width:980px;border-collapse:collapse;font-size:12.5px}
+table.mt th{position:sticky;top:0;background:#f9fafb;color:var(--sub);font-weight:600;font-size:11px;padding:8px 9px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-family:var(--mono);letter-spacing:.3px}
+table.mt th.sortable{cursor:pointer;user-select:none}
+table.mt th.sortable:hover{color:var(--accent-2)}
+table.mt th .arr{font-size:9px;color:var(--accent-2);margin-left:2px}
+table.mt td{padding:8px 9px;border-bottom:1px solid var(--hairline);vertical-align:top}
+tr.mt-row:hover td{background:#fbfdfc}
+.td-idx{color:var(--faint);font-family:var(--mono);font-size:11px}
+.td-num{text-align:center;white-space:nowrap}
+.tg-label{font-weight:600;font-size:12.5px;line-height:1.6;overflow-wrap:anywhere}
+.tg-range{color:var(--accent-2);font-family:var(--mono);font-size:11px}
+.tg-sub{font-size:10.5px;color:var(--sub);line-height:1.6}
+.tg-excel{margin-top:4px;padding:4px 8px;border-left:2px solid #b8e6d2;background:var(--accent-bg);font-size:10.5px;color:var(--sub);line-height:1.6;overflow-wrap:anywhere;border-radius:0 4px 4px 0}
+.score{display:inline-block;min-width:34px;text-align:center;border-radius:5px;padding:1px 7px;font-family:var(--mono);font-size:12px;font-weight:700}
+.score.hi{color:#0f766e;background:#ccfbf1}.score.md{color:#a16207;background:#fef3c7}.score.lo{color:#b91c1c;background:#fee2e2}
+.xc{font-size:11px;color:var(--ink)}
+.dim{color:var(--faint);font-size:10px}
+.vd{display:inline-block;border-radius:4px;padding:1px 8px;font-size:10.5px;font-weight:700;letter-spacing:.5px}
+.vd-go{color:#0f766e;background:#ccfbf1;border:1px solid #99e5d5}
+.vd-caution{color:#a16207;background:#fef3c7;border:1px solid #fde68a}
+.vd-no{color:#b91c1c;background:#fee2e2;border:1px solid #fecaca}
+.vd-line{font-size:11px;color:var(--ink);line-height:1.65;margin-top:3px;max-width:420px}
+.mt-exp{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid #b8e6d2;background:var(--accent-bg);color:var(--accent);cursor:pointer;white-space:nowrap}
+.mt-exp:hover{background:#d9f3e7}
+.mt-exp[aria-expanded="true"]{background:var(--accent);color:#fff;border-color:var(--accent)}
+.mt-links{margin-top:4px;font-size:10px;font-family:var(--mono)}
+.mt-links a{color:var(--accent-2);text-decoration:none;border-bottom:1px solid #a7f3d0}
+tr.mt-report{display:none}
+tr.mt-report.open{display:table-row}
+tr.mt-report>td{padding:0 12px 14px;background:#fbfdfc;border-bottom:1px solid var(--line)}
+.mt-report-body{border:1px solid var(--hairline);border-radius:8px;background:#fff;padding:16px 20px;margin-top:10px;max-height:640px;overflow-y:auto}
+
+/* Markdown 正文（AI 报告 + 内嵌靶点报告 — 与单靶点报告 .md 风格同源） */
+.md{font-size:13px;line-height:1.85}
+.md h2{font-size:16px;margin:20px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--hairline);font-weight:800}
+.md h3{font-size:13.5px;margin:14px 0 6px;font-weight:700}
+.md h4{font-size:12.5px;margin:12px 0 4px;font-weight:700}
+.md p{margin:8px 0}
+.md ul,.md ol{margin:8px 0;padding-left:22px}
+.md li{margin:3px 0}
+.md code{background:#f3f4f6;border-radius:4px;padding:1px 5px;font-size:11.5px;font-family:var(--mono)}
+.md table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12px}
+.md th,.md td{padding:6px 9px;border:1px solid var(--line);text-align:left}
+.md th{background:#f9fafb;font-weight:600;font-family:var(--mono);font-size:11px}
+.md blockquote{border-left:3px solid #b8e6d2;background:var(--accent-bg);padding:8px 14px;margin:10px 0;color:var(--sub)}
+.md a{color:var(--accent-2)}
+.warn{border:1px solid #fde68a;background:#fffbeb;color:#92400e;border-radius:8px;padding:8px 12px;font-size:12px;margin:10px 0}
+.note{color:var(--faint);font-size:11px;margin-top:14px;line-height:1.7}
+.backtop{position:fixed;right:18px;bottom:18px;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--sub);font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(28,25,23,.1);display:none;z-index:50}
+.backtop.show{display:block}
+@media print{.backtop{display:none}}
+</style></head><body><div class="page" id="top">
+
+<div class="rpt-head">
+  <div class="rpt-eyebrow">TargetEval · High-Throughput Master Report</div>
+  <h1 class="rpt-title">${esc(input.title)}</h1>
+  <div class="rpt-subtitle">高通量评估汇总报告 — 统计看板 · 全靶点结论总表（可筛选可排序 · 行内展开完整报告）· AI 整体可行性分析，单文件离线自包含</div>
+  <div class="meta-grid">
+    <div><b>生成时间</b> ${esc(input.generatedAt)}</div>
+    ${input.durationSec ? `<div><b>运行时长</b> ${Math.round(input.durationSec / 60)} 分钟</div>` : ''}
+    <div><b>评估引擎</b> ${esc(engineSummary)}</div>
+    <div><b>靶点规模</b> ${stats.totalTargets} 个（成功 ${stats.loadedTargets}${stats.failedTargets ? ` · 失败 ${stats.failedTargets}` : ''}）</div>
+  </div>
 </div>
 
-<h2>总分分布（0-10）</h2>
-<div class="panel">${distBar(stats.overallBuckets, stats.loadedTargets)}</div>
+${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 
-<h2>方法可用性（均分 + 有结构靶点数）</h2>
+<h2 class="sec"><span class="k">01</span>批次统计速览</h2>
+<div class="glance">
+  <div class="glance-kicker">At a Glance · 批次画像</div>
+  <div class="glance-tiles">
+    ${tile('参与靶点', `${stats.totalTargets}`, `${stats.loadedTargets} 成功${stats.failedTargets ? ` · ${stats.failedTargets} 失败` : ''}`)}
+    ${tile('总体均分', `${stats.overallMean}<span class="u">/10</span>`, `中位 ${stats.overallMedian} · 区间 ${stats.overallMin}-${stats.overallMax}`)}
+    ${tile('建议推进', `${stats.verdictCounts.go}`, `谨慎 ${stats.verdictCounts.caution} · 不建议 ${stats.verdictCounts.no}`)}
+    ${tile('有结构靶点', `${stats.targetsWithStructures}/${stats.loadedTargets}`, `X-ray ${stats.targetsWithXray} · Cryo-EM ${stats.targetsWithCryoem} · NMR ${stats.targetsWithNmr}`)}
+    ${tile('平均覆盖率', `${Math.round(stats.coverageMean)}%`, `≥50%：${stats.targetsCoverage50} 个 · 带区间 ${stats.rangeTargets} 个`)}
+    ${tile('带配体证据', `${stats.targetsWithLigand}`, `PDB 复合物内配体`)}
+  </div>
+</div>
+
+<div class="panel" style="margin-bottom:12px">
+  <div class="mb-cap" style="margin-bottom:6px"><b style="font-size:12.5px">总分分布（0-10，十档）</b></div>
+  ${distBar(stats.overallBuckets, stats.loadedTargets)}
+</div>
 <div class="panel">
-${methodBar('X-ray 射线晶体学', stats.methodMeans.xray, stats.targetsWithXray, stats.loadedTargets, '#0d9488')}
-${methodBar('Cryo-EM 冷冻电镜', stats.methodMeans.cryoem, stats.targetsWithCryoem, stats.loadedTargets, '#7c3aed')}
-${methodBar('NMR 核磁共振', stats.methodMeans.nmr, stats.targetsWithNmr, stats.loadedTargets, '#d97706')}
+  ${methodBar('X-ray 射线晶体学', stats.methodMeans.xray, stats.targetsWithXray, stats.loadedTargets, '#0d9488')}
+  ${methodBar('Cryo-EM 冷冻电镜', stats.methodMeans.cryoem, stats.targetsWithCryoem, stats.loadedTargets, '#7c3aed')}
+  ${methodBar('NMR 核磁共振', stats.methodMeans.nmr, stats.targetsWithNmr, stats.loadedTargets, '#d97706')}
 </div>
 
 ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.map(esc).join('；')}</div>` : ''}
 
-<h2>每靶点结论（按总分降序 · 一句话能否做）</h2>
-<table><thead><tr><th>靶点</th><th style="text-align:center">总分</th><th style="text-align:center">X·C·N</th><th style="text-align:center">结构</th><th style="text-align:center">覆盖</th><th>一句话结论</th><th>单独报告</th></tr></thead>
-<tbody>${rowHtml || '<tr><td colspan="7" style="padding:14px;color:#9ca3af">无成功靶点</td></tr>'}</tbody></table>
-<div class="note">「离线包」链接在「批量下载全部」的 zip 解压后可用（看板随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。</div>
+<h2 class="sec"><span class="k">02</span>全靶点结论总表<span style="font-size:12px;color:var(--faint);font-weight:400;margin-left:10px">评分 + 原始表内容 + 每靶点结论 — 点击列头排序 · 搜索/筛选 · 「展开报告」内嵌完整评估正文</span></h2>
+<div class="mt-tools no-print">
+  <input type="search" id="mt-q" placeholder="搜索靶点 / UniProt / 蛋白名 / 原表内容…" aria-label="筛选搜索">
+  <label>结论
+    <select id="mt-verdict"><option value="all">全部</option><option value="go">建议推进</option><option value="caution">谨慎推进</option><option value="no">不建议</option></select>
+  </label>
+  <label>总分 ≥
+    <select id="mt-min"><option value="0">0</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option></select>
+  </label>
+  <span class="mt-count" id="mt-count"></span>
+</div>
+<div class="tblwrap">
+<table class="mt" id="mt-table">
+<thead><tr>
+<th>#</th>
+<th data-k="label">靶点（原始表内容）</th>
+<th class="sortable num" data-k="overall">总分<span class="arr"></span></th>
+<th class="sortable num" data-k="xray">X·C·N<span class="arr"></span></th>
+<th class="sortable num" data-k="pdb">结构<span class="arr"></span></th>
+<th class="sortable num" data-k="cov">覆盖<span class="arr"></span></th>
+<th data-k="verdict">结论（一句话能否做）</th>
+<th data-k="act">报告</th>
+</tr></thead>
+<tbody>${rowPairs || '<tr><td colspan="8" style="padding:16px;color:var(--faint)">无成功靶点</td></tr>'}</tbody>
+</table>
+</div>
+<div class="note">「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。原始表内容列为导入 Excel 对应行的折叠快照（序列只保留识别前缀）。</div>
 
-<h2>AI 整体可行性报告</h2>
+<h2 class="sec"><span class="k">03</span>AI 整体可行性报告</h2>
 <div class="panel md">${body}</div>
 <div class="note">统计与每靶点结论为确定性数据（不依赖 AI）；AI 章节为 LLM 基于上述数据的分析，生成失败时保留统计结论。</div>
-</div></body></html>`
+
+<button type="button" class="backtop no-print" id="backtop" aria-label="回到顶部" title="回到顶部">↑</button>
+</div>
+
+<script>
+(function(){
+  var rows = [].slice.call(document.querySelectorAll('tr.mt-row'));
+  var state = { key: 'overall', dir: -1 };
+  var q = document.getElementById('mt-q');
+  var selV = document.getElementById('mt-verdict');
+  var selMin = document.getElementById('mt-min');
+  var countEl = document.getElementById('mt-count');
+  function visible(r){
+    if (selV.value !== 'all' && r.getAttribute('data-verdict') !== selV.value) return false;
+    if (parseInt(r.getAttribute('data-overall') || '0', 10) < parseInt(selMin.value, 10)) return false;
+    var s = (q.value || '').trim().toLowerCase();
+    if (s && (r.getAttribute('data-search') || '').indexOf(s) < 0) return false;
+    return true;
+  }
+  function apply(){
+    var n = 0, idx = 0;
+    rows.forEach(function(r){
+      var ok = visible(r);
+      r.style.display = ok ? '' : 'none';
+      var rep = r.nextElementSibling;
+      if (rep && rep.classList.contains('mt-report')) {
+        if (!ok && rep.classList.contains('open')) { rep.classList.remove('open'); var b = r.querySelector('.mt-exp'); if (b) b.setAttribute('aria-expanded', 'false'); }
+        rep.style.display = ok ? '' : 'none';
+      }
+      if (ok) { n++; var t = r.querySelector('.td-idx'); if (t) t.textContent = ++idx; }
+    });
+    countEl.textContent = '显示 ' + n + ' / ' + rows.length + ' 个靶点';
+  }
+  function sort(){
+    var k = state.key, d = state.dir;
+    var tbody = document.querySelector('#mt-table tbody');
+    var items = rows.map(function(r){
+      var rep = r.nextElementSibling && r.nextElementSibling.classList.contains('mt-report') ? r.nextElementSibling : null;
+      var v = k === 'idx' ? 0 : parseFloat(r.getAttribute('data-' + k) || '0');
+      return { r: r, rep: rep, v: isNaN(v) ? 0 : v, t: (r.querySelector('.td-target') || r).textContent || '' };
+    });
+    items.sort(function(a, b){
+      var c = k === 'label' ? a.t.localeCompare(b.t, 'zh') : (a.v - b.v);
+      if (c === 0) c = a.r === b.r ? 0 : 1;
+      return c * d;
+    });
+    items.forEach(function(it){
+      tbody.appendChild(it.r);
+      if (it.rep) tbody.appendChild(it.rep);
+    });
+  }
+  document.querySelectorAll('#mt-table th.sortable').forEach(function(th){
+    th.addEventListener('click', function(){
+      var k = th.getAttribute('data-k');
+      if (state.key === k) state.dir = -state.dir; else { state.key = k; state.dir = k === 'label' ? 1 : -1; }
+      document.querySelectorAll('#mt-table th .arr').forEach(function(a){ a.textContent = ''; });
+      var arr = th.querySelector('.arr'); if (arr) arr.textContent = state.dir > 0 ? '▲' : '▼';
+      sort(); apply();
+    });
+  });
+  q.addEventListener('input', apply);
+  selV.addEventListener('change', apply);
+  selMin.addEventListener('change', apply);
+  document.querySelectorAll('button.mt-exp').forEach(function(b){
+    b.addEventListener('click', function(){
+      var i = b.getAttribute('data-i');
+      var rep = document.querySelector('tr.mt-report[data-i="' + i + '"]');
+      if (!rep) return;
+      var open = rep.classList.toggle('open');
+      b.setAttribute('aria-expanded', open ? 'true' : 'false');
+      b.textContent = open ? '收起报告' : '展开报告';
+      if (open) rep.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+  var bt = document.getElementById('backtop');
+  window.addEventListener('scroll', function(){ bt.classList.toggle('show', window.scrollY > 600); }, { passive: true });
+  bt.addEventListener('click', function(){ window.scrollTo({ top: 0, behavior: 'smooth' }); });
+  apply();
+})();
+</script>
+</body></html>`
 }
 
 /** 看板标题（运行时间 + 靶点规模） */
 export function htDashboardTitle(totalTargets: number, generatedAt: string): string {
-  return `高通量评估统计看板 · ${totalTargets} 靶点 · ${generatedAt.slice(0, 10)}`
+  return `高通量评估汇总报告 · ${totalTargets} 靶点 · ${generatedAt.slice(0, 10)}`
 }

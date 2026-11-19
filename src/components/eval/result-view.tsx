@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpenText,
+  CircleAlert,
   Crosshair,
   Database,
   Download,
@@ -423,10 +424,34 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   /** v2.4：内联 HTML 报告（无状态同步评估）— srcDoc 渲染 + Blob 下载，不经 /api/jobs/{id}/report */
   const inlineReportHtml = job.stateless ? (job.reportHtml ?? null) : null
   /** v1.31：web 端直接内嵌完整 HTML 报告（与「下载 HTML」同一份文件，样式 100% 一致）。
-   *  单靶点作业且报告已生成时启用；deferred（并入合并报告）或文件丢失时降级为下方 React 数据区块。 */
-  const embedReport = !reportDeferred && (job.reportAvailable === true || Boolean(inlineReportHtml)) && !embedFailed
+   *  单靶点作业且报告已生成时启用；deferred（并入合并报告）或文件丢失时降级为下方 React 数据区块。
+   *  v2.36：浏览器缓存副本（服务端实例已回收）无服务端文件 → 直接走 markdown 数据区块 */
+  const embedReport = !reportDeferred && !job.fromCache && (job.reportAvailable === true || Boolean(inlineReportHtml)) && !embedFailed
 
   const downloadReport = () => {
+    // v2.36：缓存副本无服务端文件 → 导出 markdown 文本（另存 .md）
+    if (job.fromCache) {
+      if (!reportMd) {
+        toast({ title: '暂无可导出的报告正文', description: '本地缓存副本中未包含报告正文（作业完成时未生成）。', variant: 'destructive' })
+        return
+      }
+      try {
+        const blob = new Blob([reportMd], { type: 'text/markdown;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `TargetEval_${(job.uniprotId || job.id).replace(/[^\w-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.md`
+        a.rel = 'noopener'
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => URL.revokeObjectURL(url), 10_000)
+        toast({ title: '已导出 Markdown 副本', description: '服务端 HTML 报告已随部署实例回收，已改为导出本地缓存的报告正文。' })
+      } catch {
+        toast({ title: '导出失败', description: '本地缓存数据生成下载文件失败，请重试', variant: 'destructive' })
+      }
+      return
+    }
     // v2.4 无状态：内联报告 → Blob 下载（服务器不保留文件）
     if (inlineReportHtml) {
       try {
@@ -522,6 +547,17 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
 
   return (
     <div className="flex flex-col gap-8">
+      {/* v2.36：缓存副本模式横幅（服务端实例已回收，本地副本回看） */}
+      {job.fromCache && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/40 bg-amber-500/[0.07] px-3.5 py-2.5 text-[12.5px] text-amber-700 dark:text-amber-400">
+          <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+          <p className="leading-relaxed">
+            正在查看<b>浏览器本地缓存副本</b>：部署平台为 Serverless 实例，空闲回收后服务端运行数据不持久，该作业在服务端已不可用。
+            「下载报告」将导出本地缓存的 Markdown 正文；完整 HTML 报告已在作业完成时自动下载到本机下载目录。
+          </p>
+        </div>
+      )}
+
       {/* 0. 返回导航条 */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <Button
@@ -750,10 +786,10 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             <div className="grid gap-5 sm:grid-cols-2">
               {scores && (
                 <>
-                  <ScoreBar label="X-ray 结晶学" item={scores.xray} delay={0.05} delta={llmA?.xray ?? 0} />
-                  <ScoreBar label="Cryo-EM 冷冻电镜" item={scores.cryoem} delay={0.15} delta={llmA?.cryoem ?? 0} />
-                  <ScoreBar label="NMR 核磁共振" item={scores.nmr} delay={0.25} delta={llmA?.nmr ?? 0} />
-                  <ScoreBar label="总体可行性" item={scores.overall} delay={0.35} delta={llmA?.overall ?? 0} />
+                  {scores.xray && <ScoreBar label="X-ray 结晶学" item={scores.xray} delay={0.05} delta={llmA?.xray ?? 0} />}
+                  {scores.cryoem && <ScoreBar label="Cryo-EM 冷冻电镜" item={scores.cryoem} delay={0.15} delta={llmA?.cryoem ?? 0} />}
+                  {scores.nmr && <ScoreBar label="NMR 核磁共振" item={scores.nmr} delay={0.25} delta={llmA?.nmr ?? 0} />}
+                  {scores.overall && <ScoreBar label="总体可行性" item={scores.overall} delay={0.35} delta={llmA?.overall ?? 0} />}
                 </>
               )}
             </div>

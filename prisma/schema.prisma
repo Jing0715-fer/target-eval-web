@@ -103,6 +103,8 @@ model HtDashboard {
   error     String? // 生成失败原因（status=error 时）
   ownerKey  String? // 创建者归属键（与 EvaluationJob 一致）
   ownerMask String? // 创建者来源 IP 掩码
+  // v2.36：原始 Excel 行快照 JSON（汇总报告「原表内容」列 — [{label, text}]，序列折叠）
+  excelRows String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

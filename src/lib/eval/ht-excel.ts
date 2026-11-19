@@ -110,6 +110,44 @@ const CROSS_ROW_NOTE_ROWS = 30
  *  v2.34 行级语义下不再跨行去重，240K → 400K 实测 179 行清单 ≈ 95K） */
 const MAX_SEQ_TOTAL_CHARS = 400_000
 
+// ─── v2.36 原始表内容（汇总报告 master 表格的「原 Excel 行」列）────────────────
+
+/** 原始行的紧凑快照（序列折叠 — 只保留识别性前缀；标签 = 行首非序列单元格） */
+export interface HtExcelRowSnapshot {
+  /** 行标签（与 deriveRowLabel 同源 — 结构交付表 = 文件名；用于与评估条目 label 前缀匹配） */
+  label: string
+  /** 折叠后的行文本（非空单元格「|」连接；每格 ≤72 字符） */
+  text: string
+}
+
+/** v2.36：全部数据行 → 紧凑快照（汇总报告展示原始表内容；≤600 行、每行 ≤400 字符） */
+export function buildExcelRowSnapshots(sheets: HtSheetRows[]): HtExcelRowSnapshot[] {
+  const out: HtExcelRowSnapshot[] = []
+  const snap = (cell: string): string => {
+    const t = cell.trim()
+    if (t.length <= 72) return t
+    return `${t.slice(0, 56)}…[${t.length}]`
+  }
+  for (const sheet of sheets) {
+    const rows = sheet.rows
+    if (rows.length === 0) continue
+    let dataStart = 0
+    const first = rows[0]
+    const firstIsHeader = first.some((c) => c !== '') && !first.some((c) => cellHasUniprotId(c))
+    if (firstIsHeader) dataStart = 1
+    for (let r = dataStart; r < rows.length; r++) {
+      const row = rows[r]
+      if (row.every((c) => !c)) continue
+      const label = deriveRowLabel(row) || (row.find((c) => c) ?? '').slice(0, 40)
+      const text = row.filter((c) => c).map(snap).join(' | ').slice(0, 400)
+      if (text) out.push({ label, text })
+      if (out.length >= 600) return out
+    }
+  }
+  return out
+}
+
+
 /** UniProt accession 语法（与 components/eval/format.ts 同源；服务端本地定义避免引客户端模块） */
 const UNIPROT_SOURCE =
   '(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9])(?:[A-Z0-9]{3}[0-9])?(?:-[0-9]+)?'

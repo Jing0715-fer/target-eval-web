@@ -19,6 +19,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { toast } from '@/hooks/use-toast'
 import { deleteJobById, downloadHtReportArchive, fetchBatchReportList, fetchJobList, isStatelessEnv } from './api'
+import { mergeJobListWithCache, removeCachedJob } from './job-cache'
 import { removeSessionJob, sessionJobToListItem, getSessionJobs } from './session-history'
 import { StatusBadge } from './badges'
 import { formatDateTime, formatPercent } from './format'
@@ -73,6 +74,14 @@ function JobRow({
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        {job.fromCache && (
+          <span
+            className="inline-flex items-center rounded-md border border-amber-500/30 bg-amber-500/[0.08] px-1.5 py-0.5 text-[9.5px] font-medium text-amber-600 dark:text-amber-400"
+            title="服务端数据已随部署实例回收（Serverless），该记录来自浏览器本地缓存副本"
+          >
+            本地副本
+          </span>
+        )}
         {job.overallScore != null && (
           <span className="text-[13px] font-semibold tabular-nums text-foreground">
             {Number(job.overallScore.toFixed(1))}
@@ -232,7 +241,8 @@ export function HistoryDialog({
         fetchJobList(),
         fetchBatchReportList().catch(() => [] as BatchReportListItem[]),
       ])
-      setJobs(jobList)
+      // v2.36：合并本地缓存副本条目（部署实例回收后服务端列表丢失的记录）
+      setJobs(mergeJobListWithCache(jobList))
       setBatches(batchList)
     } catch {
       setJobs([])
@@ -250,12 +260,13 @@ export function HistoryDialog({
   const handleDelete = async (id: string) => {
     setDeletingId(id)
     try {
-      // v2.4：会话本地记录直接移除；服务器记录走 DELETE
+      // v2.4：会话本地记录直接移除；服务器记录走 DELETE；v2.36：本地缓存副本同步清理
       if (isStatelessEnv() && getSessionJobs().some(j => j.job.id === id)) {
         removeSessionJob(id)
         setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
       } else {
-        await deleteJobById(id)
+        await deleteJobById(id).catch(() => undefined) // 服务端可能已 404（实例回收），忽略
+        removeCachedJob(id)
         setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
       }
     } catch {
@@ -393,6 +404,13 @@ export function RecentEvaluations({
     }
     setArchivingAll(true)
     try {
+      // v2.36：本地缓存副本无服务端文件，不参与服务端打包（点击单条可另存 markdown）
+      const entries = [
+        ...batches.filter((b) => b.status === 'done').map((b) => ({ mergedId: b.id })),
+        ...jobs
+          .filter((j) => j.status === 'done' && !j.fromCache)
+          .map((j) => ({ jobId: j.id, label: j.uniprotId ?? j.proteinName ?? j.title })),
+      ]
       await downloadHtReportArchive(entries, 'recent')
       toast({ title: '批量下载已开始', description: `已打包 ${entries.length} 份报告为 zip（合并报告 + 单靶点报告）。` })
     } catch (e) {
@@ -420,7 +438,8 @@ export function RecentEvaluations({
       fetchBatchReportList().catch(() => [] as BatchReportListItem[]),
     ]).then(([jobList, batchList]) => {
       if (!cancelled) {
-        setJobs(jobList)
+        // v2.36：合并本地缓存副本条目（部署实例回收后服务端列表丢失的记录）
+        setJobs(mergeJobListWithCache(jobList))
         setBatches(batchList)
       }
     })
@@ -432,12 +451,13 @@ export function RecentEvaluations({
   const handleDelete = async (id: string) => {
     setDeletingId(id)
     try {
-      // v2.4：会话本地记录直接移除；服务器记录走 DELETE
+      // v2.4：会话本地记录直接移除；服务器记录走 DELETE；v2.36：本地缓存副本同步清理
       if (isStatelessEnv() && getSessionJobs().some(j => j.job.id === id)) {
         removeSessionJob(id)
         setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
       } else {
-        await deleteJobById(id)
+        await deleteJobById(id).catch(() => undefined) // 服务端可能已 404（实例回收），忽略
+        removeCachedJob(id)
         setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null)
       }
     } catch {

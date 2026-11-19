@@ -94,7 +94,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
   const batchRunning = batch && batch.total > 1 && !batch.done
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 pb-5 sm:pb-7">
       {/* ── 刊头：眉题 + 状态徽标 + 标题 + 靶点 chips + GOAL ── */}
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
