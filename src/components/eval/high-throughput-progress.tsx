@@ -146,6 +146,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const doneTargets = allItems.filter((it) => it.status === 'done').length
   const skippedTargets = allItems.filter((it) => it.status === 'skipped').length
   const failedTargets = allItems.filter((it) => it.status === 'error' || it.status === 'canceled').length
+  /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
+  const incompleteTargets = allItems.filter((it) => it.status === 'done' && it.reportIncomplete).length
+  /** v2.41：全局重跑入口的靶点数（失败/中断 + 报告不完整） */
+  const retryableTargets = failedTargets + incompleteTargets
   const currentGroup = run.groups.find((g) => g.index === run.currentIndex && (g.status !== 'done' && g.status !== 'canceled'))
   const isRunning = flow.phase === 'running'
   const isPaused = flow.phase === 'paused'
@@ -297,6 +301,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             组 {doneGroups}/{run.groups.length} 完成 · 靶点 {doneTargets}/{run.totalTargetCount}
             {skippedTargets > 0 ? ` · 跳过 ${skippedTargets}` : ''}
             {!isRunning && failedTargets > 0 ? ` · 失败 ${failedTargets}` : ''}
+            {!isRunning && incompleteTargets > 0 ? ` · 报告不完整 ${incompleteTargets}` : ''}
           </span>
         </div>
         {run.goal && (
@@ -358,17 +363,19 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <RotateCcw className="size-3.5" aria-hidden />
               继续运行
             </Button>
-            {failedTargets > 0 && (
+            {retryableTargets > 0 && (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={() => void flow.retryFailed()}
                 className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
-                title={`重置全部 ${failedTargets} 个失败/中断靶点并立即继续运行`}
+                title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即继续运行`}
               >
                 <Play className="size-3.5" aria-hidden />
-                重跑失败项（{failedTargets}）并继续
+                {incompleteTargets > 0 && failedTargets === 0
+                  ? `重跑报告不完整项（${incompleteTargets}）并继续`
+                  : `重跑失败/不完整项（${retryableTargets}）并继续`}
               </Button>
             )}
             <Button
@@ -415,17 +422,19 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <RotateCcw className="size-3.5" aria-hidden />
               继续运行
             </Button>
-            {failedTargets > 0 && (
+            {retryableTargets > 0 && (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={() => void flow.retryFailed()}
                 className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
-                title={`重置全部 ${failedTargets} 个失败/中断靶点并立即继续运行`}
+                title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即继续运行`}
               >
                 <Play className="size-3.5" aria-hidden />
-                重跑失败项（{failedTargets}）并继续
+                {incompleteTargets > 0 && failedTargets === 0
+                  ? `重跑报告不完整项（${incompleteTargets}）并继续`
+                  : `重跑失败/不完整项（${retryableTargets}）并继续`}
               </Button>
             )}
             <Button
@@ -507,6 +516,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             const logs = groupLogs[g.index]
             const hasReport = g.status === 'done' && (g.mergedReportId || g.items.some((it) => it.status === 'done' && it.jobId))
             const gFailed = g.items.filter((it) => it.status === 'error' || it.status === 'canceled').length
+            /** v2.41：本组报告不完整（done 但部分章节失败）靶点数 */
+            const gIncomplete = g.items.filter((it) => it.status === 'done' && it.reportIncomplete).length
             const gPending = g.items.filter((it) => it.status === 'pending').length
             const gSkipped = g.items.filter((it) => it.status === 'skipped').length
             return (
@@ -532,16 +543,19 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                         ? `复合物 ×${g.targets.length}`
                         : '单靶点'}
                     {gSkipped > 0 ? ` · 跳过 ${gSkipped}` : ''}
+                    {gIncomplete > 0 ? ` · 报告不完整 ${gIncomplete}` : ''}
                     {g.startedAt && g.finishedAt ? ` · ${formatDuration((g.finishedAt - g.startedAt) / 1000)}` : ''}
                   </span>
                 </div>
 
                 {/* 靶点 chips（状态点 + 标签 + 区间后缀 + 错误摘要；紧凑字号）
                     v2.38：非运行阶段 chip 尾部附小操作钮 — 跳过/恢复（Ban/Undo2）、
-                    重跑（RotateCcw，失败/中断/跳过项） */}
+                    重跑（RotateCcw，失败/中断/跳过项）；v2.41：报告不完整的 done 项
+                    琥珀色标记 + 可重跑（补齐缺失章节） */}
                 <div className="flex flex-wrap gap-1">
                   {g.items.map((it) => {
-                    const actionable = editable && it.status !== 'done' && it.status !== 'running'
+                    // v2.41：done+报告不完整 → 可操作（重跑）；其余 done 不可操作
+                    const actionable = editable && it.status !== 'running' && (it.status !== 'done' || it.reportIncomplete)
                     return (
                       <span
                         key={it.key}
@@ -552,23 +566,28 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                             ? 'border-red-500/30 bg-red-500/[0.05] text-red-700 dark:text-red-400'
                             : it.status === 'skipped'
                               ? 'border-sky-500/30 bg-sky-500/[0.05] text-sky-700/80 line-through decoration-sky-500/40 dark:text-sky-400/80'
-                              : 'border-border bg-muted/40 text-foreground/90',
+                              : it.status === 'done' && it.reportIncomplete
+                                ? 'border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-400'
+                                : 'border-border bg-muted/40 text-foreground/90',
                         )}
-                        title={it.skipNote ?? it.error ?? (it.range ? `${it.label} · 评估区间 ${it.range[0]}-${it.range[1]}（仅保留链范围重叠的结构）` : it.label)}
+                        title={it.reportMissingNote ?? it.skipNote ?? it.error ?? (it.range ? `${it.label} · 评估区间 ${it.range[0]}-${it.range[1]}（仅保留链范围重叠的结构）` : it.label)}
                       >
-                        <span className={cn('size-1.5 shrink-0 rounded-full', itemDotCls(it.status))} aria-hidden />
+                        <span className={cn('size-1.5 shrink-0 rounded-full', it.status === 'done' && it.reportIncomplete ? 'bg-amber-500' : itemDotCls(it.status))} aria-hidden />
                         <span className="truncate">
                           {it.label}
                           {it.range && <span className="text-primary/90">:{it.range[0]}-{it.range[1]}</span>}
                         </span>
+                        {it.status === 'done' && it.reportIncomplete && (
+                          <span className="shrink-0 font-sans text-[9px] font-medium text-amber-600/90 dark:text-amber-400/90" title={it.reportMissingNote}>不完整</span>
+                        )}
                         {actionable && (
                           <span className="inline-flex shrink-0 items-center gap-0.5">
-                            {(it.status === 'error' || it.status === 'canceled' || it.status === 'skipped') && (
+                            {(it.status === 'error' || it.status === 'canceled' || it.status === 'skipped' || (it.status === 'done' && it.reportIncomplete)) && (
                               <button
                                 type="button"
                                 onClick={() => flow.retryItem(g.index, it.key)}
                                 className="flex size-4.5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-accent hover:text-primary"
-                                title="重跑此靶点（重置为待评估）"
+                                title={it.status === 'done' ? '重跑此靶点（补齐缺失的报告章节）' : '重跑此靶点（重置为待评估）'}
                                 aria-label={`重跑靶点 ${it.label}`}
                               >
                                 <RotateCcw className="size-2.5" aria-hidden />
@@ -584,7 +603,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                               >
                                 <Undo2 className="size-2.5" aria-hidden />
                               </button>
-                            ) : (
+                            ) : it.status !== 'done' ? (
                               <button
                                 type="button"
                                 onClick={() => flow.toggleSkipItem(g.index, it.key)}
@@ -594,7 +613,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                               >
                                 <Ban className="size-2.5" aria-hidden />
                               </button>
-                            )}
+                            ) : null}
                           </span>
                         )}
                       </span>
@@ -626,15 +645,15 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                       本组打包
                     </button>
                   )}
-                  {editable && gFailed > 0 && (
+                  {editable && (gFailed > 0 || gIncomplete > 0) && (
                     <button
                       type="button"
                       onClick={() => flow.retryGroupFailures(g.index)}
                       className="inline-flex h-7 items-center gap-1 rounded-lg border border-border bg-muted/40 px-2 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
-                      title={`重置本组 ${gFailed} 个失败/中断靶点（点击「继续运行」后重跑）`}
+                      title={`重置本组 ${gFailed + gIncomplete} 个失败/中断${gIncomplete > 0 ? `/报告不完整（${gIncomplete}）` : ''}靶点（点击「继续运行」后重跑）`}
                     >
                       <RotateCcw className="size-3" aria-hidden />
-                      重跑失败（{gFailed}）
+                      重跑失败/不完整（{gFailed + gIncomplete}）
                     </button>
                   )}
                   {editable && gPending > 0 && (
@@ -758,17 +777,19 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <Button type="button" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground">
                 开始新的高通量评估
               </Button>
-              {failedTargets > 0 && (
+              {retryableTargets > 0 && (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={() => void flow.retryFailed()}
                   className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
-                  title={`重置全部 ${failedTargets} 个失败/中断靶点并立即重新运行（汇总报告将重新生成）`}
+                  title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即重新运行（汇总报告将重新生成）`}
                 >
                   <Play className="size-3.5" aria-hidden />
-                  重跑失败项（{failedTargets}）
+                  {incompleteTargets > 0 && failedTargets === 0
+                    ? `重跑报告不完整项（${incompleteTargets}）`
+                    : `重跑失败/不完整项（${retryableTargets}）`}
                 </Button>
               )}
               <Button

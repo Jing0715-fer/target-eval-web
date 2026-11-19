@@ -7,12 +7,45 @@
  *  - 直接检索 PDB 全部聚合物实体（正是「同源结构」的语义本体）
  *  - verbose 模式返回 sequence_identity / evalue / 覆盖区间 —— 与 BLAST 命中同构
  *
+ * v2.41 全局节流 + 重试（用户反馈「兜底第 3/3 次」— NCBI 队列拥堵时多个作业
+ * 同时触发 RCSB 兜底，并发冲击下 RCSB 侧瞬时 429/5xx 导致兜底尝试被白白耗尽）：
+ *  - 全局串行链节流：相邻两次检索间隔 ≥ RCSB_MIN_INTERVAL_MS，排队错峰；
+ *  - 429/5xx/网络错误自动重试（退避 4s/10s，最多 2 次重试）— 单次失败不再
+ *    直接计入「兜底失败」计数，瞬时抖动不再耗尽 MAX_RESCUE_ATTEMPTS。
+ *
  * 结果映射为 BlastHit[]（pdbId / identity% / evalue / queryCoverage），
  * 方法与分辨率由 enrichBlastHits 经 RCSB data API 补齐（含结构标题作为描述）。
  */
 import type { BlastHit } from './types'
 
 const SEARCH_URL = 'https://search.rcsb.org/rcsbsearch/v2/query'
+
+/** v2.41 相邻两次检索的最小间隔（全局串行链 — 多作业同时兜底时排队错峰） */
+const RCSB_MIN_INTERVAL_MS = 2_000
+/** v2.41 瞬时失败重试退避（429/5xx/网络错误；最多重试 2 次） */
+const RCSB_RETRY_DELAYS_MS = [4_000, 10_000]
+/** v2.41 单次请求超时：45s（实测序列服务退化时 ~31s 才返回 500 —
+ *  30s 超时会把「明确的 500」变成「超时」，重试节奏反而更慢） */
+const RCSB_REQUEST_TIMEOUT_MS = 45_000
+
+function rcsbSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
+}
+
+/** 全局节流链（globalThis 挂载，HMR / 多次导入间共享） */
+const rg = globalThis as unknown as { __rcsbSearchChain?: Promise<void>; __rcsbLastReqAt?: number }
+
+/** 获取检索节流槽：与上次实际请求间隔不足 RCSB_MIN_INTERVAL_MS 时等待 */
+async function rcsbGate(): Promise<void> {
+  const turn = (rg.__rcsbSearchChain ?? Promise.resolve()).then(() => undefined, () => undefined)
+  rg.__rcsbSearchChain = (async () => {
+    await turn
+    const since = Date.now() - (rg.__rcsbLastReqAt ?? 0)
+    if (since < RCSB_MIN_INTERVAL_MS) await rcsbSleep(RCSB_MIN_INTERVAL_MS - since)
+    rg.__rcsbLastReqAt = Date.now()
+  })()
+  await rg.__rcsbSearchChain
+}
 
 export interface RcsbSearchOptions {
   /** 最多保留的命中条目数（v2.32 起按显著性 e-value 升序保留前 N） */
@@ -74,15 +107,35 @@ export async function searchRcsbHomologs(
     return_type: 'polymer_entity',
   }
 
-  const res = await fetch(SEARCH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: signal ?? AbortSignal.timeout(30_000),
-  })
-  // 204 = 无命中（RCSB 搜索服务的空结果约定）
-  if (res.status === 204) return []
-  if (!res.ok) throw new Error(`RCSB 序列检索失败 HTTP ${res.status}`)
+  // v2.41：全局节流 + 瞬时失败重试 — 429/5xx/网络抖动退避后重试，
+  // 避免多作业同时兜底时把 MAX_RESCUE_ATTEMPTS 白白耗尽
+  let res: Response
+  for (let attempt = 0; ; attempt++) {
+    await rcsbGate()
+    try {
+      res = await fetch(SEARCH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: signal ?? AbortSignal.timeout(RCSB_REQUEST_TIMEOUT_MS),
+      })
+    } catch (e) {
+      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      if (attempt < RCSB_RETRY_DELAYS_MS.length) {
+        await rcsbSleep(RCSB_RETRY_DELAYS_MS[attempt])
+        continue
+      }
+      throw e
+    }
+    // 204 = 无命中（RCSB 搜索服务的空结果约定）— 直接返回
+    if (res.status === 204) return []
+    if (res.ok) break
+    const retriable = res.status === 429 || res.status >= 500
+    if (!retriable || attempt >= RCSB_RETRY_DELAYS_MS.length) {
+      throw new Error(`RCSB 序列检索失败 HTTP ${res.status}`)
+    }
+    await rcsbSleep(RCSB_RETRY_DELAYS_MS[attempt])
+  }
 
   const data = (await res.json()) as { result_set?: RcsbSearchHit[]; total_count?: number }
   const rows = data.result_set ?? []

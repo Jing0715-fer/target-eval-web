@@ -2362,6 +2362,8 @@ class SegmentRunner {
       mwAugment: st.mwAugment!,
       /** v2.13：deferred 批次同样生成完整独立报告 — 状态如实记录（合并报告各靶点页引用） */
       reportLlmOk: st.reportParts.some(p => p.llmOk) || undefined,
+      /** v2.41：未完整生成的章节数（部分章节失败/放弃重试）— 高通量据此标记可重跑 */
+      reportLlmMissing: st.reportParts.filter(p => !p.llmOk).length || undefined,
       reportDeferred: deferReport || undefined,
       batchNote: this.input.batchNote,
       /** v2.16：靶点身份识别证据链（识别来源/一致性/近似 UniProt — 合并报告与前端展示） */

@@ -28,6 +28,16 @@
  *    提前提交 NCBI — 作业还在队列排队时 NCBI 已在计算
  *  - 管线 blast-submit 阶段按「规范化序列哈希」命中预提交 RID，命中即跳过提交
  *    直接收集（慢队列下总时长大幅缩短）；排队过深的条目放弃，改由管线当场提交
+ *
+ * v2.41 NCBI 拥堵反馈（用户反馈「提交太多会引起 NCBI 队列拥堵，排队 217s
+ * 未开始计算就触发 RCSB 兜底」）：
+ *  - 在飞上限：预提交链在「自家在飞（已提交未回收）≥ NCBI_PRESUBMIT_LEAD_CAP」
+ *    时暂停补货 — NCBI 队列不被自家批量压深，排队等待时间回落
+ *  - 拥堵避让：收集端观测到持续 WAITING（>60s）→ 打点全局拥堵信号，
+ *    预提交链冷却 ~2 分钟再继续提交（队列消化后再补货）
+ *  - 批量感知排队耐心：批量在飞/拥堵期间 WAITING 是预期现象，软兜底阈值
+ *    从固定 90s 自适应延长（最高 7 分钟）— 优先等权威 BLASTp 结果，
+ *    并行编排下其他靶点照常推进，不构成干等；零星任务维持 90s 基线不变
  */
 import { createHash } from 'node:crypto'
 import { searchRcsbHomologs } from './rcsb-search'
@@ -108,6 +118,69 @@ export interface BlastSubmitResult {
   rtoe: number
 }
 
+// ─── v2.41 NCBI 拥堵反馈与在飞估计 ─────────────────────────────────────────
+
+/** 在飞视窗：超过该时长的 RID 视为已出结果/已放弃（计数用粗粒度估计 —
+ *  blastp 常态 1-5 分钟出结果，弃用/兜底场景最迟也在视窗内离开系统） */
+const NCBI_INFLIGHT_HORIZON_MS = 12 * 60_000
+/** 预提交在飞上限：在飞达到此数 → 预提交链暂停补货（需求侧由管线当场提交
+ *  兜底，不受影响）。防批量预热把 NCBI 队列压深（用户实测排队 217s 未开算） */
+const NCBI_PRESUBMIT_LEAD_CAP = 12
+
+interface NcbiHealth {
+  /** rid → 提交时刻（在飞估计：视窗内条目数） */
+  flight: Map<string, number>
+  /** 拥堵信号冷却时刻（收集端持续 WAITING 打点；预提交链避让） */
+  congestedUntil: number
+}
+const nh = globalThis as unknown as { __ncbiHealth?: NcbiHealth }
+const ncbiHealth: NcbiHealth = (nh.__ncbiHealth ??= { flight: new Map(), congestedUntil: 0 })
+
+/** 提交成功打点（预提交与管线直接提交共用 — 在飞估计的数据源） */
+function markNcbiSubmitted(rid: string): void {
+  ncbiHealth.flight.set(rid, Date.now())
+  if (ncbiHealth.flight.size > 400) {
+    const horizon = Date.now() - NCBI_INFLIGHT_HORIZON_MS
+    for (const [k, t] of ncbiHealth.flight) {
+      if (t < horizon) ncbiHealth.flight.delete(k)
+    }
+  }
+}
+
+/** 收集端拿到终态（结果 / FAILED / RID 过期）→ 在飞计数销账。
+ *  未收集的 RID（弃用/兜底取代）靠视窗自然衰减 */
+function markNcbiSettled(rid: string): void {
+  ncbiHealth.flight.delete(rid)
+}
+
+/** 视窗内仍在飞（已提交未回收）的 NCBI 任务数估计 */
+function ncbiInflightCount(): number {
+  const horizon = Date.now() - NCBI_INFLIGHT_HORIZON_MS
+  let n = 0
+  for (const t of ncbiHealth.flight.values()) {
+    if (t >= horizon) n++
+  }
+  return n
+}
+
+/** 观测到 NCBI 队列拥堵（持续 WAITING / 提交限流页）→ 打点拥堵信号 ~2 分钟 */
+function markNcbiCongested(): void {
+  ncbiHealth.congestedUntil = Math.max(ncbiHealth.congestedUntil, Date.now() + 120_000)
+}
+function ncbiCongested(): boolean {
+  return ncbiHealth.congestedUntil > Date.now()
+}
+
+/** v2.41 批量感知的排队耐心（软兜底 WAITING 阈值）：
+ *  自家在飞多（批量预热中）或观测到拥堵时，排队是预期现象 — 延长阈值
+ *  优先等权威 BLASTp 结果；零星任务维持 90s 基线 */
+function adaptiveWaitingMs(): number {
+  const inflight = ncbiInflightCount()
+  const batch = Math.max(inflight, ncbiCongested() ? 6 : 0)
+  if (batch <= 0) return 90_000
+  return Math.min(90_000 + batch * 25_000, 420_000)
+}
+
 /**
  * 提交 BLASTp 任务（含重试），立即返回 RID。
  * 提交后 NCBI 侧即开始排队/计算 —— 调用方可在收集结果前先做其他工作。
@@ -146,10 +219,13 @@ async function submitBlastPut(
       const rid = text.match(/RID\s*=\s*(\S+)/)?.[1]
       if (rid) {
         const rtoe = parseInt(text.match(/RTOE\s*=\s*(\d+)/)?.[1] ?? '15', 10)
+        markNcbiSubmitted(rid) // v2.41 在飞打点（拥堵反馈的数据源）
         onProgress?.(`${label} 已提交 (RID=${rid}，预计 ${rtoe}s)${attempt > 0 ? `（第 ${attempt + 1} 次尝试成功）` : ''}`)
         return { rid, rtoe }
       }
-      // HTTP 200 但无 RID — NCBI 匿名提交限流（高峰期常见），退避后重试
+      // HTTP 200 但无 RID — NCBI 匿名提交限流（高峰期常见），退避后重试；
+      // v2.41 同时打点拥堵信号 — 预提交链稍后自动放缓补货节奏
+      markNcbiCongested()
       throw new Error(`${label} 未返回 RID（NCBI 限流/资源暂时不可用）`)
     } catch (e) {
       if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
@@ -248,8 +324,10 @@ export async function collectBlastPdbWithRescue(
   policy: BlastRescuePolicy = {},
   opts: BlastCollectOpts = {},
 ): Promise<BlastCollectResult> {
-  const waitingMs = policy.waitingMs ?? 90_000
   const searchingMs = policy.searchingMs ?? 240_000
+  /** v2.41：排队软兜底阈值 — 调用方显式指定时固定（last-resort 短预算场景），
+   *  缺省按批量在飞/拥堵信号自适应（见 adaptiveWaitingMs — 每轮轮询重估） */
+  const waitingThreshold = () => policy.waitingMs ?? adaptiveWaitingMs()
   /** v1.28：last-resort 重试场景传入硬性墙钟（缺省 null = v2.39 软僵尸保险） */
   const hardWallMs = policy.maxWallMs ?? null
   const startedAt = opts.resume?.startedAt ?? Date.now()
@@ -340,10 +418,12 @@ export async function collectBlastPdbWithRescue(
     }
     const xml = await pollRes.text()
     if (xml.includes('<BlastOutput>') || xml.includes('<BlastOutput_iterations>')) {
+      markNcbiSettled(rid) // v2.41 在飞销账（拥堵反馈的完成信号）
       onProgress?.(`BLAST 完成（等待 ${Math.round((Date.now() - startedAt) / 1000)}s），解析结果…`)
       return { hits: parseBlastXml(xml), provider: 'ncbi' }
     }
     if (xml.includes('Status=FAILED') || xml.includes('Status=UNKNOWN')) {
+      markNcbiSettled(rid) // v2.41 NCBI 侧终态 — 在飞销账
       const reason = xml.includes('Status=FAILED') ? 'NCBI 侧执行失败' : `RID ${rid} 已过期`
       const rescued = await tryRescue(reason)
       if (rescued) return rescued
@@ -373,7 +453,10 @@ export async function collectBlastPdbWithRescue(
         searchingSince = null
         waitingSince = Date.now()
       }
-      if (Date.now() - waitingSince > waitingMs) {
+      // v2.41 拥堵打点：持续排队超 60s → 全局拥堵信号（预提交链暂停补货 ~2 分钟，
+      // 队列消化后再继续 — 防批量预热把 NCBI 队列越压越深）
+      if (Date.now() - waitingSince > 60_000) markNcbiCongested()
+      if (Date.now() - waitingSince > waitingThreshold()) {
         const rescued = await tryRescue(`NCBI 队列拥堵（排队 ${secSince(waitingSince)}s 未开始计算）`)
         if (rescued) return rescued
       }
@@ -514,17 +597,26 @@ export function presubmitBlastSequence(sequence: string): boolean {
   if (presubmitMap.size >= PRESUBMIT_REGISTRY_MAX) return false
   const entry = { phase: 'queued', startedAt: Date.now() } as PresubmitEntry
   entry.task = (async () => {
-    // 全局节拍：串行链上排队（每发间隔 PRESUBMIT_PACE_MS — 链上每个条目依次轮到）
-    const turn = presubmitChain.then(() => undefined, () => undefined)
-    presubmitChain = turn.then(() => new Promise<void>((r) => setTimeout(r, PRESUBMIT_PACE_MS)))
-    await turn
-    if (entry.phase === 'bypassed') throw new Error('已被管线直接提交取代')
-    entry.phase = 'submitting'
-    const submitted = await submitBlastPdb(sequence)
-    entry.phase = 'done'
-    entry.rid = submitted.rid
-    entry.rtoe = submitted.rtoe
-    return { rid: submitted.rid, rtoe: submitted.rtoe }
+    // v2.41 串行链重构：节拍间隔 + 拥堵/在飞闸门 + 实际提交全部在链内完成 —
+    // 链上下一条目须等本条目提交完成后才轮到（闸门等待期间不泄露并发提交）。
+    // 闸门：NCBI 观测拥堵（持续 WAITING / 提交限流打点）或自家在飞达上限 →
+    // 暂停补货，5s 粒度等队列消化/拥堵冷却（在飞视窗 12min 兜底 — 永不死锁）
+    const run = (async () => {
+      await presubmitChain
+      await sleep(PRESUBMIT_PACE_MS)
+      while (entry.phase !== 'bypassed' && (ncbiCongested() || ncbiInflightCount() >= NCBI_PRESUBMIT_LEAD_CAP)) {
+        await sleep(5_000)
+      }
+      if (entry.phase === 'bypassed') throw new Error('已被管线直接提交取代')
+      entry.phase = 'submitting'
+      const submitted = await submitBlastPdb(sequence)
+      entry.phase = 'done'
+      entry.rid = submitted.rid
+      entry.rtoe = submitted.rtoe
+      return { rid: submitted.rid, rtoe: submitted.rtoe }
+    })()
+    presubmitChain = run.then(() => undefined, () => undefined)
+    return await run
   })().catch((e: unknown) => {
     if (entry.phase !== 'bypassed' && entry.phase !== 'done') entry.phase = 'failed'
     entry.error = e instanceof Error ? e.message : String(e)

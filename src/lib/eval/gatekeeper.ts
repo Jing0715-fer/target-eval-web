@@ -225,6 +225,9 @@ async function acquireParseSlot(waitLimit: number | null): Promise<() => void> {
 /**
  * 惰性清理：删除超过 TTL 的终态作业（DB 行 + db/reports/{jobId} 目录）
  * 与过期的合并报告（BatchReport 行 + db/reports/{batchId} 目录，v1.8+）。
+ * v2.41：高通量汇总看板（HtDashboard 行 + 目录）同样按 30 天 TTL 回收 —
+ * 与用户约定的「已完成任务结果和数据保留 30 天」对齐（此前看板行永不清理，
+ * 既不符合保留语义也让 SQLite 无限膨胀）。
  * 每小时最多执行一次（globalThis 时间戳闸门）；单次最多删 80 条防长尾。
  * fire-and-forget：调用方不 await、失败静默。
  */
@@ -257,6 +260,18 @@ export function scheduleJobTtlCleanup(): void {
           await fs.rm(path.join(process.cwd(), 'db', 'reports', r.id), { recursive: true, force: true })
         } catch { /* 磁盘清理失败不阻塞 */ }
         await db.batchReport.delete({ where: { id: r.id } }).catch(() => undefined)
+      }
+      // v2.41：过期高通量汇总看板（目录 + 行）— 与作业/合并报告同一 30 天口径
+      const staleDashboards = await db.htDashboard.findMany({
+        where: { createdAt: { lt: cutoff } },
+        select: { id: true },
+        take: 40,
+      })
+      for (const d of staleDashboards) {
+        try {
+          await fs.rm(path.join(process.cwd(), 'db', 'reports', d.id), { recursive: true, force: true })
+        } catch { /* 磁盘清理失败不阻塞 */ }
+        await db.htDashboard.delete({ where: { id: d.id } }).catch(() => undefined)
       }
     } catch { /* DB 不可用时忽略 */ }
   })()

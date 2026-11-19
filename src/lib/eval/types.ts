@@ -707,6 +707,9 @@ export interface JobSummary {
   /** v2.15：ESMFold 公共 API 预测结构信息（AFDB 无收录时的兜底；失败/超限 available=false） */
   esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
+  /** v2.41：LLM 报告未完整生成的章节数（失败/放弃重试的章节；缺省或 0 = 完整）—
+   * 高通量运行据此标记「报告不完整」靶点，可一键重跑补齐 */
+  reportLlmMissing?: number
   /** v2.13：deferred 批次同样按单靶点流程生成完整独立报告（展示并入合并报告的
    * 靶点单独评估页）；reportDeferred 仅表示 HTML 不单独落盘 */
   reportDeferred?: boolean

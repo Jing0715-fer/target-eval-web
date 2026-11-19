@@ -717,6 +717,8 @@ export interface JobSummary {
   /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入时） */
   esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
+  /** v2.41：LLM 报告未完整生成的章节数（缺省或 0 = 完整）— 高通量据此标记可重跑 */
+  reportLlmMissing?: number
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */
   reportDeferred?: boolean
   /** 批次关系说明（v1.8+ 非关联批量） */
@@ -958,6 +960,10 @@ export interface HTGroupItemState {
   error?: string
   /** v2.38：跳过原因备注（如「已导入 xxx.zip 的既有报告」；手动跳过时缺省） */
   skipNote?: string
+  /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
+  reportIncomplete?: boolean
+  /** v2.41：报告不完整说明（缺章数/失败摘要 — chip tooltip 与重跑确认展示） */
+  reportMissingNote?: string
 }
 
 /** 高通量运行的一组（组分隔符「;」切出的单元）：组内按复合物批量评估，单独出报告 */

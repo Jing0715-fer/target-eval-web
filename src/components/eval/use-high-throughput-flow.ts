@@ -132,20 +132,41 @@ function resetCanceledForResume(r: HTRunState): void {
   }
 }
 
-/** v2.38：全局重跑失败项（error/canceled → pending）— 返回重置数；组回可执行态 + 看板作废 */
+/** v2.38：全局重跑失败项（error/canceled → pending）— 返回重置数；组回可执行态 + 看板作废
+ *  v2.41：①done 但报告不完整（部分章节失败）的靶点也纳入重跑；
+ *  ②修复：重置时同步清 jobId — 旧作业已终态，pending+jobId 既不在 unstarted
+ *  也不在 reattach 集合里，重跑会被静默吞掉（历史 bug） */
 function resetFailedForRetry(r: HTRunState): number {
   let n = 0
   for (const g of r.groups) {
     for (const it of g.items) {
-      if (it.status === 'error' || it.status === 'canceled') {
+      if (it.status === 'error' || it.status === 'canceled' || (it.status === 'done' && it.reportIncomplete)) {
         it.status = 'pending'
         it.error = undefined
+        it.reportIncomplete = undefined
+        it.reportMissingNote = undefined
+        it.jobId = undefined // v2.41 修复：清旧作业引用（重置为重新提交）
         n++
       }
     }
     if (g.items.some((it) => it.status === 'pending')) touchGroupForRerun(g, r)
   }
   return n
+}
+
+/** v2.41：从终态作业详情推导「LLM 报告未完整生成」的备注（完整时 undefined）。
+ *  新作业读 summary.reportLlmMissing；旧版本作业（无该字段）从终态日志快照
+ *  推导（管线日志行「LLM 报告章节 X「…」 失败: …」）— 存量运行同样能标可重跑 */
+function reportIncompleteNote(job: JobDetail | null | undefined): string | undefined {
+  if (!job) return undefined
+  const missing = job.summary?.reportLlmMissing ?? 0
+  if (missing > 0) return `报告不完整（${missing} 个章节未生成 — 常见于供应商限流或超时，可重跑补齐）`
+  const failLine = (job.logs ?? []).find((l) => l.includes('LLM 报告章节') && l.includes('失败'))
+  if (failLine) {
+    const label = failLine.match(/LLM 报告章节\s*\S+「([^」]+)」/)?.[1]
+    return `报告不完整（${label ? `章节「${label}」等未生成` : '部分章节未生成'} — 可重跑补齐）`
+  }
+  return undefined
 }
 
 /** v2.38：zip 导入匹配 — 未评估靶点命中既有报告 → 标 skipped（报告在用户手里的 zip 中） */
@@ -430,9 +451,15 @@ export function useHighThroughputFlow() {
         if (r.job?.summary && r.job.summary.reportLlmOk !== true) {
           item.status = 'error'
           item.error = '数据收集完成，但报告生成 LLM 全部失败（常见于供应商限流或额度耗尽）'
+          item.reportIncomplete = undefined
+          item.reportMissingNote = undefined
           pauseWithReason(`第 ${groupNo} 组靶点 ${label} 报告生成失败（LLM 全章节未产出，常见于供应商限流或额度耗尽）。`)
         } else {
           item.status = 'done'
+          // v2.41：部分章节失败的「报告不完整」标记（不阻塞流程，但可一键重跑补齐）
+          const note = reportIncompleteNote(r.job)
+          item.reportIncomplete = note ? true : undefined
+          item.reportMissingNote = note
           // 非关联批次 — 各靶点独立报告，完成即自动下载（关联批次 deferred 无独立 HTML）
           // v2.25：目录前缀 = 运行文件夹 + 组号段（G01_…），同次运行集中在一个新文件夹
           if (!related && item.jobId) {
@@ -447,11 +474,15 @@ export function useHighThroughputFlow() {
       } else if (r.status === 'error') {
         item.status = 'error'
         item.error = r.job?.error ?? '评估失败（详见该作业日志）'
+        item.reportIncomplete = undefined
+        item.reportMissingNote = undefined
         if (isRateLimitError(r.job?.error)) {
           pauseWithReason(`靶点 ${label} 作业执行失败（限流/配额）：${(r.job?.error ?? '').slice(0, 120)}`)
         }
       } else {
         item.status = 'canceled'
+        item.reportIncomplete = undefined
+        item.reportMissingNote = undefined
       }
     },
     [pauseWithReason],
@@ -1042,23 +1073,29 @@ export function useHighThroughputFlow() {
     snapshot()
   }, [ensureEditable, snapshot])
 
-  /** v2.38：重跑一个靶点（error/canceled/skipped → pending） */
+  /** v2.38：重跑一个靶点（error/canceled/skipped → pending）；
+ *  v2.41：done 但报告不完整（部分章节失败）也可重跑；重置时清旧 jobId
+ *  （旧作业已终态 — pending+jobId 不会被重新提交，历史 bug） */
   const retryItem = useCallback((groupIndex: number, key: string): void => {
     if (!ensureEditable()) return
     const r = runRef.current
     const g = r?.groups.find((x) => x.index === groupIndex)
     const it = g?.items.find((x) => x.key === key)
     if (!r || !g || !it) return
-    if (it.status === 'error' || it.status === 'canceled' || it.status === 'skipped') {
+    if (it.status === 'error' || it.status === 'canceled' || it.status === 'skipped' || (it.status === 'done' && it.reportIncomplete)) {
       it.status = 'pending'
       it.error = undefined
       it.skipNote = undefined
+      it.reportIncomplete = undefined
+      it.reportMissingNote = undefined
+      it.jobId = undefined // v2.41 修复：清旧作业引用（重置为重新提交）
       touchGroupForRerun(g, r)
       snapshot()
     }
   }, [ensureEditable, snapshot])
 
-  /** v2.38：组级 — 重跑本组全部失败/中断项（error/canceled → pending） */
+  /** v2.38：组级 — 重跑本组全部失败/中断项（error/canceled → pending）；
+ *  v2.41：报告不完整的 done 项也纳入（含清 jobId 修复） */
   const retryGroupFailures = useCallback((groupIndex: number): void => {
     if (!ensureEditable()) return
     const r = runRef.current
@@ -1066,16 +1103,19 @@ export function useHighThroughputFlow() {
     if (!r || !g) return
     let n = 0
     for (const it of g.items) {
-      if (it.status === 'error' || it.status === 'canceled') {
+      if (it.status === 'error' || it.status === 'canceled' || (it.status === 'done' && it.reportIncomplete)) {
         it.status = 'pending'
         it.error = undefined
+        it.reportIncomplete = undefined
+        it.reportMissingNote = undefined
+        it.jobId = undefined // v2.41 修复：清旧作业引用
         n++
       }
     }
     if (n > 0) {
       touchGroupForRerun(g, r)
       snapshot()
-      toast({ title: `第 ${groupIndex + 1} 组已重置 ${n} 个失败靶点`, description: '点击「继续运行」开始重跑。' })
+      toast({ title: `第 ${groupIndex + 1} 组已重置 ${n} 个失败/报告不完整靶点`, description: '点击「继续运行」开始重跑。' })
     }
   }, [ensureEditable, snapshot])
 
@@ -1163,7 +1203,26 @@ export function useHighThroughputFlow() {
           .map((it) => it.jobId as string),
       )
       const reportIds = r.groups.flatMap((g) => (g.mergedReportId ? [g.mergedReportId] : []))
-      void backfillJobCache(jobIds)
+      // v2.41：补档完成后回扫 done 靶点 — 从终态详情（含旧版本作业的日志快照）
+      // 推导「报告不完整」标记（新作业在 finishItem 已实时标记）；补挂后可一键重跑
+      void backfillJobCache(jobIds).then(() => {
+        const cur = runRef.current
+        if (!cur || cur.id !== id) return
+        let changed = false
+        for (const g of cur.groups) {
+          for (const it of g.items) {
+            if (it.status === 'done' && it.jobId && !it.reportIncomplete) {
+              const note = reportIncompleteNote(getCachedJobDetail(it.jobId))
+              if (note) {
+                it.reportIncomplete = true
+                it.reportMissingNote = note
+                changed = true
+              }
+            }
+          }
+        }
+        if (changed) snapshot()
+      })
       void backfillBatchReportCache(reportIds)
       // v2.36：打开时发现汇总报告生成被刷新中断（done + pending 且无结果）→ 自动续生成
       if (r.status === 'done' && r.dashboardPending && !r.dashboardId) void finalizeHtDashboardRef.current?.()

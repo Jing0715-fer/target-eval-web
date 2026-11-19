@@ -128,6 +128,6 @@ export async function POST(req: Request) {
     invalidSkipped: Math.max(0, total - accs.length - normSeqs.length),
     antibodySkipped,
     registrySize: presubmitRegistrySize(),
-    note: '服务端按 ~15s/条节拍陆续提交 NCBI；作业开始评估时自动命中预提交结果（按序列精确匹配），未命中则常规提交，无需额外操作。',
+    note: '服务端按 ~15s/条节拍陆续提交 NCBI（队列拥堵/在飞过多时自动放缓 — 防批量提交压深队列）；作业开始评估时自动命中预提交结果（按序列精确匹配），未命中则常规提交，无需额外操作。',
   })
 }
