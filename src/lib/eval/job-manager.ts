@@ -11,6 +11,10 @@
  *  - 进度/日志回调写入内存（日志环缓冲 60 条），终态持久化到 SQLite
  *  - v2.39：hasOtherActiveJobs — 全场活跃作业探测（BLAST 软僵尸保险
  *    「等全场收尾」的判定依据，见 blast.ts）
+ *  - v2.40：同靶点指纹去重（dedup-attach）— 同一归属对完全相同的评估输入
+ *    重复提交时（断点恢复重提 / 响应丢失重试 / 恢复运行与遗留作业撞车），
+ *    直接接上仍在执行的既有作业：不新建、不占并发配额（内存注册表即权威，
+ *    进程重启后自然清空 — 重启后作业本就全部夭折，无误接风险）
  */
 import { db } from '@/lib/db'
 import { STAGE_DEFS, STAGE_RANGES, type JobProgress, type JobStatus, type StageInfo } from './types'
@@ -36,11 +40,15 @@ function jobConcurrency(): number {
 const g = globalThis as unknown as {
   __evalJobs?: Map<string, JobSnapshot>
   __evalQueueState?: { active: number; pending: Array<() => Promise<void>> }
+  /** v2.40：「归属键|评估指纹」→ 活跃作业 id（终态时淘汰） */
+  __evalDedup?: Map<string, string>
 }
 
 const jobs: Map<string, JobSnapshot> = (g.__evalJobs ??= new Map())
 /** 并发池调度状态（HMR / 多次导入间共享同一实例） */
 const pool: { active: number; pending: Array<() => Promise<void>> } = (g.__evalQueueState ??= { active: 0, pending: [] })
+/** v2.40 同靶点去重注册表（内存态，随进程存亡） */
+const dedup: Map<string, string> = (g.__evalDedup ??= new Map())
 
 function nowTime(): string {
   return new Date().toTimeString().slice(0, 8)
@@ -79,6 +87,12 @@ export function getJobSnapshot(id: string): JobSnapshot | undefined {
 export function markStatus(id: string, status: JobStatus): void {
   const snap = jobs.get(id)
   if (snap) snap.status = status
+  // v2.40：终态时淘汰去重注册表中指向本作业的条目（可被同靶点重新提交）
+  if (status === 'done' || status === 'error' || status === 'canceled') {
+    for (const [k, v] of dedup) {
+      if (v === id) dedup.delete(k)
+    }
+  }
 }
 
 export function setJobRunning(id: string): void {
@@ -112,6 +126,32 @@ function schedulePool(): void {
         schedulePool()
       })
   }
+}
+
+// ─── v2.40 同靶点去重（dedup-attach）──────────────────────────────────
+
+/** 记录「归属 × 评估指纹 → 活跃作业」（作业创建时调用）。
+ *  注册表有界：超过 200 条时先淘汰已终态/已逐出的陈旧条目。 */
+export function rememberDedup(ownerKey: string, fp: string, jobId: string): void {
+  if (dedup.size > 200) {
+    for (const [k, id] of dedup) {
+      const snap = jobs.get(id)
+      if (!snap || (snap.status !== 'pending' && snap.status !== 'running')) dedup.delete(k)
+    }
+  }
+  dedup.set(`${ownerKey}|${fp}`, jobId)
+}
+
+/** 查找同归属同指纹且仍在执行的作业 — 命中则接上（不新建不占配额）。
+ *  以内存注册表为权威：条目指向的作业已终态/被逐出/不存在 → 淘汰并返回 undefined。 */
+export function findActiveByFingerprint(ownerKey: string, fp: string): string | undefined {
+  const key = `${ownerKey}|${fp}`
+  const id = dedup.get(key)
+  if (!id) return undefined
+  const snap = jobs.get(id)
+  if (snap && (snap.status === 'pending' || snap.status === 'running')) return id
+  dedup.delete(key)
+  return undefined
 }
 
 /**

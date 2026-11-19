@@ -21,8 +21,13 @@ import { db } from '@/lib/db'
 // ─── 配额常量（公网默认档；可通过环境变量覆盖） ────────────────────────────────
 export const MAX_GLOBAL_PENDING = num(process.env.EVAL_MAX_QUEUE, 16)
 /** v2.39：2 → 6 — 高通量并行窗口对齐（评估管线 I/O 密集，BLAST 轮询等待期
- *  其余作业照常推进；内存峰值由解析信号量与作业池独立约束） */
-export const MAX_ACTIVE_PER_IP = num(process.env.EVAL_MAX_ACTIVE_PER_IP, 6)
+ *  其余作业照常推进；内存峰值由解析信号量与作业池独立约束）
+ *  v2.40：6 → 8 — 留出「旧运行遗留的慢 BLAST 作业 / 断点重挂」余量：
+ *  客户端编排窗口仍自限 6，但恢复运行时旧运行可能还有未收尾作业占坑
+ *  （用户反馈：6 坑全满 → 新提交 429 → 整场运行被暂停）。执行并发仍由
+ *  作业池 EVAL_JOB_CONCURRENCY=6 独立约束，超出的 2 个仅在队列等待，
+ *  内存不受影响 */
+export const MAX_ACTIVE_PER_IP = num(process.env.EVAL_MAX_ACTIVE_PER_IP, 8)
 /**
  * 每 IP 24h 作业创建配额。v2.23.1：30 → 150 — 高通量评估一次运行动辄上百作业
  * （如 102 行靶点清单 ≈ 100+ 作业），30/日使高通量当天即触发自动暂停、跨多日

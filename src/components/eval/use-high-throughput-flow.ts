@@ -7,7 +7,8 @@
  *  - 组内多个靶点 = 按现有复合物批量评估链路（关系判断 → 并发评估 → ≥2 成功出合并报告）
  *  - 组内仅一个靶点 = 单作业独立评估
  *  - v2.39：组间并行推进（原严格串行）— 全部组同时开动，共享跨组全局并发窗口
- *    HT_WINDOW（=6，与服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=6 对齐）。
+ *    HT_WINDOW（=6，与服务端作业执行池 EVAL_JOB_CONCURRENCY=6 对齐；
+ *    每 IP 准入上限 v2.40 起 = 8，留出旧运行遗留作业/断点重挂余量）。
  *    用户核心诉求：「有些 BLAST 结果很久返不回结果，轮询期间可以先进行其他评估」—
  *    慢 BLAST 只占用自己的窗口槽位，不阻塞其他组/靶点推进
  *  - v2.39：启动/恢复时 BLAST 预热（blast-warmup）— 全部待评估序列一次性发服务端
@@ -19,7 +20,10 @@
  *    作业完成但报告 LLM 全部失败（reportLlmOk !== true，常见于供应商限流/额度耗尽）、
  *    关系判断 / 合并报告生成失败的限流指纹
  *  - 暂停 = 不再提交新作业；已在跑的作业让其在服务器自然跑完（数据不浪费），
- *    结果照常记入组状态
+ *    结果照常记入组状态。v2.40：退出 HT 视图同理（暂停语义）— 在飞作业继续
+ *    收尾并记录，项保持 running；恢复时直接接上，不产生重复提交/僵尸占坑。
+ *    服务端 v2.40 同靶点去重（dedup-attach）兜底：同归属对完全相同的评估输入
+ *    重复提交时直接接上仍在执行的既有作业（不新建、不占并发配额）
  *  - 配额恢复后由用户「重新开始运行」：从断点续跑 —— 已完成/已终态的靶点不重复评估，
  *    未提交的继续提交，未开始的组继续开
  *
@@ -54,14 +58,17 @@ export type HTPhase = 'idle' | 'running' | 'paused' | 'stopped' | 'done'
 const POLL_INTERVAL_MS = 2000
 /** 连续轮询失败达到该值 → 网络异常提示（继续重试） */
 const MAX_CONSECUTIVE_FAILURES = 3
-/** v2.39 跨组全局并发窗口（原组内窗口 2 → 全局 6 — 与服务端每 IP 并发上限
- *  EVAL_MAX_ACTIVE_PER_IP=6 / 作业池 EVAL_JOB_CONCURRENCY=6 对齐）：
+/** v2.39 跨组全局并发窗口（原组内窗口 2 → 全局 6 — 与服务端作业执行池
+ *  EVAL_JOB_CONCURRENCY=6 对齐；每 IP 准入上限 v2.40 起 = 8，客户端仍自限 6
+ *  保证进度反馈紧凑，服务端余量 2 坑容忍旧运行遗留/断点重挂的作业占坑）：
  *  组间并行推进，全部组的待评估项共享这 6 个槽位 — 慢 BLAST 只占自己的槽，
  *  其余靶点照常推进（用户核心诉求） */
 const HT_WINDOW = 6
 /** v2.39：作业创建遇到「同时最多/排队较多」型瞬时 429 的有界退避重试
- *  （窗口释放即可提交成功；耗尽才按限流暂停处理） */
-const CREATE_JOB_QUOTA_RETRIES = 8
+ *  （窗口释放即可提交成功；耗尽才按限流暂停处理）。
+ *  v2.40：8 → 40 次（15s 退避 ≈ 最长 10 分钟）— 旧运行遗留的慢 BLAST 作业
+ *  短期占坑时，新提交退避等待窗口释放，而不是把整场运行暂停等人工干预 */
+const CREATE_JOB_QUOTA_RETRIES = 40
 const CREATE_JOB_QUOTA_RETRY_MS = 15_000
 
 /** v2.25 目录段安全化：非法字符折叠为空格并限长 */
@@ -211,6 +218,10 @@ export function useHighThroughputFlow() {
   /** v2.39 跨组全局并发窗口状态（active = 占用槽位数；waiters = 排队等待者）。
  *  组间并行后由全部组共享 — 慢 BLAST 只占自己的槽位，不阻塞其他组/靶点 */
   const windowRef = useRef<{ active: number; waiters: Array<() => void> }>({ active: 0, waiters: [] })
+  /** v2.40 编排链代际（epoch）：startRun / resumeRun 每次启动新链时 +1；
+ *  旧链（退出视图后仍在收尾的在飞作业链）在关键推进点检测到代际过时即让位，
+ *  防止新旧双链同时推进同一组（重复生成合并报告 / 重复标记完成） */
+  const orchestrateEpochRef = useRef(0)
   /** v2.39 关系判断串行链（并行组下多组同时打 LLM 关系判断易触发限流；
  *  判断很快不构成瓶颈 — 单靶点组无判断不受影响） */
   const judgeChainRef = useRef<Promise<unknown>>(Promise.resolve())
@@ -455,7 +466,7 @@ export function useHighThroughputFlow() {
    * v2.39：组间并行 — 本组的待评估项通过全局窗口（windowRef）跨组共享
    * HT_WINDOW 个槽位，慢 BLAST 只占自己的槽，不阻塞其他组/靶点。
    */
-  const runGroup = async (g: HTGroupState): Promise<void> => {
+  const runGroup = async (g: HTGroupState, epoch: number): Promise<void> => {
     const runState = runRef.current
     if (!runState) return
     // v2.38：skipped = 已处理（用户选择不评估 / zip 导入既有报告）— 全部跳过的组直接完成
@@ -507,6 +518,10 @@ export function useHighThroughputFlow() {
     // v1.11 ≥90% 高一致组委托：组内首个提交 BLAST 的作业为家族代表，其余共享结果
     const blastGroups = g.relation?.blastGroups ?? []
 
+    // v2.40：旧链让位 — 恢复/重开已启动新编排链时，本组推进权交给新链
+    // （在飞作业的结果记录不受影响，由 launchOne/finishItem 独立完成）
+    if (epoch !== orchestrateEpochRef.current) return
+
     // ── ② 全局并发窗口（v2.39：跨组共享 HT_WINDOW 个槽位；重入：已终态跳过；
     //    running+jobId 接上等待；未提交的重新提交。窗口满则排队等槽位释放，
     //    暂停/取消时等待者被唤醒直接放弃，不再提交新作业）──
@@ -544,7 +559,26 @@ export function useHighThroughputFlow() {
           }
       const created = await createJob(req)
       if (cancelRef.current || pausedRef.current) {
-        item.status = 'canceled'
+        // v2.40 提交-暂停/停止竞态收尾：刚创建成功的服务器作业不能被丢弃成
+        // 无人轮询的僵尸（占并发坑位 + 结果浪费）：
+        //  - 停止（cancel）：主动撤销服务器作业（cancelRun 的 DELETE 批次可能已错过它）；
+        //  - 暂停（paused）：记录 jobId 并照常轮询到终态（暂停语义 — 结果记入组
+        //    状态；恢复运行时该项已是 running+jobId，直接接上不重复提交）
+        if (created.jobId && cancelRef.current) {
+          void fetch(`/api/jobs/${created.jobId}`, { method: 'DELETE' }).catch(() => undefined)
+          item.status = 'canceled'
+        } else if (created.jobId && pausedRef.current) {
+          item.jobId = created.jobId
+          item.status = 'running'
+          activeJobIdsRef.current.add(created.jobId)
+          snapshot()
+          const r = await waitForJobTerminal(created.jobId)
+          finishItem(item, label, related, g.index + 1, r)
+          snapshot()
+          return
+        } else {
+          item.status = 'canceled'
+        }
         snapshot()
         return
       }
@@ -561,6 +595,7 @@ export function useHighThroughputFlow() {
       item.status = 'running'
       activeJobIdsRef.current.add(created.jobId)
       displayJobIdRef.current = created.jobId // 进度面板跟随最新创建的作业
+      snapshot() // v2.40：提交成功即时持久化 — 刷新窗口内 jobId 不丢失（恢复时直接接上而非重复提交）
       const r = await waitForJobTerminal(created.jobId)
       finishItem(item, label, related, g.index + 1, r)
       snapshot()
@@ -597,6 +632,9 @@ export function useHighThroughputFlow() {
 
     // 等待本组全部项收尾（暂停时已在跑的作业照常收尾；等待槽位的项被唤醒后放弃）
     if (activePromises.length > 0) await Promise.all(activePromises)
+
+    // v2.40：旧链让位 — 新链已接管本组（避免双链重复推进合并报告/完成标记）
+    if (epoch !== orchestrateEpochRef.current) return
 
     // 窗口收尾（暂停时后台作业可能仍在跑 — orchestrate 已退出循环，这里的 promise 由自身驱动收尾）
     if (pausedRef.current) {
@@ -669,11 +707,15 @@ export function useHighThroughputFlow() {
   const orchestrate = async (): Promise<void> => {
     const runState = runRef.current
     if (!runState) return
+    // v2.40：启动新编排链（代际 +1）— 旧链在关键推进点检测到过时即让位
+    const epoch = ++orchestrateEpochRef.current
     const runnable = runState.groups.filter((g) => g.status !== 'done' && g.status !== 'canceled')
     if (runnable.length > 0) {
       snapshot()
-      await Promise.all(runnable.map((g) => runGroup(g)))
+      await Promise.all(runnable.map((g) => runGroup(g, epoch)))
     }
+    // v2.40：旧链让位 — 新链已接管运行（避免双链重复收尾/生成看板）
+    if (epoch !== orchestrateEpochRef.current) return
     if (pausedRef.current) return // runGroup/pauseWithReason 已置状态；后台作业继续收尾
     // v2.38 手动停止：未开始的组标 canceled，运行标 stopped（可恢复 — 继续运行时
     // canceled 项/组重置为 pending 重新提交）；不生成汇总看板（那是自然完成的收尾）
@@ -1218,13 +1260,17 @@ export function useHighThroughputFlow() {
     }
   }, [stopTick])
 
-  /** 退出高通量视图回输入页（运行记录保留在本地与 HT Tab；running 时视为中断保存） */
+  /** 退出高通量视图回输入页（运行记录保留在本地与 HT Tab）。
+   * v2.40：运行中退出 = 暂停语义（原为 cancel 语义 — 在飞作业被标 canceled 但
+   * 服务器侧照跑，成为无人轮询的僵尸：占并发坑位 + 恢复时被重复提交，双重浪费）。
+   * 改为与手动暂停一致：在飞作业继续执行并记录结果，项保持 running —
+   * 回到 HT 标签页「继续运行」时直接接上（reattach），不重复提交、不虚占坑位；
+   * 尚未提交的项（等槽位/退避中）被唤醒后放弃，恢复时重新提交（无服务器作业，无浪费）。 */
   const exitToIdle = useCallback((): void => {
     const r = runRef.current
     if (r && r.status === 'running') {
       r.status = 'interrupted'
       pausedRef.current = true
-      cancelRef.current = true
       saveHTRun(r)
     }
     stopTick()
