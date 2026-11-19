@@ -507,7 +507,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       {/* ── 底部操作（v2.25：取消按钮与内容区拉开间距 mt-2；说明文字上移） ── */}
       <div className="flex flex-col gap-2.5">
         <span className="font-mono text-[10.5px] text-muted-foreground/60">
-          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后统计看板（评分统计 + AI 整体可行性报告）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器（最近 5 次）
+          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器（最近 5 次）
         </span>
         <div className="flex flex-wrap items-center gap-2.5">
           {isRunning && (

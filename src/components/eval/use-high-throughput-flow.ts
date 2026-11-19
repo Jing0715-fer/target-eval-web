@@ -90,6 +90,8 @@ export function useHighThroughputFlow() {
 
   /** 权威运行状态（可变引用；每次关键节点 snapshot() 落 localStorage + 刷视图） */
   const runRef = useRef<HTRunState | null>(null)
+  /** v2.36：finalizeHtDashboard 的稳定引用（openRunById 自动续生成用 — 声明先于函数体） */
+  const finalizeHtDashboardRef = useRef<(() => Promise<void>) | null>(null)
   /** v2.25：一次高通量运行的自动下载统一目录前缀 — 默认下载目录下新建文件夹，
    *  同次运行的全部报告（每靶点独立报告 + 合并报告）都落在同一文件夹内。
    *  命名：TargetEval_HT_日期_Ng（恢复运行/openRunById 时按 run 元数据重建，
@@ -510,7 +512,7 @@ export function useHighThroughputFlow() {
     const reports = runState.groups.filter((g) => g.mergedReportId || g.items.some((it) => it.status === 'done')).length
     toast({
       title: '高通量评估完成',
-      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；统计看板正在生成（评分统计 + AI 整体可行性报告，完成后自动下载）。运行日志可在每组卡片中回看。`,
+      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
     })
   }
 
@@ -578,6 +580,10 @@ export function useHighThroughputFlow() {
     saveHTRun(runState)
     setRun(cloneRun(runState))
   }
+  // ref 赋值须在 effect 内（render 期访问 ref 违反 React 规则；每次渲染后刷新引用）
+  useEffect(() => {
+    finalizeHtDashboardRef.current = finalizeHtDashboard
+  })
 
   /** 启动一次高通量运行（HT Tab → 开始高通量评估） */
   const startRun = async (payload: HTStartPayload): Promise<StartResult> => {
@@ -703,6 +709,8 @@ export function useHighThroughputFlow() {
       setNetworkIssue(false)
       if (r.status === 'running') r.status = 'interrupted'
       setPhase(r.status === 'done' ? 'done' : 'paused')
+      // v2.36：打开时发现汇总报告生成被刷新中断（done + pending 且无结果）→ 自动续生成
+      if (r.status === 'done' && r.dashboardPending && !r.dashboardId) void finalizeHtDashboardRef.current?.()
       if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
     },
     [],
