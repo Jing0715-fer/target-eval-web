@@ -932,7 +932,8 @@ export interface HtSeqTarget {
   header: string
   seq: string
   length: number
-  /** v2.27：行内构建区间（UniProt 编号；作业 options.range — 仅保留链范围重叠的结构） */
+  /** v2.27 行内构建区间 · v2.37 起序列靶点不再填充（接口兼容保留）：序列靶点的
+   *  评估区间由管线在 BLAST 归属后推导（构建比对 / BLAST nr HSP），不从 Excel 行文本配对 */
   range?: [number, number]
 }
 

@@ -23,6 +23,7 @@ import { runPipelineSegment, sanitizeCheckpoint, type InlineEvalTable, type Pipe
 import { getOwner } from '@/lib/eval/request-guard'
 import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
+import { isYearSpan } from '@/lib/eval/construct-range'
 import { MAX_PDB_UNLIMITED, type EvaluationOptions, type FormInsights, type InputMode } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
@@ -116,13 +117,15 @@ export async function POST(req: Request) {
   }
   syncG.__syncEvalActive = (syncG.__syncEvalActive ?? 0) + 1
 
-  // 评估范围（与 /api/evaluate 同规则）
+  // 评估范围（与 /api/evaluate 同规则；v2.37 年份区间守卫 — 两端均在 1900-2099 且
+  // 跨度 ≤60 的「2022-2024」类年份区间忽略，改由管线 BLAST 归属后推导评估区间）
   const rawRange = body.options?.range
   let range: [number, number] | undefined
   if (Array.isArray(rawRange) && rawRange.length === 2) {
     const s = Number(rawRange[0]), e = Number(rawRange[1])
     if (Number.isFinite(s) && Number.isFinite(e) && s >= 1 && e >= s && e <= 100000) {
-      range = [Math.round(s), Math.round(e)]
+      const rs = Math.round(s), re = Math.round(e)
+      if (!isYearSpan(rs, re)) range = [rs, re]
     }
   }
   const options: EvaluationOptions = {

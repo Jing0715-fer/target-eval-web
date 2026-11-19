@@ -11,6 +11,7 @@ import { getOwner } from '@/lib/eval/request-guard'
 import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { checkJobQuota, quotaResponse, scheduleJobTtlCleanup, QuotaError } from '@/lib/eval/gatekeeper'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
+import { isYearSpan } from '@/lib/eval/construct-range'
 import { MAX_PDB_UNLIMITED, type BlastGroup, type EvaluationOptions, type InputMode } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
@@ -95,12 +96,15 @@ export async function POST(req: Request) {
   }
 
   // v1.23 评估范围限定（UniProt 残基编号，1-based 闭区间）：仅 UniProt 单靶点无伴随序列时有效
+  // v2.37 年份区间守卫：两端均在 1900-2099 且跨度 ≤60（如 2022-2024 流行年份）→ 忽略，
+  // 评估区间改由管线在 BLAST 归属后推导（构建比对 / BLAST nr HSP）
   const rawRange = body.options?.range
   let range: [number, number] | undefined
   if (Array.isArray(rawRange) && rawRange.length === 2) {
     const s = Number(rawRange[0]), e = Number(rawRange[1])
     if (Number.isFinite(s) && Number.isFinite(e) && s >= 1 && e >= s && e <= 100000) {
-      range = [Math.round(s), Math.round(e)]
+      const rs = Math.round(s), re = Math.round(e)
+      if (!isYearSpan(rs, re)) range = [rs, re]
     }
   }
 

@@ -399,7 +399,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             <li
               key={`seq-${gi}`}
               className="flex flex-wrap items-center gap-1.5 rounded-lg border border-teal-500/30 bg-teal-500/[0.04] px-2.5 py-1.5"
-              title="该行无 UniProt ID 但有序列 → 逐行成组（同一行的多个靶点作为同一组）；抗体链已忽略、同源多聚体只计 1 条；跨行所有链 ≥95% 同源的重复交付行已并入本组（首个交付行为代表）；组内每条序列作为独立序列靶点评估（结构预测走 ESMFold 兜底）"
+              title="该行无 UniProt ID 但有序列 → 逐行成组（同一行的多个靶点作为同一组）；抗体链已忽略、同源多聚体只计 1 条；跨行所有链 ≥95% 同源的重复交付行已并入本组（首个交付行为代表）；组内每条序列作为独立序列靶点评估（结构预测走 ESMFold 兜底）。评估区间由管线在 BLAST 归属后自动推导（构建比对 / BLAST nr 比对坐标 — 不取自 Excel 行文本，年份等数字不会被误当残基区间）"
             >
               <span className="shrink-0 rounded-md bg-teal-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-teal-600 dark:text-teal-400">
                 G{String(parsed.groups.length + gi + 1).padStart(2, '0')}
