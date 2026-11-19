@@ -26,7 +26,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
-import { cacheJobDetail, getCachedJobDetail } from './job-cache'
+import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -121,6 +121,10 @@ export function useHighThroughputFlow() {
   useEffect(() => {
     const hit = markInterruptedOnLoad()
     refreshRecentRuns()
+    // v2.37：挂载即后台补缓存（6h 节流）— 本地 HT 运行 + 服务端历史列表中
+    // 已终态但浏览器尚无副本的作业/合并报告，趁实例存活静默留档；
+    // 实例回收后组日志/结果/合并报告仍可离线回看
+    void backfillCacheOnMount()
     if (hit) {
       toast({
         title: '检测到未完成的高通量运行',
@@ -449,6 +453,9 @@ export function useHighThroughputFlow() {
           goal: runState.goal,
         })
         g.mergedReportId = merged.id
+        // v2.37：合并报告生成完成（markdown 完整）→ 立即留入浏览器本地缓存
+        // （实例回收后「打开合并报告」仍可从本地副本回看）
+        cacheBatchReport(merged)
         autoDownloadHtmlReport(
           `/api/evaluate/batch-report?id=${encodeURIComponent(merged.id)}&download=1`,
           `batch:${merged.id}`,
@@ -709,6 +716,16 @@ export function useHighThroughputFlow() {
       setNetworkIssue(false)
       if (r.status === 'running') r.status = 'interrupted'
       setPhase(r.status === 'done' ? 'done' : 'paused')
+      // v2.37：打开历史运行 → 趁服务实例仍存活，后台补齐该运行全部终态作业与
+      // 各组合并报告的本地副本（组日志弹窗/报告入口此后不再依赖服务端存活）
+      const jobIds = r.groups.flatMap((g) =>
+        g.items
+          .filter((it) => (it.status === 'done' || it.status === 'error') && it.jobId)
+          .map((it) => it.jobId as string),
+      )
+      const reportIds = r.groups.flatMap((g) => (g.mergedReportId ? [g.mergedReportId] : []))
+      void backfillJobCache(jobIds)
+      void backfillBatchReportCache(reportIds)
       // v2.36：打开时发现汇总报告生成被刷新中断（done + pending 且无结果）→ 自动续生成
       if (r.status === 'done' && r.dashboardPending && !r.dashboardId) void finalizeHtDashboardRef.current?.()
       if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })

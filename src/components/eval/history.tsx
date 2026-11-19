@@ -19,7 +19,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { toast } from '@/hooks/use-toast'
 import { deleteJobById, downloadHtReportArchive, fetchBatchReportList, fetchJobList, isStatelessEnv } from './api'
-import { mergeJobListWithCache, removeCachedJob } from './job-cache'
+import { mergeBatchListWithCache, mergeJobListWithCache, removeCachedJob } from './job-cache'
 import { removeSessionJob, sessionJobToListItem, getSessionJobs } from './session-history'
 import { StatusBadge } from './badges'
 import { formatDateTime, formatPercent } from './format'
@@ -243,7 +243,8 @@ export function HistoryDialog({
       ])
       // v2.36：合并本地缓存副本条目（部署实例回收后服务端列表丢失的记录）
       setJobs(mergeJobListWithCache(jobList))
-      setBatches(batchList)
+      // v2.37：合并报告列表同样合并本地缓存副本
+      setBatches(mergeBatchListWithCache(batchList))
     } catch {
       setJobs([])
       setBatches([])
@@ -440,7 +441,8 @@ export function RecentEvaluations({
       if (!cancelled) {
         // v2.36：合并本地缓存副本条目（部署实例回收后服务端列表丢失的记录）
         setJobs(mergeJobListWithCache(jobList))
-        setBatches(batchList)
+        // v2.37：合并报告列表同样合并本地缓存副本
+        setBatches(mergeBatchListWithCache(batchList))
       }
     })
     return () => {

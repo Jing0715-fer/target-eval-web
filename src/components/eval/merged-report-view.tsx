@@ -362,7 +362,10 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const [previewSlow, setPreviewSlow] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   /** v2.10 ③：内嵌完整报告加载失败（文件丢失/未生成）→ 降级旧版 React 数据区块 */
-  const [embedFailed, setEmbedFailed] = useState(false)
+  const [embedLoadFailed, setEmbedLoadFailed] = useState(false)
+  /** v2.37：本地缓存副本（服务端实例已回收）→ 直接走 React 数据区块，
+   *  不再请求注定 404 的 iframe（markdown 已在本地，降级视图完整可用） */
+  const embedFailed = embedLoadFailed || report.fromCache === true
   const reportFrameRef = useRef<HTMLIFrameElement>(null)
 
   const openPreview = () => {
@@ -402,6 +405,17 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           合并报告 {report.id.slice(0, 8)} · {targetLabels.length} 个关联靶点
         </span>
       </div>
+
+      {/* v2.37：本地缓存副本来源横幅（服务端实例已回收，数据来自浏览器留存副本） */}
+      {report.fromCache && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span>
+            服务端数据已随部署实例回收，当前展示的是浏览器本地留存的副本（生成完成时自动存入）。
+            完整版 HTML 报告已在该组完成时自动下载到本机下载目录。
+          </span>
+        </div>
+      )}
 
       {/* 1. 刊头 */}
       <motion.header
@@ -532,11 +546,13 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           </div>
         </div>
         {!embedFailed ? (
-          <MergedReportFrame url={inlineUrl} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} />
+          <MergedReportFrame url={inlineUrl} iframeRef={reportFrameRef} onFail={() => setEmbedLoadFailed(true)} />
         ) : (
           <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            完整 HTML 报告加载失败（文件可能已被服务器清理）— 已切换为在线数据视图；可尝试「大窗预览 / 下载 HTML」或重新发起评估。
+            {report.fromCache
+              ? '当前展示为浏览器本地缓存副本（服务端实例已回收）— 完整版 HTML 报告已在完成时自动下载到本机下载目录，可从那里查看。'
+              : '完整 HTML 报告加载失败（文件可能已被服务器清理）— 已切换为在线数据视图；可尝试「大窗预览 / 下载 HTML」或重新发起评估。'}
           </div>
         )}
       </motion.section>

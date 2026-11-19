@@ -34,7 +34,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatDuration } from './format'
-import { getCachedJobDetail } from './job-cache'
+import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import { EvalLogConsole } from './log-console'
 import { ProgressPanel } from './progress-panel'
 import type { BatchState } from './use-evaluation-flow'
@@ -157,9 +157,15 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
     } else {
       const results = await Promise.allSettled(
         jobIds.map((id) =>
-          fetch(`/api/jobs/${id}`, { cache: 'no-store' }).then((r) => {
-            if (r.ok) return r.json() as Promise<JobDetail>
-            // 404 → 尝试浏览器本地缓存副本（作业完成时已自动存入）
+          fetch(`/api/jobs/${id}`, { cache: 'no-store' }).then(async (r) => {
+            if (r.ok) {
+              const data = (await r.json()) as JobDetail
+              // v2.37：服务端仍在的终态详情 → 立即留入本地缓存
+              // （本弹窗下次打开、以及实例回收后均可离线回看）
+              if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
+              return data
+            }
+            // 404 → 尝试浏览器本地缓存副本（作业完成/回看时已自动存入）
             if (r.status === 404) {
               const cached = getCachedJobDetail(id)
               if (cached) return cached

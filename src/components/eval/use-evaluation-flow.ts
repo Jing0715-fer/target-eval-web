@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { evaluateSyncStream, fetchBatchReport, generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation } from './api'
 import { addSessionJob, getSessionJob } from './session-history'
-import { cacheJobDetail, getCachedJobDetail } from './job-cache'
+import { cacheBatchReport, cacheJobDetail, getCachedBatchReport, getCachedJobDetail } from './job-cache'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
 /** 主视图状态机：idle（输入）→ running（进度）→ done（结果）；error 单独处理 */
@@ -949,13 +949,29 @@ export function useEvaluationFlow() {
   }, [])
 
   /** 从历史记录加载合并报告（v1.13：批量评估历史）
-   *  拉取 BatchReport → 构造最小 batch 状态 → 切到 done + merged 视图 */
+   *  拉取 BatchReport → 构造最小 batch 状态 → 切到 done + merged 视图
+   *  v2.37：成功打开即留入本地缓存；服务端 404/网络异常 → 回退本地副本 */
   const loadBatchReport = useCallback(
     async (id: string) => {
       setLoadingHistoryJob(true)
       setSubmitError(null)
+      let report: (BatchReportInfo & { fromCache?: boolean }) | null = null
       try {
-        const report = await fetchBatchReport(id)
+        report = await fetchBatchReport(id)
+        // v2.37：服务端仍在 → 立即留入浏览器本地缓存（实例回收后仍可回看）
+        cacheBatchReport(report)
+      } catch {
+        // v2.37：服务端 404（Serverless 实例回收）/ 网络异常 → 浏览器本地缓存副本
+        report = getCachedBatchReport(id)
+      }
+      if (!report) {
+        setSubmitError(
+          '无法加载该合并报告：服务端已无此记录（部署平台为 Serverless 实例，空闲回收后运行数据不持久），且本浏览器未留存该报告副本。各靶点的单靶点报告 HTML 已在完成时自动下载到本机下载目录，可从那里查看。',
+        )
+        setLoadingHistoryJob(false)
+        return
+      }
+      try {
         // 各靶点标签：优先取 targets 中的 uniprot/蛋白名；降级用 jobIds 序号
         // v2.31：蛋白名追加 nsp 标注（聚合蛋白截短 — 同名靶点可区分）
         const labels = (report.targets ?? []).map(t => {
@@ -983,23 +999,28 @@ export function useEvaluationFlow() {
           sequenceAttribution: report.sequenceAttribution ?? undefined,
         })
         // 同步加载第一个靶点的详情作为 flow.job（ResultView 切换栏需要）
+        // v2.37：成功即缓存；服务端已回收时回退本地副本
         if (report.jobIds.length > 0) {
           try {
             const res = await fetch(`/api/jobs/${report.jobIds[0]}`, { cache: 'no-store' })
             if (res.ok) {
               const data = (await res.json()) as JobDetail
+              if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
               jobIdRef.current = data.id
               displayJobIdRef.current = data.id
               applyJobSnapshot(data)
+            } else if (res.status === 404) {
+              const cached = getCachedJobDetail(report.jobIds[0])
+              if (cached) {
+                jobIdRef.current = cached.id
+                displayJobIdRef.current = cached.id
+                applyJobSnapshot(cached)
+              }
             }
           } catch { /* 靶点详情加载失败不阻断合并报告展示 */ }
         }
         setPhase('done')
         if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
-      } catch {
-        setSubmitError(
-          '无法加载该合并报告：服务端已无此记录（部署平台为 Serverless 实例，空闲回收后运行数据不持久），且合并报告正文未在浏览器留存副本。各靶点的单靶点报告 HTML 已在完成时自动下载到本机下载目录，可从那里查看。',
-        )
       } finally {
         setLoadingHistoryJob(false)
       }

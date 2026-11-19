@@ -256,6 +256,8 @@ export interface BatchReportInfo {
   status?: 'running' | 'done' | 'error'
   /** 生成失败原因（status = error 时） */
   error?: string | null
+  /** v2.37：本报告来自浏览器本地缓存副本（服务端实例已回收，仅回看兜底） */
+  fromCache?: boolean
 }
 
 /** 合并报告历史列表项（v1.13：批量评估历史记录） */
