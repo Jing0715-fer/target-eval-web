@@ -274,6 +274,9 @@ export interface BlastPollState {
   rescueNextAt: number
   /** v2.39 终局窗口计时锚点：首次观测到「全场只剩本作业」的时刻（null = 尚未孤立） */
   aloneSince?: number | null
+  /** v2.43 连续 404 计时锚点（NCBI 拒绝承认 RID — 队列患病日的另一种形态；
+   *  旧 checkpoint 无此字段 → undefined，重入时重新起算，安全） */
+  notFoundSince?: number | null
 }
 
 export interface BlastCollectOpts {
@@ -341,11 +344,15 @@ export async function collectBlastPdbWithRescue(
   let rescueNextAt = opts.resume?.rescueNextAt ?? 0
   /** v2.39 终局窗口锚点（全场只剩本作业的首个观测时刻；其他作业出现即重置） */
   let aloneSince = opts.resume?.aloneSince ?? null
+  /** v2.43 连续 404 锚点：NCBI 对已提交 RID 持续回 404（队列患病日的另一种形态 —
+   *  旧代码对此只静默重试，WAITING/僵尸保险均在 continue 之后永远达不到，
+   *  批量日在这种形态下会无限空转；超排队阈值后同样触发 RCSB 兜底） */
+  let notFoundSince = opts.resume?.notFoundSince ?? null
 
   const rescueExhausted = () => rescueFails >= MAX_RESCUE_ATTEMPTS
   const secSince = (t: number) => Math.round((Date.now() - t) / 1000)
   /** v2.6：轮询状态快照（预算到点时随 stillRunning 返回，跨段续跑） */
-  const snapshot = (): BlastPollState => ({ rid, rtoe, startedAt, waitingSince, searchingSince, attempts, netFails, rescueFails, rescueNextAt, aloneSince })
+  const snapshot = (): BlastPollState => ({ rid, rtoe, startedAt, waitingSince, searchingSince, attempts, netFails, rescueFails, rescueNextAt, aloneSince, notFoundSince })
   /** v2.6：剩余预算不足一轮完整轮询（首等最多 30s / 常规 6s + GET）→ 不开启新轮询，交还续跑 */
   const budgetLeft = () => (opts.deadline != null && opts.deadline > 0 ? opts.deadline - Date.now() : Infinity)
 
@@ -413,9 +420,18 @@ export async function collectBlastPdbWithRescue(
       continue
     }
     if (!pollRes.ok) {
+      // v2.43：非 5xx 的持续 404/429 等 — NCBI 不承认 RID（提交后队列延迟）或限流。
+      //  短暂 404 是正常现象（RID 生效延迟），但持续超过排队阈值 = 队列患病的
+      //  另一种形态 → 同样走 RCSB 兜底（旧代码静默重试，永远到不了兜底/僵尸保险）
+      notFoundSince ??= Date.now()
+      if (Date.now() - notFoundSince > waitingThreshold()) {
+        const rescued = await tryRescue(`NCBI 轮询持续 ${pollRes.status}（已 ${secSince(notFoundSince)}s — RID 未被受理/被限流）`)
+        if (rescued) return rescued
+      }
       onProgress?.(`HTTP ${pollRes.status}，继续轮询（已等 ${elapsed}s）`)
       continue
     }
+    notFoundSince = null // NCBI 正常应答 — 404 计时复位
     const xml = await pollRes.text()
     if (xml.includes('<BlastOutput>') || xml.includes('<BlastOutput_iterations>')) {
       markNcbiSettled(rid) // v2.41 在飞销账（拥堵反馈的完成信号）
