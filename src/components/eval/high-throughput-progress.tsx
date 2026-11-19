@@ -33,6 +33,7 @@ import {
   PauseCircle,
   Play,
   RotateCcw,
+  ExternalLink,
   Terminal,
   Undo2,
   XCircle,
@@ -58,7 +59,9 @@ export interface HighThroughputViewProps {
   onNewEvaluation: () => void
 }
 
-/** 组状态 → 图标 + 文案 */
+/** 组状态 → 图标 + 文案；v2.42 诚实化：done 组内含失败/取消/报告不完整项时
+ *  不再显示绿色「已完成」，改琥珀色「完成（N 未成功）」— 与靶点真实结局一致
+ *  （用户反馈：作业被取消后组徽章仍显示已完成，误导判断） */
 function groupStatusMeta(g: HTGroupState): { icon: React.ReactNode; label: string; cls: string } {
   switch (g.status) {
     case 'judging':
@@ -67,8 +70,13 @@ function groupStatusMeta(g: HTGroupState): { icon: React.ReactNode; label: strin
       return { icon: <LoaderCircle className="size-3.5 animate-spin text-primary" />, label: '评估中', cls: 'border-primary/40 bg-primary/[0.07] text-primary' }
     case 'merging':
       return { icon: <LoaderCircle className="size-3.5 animate-spin text-violet-600 dark:text-violet-400" />, label: '合并报告生成中', cls: 'border-violet-500/40 bg-violet-500/[0.08] text-violet-700 dark:text-violet-400' }
-    case 'done':
+    case 'done': {
+      const notOk = g.items.filter((it) => (it.status === 'error' || it.status === 'canceled' || (it.status === 'done' && it.reportIncomplete))).length
+      if (notOk > 0) {
+        return { icon: <AlertTriangle className="size-3.5 text-amber-600 dark:text-amber-400" />, label: `完成（${notOk} 未成功）`, cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
+      }
       return { icon: <CircleCheckBig className="size-3.5 text-emerald-600 dark:text-emerald-400" />, label: '已完成', cls: 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' }
+    }
     case 'paused':
       return { icon: <PauseCircle className="size-3.5 text-amber-600 dark:text-amber-400" />, label: '已暂停', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
     case 'canceled':
@@ -94,6 +102,27 @@ function itemDotCls(status: string): string {
     default:
       return 'bg-muted-foreground/25'
   }
+}
+
+/** v2.42：单靶点「查看报告」— 新标签页打开。
+ *  序列靶点/非关联组 = 独立报告 HTML（/api/jobs/{id}/report）；
+ *  关联复合物组（deferred，无独立 HTML）→ 组合并报告 inline（含本靶点单独评估页） */
+function openTargetReport(g: HTGroupState, it: { jobId?: string; label: string; sequence?: string }): void {
+  if (!it.jobId) return
+  const deferred = !it.sequence && g.relation?.related === true && g.items.length > 1
+  if (deferred) {
+    if (g.mergedReportId) {
+      window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(g.mergedReportId)}&inline=1`, '_blank', 'noopener')
+    } else {
+      toast({
+        title: '暂无可打开的报告',
+        description: '该靶点属关联复合物组，报告并入组合并评估报告（本组尚未生成合并报告 — 可先重跑/补齐后查看）。',
+        variant: 'destructive',
+      })
+    }
+    return
+  }
+  window.open(`/api/jobs/${it.jobId}/report`, '_blank', 'noopener')
 }
 
 /** 当前组 → ProgressPanel 的 BatchState 形状（继承组内进度呈现；v2.38 跳过项不进面板） */
@@ -192,12 +221,13 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
     }
   }
 
-  /** 组日志回看：拉取组内全部作业的持久化日志并拼接（打开弹窗时按需拉取一次）
-   *  v2.36：服务端 404（Serverless 实例回收）→ 回退浏览器缓存副本的日志 */
+  /** 组日志回看：拉取组内全部作业的持久化日志并拼接。
+   *  v2.42：每次打开都重新拉取（旧缓存永不刷新 — 停止/重跑后 item.jobId 变了，
+   *  弹窗仍在展示旧作业的日志，用户误以为任务被取消/未重跑）。
+   *  服务端 404（Serverless 实例回收）→ 回退浏览器缓存副本的日志 */
   const openGroupLogs = async (g: HTGroupState) => {
     setLogDialogGroup(g.index)
-    if (groupLogs[g.index]) return
-    setGroupLogs((prev) => ({ ...prev, [g.index]: { loading: true, lines: [] } }))
+    setGroupLogs((prev) => ({ ...prev, [g.index]: { loading: true, lines: prev[g.index]?.lines ?? [] } }))
     const jobIds = [...new Set(g.items.map((it) => it.jobId).filter((x): x is string => Boolean(x)))]
     const fetched: string[] = []
     if (jobIds.length === 0) {
@@ -580,6 +610,18 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                         {it.status === 'done' && it.reportIncomplete && (
                           <span className="shrink-0 font-sans text-[9px] font-medium text-amber-600/90 dark:text-amber-400/90" title={it.reportMissingNote}>不完整</span>
                         )}
+                        {/* v2.42：靶点完成后即可新标签页查看报告（独立报告 / 关联组并入合并报告） */}
+                        {it.status === 'done' && it.jobId && (
+                          <button
+                            type="button"
+                            onClick={() => openTargetReport(g, it)}
+                            className="flex size-4.5 shrink-0 items-center justify-center rounded text-primary/70 transition-colors hover:bg-accent hover:text-primary"
+                            title="新标签页查看此靶点的报告"
+                            aria-label={`查看靶点 ${it.label} 的报告`}
+                          >
+                            <ExternalLink className="size-2.5" aria-hidden />
+                          </button>
+                        )}
                         {actionable && (
                           <span className="inline-flex shrink-0 items-center gap-0.5">
                             {(it.status === 'error' || it.status === 'canceled' || it.status === 'skipped' || (it.status === 'done' && it.reportIncomplete)) && (
@@ -731,9 +773,16 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               </p>
             </div>
           ) : (
-            <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
-              汇总报告生成失败：{run.dashboardError}（运行结果不受影响；重新下载 zip 会重试打包可用的看板）
-            </p>
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-semibold text-amber-700 dark:text-amber-400">
+                {run.dashboardError === '__done__' ? '本次运行没有成功完成的靶点，未生成汇总报告' : '汇总报告生成失败'}
+              </p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
+                {run.dashboardError === '__done__'
+                  ? '全部靶点均失败/被取消/被跳过，无可统计的评估结果（运行中作业被停止或服务实例回收时会出现此情况）。可点击「重跑失败/不完整项」补齐后重新生成。'
+                  : <>{run.dashboardError}（运行结果不受影响；重新下载 zip 会重试打包可用的看板）</>}
+              </p>
+            </div>
           )}
         </div>
       )}
@@ -741,7 +790,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       {/* ── 底部操作（v2.25：取消按钮与内容区拉开间距 mt-2；说明文字上移） ── */}
       <div className="flex flex-col gap-2.5">
         <span className="font-mono text-[10.5px] text-muted-foreground/60">
-          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器（最近 5 次）
+          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器 30 天
         </span>
         <div className="flex flex-wrap items-center gap-2.5">
           {isRunning && (

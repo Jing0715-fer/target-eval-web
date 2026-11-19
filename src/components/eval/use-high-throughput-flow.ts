@@ -48,7 +48,7 @@ import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
-import { parseHtArchive, matchReportToTarget, sha256Hex16, type HtArchiveReport } from './ht-archive-import'
+import { parseHtArchive, planArchiveSkips, sha256Hex16, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -169,36 +169,41 @@ function reportIncompleteNote(job: JobDetail | null | undefined): string | undef
   return undefined
 }
 
-/** v2.38：zip 导入匹配 — 未评估靶点命中既有报告 → 标 skipped（报告在用户手里的 zip 中） */
+/** v2.38→v2.42 zip 导入匹配 — 用 planArchiveSkips 统一严格规则：
+ *  只有单靶点 job 报告参与；序列靶点 SHA 精确等值 / 标签+长度严格相等且无歧义
+ *  才标 skipped（用户反馈：旧包含式匹配把无报告的靶点也误跳了）。
+ *  返回匹配数（调用方 toast）。 */
 function applyArchiveSkips(
   r: HTRunState,
   reports: HtArchiveReport[],
   shaByKey: Map<string, string | undefined>,
   fileName: string,
 ): number {
-  let matched = 0
+  const targets: HtMatchTarget[] = []
   for (const g of r.groups) {
     for (const it of g.items) {
       if (it.status === 'done' || it.status === 'running') continue
-      const hit = reports.some((rep) =>
-        matchReportToTarget(rep, {
-          acc: it.sequence ? undefined : it.label,
-          range: it.range,
-          header: it.sequenceHeader,
-          label: it.label,
-          length: it.sequence?.length,
-          seqSha: shaByKey.get(it.key),
-        }),
-      )
-      if (hit) {
-        it.status = 'skipped'
-        it.error = undefined
-        it.skipNote = `已导入 ${fileName.slice(0, 40)} 的既有报告`
-        matched++
-      }
+      targets.push({
+        key: it.key,
+        acc: it.sequence ? undefined : it.label,
+        range: it.range,
+        header: it.sequenceHeader,
+        label: it.label,
+        length: it.sequence?.length,
+        seqSha: shaByKey.get(it.key),
+        seq: it.sequence,
+      })
     }
   }
-  return matched
+  const matchedKeys = planArchiveSkips(reports, targets)
+  for (const it of r.groups.flatMap((g) => g.items)) {
+    if (matchedKeys.has(it.key)) {
+      it.status = 'skipped'
+      it.error = undefined
+      it.skipNote = `已导入 ${fileName.slice(0, 40)} 的既有报告`
+    }
+  }
+  return matchedKeys.size
 }
 
 /**
@@ -596,7 +601,8 @@ export function useHighThroughputFlow() {
         //  - 暂停（paused）：记录 jobId 并照常轮询到终态（暂停语义 — 结果记入组
         //    状态；恢复运行时该项已是 running+jobId，直接接上不重复提交）
         if (created.jobId && cancelRef.current) {
-          void fetch(`/api/jobs/${created.jobId}`, { method: 'DELETE' }).catch(() => undefined)
+          // v2.42：取消模式（保留日志与结果 — 停止与完成竞态时不误删已产出报告）
+          void fetch(`/api/jobs/${created.jobId}?mode=cancel`, { method: 'DELETE' }).catch(() => undefined)
           item.status = 'canceled'
         } else if (created.jobId && pausedRef.current) {
           item.jobId = created.jobId
@@ -779,9 +785,13 @@ export function useHighThroughputFlow() {
     const doneGroups = runState.groups.filter((g) => g.status === 'done').length
     const reports = runState.groups.filter((g) => g.mergedReportId || g.items.some((it) => it.status === 'done')).length
     const skippedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'skipped').length
+    // v2.42：完成提示诚实化 — 如实报告未成功靶点数（作业被取消/失败不再被「完成」掩盖）
+    const failedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'error' || it.status === 'canceled').length
+    const incompleteTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'done' && it.reportIncomplete).length
+    const unfinished = failedTargets + incompleteTargets
     toast({
-      title: '高通量评估完成',
-      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告${skippedTargets > 0 ? `（跳过 ${skippedTargets} 个靶点）` : ''}；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
+      title: unfinished > 0 ? `高通量评估完成（${unfinished} 个靶点未成功）` : '高通量评估完成',
+      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告${skippedTargets > 0 ? `（跳过 ${skippedTargets} 个靶点）` : ''}${unfinished > 0 ? `；${failedTargets > 0 ? `${failedTargets} 个失败/被取消` : ''}${failedTargets > 0 && incompleteTargets > 0 ? '、' : ''}${incompleteTargets > 0 ? `${incompleteTargets} 个报告不完整` : ''}，可「重跑失败/不完整项」补齐` : ''}；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
     })
   }
 
@@ -806,6 +816,12 @@ export function useHighThroughputFlow() {
       runState.dashboardError = '__done__'
       saveHTRun(runState)
       setRun(cloneRun(runState))
+      // v2.42：明确提示（此前静默写入哨兵值，横幅只显示「__done__」原始文本）
+      toast({
+        title: '未生成汇总报告',
+        description: '本次运行没有成功完成的靶点（全部失败/被取消/被跳过），无可统计的评估结果。可「重跑失败/不完整项」补齐后自动重新生成。',
+        variant: 'destructive',
+      })
       return
     }
     // v2.36：生成中标记（横幅立即可见，终态后接替）
@@ -1309,7 +1325,9 @@ export function useHighThroughputFlow() {
     if (ids.length > 0) {
       setCanceling(true)
       try {
-        await Promise.allSettled(ids.map((id) => fetch(`/api/jobs/${id}`, { method: 'DELETE' })))
+        // v2.42：取消模式 — 中止运行中作业但保留日志与已产出结果（与历史页的
+        // 删除语义分开；停止与作业完成竞态时不再误删已完成报告）
+        await Promise.allSettled(ids.map((id) => fetch(`/api/jobs/${id}?mode=cancel`, { method: 'DELETE' })))
       } catch {
         // 忽略取消请求失败（作业可能已结束）
       } finally {

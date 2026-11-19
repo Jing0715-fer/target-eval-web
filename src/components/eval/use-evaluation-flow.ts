@@ -897,7 +897,8 @@ export function useEvaluationFlow() {
     if (ids.length > 0) {
       setCanceling(true)
       try {
-        await Promise.allSettled(ids.map(id => fetch(`/api/jobs/${id}`, { method: 'DELETE' })))
+        // v2.42：取消模式（保留日志与结果 — 与历史页的删除语义分开）
+        await Promise.allSettled(ids.map(id => fetch(`/api/jobs/${id}?mode=cancel`, { method: 'DELETE' })))
       } catch {
         // 忽略取消请求失败（作业可能已结束）
       } finally {
@@ -909,7 +910,7 @@ export function useEvaluationFlow() {
       if (id && !syncCtrl) {
         setCanceling(true)
         try {
-          await fetch(`/api/jobs/${id}`, { method: 'DELETE' })
+          await fetch(`/api/jobs/${id}?mode=cancel`, { method: 'DELETE' })
         } catch {
           // 忽略
         } finally {

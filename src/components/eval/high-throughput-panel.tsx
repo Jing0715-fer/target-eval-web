@@ -37,7 +37,7 @@ import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDateTime } from './format'
 import { extractHtTargetsFromExcel } from './api'
-import { parseHtArchive, matchReportToTarget, sha256Hex16 } from './ht-archive-import'
+import { parseHtArchive, planArchiveSkips, sha256Hex16, type HtMatchTarget } from './ht-archive-import'
 import type { HTRunState, HtSeqTarget } from './types'
 
 export interface HighThroughputPanelProps {
@@ -152,41 +152,41 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
     try {
       const reports = await parseHtArchive(file)
       if (reports.length === 0) throw new Error('zip 内没有可识别的报告（HTML）')
-      const next = new Set(skipSet)
-      let matched = 0
+      // v2.42 严格匹配（planArchiveSkips）：只有单靶点 job 报告参与；序列靶点
+      // SHA 精确等值 / 标签+长度严格相等且无歧义才跳 — 杜绝短标签包含式误跳
+      const targets: HtMatchTarget[] = []
       for (let i = 0; i < parsed.groups.length; i++) {
         for (let j = 0; j < parsed.groups[i].length; j++) {
-          const t = parsed.groups[i][j]!
-          const hit = reports.some((rep) => matchReportToTarget(rep, { acc: t, range: parsed.groupRanges?.[i]?.[j] }))
-          if (hit) {
-            next.add(`g:${i}:${j}`)
-            matched++
-          }
+          targets.push({ key: `g:${i}:${j}`, acc: parsed.groups[i][j], range: parsed.groupRanges?.[i]?.[j] })
         }
       }
       for (let k = 0; k < seqGroups.length; k++) {
         for (let j = 0; j < seqGroups[k].length; j++) {
           const s = seqGroups[k][j]!
-          const sha = await sha256Hex16(s.seq)
           const label = s.header
             ? `${s.header.length > 30 ? `${s.header.slice(0, 22)}…${s.header.slice(-7)}` : s.header} · ${s.length}aa`
             : `序列${j + 1} · ${s.length}aa`
-          const hit = reports.some((rep) => matchReportToTarget(rep, { header: s.header, label, length: s.length, seqSha: sha }))
-          if (hit) {
-            next.add(`sq:${k}:${j}`)
-            matched++
-          }
+          targets.push({ key: `sq:${k}:${j}`, header: s.header, label, length: s.length, seqSha: await sha256Hex16(s.seq), seq: s.seq })
+        }
+      }
+      const matchedKeys = planArchiveSkips(reports, targets)
+      const next = new Set(skipSet)
+      let matched = 0
+      for (const key of matchedKeys) {
+        if (!next.has(key)) {
+          next.add(key)
+          matched++
         }
       }
       onSkipKeysChange([...next])
       setZipMeta({ name: file.name, reports: reports.length, matched })
       if (matched > 0) {
         toast({
-          title: `已匹配 ${matched} 个已完成靶点`,
+          title: `已匹配 ${matched} 个已有报告的靶点`,
           description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的 zip。可手动重新勾选恢复评估。',
         })
       } else {
-        toast({ title: 'zip 内没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 份报告但未命中（UniProt/序列/区间需一致）。` })
+        toast({ title: 'zip 内没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 份报告但未命中（仅单靶点报告参与匹配；UniProt/序列/区间需严格一致，同名不同序列的靶点不跳过）。` })
       }
     } catch (e) {
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析该 zip', variant: 'destructive' })

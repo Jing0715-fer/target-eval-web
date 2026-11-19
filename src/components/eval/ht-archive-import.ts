@@ -1,20 +1,21 @@
 'use client'
 
 /**
- * 高通量运行报告 zip 导入（v2.38）— 把「已完成的靶点报告」导入新运行或既有运行，
- * 匹配到的靶点直接跳过（不重复评估、不浪费配额）。
+ * 高通量运行报告 zip 导入（v2.38 → v2.42 严格匹配重设计）— 把「已完成的靶点报告」
+ * 导入新运行或既有运行，匹配到的靶点直接跳过（不重复评估、不浪费配额）。
  *
- * 两种匹配通道：
- *  ① 清单优先（v2.38 起打包的 zip）：包内 _TargetEval_manifest.json 携带每个报告的
- *     结构化元数据（uniprot / range / seqSha / seqLength / sequenceHeader / zip 路径），
- *     匹配精确（序列靶点按提交序列 SHA-256 前 16 hex 精确等值）；
- *  ② 旧 zip 兜底（无清单）：扫 *.html 文件名 + <title>：
- *     - UniProt 靶点：文件名 / 题目中的 accession（题目格式「蛋白名（P0DTC2 · 残基 16-1273）」）；
- *       双方都带区间时要求相等（不同截短构建视为不同靶点），仅一方带区间不匹配；
- *     - 序列靶点：文件名归一化包含匹配（标签头 + 「· Naa」长度段需一致；长标签的
- *       「…」截断按去符号归一化吸收）。
- * 看板（00_统计看板）/ _README / 合并报告不参与靶点匹配（合并报告按组生成，
- * 跨运行组结构不同，无法可靠对应 — 只用单靶点报告判定跳过）。
+ * v2.42 严格化（用户反馈「除了已有报告的 G01-16 外还有很多靶点被跳过」—
+ * 旧版序列靶点文件名兜底用「归一化标签双向包含」，短标签如「原PDB」「序列1」
+ * 归一化后变成 pdb / 1 这类短串，几乎任何报告文件名都包含它 → 大量误跳过）：
+ *  - 只有 kind='job' 的单靶点报告参与匹配（merged 按组生成跨运行组结构不同，
+ *    dashboard 是汇总件 — 都不能证明某个具体靶点已有报告）；
+ *  - 序列靶点：①清单 seqSha 双侧精确等值（主通道）；②无 SHA 旧 zip 兜底改为
+ *    「归一化标签严格相等 + 长度双方已知且相等」，并加歧义守卫：多个不同序列
+ *    共享同一标签+长度时无法区分报告属于谁 → 一个都不跳（宁重跑不误跳）；
+ *  - UniProt 靶点：accession + 区间严格相等（原有语义不变）；
+ *  - 双向包含匹配彻底移除。
+ *
+ * 匹配计划由 planArchiveSkips 统一计算（新建运行与既有运行导入同一套规则）。
  */
 import JSZip from 'jszip'
 
@@ -39,6 +40,8 @@ export interface HtArchiveReport {
 
 /** 匹配的目标描述（新运行解析结果或既有运行的 item） */
 export interface HtMatchTarget {
+  /** 目标唯一键（计划结果的 Set 元素 — 调用方自定：`g:${i}:${j}` / item.key） */
+  key: string
   /** UniProt accession（UniProt 靶点；序列靶点缺省） */
   acc?: string
   /** 评估区间（UniProt 残基编号；无则缺省） */
@@ -51,6 +54,8 @@ export interface HtMatchTarget {
   length?: number
   /** 序列靶点：提交序列 SHA-256 前 16 hex（精确匹配通道） */
   seqSha?: string
+  /** v2.42：提交序列本体（歧义守卫 — 同标签同长度但不同序列时识别无法区分） */
+  seq?: string
 }
 
 /** zip 内文件数上限（对齐高通量 MAX_HT_TARGETS_TOTAL + 冗余） */
@@ -79,30 +84,102 @@ function normLabel(s: string): string {
   return (s || '').toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
-/** 报告 ↔ 目标匹配（规则见文件头；一份报告可匹配多个同名目标 — 调用方自行去重） */
-export function matchReportToTarget(rep: HtArchiveReport, t: HtMatchTarget): boolean {
-  // ── UniProt 靶点 ──
-  if (t.acc) {
-    if (!rep.uniprot || rep.uniprot.toUpperCase() !== t.acc.toUpperCase()) return false
-    // 双方都带区间 → 必须相等（不同截短构建 = 不同靶点）；仅一方带 → 不匹配
-    if (rep.range && t.range) return rep.range[0] === t.range[0] && rep.range[1] === t.range[1]
-    return !rep.range && !t.range
-  }
-  // ── 序列靶点 ──
-  if (rep.seqSha && t.seqSha) return rep.seqSha === t.seqSha
-  // 旧 zip：文件名标签匹配（归一化包含 + 长度一致）
-  const stemN = normLabel(rep.stem)
-  if (!stemN) return false
-  const lenOk = rep.seqLength == null || t.length == null || rep.seqLength === t.length
-  if (!lenOk) return false
+/** v2.42 报告侧匹配键：去 zip 组目录前缀（G05_/）与去重尾缀（_2）后的归一化标签
+ *  （长度尾巴单独比 —「· Naa」在双方标签里都存在时会自然吸收进等值比较） */
+function reportLabelKey(stem: string): string {
+  return normLabel(
+    stem
+      .replace(/^G\d{1,3}[_\s-]*/i, '')   // 组目录前缀（文件名含 G05_ 前缀）
+      .replace(/_\d{1,3}$/, ''),            // 同名去重尾缀（_2/_3…）
+  )
+}
+
+/** v2.42 目标侧匹配键（label / header 同口径归一化；截断标签「头22…尾7」在
+ *  双方用同一截断函数生成时归一化结果一致） */
+function targetLabelKey(t: HtMatchTarget): string {
   const cands = [t.label, t.header].filter(Boolean).map((x) => normLabel(String(x)))
-  // 去掉「· Naa」长度尾巴后再比（长度已单独校验）
-  const stripped = cands.map((c) => c.replace(/\d+aa$/, ''))
-  const repStripped = stemN.replace(/\d+aa$/, '')
-  return stripped.some((c) => {
-    if (!c) return false
-    return repStripped.includes(c) || c.includes(repStripped)
-  })
+  return cands[0] ?? ''
+}
+
+/** v2.42 统一匹配计划：返回可安全跳过的目标键集合。
+ *  规则（见文件头）：
+ *  - 只有单靶点 job 报告参与；
+ *  - UniProt：acc + 区间严格相等；
+ *  - 序列：SHA 精确等值；无 SHA 时「标签键严格相等 + 长度双方已知且相等」
+ *    且无歧义（同标签键同长度的不同序列只计 1 个时才可判定归属）；
+ *  - 任一证据缺失 → 不跳（宁重跑不误跳 — 用户明确要求只跳过真正有报告的靶点）。 */
+export function planArchiveSkips(reports: HtArchiveReport[], targets: HtMatchTarget[]): Set<string> {
+  const jobReports = reports.filter((r) => r.kind === 'job')
+  if (jobReports.length === 0 || targets.length === 0) return new Set()
+
+  const skipped = new Set<string>()
+
+  // ── UniProt 靶点：acc + 区间严格相等（无歧义 — accession+区间即身份）──
+  const uniTargets = targets.filter((t) => t.acc)
+  for (const t of uniTargets) {
+    const hit = jobReports.some((rep) => {
+      if (!rep.uniprot || rep.uniprot.toUpperCase() !== t.acc!.toUpperCase()) return false
+      if (rep.range && t.range) return rep.range[0] === t.range[0] && rep.range[1] === t.range[1]
+      return !rep.range && !t.range
+    })
+    if (hit) skipped.add(t.key)
+  }
+
+  // ── 序列靶点：①SHA 精确通道 ②严格标签+长度兜底（带歧义守卫）──
+  const seqTargets = targets.filter((t) => !t.acc)
+
+  // ① SHA 精确：报告有 seqSha 且目标有 seqSha → 等值即跳（同序列多行都算已有报告）
+  const shaReports = jobReports.filter((r) => r.seqSha)
+  for (const t of seqTargets) {
+    if (!t.seqSha) continue
+    if (shaReports.some((r) => r.seqSha === t.seqSha)) skipped.add(t.key)
+  }
+
+  // ② 无 SHA 兜底：标签键严格相等 + 长度双方已知且相等；
+  //    歧义守卫：同（标签键，长度）下存在多个不同序列（SHA 或 seq 本体可区分）→ 全部不跳
+  const fallbackReports = jobReports.filter((r) => !r.seqSha)
+  if (fallbackReports.length > 0) {
+    // 报告侧候选键：标签键 → 长度集合
+    const repKeys = new Map<string, Set<number>>()
+    for (const rep of fallbackReports) {
+      const k = reportLabelKey(rep.stem)
+      if (!k) continue
+      if (rep.seqLength == null) continue // 报告侧长度未知 → 无法安全匹配
+      if (!repKeys.has(k)) repKeys.set(k, new Set())
+      repKeys.get(k)!.add(rep.seqLength)
+    }
+    // 目标侧分组：（标签键，长度）→ 不同序列数
+    const ambiguous = new Set<string>()
+    const groupSeqs = new Map<string, Set<string>>()
+    for (const t of seqTargets) {
+      const k = targetLabelKey(t)
+      if (!k || t.length == null) continue
+      const gk = `${k}|${t.length}`
+      const identity = t.seqSha ?? t.seq ?? ''
+      if (!identity) continue // 无法区分身份 → 保守不跳（不入组）
+      if (!groupSeqs.has(gk)) groupSeqs.set(gk, new Set())
+      groupSeqs.get(gk)!.add(identity)
+    }
+    for (const [gk, ids] of groupSeqs) {
+      if (ids.size > 1) ambiguous.add(gk) // 同标签同长度不同序列 → 无法判定报告归属
+    }
+    for (const t of seqTargets) {
+      if (skipped.has(t.key)) continue // SHA 通道已命中
+      const k = targetLabelKey(t)
+      if (!k || t.length == null) continue
+      const gk = `${k}|${t.length}`
+      if (ambiguous.has(gk)) continue
+      const lens = repKeys.get(k)
+      if (lens && lens.has(t.length)) skipped.add(t.key)
+    }
+  }
+
+  return skipped
+}
+
+/** v2.42 保留的单报告↔单目标判定（供调试/单点调用；集合语义用 planArchiveSkips） */
+export function matchReportToTarget(rep: HtArchiveReport, t: HtMatchTarget): boolean {
+  return planArchiveSkips([rep], [t]).has(t.key)
 }
 
 /** 清单 JSON 条目（与服务端 ht-archive 写入口径一致） */
