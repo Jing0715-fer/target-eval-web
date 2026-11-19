@@ -459,6 +459,11 @@ export interface HtExcelExtractResult {
     bytes?: number
     seqGroups?: number
     seqTargets?: number
+    /** v2.34：行→组口径统计（抗体链忽略 / 同源多聚体合并 / 跳过行数） */
+    seqRows?: number
+    seqAntibodyChains?: number
+    seqHomologMerged?: number
+    seqSkippedRows?: number
     /** v2.27：携带构建区间的靶点数 */
     rangeTargets?: number
     /** v2.29：携带结构域名提示的靶点数（管线内匹配 UniProt domain 推导区间） */

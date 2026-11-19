@@ -132,9 +132,14 @@ export async function POST(req: Request) {
                 rows: wb.rowCount,
                 truncated: wb.truncated,
                 bytes: file.size,
-                // v2.23.1 序列兜底计数（行缺 UniProt 但有构建序列 → 按序列评估）
+                // v2.23.1 序列兜底计数（v2.34 行级语义：行=组，链级提取）
                 seqGroups: result.seqGroups.length,
                 seqTargets: result.seqGroups.reduce((n, g) => n + g.length, 0),
+                // v2.34：行→组口径统计（抗体链忽略 / 同源多聚体合并 / 跳过行）
+                seqRows: result.seqInfo?.groups,
+                seqAntibodyChains: result.seqInfo?.antibodyChains,
+                seqHomologMerged: result.seqInfo?.homologMerged,
+                seqSkippedRows: result.seqInfo?.skippedRows.length,
                 // v2.27：携带构建区间的靶点数（截短构建感知 — 仅保留链范围重叠的结构）
                 rangeTargets: result.groups.reduce(
                   (n, g, gi) => n + (result.groupRanges[gi] ?? []).filter(Boolean).length,

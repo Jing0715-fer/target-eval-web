@@ -595,7 +595,10 @@ export function useHighThroughputFlow() {
           seqTargets: seqs,
           items: seqs.map((s: HtSeqTarget, j: number) => ({
             key: `sq-${k}-${j}-${s.length}`,
-            label: s.header ? `${s.header.slice(0, 24)} · ${s.length}aa` : `序列${j + 1} · ${s.length}aa`,
+            // v2.34：结构交付行标签「文件名·链N」— 长 header 截头保尾（链序号在尾部，全截会失去区分度）
+            label: s.header
+              ? `${s.header.length > 30 ? `${s.header.slice(0, 22)}…${s.header.slice(-7)}` : s.header} · ${s.length}aa`
+              : `序列${j + 1} · ${s.length}aa`,
             range: s.range,
             sequence: s.seq,
             sequenceHeader: s.header || undefined,

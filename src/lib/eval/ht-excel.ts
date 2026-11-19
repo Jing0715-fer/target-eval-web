@@ -1,5 +1,5 @@
 /**
- * 高通量评估 — Excel/CSV 靶点表解析（v2.23；v2.23.1 修订）。
+ * 高通量评估 — Excel/CSV 靶点表解析（v2.23 → v2.34）。
  *
  * 链路：workbook（SheetJS）→ 有界文本化（保留 sheet/行/列结构）→ LLM 语义提取
  * 「靶点分组」（组内多靶点 = 复合物批量评估；单靶点 = 独立评估）→ 校验消毒。
@@ -14,9 +14,6 @@
  *    「前 60 字符 + [已折叠 N 字符]」，102 行全量可见
  *  ③ 序列兜底（新增）：行内无任何 UniProt ID 但存在序列（≥90 aa 构建序列，
  *     支持 [标签头] SEQ 多构段与裸序列）→ seqGroups 按序列评估（独立作业）
- *
- * 内存有界：sheet/行/列/文本均设上限，输出 ≤ 300 组 × 30 靶点 + 序列靶点
- * 总字符 ≤ 240KB（localStorage 运行历史防膨胀）。
  *
  * v2.27 截短构建感知：
  *  - 行内解析「构建区间」（UniProt 列括号注释「P0DTD1 (nsp12, 4393-5324)」/
@@ -33,10 +30,29 @@
  * 作业携带 options.rangeHint，管线取得 UniProt features 后由 domain-range.ts
  * 匹配 domain 划分推导评估区间（层级：手动区间 > 构建比对 > 域名匹配）。已带数值
  * 区间的靶点不扫域名（区间证据更强）。LLM 路径域名同样由规则扫描确定性回填。
+ *
+ * v2.34 结构交付清单行级语义（用户实测 179 行清单只识别 127 序列的根因修订）：
+ *  - 根因：旧兜底把整行序列单元格当「一条序列」且跨行全局去重 — 同序列的
+ *    .cif/.pdb 双行、复测行整行蒸发（179 → 127）；同源多聚体的多拷贝链与
+ *    Fab 的 VH/VL 链也全部计入。
+ *  - 新口径（仅序列兜底分支；UniProt 分组行为不变）：
+ *    ① 逐行成组：每个数据行 = 1 个靶点组（同一行的多个靶点作为同一组），
+ *       不再跨行去重 — 179 行 → 179 组（除非该行无任何可评估靶点序列）；
+ *    ② FASTA 链级解析：「>chain A\nSEQ;>chain B\nSEQ…」结构交付表序列列
+ *       按链拆分（≥40 aa；短肽/标签段丢弃），每条独立链 = 组内一个靶点；
+ *    ③ 抗体链忽略：链级 detectAntibody（v2.34 强化基序 — Fab/VHH 可变域
+ *       片段也能识别）命中的链不计入靶点（不参与计数与评估）；
+ *    ④ 同源多聚体只计 1 条：行内 6-mer 包含度 ≥0.55 的链视为同一蛋白的
+ *       不同拷贝/可及区（保留最长），IL17A vs IL17F 等异源同族不受影响；
+ *    ⑤ 行标签命名：取行内首个非序列单元格（结构交付表 = 文件路径）剥目录与
+ *       扩展名作为靶点名（多靶点行附「·链N」），报告/预览可读。
+ *  - 纯抗体行（全部链均为抗体，如 Fab+短肽抗原交付）无可评估靶点 → 跳过并在
+ *    note 中列明行号与原因（不静默丢行）。
  */
 import * as XLSX from 'xlsx'
 import { llmChat } from './llm'
 import { scanRowTargets, type HtRowTarget } from './construct-range'
+import { detectAntibody } from './antibody'
 import type { ResidueRange } from './range-filter'
 
 /** 上传文件体积上限（与前端 HighThroughputPanel 的客户端预校验一致） */
@@ -53,8 +69,17 @@ const MAX_GROUPS = 300
 const MAX_TARGETS_PER_GROUP = 30
 /** 序列兜底：行内序列识别最小长度（aa）— 构建序列均远超此值，可滤除载体名/编号等噪音 */
 const MIN_SEQ_AA = 90
-/** 序列兜底：全部序列靶点总字符上限（响应体积 + localStorage 运行历史防膨胀） */
-const MAX_SEQ_TOTAL_CHARS = 240_000
+/** v2.34：FASTA 链段最小长度（结构交付表「>chain」段为显式链，可信度高；
+ *  40 aa 兼容小蛋白结构域（Gγ ≈ 65 aa、IL17F 可及区 87 aa 等），滤除短肽/标签段 */
+const FASTA_CHAIN_MIN_AA = 40
+/** v2.34：行内同源合并阈值 — 短链 6-mer 出现在长链中的比例 ≥ 此值视为同一蛋白
+ *  的不同拷贝/可及区（保留最长）。异源同族蛋白（IL17A vs IL17F ≈ 50% 一致）
+ *  的 6-mer 包含度通常 < 0.1，不会误合并。 */
+const HOMOLOG_KMER = 6
+const HOMOLOG_CONTAINMENT = 0.55
+/** 序列兜底：全部序列靶点总字符上限（响应体积 + localStorage 运行历史防膨胀；
+ *  v2.34 行级语义下不再跨行去重，240K → 400K 实测 179 行清单 ≈ 95K） */
+const MAX_SEQ_TOTAL_CHARS = 400_000
 
 /** UniProt accession 语法（与 components/eval/format.ts 同源；服务端本地定义避免引客户端模块） */
 const UNIPROT_SOURCE =
@@ -142,13 +167,25 @@ export function parseHtWorkbook(buffer: Buffer): HtWorkbookText {
 
 /** 序列兜底靶点（Excel 行缺 UniProt ID 时按序列评估） */
 export interface HtSeqTarget {
-  /** 构建标签头（如「His-TEV-NTRC-83-548」；裸序列为空串） */
+  /** 构建标签头（如「His-TEV-NTRC-83-548」；v2.34 结构交付行为行标签「文件名·链N」） */
   header: string
   /** 清洗后的氨基酸序列（大写、去非字母） */
   seq: string
   length: number
   /** v2.27：行内构建区间（UniProt 编号；序列靶点 UniProt 归属后用于结构范围过滤） */
   range?: ResidueRange
+}
+
+/** v2.34：序列兜底统计（note / meta 展示「行→组」口径） */
+export interface HtSeqFallbackInfo {
+  /** 序列组数（= 产出靶点序列的有效数据行数） */
+  groups: number
+  /** 被忽略的抗体链数 */
+  antibodyChains: number
+  /** 行内同源合并掉的链数（同源多聚体多拷贝） */
+  homologMerged: number
+  /** 无可评估靶点序列而被跳过的行（纯抗体 / 短肽行），sheet 内行号从 1 计 */
+  skippedRows: Array<{ sheet: string; row: number; label: string; reason: 'antibody' | 'none' }>
 }
 
 export interface HtExtractedGroups {
@@ -160,8 +197,11 @@ export interface HtExtractedGroups {
   /** v2.29：与 groups 逐组逐位对齐的结构域名提示（如「胞外域」/「kinase domain」；
    *  无则 undefined — 管线内与 UniProt domain 划分匹配推导区间；仅无数值区间的靶点携带） */
   groupDomainHints: Array<Array<string | undefined>>
-  /** 序列兜底组：行内无 UniProt 但有构建序列 → 每行一组，组内每条序列独立评估 */
+  /** 序列兜底组：行内无 UniProt 但有构建序列 → v2.34 每行一组（组内 = 该行的
+   *  非抗体、去同源合并后的靶点链），组内每条序列独立评估 */
   seqGroups: HtSeqTarget[][]
+  /** v2.34：序列兜底统计（行→组、抗体忽略、同源合并、跳过行） */
+  seqInfo?: HtSeqFallbackInfo
   /** LLM 提取出但不符合 UniProt 编号规则的 token（前端提示用） */
   invalid: string[]
   source: 'llm' | 'regex'
@@ -228,7 +268,18 @@ function sanitizeGroups(v: unknown): { groups: string[][]; invalid: string[]; ca
   return { groups, invalid, capped }
 }
 
-// ─── v2.23.1 序列兜底：行内构建序列提取 ─────────────────────────────────────
+// ─── v2.34 序列兜底：链级提取（FASTA / 构基 / 裸文本）+ 抗体过滤 + 行内同源合并 ───
+
+/** 拆「>chain A\nSEQ;>chain B\nSEQ …」FASTA 风格链段（结构交付表的序列列） */
+function splitFastaChains(cell: string): Array<{ header: string; body: string }> {
+  const segs: Array<{ header: string; body: string }> = []
+  for (const part of cell.split(/(?=>)/)) {
+    const m = part.match(/^>([^\n]*)\n?([\s\S]*)$/)
+    if (!m) continue
+    if (m[2].trim()) segs.push({ header: m[1].trim().slice(0, 40), body: m[2] })
+  }
+  return segs
+}
 
 /** 拆「[标签头] 序列 [标签头] 序列 …」构段；无括号的裸文本返回单段（header=''） */
 function splitBracketSegments(cell: string): Array<{ header: string; body: string }> {
@@ -252,30 +303,122 @@ function splitBracketSegments(cell: string): Array<{ header: string; body: strin
   return segs
 }
 
+function cleanAa(raw: string): string {
+  return raw.toUpperCase().replace(/[^A-Z]/g, '')
+}
+
+interface RowChain {
+  header: string
+  seq: string
+  origin: 'fasta' | 'bracket' | 'bare'
+}
+
 /**
- * 从一行单元格中提取构建序列（≥ MIN_SEQ_AA aa）：
- *  - 含「[标签头]」结构：逐构段提取（标签头作为 sequenceHeader 命名证据）
- *  - 裸序列单元格：字母占比 ≥ 0.7 且长度达标才收（滤除载体名/编号/描述文本）
+ * 行内链收集（v2.34 链级化）：
+ *  - 「>…」开头的 FASTA 链段单元格：逐链提取（≥40 aa — 显式链可信度高，兼容小结构域）
+ *  - 「[标签头] SEQ」构段：逐构段提取（≥90 aa，标签头作为命名证据）
+ *  - 裸序列单元格：字母占比 ≥ 0.7 且 ≥90 aa 才收（滤除载体名/编号/描述文本）
  */
-function extractRowSequences(row: string[], seen: Set<string>): HtSeqTarget[] {
-  const out: HtSeqTarget[] = []
-  const push = (header: string, raw: string) => {
-    const seq = raw.toUpperCase().replace(/[^A-Z]/g, '')
-    if (seq.length < MIN_SEQ_AA || seen.has(seq)) return
-    seen.add(seq)
-    out.push({ header: header.trim().slice(0, 120), seq, length: seq.length })
-  }
+function collectRowChains(row: string[]): RowChain[] {
+  const out: RowChain[] = []
   for (const cell of row) {
-    if (!cell || cell.length < MIN_SEQ_AA) continue
+    if (!cell) continue
+    if (cell.trimStart().startsWith('>')) {
+      for (const seg of splitFastaChains(cell)) {
+        const seq = cleanAa(seg.body)
+        if (seq.length >= FASTA_CHAIN_MIN_AA) out.push({ header: seg.header, seq, origin: 'fasta' })
+      }
+      continue
+    }
+    if (cell.length < MIN_SEQ_AA) continue
     if (cell.includes('[') && cell.includes(']')) {
-      for (const seg of splitBracketSegments(cell)) push(seg.header, seg.body)
+      for (const seg of splitBracketSegments(cell)) {
+        const seq = cleanAa(seg.body)
+        if (seq.length >= MIN_SEQ_AA) out.push({ header: seg.header, seq, origin: 'bracket' })
+      }
     } else {
       const letters = cell.replace(/[^A-Za-z]/g, '').length
       const nonSpace = cell.replace(/\s/g, '').length
-      if (letters >= MIN_SEQ_AA && nonSpace > 0 && letters / nonSpace >= 0.7) push('', cell)
+      if (letters >= MIN_SEQ_AA && nonSpace > 0 && letters / nonSpace >= 0.7) {
+        out.push({ header: '', seq: cleanAa(cell), origin: 'bare' })
+      }
     }
   }
   return out
+}
+
+/** 序列 6-mer 集合（行内同源判定用） */
+function seqKmers(seq: string, k = HOMOLOG_KMER): Set<string> {
+  const s = new Set<string>()
+  for (let i = 0; i + k <= seq.length; i++) s.add(seq.slice(i, i + k))
+  return s
+}
+
+/** 包含度：short 的 k-mer 出现在 long 中的比例 */
+function kmerContainment(short: Set<string>, long: Set<string>): number {
+  if (short.size === 0) return 0
+  let hit = 0
+  for (const k of short) if (long.has(k)) hit++
+  return hit / short.size
+}
+
+/** v2.34：行标签 — 行内首个非序列单元格（结构交付表 = 文件路径），剥目录与扩展名 */
+function deriveRowLabel(row: string[]): string {
+  for (const cell of row) {
+    if (!cell || cell.trimStart().startsWith('>')) continue
+    const letters = cell.replace(/[^A-Za-z]/g, '').length
+    const nonSpace = cell.replace(/\s/g, '').length
+    if (nonSpace > 0 && cell.length >= 80 && letters / nonSpace >= 0.7) continue // 序列样文本
+    const base = cell.replace(/[\\/]+/g, '/').split('/').pop() ?? ''
+    const label = base.replace(/\.(pdb|cif|mmcif|ent|csv|txt|fa|fasta)$/i, '').trim()
+    if (label) return label.slice(0, 60)
+  }
+  return ''
+}
+
+/**
+ * 行 → 序列靶点组（v2.34 行级语义）：
+ *  ① 链级收集（FASTA ≥40 aa / 构基与裸序列 ≥90 aa）
+ *  ② 抗体链忽略（detectAntibody — Fab/VHH 可变域也识别）
+ *  ③ 行内同源合并（同源多聚体只计 1 条，保留最长 = 可及区最完整）
+ *  ④ 命名：FASTA/裸序列 → 行标签（多靶点附「·链N」）；构基标签头保留原语义
+ */
+function extractRowSeqTargets(
+  row: string[],
+  rowLabel: string,
+  stats: HtSeqFallbackInfo,
+): HtSeqTarget[] {
+  const chains = collectRowChains(row)
+  const targets = chains.filter((c) => {
+    if (detectAntibody(c.seq, c.header).isAntibody) {
+      stats.antibodyChains += 1
+      return false
+    }
+    return true
+  })
+  if (targets.length === 0) return []
+  const sorted = [...targets].sort((a, b) => b.seq.length - a.seq.length)
+  const kept: Array<RowChain & { kmers: Set<string> }> = []
+  for (const t of sorted) {
+    const kmers = seqKmers(t.seq)
+    if (kept.some((k) => kmerContainment(kmers, k.kmers) >= HOMOLOG_CONTAINMENT)) {
+      stats.homologMerged += 1
+      continue
+    }
+    kept.push({ ...t, kmers })
+  }
+  return kept.map((k, i) => ({
+    header:
+      k.origin === 'bracket' && k.header
+        ? k.header
+        : rowLabel
+          ? kept.length > 1
+            ? `${rowLabel}·链${i + 1}`
+            : rowLabel
+          : k.header || `序列${i + 1}`,
+    seq: k.seq,
+    length: k.seq.length,
+  }))
 }
 
 /** 行内靶点（含区间）→ 分组去重键（accession|区间；v2.27：聚蛋白不同片段不再合并） */
@@ -311,7 +454,9 @@ function scanSheetInstances(sheets: HtSheetRows[]): HtRowTarget[] {
  *  - 组列识别：表头匹配「组号/分组/批次/batch/group/complex/复合物」的列（排除靶点/accession 列）
  *  - 有组列 → 同值行合并一组；无组列 → 同一行内的靶点归一组（逐行成组）
  *  - 单元格内多 ID（P04637/P00533、分号、空格、加号分隔）均拆出（v2.27：结构化解析 — 括号注释里的区间保留）
- *  - v2.23.1 序列兜底：行内无 UniProt 但有构建序列 → 该行归入 seqGroups（每行一组）
+ *  - v2.23.1 序列兜底 → v2.34 行级语义：行内无 UniProt 但有可评估序列 → 该行归入
+ *    seqGroups（每行一组；组内 = 非抗体、同源合并后的靶点链，逐序列独立评估；
+ *    不再跨行去重 — 同序列的 .cif/.pdb 双行/复测行各自成组）
  *  - v2.27：去重键 accession|区间；行内区间数与序列数一致时 1:1 附到序列靶点
  */
 export function fallbackHtGroups(sheets: HtSheetRows[]): {
@@ -319,13 +464,14 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
   groupRanges: Array<Array<ResidueRange | undefined>>
   groupDomainHints: Array<Array<string | undefined>>
   seqGroups: HtSeqTarget[][]
+  seqInfo: HtSeqFallbackInfo
 } {
   const groups: string[][] = []
   const groupRanges: Array<Array<ResidueRange | undefined>> = []
   const groupDomainHints: Array<Array<string | undefined>> = []
   const seqGroups: HtSeqTarget[][] = []
+  const seqInfo: HtSeqFallbackInfo = { groups: 0, antibodyChains: 0, homologMerged: 0, skippedRows: [] }
   const seenKeys = new Set<string>()
-  const seenSeqs = new Set<string>()
   let seqChars = 0
   for (const sheet of sheets) {
     const rows = sheet.rows
@@ -382,23 +528,37 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
         }
         continue
       }
-      // 序列兜底：本行无任何 UniProt ID — 尝试提取构建序列（≥90 aa）
-      const seqs = extractRowSequences(row, seenSeqs)
+      // v2.34 序列兜底：本行无任何 UniProt ID → 逐行成组（行 = 靶点组）。
+      //  链级收集 + 抗体链忽略 + 行内同源合并（同源多聚体只计 1 条）+ 行标签命名。
+      const seqs = extractRowSeqTargets(scanRow, deriveRowLabel(scanRow), seqInfo)
       // v2.27：行内构建区间与序列数一致时 1:1 附到序列靶点（UniProt 归属后区间过滤）
       if (seqs.length > 0 && scan.seqRanges.length === seqs.length) {
         for (let i = 0; i < seqs.length; i++) seqs[i].range = scan.seqRanges[i]
       }
-      if (seqs.length > 0 && seqGroups.length < MAX_GROUPS) {
-        const budget = MAX_SEQ_TOTAL_CHARS - seqChars
-        if (budget > MIN_SEQ_AA) {
-          const capped: HtSeqTarget[] = []
-          for (const s of seqs) {
-            if (seqChars + s.length > MAX_SEQ_TOTAL_CHARS || capped.length >= MAX_TARGETS_PER_GROUP) break
-            capped.push(s)
-            seqChars += s.length
+      if (seqs.length > 0) {
+        if (seqGroups.length < MAX_GROUPS) {
+          const budget = MAX_SEQ_TOTAL_CHARS - seqChars
+          if (budget > FASTA_CHAIN_MIN_AA) {
+            const capped: HtSeqTarget[] = []
+            for (const s of seqs) {
+              if (seqChars + s.length > MAX_SEQ_TOTAL_CHARS || capped.length >= MAX_TARGETS_PER_GROUP) break
+              capped.push(s)
+              seqChars += s.length
+            }
+            if (capped.length > 0) {
+              seqGroups.push(capped)
+              seqInfo.groups += 1
+            }
           }
-          if (capped.length > 0) seqGroups.push(capped)
         }
+      } else if (chainsPresentInRow(scanRow)) {
+        // 有链但无可评估靶点（纯抗体行）→ 记录跳过原因，不静默丢行
+        seqInfo.skippedRows.push({
+          sheet: sheet.name,
+          row: r + 1,
+          label: deriveRowLabel(scanRow) || `第 ${r + 1} 行`,
+          reason: 'antibody',
+        })
       }
     }
     for (const bucket of byKey.values()) {
@@ -408,7 +568,29 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
       groupDomainHints.push(bucket.hints)
     }
   }
-  return { groups, groupRanges, groupDomainHints, seqGroups }
+  return { groups, groupRanges, groupDomainHints, seqGroups, seqInfo }
+}
+
+/** 行内是否存在（被长度阈值收进来过的）链段 — 区分「纯抗体行」与「本就无序列的行」 */
+function chainsPresentInRow(row: string[]): boolean {
+  return collectRowChains(row).length > 0
+}
+
+/** v2.34：序列兜底统计 → note 文案（行→组口径、抗体忽略、同源合并、跳过行） */
+function seqInfoNote(info: HtSeqFallbackInfo): string {
+  const parts: string[] = []
+  parts.push(`序列行 ${info.groups} 组（行=组）`)
+  if (info.antibodyChains > 0) parts.push(`抗体链已忽略 ${info.antibodyChains} 条`)
+  if (info.homologMerged > 0) parts.push(`同源多聚体合并 ${info.homologMerged} 条`)
+  if (info.skippedRows.length > 0) {
+    const listed = info.skippedRows
+      .slice(0, 8)
+      .map((s) => `${s.sheet}第${s.row}行（${s.label}${s.reason === 'antibody' ? '·纯抗体链' : '·无序列'}）`)
+      .join('、')
+    const more = info.skippedRows.length > 8 ? ` 等 ${info.skippedRows.length} 行` : ''
+    parts.push(`跳过无可评估靶点的行：${listed}${more}`)
+  }
+  return parts.join('；')
 }
 
 /**
@@ -436,9 +618,10 @@ export async function extractHtGroups(
       groupRanges: fb.groupRanges,
       groupDomainHints: fb.groupDomainHints,
       seqGroups: fb.seqGroups,
+      seqInfo: fb.seqInfo,
       invalid: [],
       source: 'regex',
-      note: '已返回规则提取结果（快速兜底模式）',
+      note: fb.seqGroups.length > 0 ? `已返回规则提取结果（快速兜底模式）— ${seqInfoNote(fb.seqInfo)}` : '已返回规则提取结果（快速兜底模式）',
     }
   }
 
@@ -447,36 +630,48 @@ export async function extractHtGroups(
     `━━━━━━━━━━ 表格内容 ━━━━━━━━━━\n${wb.text.slice(0, MAX_TABLE_TEXT_CHARS)}\n━━━━━━━━━━ 内容结束 ━━━━━━━━━━\n\n` +
     `请按系统指令输出 JSON。`
 
+  const fb = fallbackHtGroups(wb.sheets)
+  const seqNote = fb.seqGroups.length > 0 ? seqInfoNote(fb.seqInfo) : ''
   const r = await llmChat(prompt, SYSTEM, opts.signal)
   if (!r.ok) {
-    const fb = fallbackHtGroups(wb.sheets)
     return {
       groups: fb.groups,
       groupRanges: fb.groupRanges,
       groupDomainHints: fb.groupDomainHints,
       seqGroups: fb.seqGroups,
+      seqInfo: fb.seqInfo,
       invalid: [],
       source: 'regex',
-      note: r.error ? `LLM 不可用（${r.error}），已返回规则提取结果` : 'LLM 不可用，已返回规则提取结果',
+      note: r.error
+        ? `LLM 不可用（${r.error}），已返回规则提取结果${seqNote ? ` — ${seqNote}` : ''}`
+        : 'LLM 不可用，已返回规则提取结果',
     }
   }
   const obj = extractJson(r.text)
   if (!obj) {
-    const fb = fallbackHtGroups(wb.sheets)
     return {
       groups: fb.groups,
       groupRanges: fb.groupRanges,
       groupDomainHints: fb.groupDomainHints,
       seqGroups: fb.seqGroups,
+      seqInfo: fb.seqInfo,
       invalid: [],
       source: 'regex',
-      note: 'AI 输出无法解析为 JSON，已返回规则提取结果',
+      note: `AI 输出无法解析为 JSON，已返回规则提取结果${seqNote ? ` — ${seqNote}` : ''}`,
     }
   }
   const { groups, invalid, capped } = sanitizeGroups(obj)
   if (groups.length === 0) {
-    const fb = fallbackHtGroups(wb.sheets)
-    return { groups: fb.groups, groupRanges: fb.groupRanges, groupDomainHints: fb.groupDomainHints, seqGroups: fb.seqGroups, invalid, source: 'regex', note: 'AI 未识别到有效靶点，已返回规则提取结果' }
+    return {
+      groups: fb.groups,
+      groupRanges: fb.groupRanges,
+      groupDomainHints: fb.groupDomainHints,
+      seqGroups: fb.seqGroups,
+      seqInfo: fb.seqInfo,
+      invalid,
+      source: 'regex',
+      note: `AI 未识别到有效靶点，已返回规则提取结果${seqNote ? ` — ${seqNote}` : ''}`,
+    }
   }
 
   // ── v2.27/v2.29 区间/域名确定性回填：acc → 行序实例队列；LLM 组内出现序出队。
@@ -520,12 +715,14 @@ export async function extractHtGroups(
     invalid,
     groupRanges,
     groupDomainHints,
-    seqGroups: fallbackHtGroups(wb.sheets).seqGroups,
+    seqGroups: fb.seqGroups,
+    seqInfo: fb.seqInfo,
     source: 'llm',
   }
   const notes: string[] = []
   if (capped) notes.push('提取结果已按上限截断（≤ 300 组 · 每组 ≤ 30 靶点）')
   if (appended > 0) notes.push(`已按行内区间补充 ${appended} 个被全局去重合并的靶点实例（如聚蛋白不同片段）`)
+  if (seqNote) notes.push(seqNote)
   if (notes.length > 0) out.note = notes.join('；')
   return out
 }

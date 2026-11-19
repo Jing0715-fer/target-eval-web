@@ -67,9 +67,13 @@ interface ExcelImportMeta {
   source: 'llm' | 'regex'
   groupCount: number
   targetCount: number
-  /** v2.23.1 序列兜底：行缺 UniProt 但有构建序列 → 按序列评估 */
+  /** v2.23.1 序列兜底：行缺 UniProt 但有构建序列 → 按序列评估（v2.34：行=组） */
   seqGroupCount: number
   seqTargetCount: number
+  /** v2.34：行→组口径统计（抗体链忽略 / 同源多聚体合并 / 跳过行数） */
+  seqAntibodyChains?: number
+  seqHomologMerged?: number
+  seqSkippedRows?: number
   /** v2.27：携带构建区间的靶点数（截短构建感知） */
   rangeTargetCount: number
   /** v2.29：携带结构域名提示的靶点数（管线内与 UniProt domain 匹配推导区间） */
@@ -152,6 +156,9 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         targetCount: r.groups.reduce((n, g) => n + g.length, 0),
         seqGroupCount: seqs.length,
         seqTargetCount: seqs.reduce((n, g) => n + g.length, 0),
+        seqAntibodyChains: r.meta?.seqAntibodyChains,
+        seqHomologMerged: r.meta?.seqHomologMerged,
+        seqSkippedRows: r.meta?.seqSkippedRows,
         rangeTargetCount:
           r.meta?.rangeTargets ??
           (r.groupRanges ?? []).reduce((n, gr) => n + gr.filter(Boolean).length, 0),
@@ -221,7 +228,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           {importing ? 'AI 解析中…' : '从 Excel 导入'}
         </Button>
         <span className="font-mono text-[10px] text-muted-foreground/70">
-          .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 行缺 UniProt 但有序列则按序列评估 · 导入会替换当前输入
+          .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 序列行逐行成组（同链多靶点同组 · 抗体链忽略 · 同源多聚体只计 1 条） · 导入会替换当前输入
         </span>
       </div>
 
@@ -276,8 +283,14 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             </span>
           )}
           {importMeta.seqGroupCount > 0 && (
-            <span className="font-mono text-[11px] text-teal-600 dark:text-teal-400" title="行内无 UniProt ID 但有构建序列（≥90 aa）→ 每条序列作为独立序列靶点评估">
-              另提取 {importMeta.seqGroupCount} 组 · {importMeta.seqTargetCount} 条序列靶点（无 UniProt 行，按序列评估）
+            <span
+              className="font-mono text-[11px] text-teal-600 dark:text-teal-400"
+              title="行内无 UniProt ID 但有序列（结构交付表 FASTA 链 / 构建序列）→ 逐行成组：同一行的多个靶点作为同一组；抗体链已忽略；同源多聚体只计 1 条；组内每条序列独立评估"
+            >
+              另提取 {importMeta.seqGroupCount} 组（行=组） · {importMeta.seqTargetCount} 条靶点序列
+              {importMeta.seqAntibodyChains ? ` · 忽略抗体链 ${importMeta.seqAntibodyChains}` : ''}
+              {importMeta.seqHomologMerged ? ` · 同源合并 ${importMeta.seqHomologMerged}` : ''}
+              {importMeta.seqSkippedRows ? ` · 跳过纯抗体行 ${importMeta.seqSkippedRows}` : ''}
             </span>
           )}
           {importMeta.note && (
@@ -363,7 +376,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             <li
               key={`seq-${gi}`}
               className="flex flex-wrap items-center gap-1.5 rounded-lg border border-teal-500/30 bg-teal-500/[0.04] px-2.5 py-1.5"
-              title="该行无 UniProt ID 但有构建序列（≥90 aa）→ 每条序列作为独立序列靶点评估（结构预测走 ESMFold 兜底）"
+              title="该行无 UniProt ID 但有序列 → 逐行成组（同一行的多个靶点作为同一组）；抗体链已忽略、同源多聚体只计 1 条；组内每条序列作为独立序列靶点评估（结构预测走 ESMFold 兜底）"
             >
               <span className="shrink-0 rounded-md bg-teal-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-teal-600 dark:text-teal-400">
                 G{String(parsed.groups.length + gi + 1).padStart(2, '0')}
@@ -378,7 +391,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                 </span>
               ))}
               <span className="ml-auto shrink-0 rounded-md bg-teal-500/10 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-teal-600 dark:text-teal-400">
-                序列兜底 · {g.length} 条独立评估
+                行组 · {g.length} 条独立评估
               </span>
             </li>
           ))}
@@ -399,7 +412,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       )}
 
       <p className="text-[11px] leading-relaxed text-muted-foreground/80">
-        支持手输或「从 Excel 导入」（AI 语义提取分组；行内无 UniProt ID 但有构建序列 ≥90 aa 时，该行自动转为序列靶点独立评估）。
+        支持手输或「从 Excel 导入」（AI 语义提取分组；行内无 UniProt ID 但有序列时逐行成组 — 同一行的多个靶点作为同一组，
+        抗体链自动忽略，同源多聚体只计 1 条序列，靶点名取自行内文件路径/标签）。
         每组按现有复合物批量评估链路执行（靶点关系判断 → 并发评估 → 合并评估报告），组间串行推进；
         遇 LLM 限流 / 服务配额（含每日作业配额）自动暂停，配额恢复后可从断点重新开始（已完成的组不会重复评估）。
         每组报告与运行日志在完成后均保留可回看。
