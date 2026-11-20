@@ -22,6 +22,8 @@
  *  - v2.47：AF 3D 放大视图随 canvas 迁入「下载 PDB / 着色切换」工具条（v2.46 小窗
  *    拥挤 → 小窗一律隐藏，仅放大后可见；图例双处同步 — 内嵌 af-legend + 全屏条
  *    af-full-legend，重开全屏对齐当前已选着色）。
+ *  - v2.48：PDB / BLAST 列表筛选排序（TABLE_FILTER_JS — 方法 chips + 排序下拉 +
+ *    计数；PDB 主表与折叠表同组跨表作用于全量行，激活时折叠区暂避、默认态归位）。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -754,6 +756,135 @@ export const UX_PAGE_JS = `<script>
 })();
 </script>`
 
+// ─── v2.48 PDB / BLAST 列表筛选 + 排序（报告内嵌，纯客户端零依赖）──────────────
+//  表格行携带 data-m（方法归类）/data-res/data-date/data-id/data-ident/data-e/data-cov，
+//  table[data-tbl] 标组（pdb 主表+折叠表同组 — 控制器跨表作用于全量行；pdb-out /
+//  blast / blast-out 各自独立成组）。分组作用域 = 最近 section（合并报告多靶点
+//  各自的 section id 唯一 — 不串组）。激活筛选/排序时全部可见行并入首表、折叠区
+//  暂避；恢复默认则按 __home 归位原分布（预览 20 + 折叠余量的结构不变）。
+const TABLE_FILTER_MARKER = 'rpt-tbl-v1'
+
+export const TABLE_FILTER_JS = `<script>
+/* ${TABLE_FILTER_MARKER} PDB/BLAST 列表筛选排序（v2.48）*/
+(function () {
+  var M_LABEL = { xray: 'X-ray', cryoem: 'Cryo-EM', nmr: 'NMR', other: '其他' };
+  var M_ORDER = ['xray', 'cryoem', 'nmr', 'other'];
+  var SORTS = {
+    pdb: [
+      ['default', '默认（分辨率 ↑）'],
+      ['res-asc', '分辨率 ↑'], ['res-desc', '分辨率 ↓'],
+      ['date-desc', '日期 新→旧'], ['date-asc', '日期 旧→新'],
+      ['id-asc', 'PDB ID A→Z']
+    ],
+    blast: [
+      ['default', '默认（Identity ↓）'],
+      ['ident-desc', 'Identity 高→低'], ['ident-asc', 'Identity 低→高'],
+      ['e-asc', 'E-value 小→大'], ['cov-desc', '覆盖 大→小'], ['res-asc', '分辨率 小→大']
+    ]
+  };
+  function numAttr(el, k) { var v = parseFloat(el.getAttribute(k)); return Number.isFinite(v) ? v : null; }
+  function strAttr(el, k) { var v = (el.getAttribute(k) || '').trim(); return v || null; }
+  function cmp(av, bv, dir) { // 缺失值恒排末尾（不因方向翻转漂到头部）
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  }
+  var ACCESS = {
+    res: function (r) { return numAttr(r, 'data-res'); },
+    date: function (r) { return strAttr(r, 'data-date'); },
+    id: function (r) { return strAttr(r, 'data-id'); },
+    ident: function (r) { return numAttr(r, 'data-ident'); },
+    e: function (r) { return numAttr(r, 'data-e'); },
+    cov: function (r) { return numAttr(r, 'data-cov'); }
+  };
+  function sortKey(v) { var i = v.lastIndexOf('-'); return i < 0 ? null : { k: v.slice(0, i), dir: v.slice(i + 1) === 'desc' ? -1 : 1 }; }
+  var groups = {};
+  Array.prototype.forEach.call(document.querySelectorAll('table[data-tbl]'), function (t) {
+    var g = t.getAttribute('data-tbl');
+    var scope = t.closest ? (t.closest('section') || t.closest('.rpt-view') || document.body) : document.body;
+    var key = (scope.id || '') + '|' + g;
+    (groups[key] = groups[key] || { kind: g, tables: [] }).tables.push(t);
+  });
+  Object.keys(groups).forEach(function (key) {
+    var grp = groups[key];
+    var kind = grp.kind.indexOf('blast') === 0 ? 'blast' : 'pdb';
+    var rows = [];
+    grp.tables.forEach(function (t) {
+      var tb = t.tBodies[0];
+      if (!tb) return;
+      Array.prototype.forEach.call(tb.rows, function (tr) { tr.__home = tb; rows.push(tr); });
+    });
+    if (rows.length < 4) return; // 极小表无筛选价值
+    var mCounts = {};
+    rows.forEach(function (r) { var m = r.getAttribute('data-m') || 'other'; mCounts[m] = (mCounts[m] || 0) + 1; });
+    var mKeys = M_ORDER.filter(function (k) { return mCounts[k]; });
+    var sorts = SORTS[kind];
+    var firstWrap = grp.tables[0].closest ? (grp.tables[0].closest('.tbl-wrap') || grp.tables[0]) : grp.tables[0];
+    var ctl = document.createElement('div');
+    ctl.className = 'tbl-ctl';
+    ctl.setAttribute('role', 'group');
+    ctl.setAttribute('aria-label', '列表筛选与排序');
+    var html = '';
+    if (mKeys.length > 1) {
+      html += '<span class="tc-lbl">方法</span>';
+      html += '<button type="button" class="tc-chip tc-on" data-m="all" aria-pressed="true">全部 ' + rows.length + '</button>';
+      mKeys.forEach(function (k) {
+        html += '<button type="button" class="tc-chip" data-m="' + k + '" aria-pressed="false">' + (M_LABEL[k] || k) + ' ' + mCounts[k] + '</button>';
+      });
+    }
+    html += '<span class="tc-lbl">排序</span><select class="tc-sel" aria-label="排序方式">';
+    sorts.forEach(function (s) { html += '<option value="' + s[0] + '">' + s[1] + '</option>'; });
+    html += '</select><span class="tc-count"></span>';
+    ctl.innerHTML = html;
+    firstWrap.parentNode.insertBefore(ctl, firstWrap);
+    var state = { m: 'all', sort: 'default' };
+    var countEl = ctl.querySelector('.tc-count');
+    var selEl = ctl.querySelector('.tc-sel');
+    var hides = []; // 激活期间暂避的次表宿主（details 折叠区 / .tbl-wrap）
+    grp.tables.slice(1).forEach(function (t) {
+      var host = t.closest ? (t.closest('details') || t.closest('.tbl-wrap')) : null;
+      if (host) hides.push(host);
+    });
+    function render() {
+      var active = state.m !== 'all' || state.sort !== 'default';
+      var vis = rows.filter(function (r) { return state.m === 'all' || (r.getAttribute('data-m') || 'other') === state.m; });
+      var sk = sortKey(state.sort);
+      if (sk && ACCESS[sk.k]) vis.sort(function (a, b) { return cmp(ACCESS[sk.k](a), ACCESS[sk.k](b), sk.dir); });
+      var first = grp.tables[0].tBodies[0];
+      if (!first) return;
+      if (active) {
+        vis.forEach(function (r) { first.appendChild(r); });
+        rows.forEach(function (r) { if (vis.indexOf(r) < 0) r.remove(); });
+        hides.forEach(function (h) { h.style.display = 'none'; });
+      } else {
+        rows.forEach(function (r) { r.__home.appendChild(r); });
+        hides.forEach(function (h) { h.style.display = ''; });
+      }
+      if (countEl) {
+        countEl.textContent = '显示 ' + vis.length + ' / ' + rows.length;
+        countEl.classList.toggle('tc-filtered', vis.length < rows.length);
+      }
+    }
+    ctl.addEventListener('click', function (e) {
+      var chip = e.target && e.target.closest ? e.target.closest('.tc-chip') : null;
+      if (!chip || !ctl.contains(chip)) return;
+      state.m = chip.getAttribute('data-m') || 'all';
+      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip'), function (c) {
+        var on = c === chip;
+        c.classList.toggle('tc-on', on);
+        if (c.setAttribute) c.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      render();
+    });
+    if (selEl) selEl.addEventListener('change', function () { state.sort = selEl.value; render(); });
+    render();
+  });
+})();
+</script>`
+
 /** 旧报告兼容：无 UX 标记的历史 report.html，注入打印版式 + 复制/横滚 CSS+JS（幂等，已有则原样返回） */
 export function applyUxUpgrade(html: string): string {
   if (html.includes(UX_PAGE_MARKER)) return html
@@ -1002,13 +1133,16 @@ export function coverageFigureHtml(
 }
 
 /** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题；
- *  v2.29 outside=true → 范围外行（灰色 + chip — 与评估区间无链范围重叠）） */
+ *  v2.29 outside=true → 范围外行（灰色 + chip — 与评估区间无链范围重叠）；
+ *  v2.48 行携带 data-m/-res/-date/-id — 表格筛选排序控制器（TABLE_FILTER_JS）消费） */
 function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, LiteratureItem>, outside = false): string {
   return pdbs.slice(0, max).map(p => {
     const lit = p.pubmedId ? litByPmid.get(p.pubmedId) : undefined
     const ligShow = p.ligands.slice(0, 2).map(l => shortLigand(l)).join('; ')
+    const mKey = p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'
+    const dateSort = (p.releaseDate || '').slice(0, 10)
     return `
-    <tr${outside ? ' class="tr-outside"' : ''}>
+    <tr${outside ? ' class="tr-outside"' : ''} data-m="${mKey}" data-res="${p.resolution ?? ''}" data-date="${esc(dateSort)}" data-id="${p.pdbId}">
       <td class="td-id"><a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a></td>
       <td><span class="mth mth-${p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'}">${esc(methodLabel(p))}</span></td>
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
@@ -1033,13 +1167,14 @@ const PDB_COLGROUP = `<colgroup>
 /** PDB 表头（v2.29 提为模块级常量 — 主表/范围外折叠表共用） */
 const PDB_TABLE_THEAD = '<thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>'
 
-/** PDB 表格：前 preview 条直出，剩余放入 details 折叠；expandAll=true 全量直出（v2.13 单独评估页要求） */
+/** PDB 表格：前 preview 条直出，剩余放入 details 折叠；expandAll=true 全量直出（v2.13 单独评估页要求）。
+ *  v2.48 主表/折叠表同标 data-tbl="pdb"（同组 — 筛选排序控制器跨表作用于全量行） */
 function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid: Map<string, LiteratureItem>, expandAll = false): string {
   const shown = pdbs.slice(0, max)
   const PDB_THEAD = PDB_TABLE_THEAD
   if (expandAll) {
     return `
-  <div class="tbl-wrap"><table class="tbl-data">
+  <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb">
     ${PDB_COLGROUP}
     ${PDB_THEAD}
     <tbody>${pdbRowsHtml(shown, max, litByPmid)}</tbody>
@@ -1048,7 +1183,7 @@ function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid:
   const head = shown.slice(0, preview)
   const rest = shown.slice(preview)
   const headHtml = `
-  <div class="tbl-wrap"><table class="tbl-data">
+  <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb">
     ${PDB_COLGROUP}
     ${PDB_THEAD}
     <tbody>${pdbRowsHtml(head, preview, litByPmid)}</tbody>
@@ -1057,7 +1192,7 @@ function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid:
   return `${headHtml}
   <details class="fold">
     <summary>展开其余 ${rest.length} 条结构（共 ${shown.length} 条，打印时自动展开）</summary>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb">
       ${PDB_COLGROUP}
       ${PDB_THEAD}
       <tbody>${pdbRowsHtml(rest, rest.length, litByPmid)}</tbody>
@@ -1109,7 +1244,7 @@ function pdbOutsideFoldHtml(pdbs: PdbEntry[], litByPmid: Map<string, LiteratureI
   return `
   <details class="fold fold-outside">
     <summary>范围外结构 ${pdbs.length} 条（与评估区间 ${range[0]}-${range[1]} 无链范围重叠 — 折叠保留，灰色行${pdbs.length > 150 ? `，展示前 150 条` : ''}）</summary>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb-out">
       ${PDB_COLGROUP}
       ${PDB_TABLE_THEAD}
       <tbody>${pdbRowsHtml(shown, 150, litByPmid, true)}</tbody>
@@ -1316,8 +1451,11 @@ function blastRowsHtml(hits: BlastHit[], outside = false): string {
     const range = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
       ? `${h.queryFrom}-${h.queryTo}`
       : (h.queryCoverage != null && h.queryCoverage > 0 ? `${h.queryCoverage} aa` : '—')
+    const covSpan = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo >= h.queryFrom
+      ? h.queryTo - h.queryFrom + 1
+      : (h.queryCoverage != null && h.queryCoverage > 0 ? h.queryCoverage : '')
     return `
-    <tr${outside ? ' class="tr-outside"' : ''}>
+    <tr${outside ? ' class="tr-outside"' : ''} data-m="${blastMethodKey(h.method)}" data-ident="${h.identity}" data-res="${h.resolution ?? ''}" data-cov="${covSpan}" data-e="${Number.isFinite(h.evalue) ? h.evalue : ''}">
       <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
       <td class="t-desc">${esc(h.description)}</td>
       <td class="num">${h.identity.toFixed(1)}%</td>
@@ -1344,6 +1482,17 @@ function blastMethodChip(method: string): string {
   return `<span class="mth mth-other" title="${esc(m)}">${esc(m.slice(0, 13))}…</span>`
 }
 
+/** v2.48：BLAST 行方法归类键（与 blastMethodChip 同口径 — 筛选 chips / data-m 属性用） */
+function blastMethodKey(method: string): string {
+  const m = (method || '').trim()
+  if (!m) return 'other'
+  const up = m.toUpperCase()
+  if (up.includes('X-RAY') || up.includes('XRAY')) return 'xray'
+  if (up.includes('ELECTRON MICROSCOPY') || up.includes('CRYO-EM') || up.includes('CRYOEM') || up.includes('ELECTRON CRYSTALLOGRAPHY')) return 'cryoem'
+  if (up.includes('NMR')) return 'nmr'
+  return 'other'
+}
+
 /** 范围外 BLAST 同源命中折叠区（灰色行 + 范围外 chip — v2.29） */
 function blastOutsideFoldHtml(hits: BlastHit[], range: [number, number] | undefined): string {
   if (!range || hits.length === 0) return ''
@@ -1351,7 +1500,7 @@ function blastOutsideFoldHtml(hits: BlastHit[], range: [number, number] | undefi
   return `
   <details class="fold fold-outside">
     <summary>范围外同源结构 ${hits.length} 条（查询覆盖区间与评估区间 ${range[0]}-${range[1]} 无重叠 — 折叠保留，灰色行${hits.length > 100 ? '，展示前 100 条' : ''}）</summary>
-    <div class="tbl-wrap"><table class="tbl-data tbl-blast">
+    <div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast-out">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
@@ -2234,7 +2383,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <h2>${secHead(pdbsNo, 'PDB 结构清单', ctx.directPdbs.length ? `Structures · ${ctx.directPdbs.length}${(ctx.rangeOutsidePdbs?.length ?? 0) > 0 ? ` · 范围外 ${(ctx.rangeOutsidePdbs?.length ?? 0)}` : ''}` : (ctx.interaction?.hasEvidence ? 'Structures · 互作组分证据' : 'Structures · 0'))}</h2>
     ${rangeBannerHtml(ctx.range, ctx.rangeSource, ctx.rangeOutsidePdbs?.length ?? 0, ctx.rangeOutsideBlastHits?.length ?? 0)}
     ${covFigHtml}
-    ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。${expandAll ? '本页为单独评估页 — 全量结构默认展开。' : ''}${ctx.range ? ' 本表仅含链范围与评估区间重叠（或范围未知）的结构。' : ''}</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid, expandAll)}` +
+    ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。表头下方可按方法筛选、切换排序。${expandAll ? '本页为单独评估页 — 全量结构默认展开。' : ''}${ctx.range ? ' 本表仅含链范围与评估区间重叠（或范围未知）的结构。' : ''}</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid, expandAll)}` +
       (input.totalPdbFound > 150 ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示前 150 个（按分辨率排序）。</p>`
       : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : '')) +
       pdbOutsideFoldHtml(ctx.rangeOutsidePdbs ?? [], litByPmid, ctx.range)
@@ -2246,7 +2395,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   ${showBlastSec ? `
   <section class="sec" id="${idOf('blast')}">
     <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}`)}</h2>
-    ${ctx.blastHits.length ? `<p class="note">按 identity 降序排列（已排除直接结构重复项）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast">
+    ${ctx.blastHits.length ? `<p class="note">按 identity 降序排列（已排除直接结构重复项）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。表头下方可按方法筛选、切换排序。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
@@ -2637,6 +2786,18 @@ export const SINGLE_REPORT_CSS = `  :root {
   .af-legend.af-lgd-scroll { max-height:76px; overflow-y:auto; justify-content:flex-start; }
   .af-lgd-item { max-width:170px; overflow:hidden; text-overflow:ellipsis; }
   .af-lgd-rb-bar { display:inline-block; width:56px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); background:linear-gradient(90deg,#4363D8,#46F0F0,#3CB44B,#FFE119,#F58231,#E6194B); }
+  /* v2.48 PDB/BLAST 列表筛选排序工具条（TABLE_FILTER_JS 挂载 — chips + 排序下拉 + 计数） */
+  .tbl-ctl { display:flex; flex-wrap:wrap; align-items:center; gap:5px 8px; margin:2px 0 10px; font-family:var(--mono); }
+  .tc-lbl { font-size:9px; color:var(--faint); letter-spacing:1.2px; margin-left:2px; }
+  .tbl-ctl .tc-lbl:first-child { margin-left:0; }
+  .tc-chip { padding:2px 10px; border-radius:10px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; letter-spacing:.4px; line-height:1.7; cursor:pointer; transition:border-color .12s, color .12s; }
+  .tc-chip:hover { border-color:#c7ece0; color:var(--accent-2); }
+  .tc-chip.tc-on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .tc-chip:focus-visible, .tc-sel:focus-visible { outline:2px solid #10b981; outline-offset:1px; }
+  .tc-sel { padding:2.5px 6px; border-radius:5px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; cursor:pointer; }
+  .tc-count { margin-left:auto; font-size:9.5px; color:var(--faint); white-space:nowrap; }
+  .tc-count.tc-filtered { color:#b45309; font-weight:700; }
+  @media print { .tbl-ctl { display:none !important; } }
   @media print { .af-stage .af-canvas, .af-stage .af-tb { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } }
   .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
   .af-fig figcaption b { color:var(--ink); font-weight:600; }
@@ -2762,6 +2923,7 @@ ${body}
 })();
 </script>
 ${UX_PAGE_JS}
+${TABLE_FILTER_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`
