@@ -61,10 +61,25 @@ async function recomputeAttribution(
   }
 }
 
+/** v2.48.1：relationType 枚举校验 — 此前仅 typeof string，任意自定义字符串透传到
+ *  describeRelationType 无匹配 → undefined → esc(undefined) 渲染崩溃（HTML 落盘失败）；
+ *  strategy 接口上 required 但历史/外部调用可能缺省，守卫放宽后由 normalizeRelation 补齐 */
+const RELATION_TYPES = new Set(['complex', 'antibody-antigen', 'fusion', 'homologous', 'pathway', 'independent', 'other'])
+
 function isRelationJudgment(v: unknown): v is RelationJudgment {
   if (!v || typeof v !== 'object') return false
   const j = v as Partial<RelationJudgment>
-  return typeof j.related === 'boolean' && typeof j.relationType === 'string' && typeof j.rationale === 'string'
+  return typeof j.related === 'boolean'
+    && typeof j.relationType === 'string' && RELATION_TYPES.has(j.relationType)
+    && typeof j.rationale === 'string'
+    && (j.strategy === undefined || typeof j.strategy === 'string')
+}
+
+/** strategy 缺省补空串（渲染层 esc() 不再收 undefined；入参可能为 undefined —
+ *  展开为空对象后交由 isRelationJudgment 拒绝，不在此处抛错） */
+function normalizeRelation(j: RelationJudgment | undefined): RelationJudgment {
+  if (j && typeof j.strategy === 'string') return j
+  return { ...j, strategy: '' } as RelationJudgment
 }
 
 // ── v2.13 旧版合并报告自动升级（格式重渲染）────────────────────────────
@@ -85,6 +100,7 @@ async function upgradeLegacyHtml(record: BatchReport): Promise<string | null> {
   let relation: RelationJudgment | null = null
   try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
   if (!isRelationJudgment(relation)) return null
+  relation = normalizeRelation(relation) // v2.48.1：strategy 缺省补空串
 
   // 作业可能已被 TTL 清理 — 数据不可完整重建时保留旧 HTML
   let targets: Awaited<ReturnType<typeof loadMergedTargets>> = []
@@ -173,7 +189,7 @@ export async function POST(req: Request) {
   // v2.8：取消 6 作业截断 → 全量合并；防御性上限（与关系判断路由/前端一致）超限明确告知
   const MAX_BATCH_JOBS = 30
   const jobIds = (body.jobIds ?? []).filter(Boolean)
-  const relation = body.relation
+  const relation = normalizeRelation(body.relation) // v2.48.1：strategy 缺省补空串
   if (jobIds.length < 2) {
     return NextResponse.json({ ok: false, error: '合并报告至少需要 2 个评估作业' }, { status: 400 })
   }
@@ -181,7 +197,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: `一次最多合并 ${MAX_BATCH_JOBS} 个评估作业` }, { status: 400 })
   }
   if (!isRelationJudgment(relation)) {
-    return NextResponse.json({ ok: false, error: '缺少有效的关系判定结果（relation）' }, { status: 400 })
+    return NextResponse.json({ ok: false, error: '缺少有效的关系判定结果（relation — relationType 须为七种已知类型之一）' }, { status: 400 })
   }
 
   // 归属校验：全部作业须为本人创建

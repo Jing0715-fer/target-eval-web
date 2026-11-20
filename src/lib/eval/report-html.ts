@@ -898,8 +898,10 @@ export function applyUxUpgrade(html: string): string {
 
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
 
-export function esc(s: string): string {
-  return s
+export function esc(s: string | null | undefined): string {
+  // v2.48.1：null/undefined 容错 — 关系字段等外部输入可能缺省，此前直接 .replace 崩溃
+  // （合并报告 HTML 落盘失败曾由 esc(relation.strategy) 触发）
+  return (s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

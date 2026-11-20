@@ -840,8 +840,11 @@ export interface SequenceAttribution {
 }
 
 /** 关系类型 → 中文描述（前后端共用） */
-export function describeRelationType(t: TargetRelationType): string {
-  switch (t) {
+/** v2.48.1：参数放宽为 string + default 兜底 — 运行时 relation.relationType 可能来自
+ *  未枚举校验的历史/外部输入（describeRelationType 无匹配时隐式 undefined 曾致
+ *  esc(undefined) 渲染崩溃）；非空未知字符串原样返回（调用方均经 esc() 转义，展示安全） */
+export function describeRelationType(t: string): string {
+  switch (t as TargetRelationType) {
     case 'complex': return '复合物亚基（物理相互作用）'
     case 'antibody-antigen': return '抗体-抗原配对'
     case 'fusion': return '融合构建（多结构域串联）'
@@ -849,6 +852,7 @@ export function describeRelationType(t: TargetRelationType): string {
     case 'pathway': return '同通路/功能相关'
     case 'independent': return '相互独立'
     case 'other': return '其他关联'
+    default: return (t || '').trim() || '其他关联'
   }
 }
 

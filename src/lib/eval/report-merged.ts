@@ -936,6 +936,22 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // PDB 结构与文献全量展开（expandAll）；AF 视图走公共 MODELS 池，图片走首页池。
   const targetKeyOf = (t: MergedTargetData) => (t.uniprotId ?? t.label).replace(/[^A-Za-z0-9]/g, '')
 
+  // v2.48.1：重复靶点（同 UniProt/同 label 二次评估合并）key 唯一化 — 视图 id /
+  // data-goto 卡片导航 / #view-target- 深链 / 内嵌 section id 前缀（含表格筛选分组
+  // 作用域）全部引用同一 key；此前重复 key 致两靶点视图与章节锚点全部冲突（筛选
+  // 控制器跨靶点并组、卡片恒进第一视图）。后缀 -2/-3… 与纯字母数字基 key 不碰撞。
+  const keyByTarget = new Map<MergedTargetData, string>()
+  {
+    const seen = new Map<string, number>()
+    for (const t of targets) {
+      const base = targetKeyOf(t)
+      const n = (seen.get(base) ?? 0) + 1
+      seen.set(base, n)
+      keyByTarget.set(t, n === 1 ? base : `${base}-${n}`)
+    }
+  }
+  const keyOf = (t: MergedTargetData) => keyByTarget.get(t) ?? targetKeyOf(t)
+
   // 3Dmol bundle 一次内嵌 + 多视图初始化（所有 data-maf 阶段共用同一实现与 pLDDT 着色）
   // 无可内嵌模型（全部靶点无预测/超预算）时整段省略 — 报告不携带死脚本
   // MODELS 映射为 UniProt → 模型 PDB 文本（纯字符串 — plddtStyleApplyJs 直接消费）
@@ -1199,7 +1215,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const o = t.oligomer
     const ms = t.methodStats
     return `
-    <div class="tgt-card" data-goto="target-${targetKeyOf(t)}" title="查看 ${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
+    <div class="tgt-card" data-goto="target-${keyOf(t)}" title="查看 ${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
       <div class="tgt-name">${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : t.targetIdentity ? ` <span class="tgt-idsrc" title="${esc(t.targetIdentity.note ?? t.targetIdentity.sourceLabel)}">${esc(t.targetIdentity.sourceLabel)}${t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}</span>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
@@ -1424,7 +1440,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // 用户需求「主页只显示受体的评估页面」）；G 蛋白伴侣保留独立视图（chips 卡片进入）。
   // 受体导航 chip 指向 home（报告首页即受体页）。
   const targetViewList = await Promise.all(targets.map(async (t, i) => {
-    const key = targetKeyOf(t)
+    const key = keyOf(t)
     const prev = i > 0 ? targets[i - 1] : null
     const next = i < targets.length - 1 ? targets[i + 1] : null
     const isReceptor = !!gpcrBatch && t === gpcrBatch.receptor
@@ -1510,7 +1526,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const navChip = (tgt: MergedTargetData | null, dir: 'prev' | 'next') => tgt
       ? (gpcrBatch && tgt === gpcrBatch.receptor
           ? `<a class="tgt-nav-chip" data-goto="home" href="#top" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）— 报告首页即该受体的完整评估报告">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}（首页）${dir === 'next' ? ' →' : ''}</a>`
-          : `<a class="tgt-nav-chip" data-goto="target-${targetKeyOf(tgt)}" href="#view-target-${targetKeyOf(tgt)}" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}${dir === 'next' ? ' →' : ''}</a>`)
+          : `<a class="tgt-nav-chip" data-goto="target-${keyOf(tgt)}" href="#view-target-${keyOf(tgt)}" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}${dir === 'next' ? ' →' : ''}</a>`)
       : ''
     if (isReceptor) {
       // v2.26：受体完整评估报告直接作为报告首页主体 — 不再包独立视图（避免双份大体积）
@@ -1873,7 +1889,7 @@ ${receptorBodyHtml}
     </ol>
     <div class="toc-targets">
       <b>靶点单独报告 · ${targets.length}</b>
-      ${targets.map(t => `<a data-goto="target-${targetKeyOf(t)}" href="#view-target-${targetKeyOf(t)}" title="${esc(t.proteinName)} — PDB ${t.directPdbs.length} · 总体 ${t.scores.overall.score}/10 · 完整单独评估报告（与单靶点评估同格式）">${esc(t.uniprotId ?? t.label)}</a>`).join('')}
+      ${targets.map(t => `<a data-goto="target-${keyOf(t)}" href="#view-target-${keyOf(t)}" title="${esc(t.proteinName)} — PDB ${t.directPdbs.length} · 总体 ${t.scores.overall.score}/10 · 完整单独评估报告（与单靶点评估同格式）">${esc(t.uniprotId ?? t.label)}</a>`).join('')}
     </div>
   </nav>
 
