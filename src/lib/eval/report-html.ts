@@ -2015,6 +2015,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>
         ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+        <script>${afToolbarJs()}</script>
         <script>
         (function () {
           var stage = document.getElementById('af-stage');
@@ -2039,6 +2040,10 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
                 var uri = viewer.pngURI ? viewer.pngURI() : null;
                 if (uri && poster) poster.src = uri;
               } catch (e) { /* 打印海报生成失败不影响交互 */ }
+              // v2.46：挂载「下载 PDB + 着色切换」工具条（域着色仅 AFDB 模型 — 残基编号 = UniProt 坐标）
+              try {
+                if (window.__afTb && window.__afTb.mount) window.__afTb.mount(stage, viewer, pdb, { fileName: ${JSON.stringify(afFileName)}, domains: ${afDomainsJs} });
+              } catch (e) { /* 工具条失败不影响视图 */ }
             } catch (e) { fail(); }
           }
           if (window.$3Dmol) init();
@@ -2050,7 +2055,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           }
         })();
         </script>
-        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹 / UniProt 域着色，PDB 模型可下载）<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
       </figure>`
     : (input.alphafoldFigure ? `
       <figure class="af-fig">
@@ -2076,6 +2081,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>
         ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+        <script>${afToolbarJs()}</script>
         <script>
         (function () {
           var stage = document.getElementById('${idOf('ef-stage')}');
@@ -2100,6 +2106,11 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
                 var uri = viewer.pngURI ? viewer.pngURI() : null;
                 if (uri && poster) poster.src = uri;
               } catch (e) { /* 打印海报生成失败不影响交互 */ }
+              // v2.46：挂载工具条（ESMFold 残基编号自 1 起与 UniProt 坐标不保证
+              // 对齐 → 不传 domains，域着色选项禁用置灰）
+              try {
+                if (window.__afTb && window.__afTb.mount) window.__afTb.mount(stage, viewer, pdb, { fileName: 'ESMFold_prediction.pdb' });
+              } catch (e) { /* 工具条失败不影响视图 */ }
             } catch (e) { fail(); }
           }
           if (window.$3Dmol) init();
@@ -2111,7 +2122,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           }
         })();
         </script>
-        <figcaption><b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(ef.modelId)}（ESM Atlas 公共 API · 免登录）· ${ef.sequenceLength} aa · 平均 pLDDT ${ef.globalPlddt ?? '—'}${ef.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''} · ${Math.round(ef.pdbText.length / 1024)}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）；引用须注明计算预测而非实验结构 · <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a></figcaption>
+        <figcaption><b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹着色，PDB 模型可下载）<br>${esc(ef.modelId)}（ESM Atlas 公共 API · 免登录）· ${ef.sequenceLength} aa · 平均 pLDDT ${ef.globalPlddt ?? '—'}${ef.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''} · ${Math.round(ef.pdbText.length / 1024)}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）；引用须注明计算预测而非实验结构 · <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a></figcaption>
       </figure>` : ''
 
   // ─── 报告主体组装（header → glance → 目录 → 章节 → footer；不含外壳）──────

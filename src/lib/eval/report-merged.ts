@@ -33,13 +33,13 @@ import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
 import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
-import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
+import { describeRelationType, describeBlastStatus, type AfDomainRange, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
 import { augmentTargetsForSharedPdbCoverage } from './rcsb'
 import { synthesizeScoreRationale } from './score'
-import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs, afToolbarJs } from './alphafold'
 import { loadCachedEsmfoldModel } from './esmfold'
 import { splitQaChapter, parseInsightQa, QA_CHAPTER_TITLE } from './qa-chapter'
 
@@ -106,6 +106,9 @@ export interface MergedTargetData {
   sequenceHeader?: string
   /** v2.45：提交序列 SHA-256 前 16 hex（报告导入 SHA 精确匹配；历史作业缺省） */
   seqSha?: string
+  /** v2.46：UniProt DOMAIN 结构域区间（各靶点单独评估页预测结构视图「按域着色」用；
+   *  仅 AFDB 引擎靶点有值；历史作业/无 DOMAIN 注释缺省 → 选项禁用） */
+  afDomains?: AfDomainRange[]
 }
 
 /** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属）
@@ -218,6 +221,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex（报告导入匹配用） */
       sequenceHeader?: string
       seqSha?: string
+      /** v2.46：UniProt DOMAIN 结构域区间（预测结构视图「按域着色」用） */
+      afDomains?: AfDomainRange[]
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -288,6 +293,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       // v2.45：序列靶点导入匹配证据（原始标签头 + 序列 SHA — meta 标记携带）
       sequenceHeader: summary.sequenceHeader,
       seqSha: summary.seqSha,
+      // v2.46：UniProt DOMAIN 区间（单独评估页预测结构「按域着色」）
+      afDomains: summary.afDomains,
     })
   }
   return targets
@@ -943,6 +950,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const afModelsJson = JSON.stringify(Object.fromEntries(afModelEntries)).replace(/<\//g, '<\\/')
   const mtrViewerJs = afViews.size > 0 || esmViews.size > 0 ? `
     ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+    <script>${afToolbarJs()}</script>
     <script>
     (function () {
       var MODELS = ${afModelsJson};
@@ -971,6 +979,17 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
             var uri = viewer.pngURI ? viewer.pngURI() : null;
             if (uri && poster) poster.src = uri;
           } catch (e) { /* 打印海报生成失败不影响交互 */ }
+          // v2.46：挂载「下载 PDB + 着色切换」工具条（域区间从 stage data-domains
+          // 读 — renderSingleReportBody 序列化；AFDB 模型才携带，ESMFold 编号不对齐不带）
+          try {
+            if (window.__afTb && window.__afTb.mount) {
+              var afn = stage.getAttribute('data-afn') || 'model.pdb';
+              var domAttr = stage.getAttribute('data-domains');
+              var doms = null;
+              if (domAttr) { try { doms = JSON.parse(domAttr); } catch (er) { doms = null; } }
+              window.__afTb.mount(stage, viewer, pdb, { fileName: afn, domains: doms });
+            }
+          } catch (e) { /* 工具条失败不影响视图 */ }
         } catch (e) { stage.className = 'af-stage af-fail'; try { stage.setAttribute('data-maf-err', String((e && e.message) || e).slice(0, 200)); } catch (er) { /* ignore */ } }
       }
       function visibleStages() {
@@ -1417,7 +1436,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const esmView = t.esmfold?.cacheKey ? esmViews.get(t.esmfold.cacheKey) : undefined
     const afSummary = (t.alphafold?.available ? t.alphafold : (t.uniprotId ? afMetaFill.get(t.uniprotId) : undefined)) ?? t.alphafold
     const afPooled = view && t.uniprotId
-      ? { mafKey: t.uniprotId, modelId: view.modelId, version: view.version, globalPlddt: view.globalPlddt, fracVeryHigh: view.fracVeryHigh, pdbKb: Math.max(1, Math.round(view.pdbText.length / 1024)) }
+      ? { mafKey: t.uniprotId, modelId: view.modelId, version: view.version, globalPlddt: view.globalPlddt, fracVeryHigh: view.fracVeryHigh, pdbKb: Math.max(1, Math.round(view.pdbText.length / 1024)), domains: t.afDomains }
       : afSummary?.available && t.uniprotId
         ? { mafKey: t.uniprotId, modelId: afSummary.modelId ?? 'AF 模型', version: afSummary.version ?? 1, globalPlddt: afSummary.globalPlddt ?? null, fracVeryHigh: afSummary.fracVeryHigh ?? null, pdbKb: 0, metaOnly: true }
         : esmView && t.esmfold?.available && t.esmfold.cacheKey

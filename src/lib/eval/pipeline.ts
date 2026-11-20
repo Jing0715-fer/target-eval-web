@@ -47,7 +47,7 @@ import { splitPdbsByRange, splitBlastByRange, type ResidueRange } from './range-
 import { matchDomainHint } from './domain-range'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
 import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
-import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
+import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor, extractAfDomains } from './alphafold'
 import { cleanEsmfoldSequence, esmfoldStructureFor, esmfoldFailNote, loadCachedEsmfoldModel, ESMFOLD_MAX_AA, ESMFOLD_EMBED_MAX_BYTES } from './esmfold'
 import { isValidUniprotId, MAX_PDB_UNLIMITED, describeTargetIdentitySource, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type SequenceComparison, type TargetIdentityInfo, type UniprotInfo } from './types'
 
@@ -2428,6 +2428,9 @@ class SegmentRunner {
         alphafoldFigure: st.afFigure ?? undefined,
         alphafoldStructure,
         esmfoldStructure,
+        // v2.46：AFDB 模型的 UniProt DOMAIN 区间（视图「按域着色」选项；
+        // ESMFold 模型残基编号不对齐不传 → 选项禁用）
+        afDomains: alphafoldStructure ? extractAfDomains(st.uniprotInfo?.features, st.uniprotInfo?.sequenceLength) : undefined,
         resolveImagePath: (meta) => {
           const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
           // turbopackIgnore：st.assetDir 为运行时上传目录（db/reports/<id>/assets），
@@ -2522,6 +2525,9 @@ class SegmentRunner {
        *  （合并报告 meta 标记携带 → 单独 HTML 报告导入时 SHA/标签精确匹配） */
       sequenceHeader: st.sequenceHeader || undefined,
       seqSha: st.sequence ? createHash('sha256').update(st.sequence).digest('hex').slice(0, 16) : undefined,
+      /** v2.46：UniProt DOMAIN 结构域区间（AFDB 引擎时落库 — 合并报告重渲染时
+       *  预测结构视图「按域着色」用；无 DOMAIN 注释/ESMFold 引擎缺省） */
+      afDomains: st.afSummary?.available ? extractAfDomains(st.uniprotInfo?.features, st.uniprotInfo?.sequenceLength) : undefined,
       construct: st.comparison
         ? {
             providedLength: st.comparison.providedLength,
