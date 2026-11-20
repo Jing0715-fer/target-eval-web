@@ -199,20 +199,44 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         ? { icon: <PauseCircle className="size-3" />, text: '已停止 · 可恢复', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
         : { icon: <CircleCheckBig className="size-3" />, text: '已完成', cls: 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' }
 
-  /** v2.38→v2.44 报告导入（当前运行；zip 归档 / 单独 HTML，可多选）：匹配到的未评估靶点标跳过 */
+  /** v2.38→v2.49 报告导入（当前运行；zip 归档 / 单独 HTML，可多选）：匹配到的未评估靶点标跳过；
+   *  未命中文件附带逐文件原因（v2.49 — 此前只有一句「未命中」，用户无从排查） */
   const handleZipImport = async (files: FileList | null | undefined) => {
     const list = files ? Array.from(files) : []
     if (list.length === 0 || importingZip) return
     setImportingZip(true)
     try {
-      const matched = await flow.importArchive(list)
-      if (matched > 0) {
+      const result = await flow.importArchive(list)
+      // v2.49 逐文件诊断文本（未命中原因 + 已完成提示）
+      const missTail = result.missLines.length > 0
+        ? `\n未命中文件原因：\n${result.missLines.slice(0, 5).join('\n')}${result.missLines.length > 5 ? `\n…等共 ${result.missLines.length} 个文件` : ''}`
+        : ''
+      const doneNote = result.doneOnlyCount > 0
+        ? `\n另有 ${result.doneOnlyCount} 个文件的靶点在当前运行中已完成/进行中（无需导入）。`
+        : ''
+      if (result.matched > 0) {
         toast({
-          title: `已导入 ${matched} 个靶点的既有报告`,
-          description: `这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。`,
+          title: `已导入 ${result.matched} 个靶点的既有报告`,
+          description: (
+            <div className="whitespace-pre-line">
+              {`这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。${doneNote}${missTail}`}
+            </div>
+          ),
+        })
+      } else if (result.doneOnlyCount > 0 && result.missLines.length === 0) {
+        toast({
+          title: '导入的报告对应靶点均已完成',
+          description: '报告对应的靶点在当前运行中已完成或正在进行 — 无需导入。',
         })
       } else {
-        toast({ title: '导入的报告中没有匹配到当前运行的靶点', description: '已识别报告但未命中任何待评估靶点（UniProt/序列/区间需一致）。' })
+        toast({
+          title: '导入的报告中没有匹配到当前运行的靶点',
+          description: (
+            <div className="whitespace-pre-line">
+              {`已识别报告但未命中任何待评估靶点（UniProt/序列/区间需一致）。${doneNote}${missTail || '\n可改用「批量下载全部」的 zip 导入（清单含组号与序列指纹，匹配最可靠）。'}`}
+            </div>
+          ),
+        })
       }
     } catch (e) {
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })

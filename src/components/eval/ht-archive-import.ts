@@ -33,6 +33,16 @@
  *    残基 25-483 → 459aa 链）；③非归属报告的序列长度（提交长度）。组内唯一命中
  *    才跳（同长度多靶点无法区分则不跳 — 宁重跑不误跳）。
  *
+ * v2.49（用户实测导入匹配仍不稳 — 文件名携带的组号在 Firefox/Safari 按 W3C 规范
+ *  丢弃 download 属性目录段、Chrome 建目录后从文件夹里选文件 file.name 无 G 前缀，
+ *  组号通道天然依赖文件名形态）：
+ *  - **运行标记通道**：autoDownloadHtmlReport 下载时把 targeteval:run meta
+ *    （组号 + 总组数）注入 HTML blob — 信息随内容走，改名/换浏览器/从文件夹
+ *    选文件均免疫；parseHtReportFile 优先读 meta（文件名解析降级为兜底）；
+ *  - **逐文件诊断**：diagnoseArchiveImport 对每个未命中文件给出人话原因
+ *    （总组数不一致 / 组内同长不可区分 / 序列指纹不一致 / 无证据…），
+ *    导入 toast 直接展示 — 用户不再只能看到「未命中」三个字。
+ *
  * 匹配计划由 planArchiveSkips 统一计算（新建运行与既有运行导入同一套规则）。
  */
 import JSZip from 'jszip'
@@ -230,19 +240,53 @@ export function planArchiveSkips(reports: HtArchiveReport[], targets: HtMatchTar
   if (groupTargets.size > 0) {
     const totalAligned = (rep: HtArchiveReport) =>
       rep.totalGroups == null || opts?.totalGroups == null || rep.totalGroups === opts.totalGroups
+    // v2.49 文件级指纹证据表：同文件（path 的 :: 前缀）+ 同组存在权威 seqSha 条目时，
+    // 该文件该组的无指纹条目（h1/题目兜底证据）不再做「唯一靶点归属/长度消歧」—
+    // 指纹命中时 SHA 通道已归属（长度兜底只会引入错误目标），指纹不一致时文件
+    // 根本不属于该组（防换序列后长度巧合误跳 — 同文件新旧证据混存场景）
+    const fileShaEvidence = new Set<string>()
+    for (const rep of reports) {
+      if (rep.kind !== 'job' || rep.seqSha == null || rep.group == null || rep.group < 1) continue
+      if (!totalAligned(rep)) continue
+      fileShaEvidence.add(`${rep.path.split('::')[0]}|${rep.group}`)
+    }
     for (const rep of reports) {
       if (rep.group == null || rep.group < 1) continue
       const gt = groupTargets.get(rep.group - 1)
       if (!gt || gt.length === 0) continue
       if (!totalAligned(rep)) continue
+      const shaEvidence = fileShaEvidence.has(`${rep.path.split('::')[0]}|${rep.group}`)
       if (rep.kind === 'merged') {
         // 合并报告覆盖整组：靶点数未知或与运行侧不一致 → 不可整组跳（宁重跑不误跳）
         if (rep.targetCount == null || rep.targetCount !== gt.length) continue
         for (const t of gt) skipped.add(t.key)
       } else if (rep.kind === 'job') {
+        // v2.49 序列一致性守卫（「该组恰 1 靶点即归属」前提的加固 — 用户在两次运行
+        //  间换过序列/换过靶点类型时组数不变，纯结构对齐会误跳新靶点）：
+        //  a. 序列报告落在 UniProt 靶点上（清单结构已变 — 源运行该组是序列靶点）；
+        //  b. 序列指纹与唯一靶点明确不一致（清单已换序列）；
+        //  c. 旧报告（无指纹）提交长度与唯一靶点长度不等（清单已换序列）。
+        //  命中任一 → 报告不属于当前清单的该靶点，不跳（宁重跑不误跳）。
+        //  归属报告（rep.uniprot）的 seqLength 是 UniProt 全长（非提交口径）不参与 c。
+        const t0 = gt[0]!
+        const repIsSeq = rep.uniprot == null
         if (gt.length === 1) {
-          // 单靶点报告 + 运行侧该组恰好 1 个靶点 → 报告必属该靶点
-          skipped.add(gt[0]!.key)
+          // v2.49 UniProt 一致性守卫：报告与唯一靶点均为 UniProt 形态时，必须严格
+          // 相等（accession + 区间口径同严格通道）— 否则清单已换靶点/换区间，
+          // 报告不属于它（宁重跑不误跳；归属序列报告的靶点是序列形态不触发）
+          const accGuard = rep.uniprot != null && t0.acc != null && !(
+            rep.uniprot.toUpperCase() === t0.acc.toUpperCase() && (
+              rep.range && t0.range
+                ? rep.range[0] === t0.range[0] && rep.range[1] === t0.range[1]
+                : !rep.range && !t0.range
+            )
+          )
+          const seqGuard = shaEvidence || (repIsSeq && !t0.acc && (
+            (rep.seqSha != null && t0.seqSha != null && rep.seqSha !== t0.seqSha)
+            || (rep.seqSha == null && rep.seqLength != null && t0.length != null && rep.seqLength !== t0.length)
+          ))
+          const kindGuard = repIsSeq && !!t0.acc
+          if (!accGuard && !seqGuard && !kindGuard) skipped.add(t0.key)
           continue
         }
         // v2.45.1 多靶点组内消歧（组号已把候选限定在本组 — 组内证据只需唯一定位）：
@@ -259,6 +303,12 @@ export function planArchiveSkips(reports: HtArchiveReport[], targets: HtMatchTar
             for (const t of shaHits) skipped.add(t.key)
             continue
           }
+          // v2.49：指纹明确不一致（组内至少一个清单靶点指纹可知）→ 报告不属于本组，
+          // 长度巧合不再兜底（避免换序列后同长误跳）
+          if (seqTs.some((t) => t.seqSha != null)) continue
+        } else if (shaEvidence) {
+          // v2.49：同文件存在权威指纹条目（命中或否）→ 本条目的长度兜底一并失效
+          continue
         }
         const spanOrLen = rep.alignedSpan ?? (rep.uniprot ? undefined : rep.seqLength)
         if (spanOrLen != null) {
@@ -275,6 +325,179 @@ export function planArchiveSkips(reports: HtArchiveReport[], targets: HtMatchTar
 /** v2.42 保留的单报告↔单目标判定（供调试/单点调用；集合语义用 planArchiveSkips） */
 export function matchReportToTarget(rep: HtArchiveReport, t: HtMatchTarget): boolean {
   return planArchiveSkips([rep], [t]).has(t.key)
+}
+
+// ── v2.49 导入诊断 ──────────────────────────────────────────────────────────
+
+/** 逐文件诊断结果（diagnoseArchiveImport 返回 — 导入 toast 展示用） */
+export interface ArchiveFileDiagnosis {
+  /** 文件短名（去路径/扩展名，超长截断） */
+  file: string
+  /** 任一证据命中可匹配目标（该文件无需提示原因） */
+  matched: boolean
+  /** 仅命中「已完成/进行中」靶点（既有运行导入场景 — 传入 doneHintTargets 时才有值；
+   *  报告本身有效，只是对应靶点已在当前运行中完成，无需再导入） */
+  doneOnly: boolean
+  /** 未命中原因（matched 时为空串） */
+  reason: string
+}
+
+/** 诊断用的目标侧索引（一次构建，逐文件复用） */
+interface DiagContext {
+  byGroup: Map<number, HtMatchTarget[]>
+  runTotal: number | undefined
+  /** 与当前清单同 acc 的目标（区间诊断用） */
+  byAcc: Map<string, HtMatchTarget[]>
+}
+
+function buildDiagContext(targets: HtMatchTarget[], opts?: PlanArchiveSkipsOptions): DiagContext {
+  const byGroup = new Map<number, HtMatchTarget[]>()
+  const byAcc = new Map<string, HtMatchTarget[]>()
+  for (const t of targets) {
+    if (t.groupIndex != null && t.groupIndex >= 0) {
+      const arr = byGroup.get(t.groupIndex)
+      if (arr) arr.push(t)
+      else byGroup.set(t.groupIndex, [t])
+    }
+    if (t.acc) {
+      const k = t.acc.toUpperCase()
+      const arr = byAcc.get(k)
+      if (arr) arr.push(t)
+      else byAcc.set(k, [t])
+    }
+  }
+  return { byGroup, byAcc, runTotal: opts?.totalGroups }
+}
+
+function fmtRange(r?: [number, number]): string {
+  return r ? `${r[0]}-${r[1]}` : '无区间'
+}
+
+/** 总组数不一致原因（组号通道共用 — 报告来自的运行与当前清单组数不同） */
+function totalMismatchReason(rep: HtArchiveReport, ctx: DiagContext): string | null {
+  if (rep.totalGroups != null && ctx.runTotal != null && rep.totalGroups !== ctx.runTotal) {
+    return `报告来自 ${rep.totalGroups} 组的运行，当前清单 ${ctx.runTotal} 组 — 分组结构不一致，组号 G${rep.group} 无法对齐`
+  }
+  return null
+}
+
+/** 合并报告未命中原因（只走组号通道） */
+function mergedMissReason(rep: HtArchiveReport, ctx: DiagContext): string {
+  if (rep.group == null) {
+    return '合并报告未携带组号（文件名无 G{NN} 且报告为旧版无运行标记）— 无法整组对齐；可从「批量下载全部」的 zip 导入（含精确清单），或重命名文件加上 G 组号'
+  }
+  const tm = totalMismatchReason(rep, ctx)
+  if (tm) return tm
+  const tg = ctx.byGroup.get(rep.group - 1)
+  if (!tg || tg.length === 0) return `当前清单没有组 G${rep.group}（分组结构与报告来源运行不同）`
+  if (rep.targetCount == null) return `组 G${rep.group}：报告内未识别到靶点数，无法校验整组覆盖（可改用 zip 导入）`
+  if (rep.targetCount !== tg.length) {
+    return `组 G${rep.group}：报告覆盖 ${rep.targetCount} 个靶点，当前清单该组 ${tg.length} 个 — 组内结构不一致`
+  }
+  return `组 G${rep.group} 校验应通过但未命中（未预期 — 请反馈）`
+}
+
+/** 单靶点报告未命中原因 */
+function jobMissReason(rep: HtArchiveReport, ctx: DiagContext): string {
+  // ⓪ v2.49 序列指纹明确不一致（单/多靶点、归属/非归属报告通用 — 优先于
+  //    「UniProt 不在清单」：归属报告本质是序列靶点，序列变了才是根因）
+  if (rep.group != null && rep.seqSha != null) {
+    const tg = ctx.byGroup.get(rep.group - 1)
+    if (tg && tg.length > 0) {
+      const seqTs = tg.filter((t) => !t.acc)
+      if (seqTs.some((t) => t.seqSha != null) && !seqTs.some((t) => t.seqSha === rep.seqSha)) {
+        return `组 G${rep.group}：报告序列指纹与该组清单序列均不一致（提交序列已变更）`
+      }
+    }
+  }
+  // ① UniProt 严格通道（主通道）
+  if (rep.uniprot) {
+    const same = ctx.byAcc.get(rep.uniprot.toUpperCase()) ?? []
+    if (same.length === 0) return `报告靶点 UniProt ${rep.uniprot} 不在当前清单`
+    return `UniProt ${rep.uniprot} 区间不一致（报告 ${fmtRange(rep.range)}，清单 ${same.map((t) => fmtRange(t.range)).join('/')}）`
+  }
+  // ② 组号通道（序列靶点兜底主通道；到这里的报告均无 accession）
+  if (rep.group != null) {
+    const tm = totalMismatchReason(rep, ctx)
+    if (tm) return tm
+    const tg = ctx.byGroup.get(rep.group - 1)
+    if (!tg || tg.length === 0) return `当前清单没有组 G${rep.group}（分组结构与报告来源运行不同）`
+    if (tg.length === 1) {
+      // v2.49 守卫原因（与 planArchiveSkips 单靶点守卫对齐；rep.uniprot 非空的
+      // 报告已在 ① 返回 — 到这里的报告均无 accession）
+      const t0 = tg[0]!
+      if (t0.acc) return `组 G${rep.group} 当前是 UniProt 靶点（${t0.acc}），报告为序列靶点 — 清单结构已变更`
+      if (rep.seqSha == null && rep.seqLength != null && t0.length != null && rep.seqLength !== t0.length) {
+        return `组 G${rep.group}：报告提交长度 ${rep.seqLength}aa 与该组唯一靶点 ${t0.length}aa 不一致（清单已换序列）`
+      }
+      if (rep.seqSha != null && t0.seqSha == null) {
+        return `组 G${rep.group} 的清单靶点无法计算序列指纹（SHA）— 无法精确定位（可改用 zip 导入）`
+      }
+      return `组 G${rep.group} 校验应通过但未命中（未预期 — 请反馈）`
+    }
+    if (rep.seqSha) {
+      // 指纹不匹配已在 ⓪ 返回 — 到这里只剩清单侧无法计算指纹
+      return `组 G${rep.group} 的清单靶点无法计算序列指纹（SHA）— 无法精确定位`
+    }
+    const span = rep.alignedSpan ?? rep.seqLength
+    if (span == null) {
+      return `组 G${rep.group} 有 ${tg.length} 个靶点，报告无序列标记/长度证据可区分 — 旧版报告建议用「批量下载全部」zip 导入（清单含精确指纹）`
+    }
+    const hits = tg.filter((t) => !t.acc && t.length === span)
+    if (hits.length === 0) return `组 G${rep.group}：报告序列长度 ${span}aa 与该组清单靶点均不一致`
+    return `组 G${rep.group} 有 ${tg.length} 个靶点、其中 ${hits.length} 个同为 ${span}aa — 无法区分报告属于谁（宁重跑不误跳，可改用 zip 导入）`
+  }
+  // ③ 无组号 — 序列证据直配
+  if (rep.seqSha) return '报告序列指纹与当前清单序列均不一致（提交序列不同）'
+  if (rep.seqLength != null) {
+    return `旧版报告无组号/序列标记 — 标签与清单靶点标签不一致且无其他证据（可改用 zip 导入或新版报告）`
+  }
+  return '报告无可用匹配证据（无 UniProt / 序列标记 / 组号）— 可能是旧版报告或文件被改动'
+}
+
+/**
+ * v2.49：逐文件诊断导入匹配结果 — 每个未命中文件一条人话原因。
+ * 背景用户诉求：导入匹配不上时 toast 只说「未命中」，用户无从自查；本函数把
+ * planArchiveSkips 的判定依据翻译成可行动的原因（改用 zip / 检查清单结构 /
+ * 旧版报告升级等）。
+ * @param doneHintTargets 可选：含已完成/进行中靶点的全量目标（既有运行导入场景 —
+ *        文件只命中这些目标时标 doneOnly 而非报「不在清单」）
+ */
+export function diagnoseArchiveImport(
+  reports: HtArchiveReport[],
+  targets: HtMatchTarget[],
+  opts?: PlanArchiveSkipsOptions,
+  doneHintTargets?: HtMatchTarget[],
+): ArchiveFileDiagnosis[] {
+  const ctx = buildDiagContext(targets, opts)
+  // 文件级聚合：path 的 :: 前是文件名；同文件多条证据任一命中即整文件命中
+  const files = new Map<string, HtArchiveReport[]>()
+  for (const rep of reports) {
+    if (rep.kind === 'dashboard') continue
+    const fk = rep.path.split('::')[0] ?? rep.path
+    const arr = files.get(fk)
+    if (arr) arr.push(rep)
+    else files.set(fk, [rep])
+  }
+  const out: ArchiveFileDiagnosis[] = []
+  for (const [file, entries] of files) {
+    const base = (file.split('/').pop() ?? file).replace(/\.html?$/i, '')
+    const shortName = base.length > 30 ? `${base.slice(0, 28)}…` : base
+    if (entries.some((e) => planArchiveSkips([e], targets, opts).size > 0)) {
+      out.push({ file: shortName, matched: true, doneOnly: false, reason: '' })
+      continue
+    }
+    if (doneHintTargets && entries.some((e) => planArchiveSkips([e], doneHintTargets, opts).size > 0)) {
+      out.push({ file: shortName, matched: false, doneOnly: true, reason: '' })
+      continue
+    }
+    const merged = entries.find((e) => e.kind === 'merged')
+    const reason = merged
+      ? mergedMissReason(merged, ctx)
+      : jobMissReason(entries.find((e) => e.kind === 'job') ?? entries[0]!, ctx)
+    out.push({ file: shortName, matched: false, doneOnly: false, reason })
+  }
+  return out
 }
 
 /** 清单 JSON 条目（与服务端 ht-archive 写入口径一致） */
@@ -300,6 +523,35 @@ interface ManifestEntry {
 const FILE_GROUP_RE = /(?:^|[\s\/])G(\d{1,3})(?=[\s\/_]|$)/
 /** 文件名中的总组数段：TargetEval_HT_日期_Ng（数字后紧跟 g 结束 token） */
 const FILE_TOTAL_GROUPS_RE = /(?:^|[\s_])(\d{1,3})g(?![a-z0-9])/
+
+/** v2.49：从运行目录串（TargetEval_HT_日期_Ng/G{NN}）解析组号与总组数。
+ *  下载注入（use-evaluation-flow）与导入解析（本文件）同源 — 目录格式变化只改一处。 */
+export function parseRunFolderMeta(dir: string): { group?: number; totalGroups?: number } {
+  const out: { group?: number; totalGroups?: number } = {}
+  const tM = FILE_TOTAL_GROUPS_RE.exec(dir)
+  if (tM) {
+    const n = Number(tM[1])
+    if (n >= 1 && n <= 999) out.totalGroups = n
+  }
+  const gM = FILE_GROUP_RE.exec(dir)
+  if (gM) {
+    const n = Number(gM[1])
+    if (n >= 1 && n <= 999 && (out.totalGroups == null || n <= out.totalGroups)) out.group = n
+  }
+  return out
+}
+
+/** HTML 属性转义（unescapeAttr 的逆 — run meta 注入用） */
+function escapeAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;')
+}
+
+/** v2.49：构造运行标记 meta 标签（autoDownloadHtmlReport 注入 HTML blob —
+ *  parseHtReportFile 经 parseMetaJson 读回，与 targeteval:target(s) 同一解析器） */
+export function buildRunMetaTag(group: number | undefined, totalGroups: number | undefined): string {
+  const content = escapeAttr(JSON.stringify({ group: group ?? null, totalGroups: totalGroups ?? null }))
+  return `<meta name="targeteval:run" content="${content}">`
+}
 
 /** HTML 属性反转义（esc 的逆 — meta 标记通道用） */
 function unescapeAttr(s: string): string {
@@ -404,6 +656,22 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
       const n = Number(gM[1])
       // 组号越界（> 总组数）视为误判（标题里的 G token 等）丢弃
       if (n >= 1 && n <= 999 && (totalGroups == null || n <= totalGroups)) group = n
+    }
+  }
+
+  // ── v2.49 运行标记（targeteval:run meta — 下载时注入的组号/总组数，优先于文件名）。
+  //    文件名证据天然脆弱：Firefox/Safari 按 W3C 规范丢弃 download 目录段、Chrome 建
+  //    目录后从文件夹选文件 file.name 无 G 前缀、手工重命名 — 内容里的标记不受影响 ──
+  {
+    const runMeta = parseMetaJson<{ group?: number | null; totalGroups?: number | null }>(capped, 'targeteval:run')
+    if (runMeta) {
+      if (typeof runMeta.totalGroups === 'number' && runMeta.totalGroups >= 1 && runMeta.totalGroups <= 999) {
+        totalGroups = runMeta.totalGroups
+      }
+      if (typeof runMeta.group === 'number' && runMeta.group >= 1 && runMeta.group <= 999
+        && (totalGroups == null || runMeta.group <= totalGroups)) {
+        group = runMeta.group
+      }
     }
   }
 

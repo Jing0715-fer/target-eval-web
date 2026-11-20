@@ -906,7 +906,7 @@ export interface JobDetail {
   reportHtml?: string | null
   /** v2.4：本作业由无状态同步评估产生（前端历史/下载走内联数据） */
   stateless?: boolean
-  /** v2.36：本详情来自浏览器本地缓存副本（服务端实例已回收，仅回看兑底） */
+  /** v2.36：本详情来自浏览器本地缓存副本（服务端实例已回收，仅回看兜底） */
   fromCache?: boolean
   error: string | null
 }

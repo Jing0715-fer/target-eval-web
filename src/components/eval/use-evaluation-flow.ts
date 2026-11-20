@@ -5,6 +5,7 @@ import { toast } from '@/hooks/use-toast'
 import { evaluateSyncStream, fetchBatchReport, generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation } from './api'
 import { addSessionJob, getSessionJob } from './session-history'
 import { cacheBatchReport, cacheJobDetail, getCachedBatchReport, getCachedJobDetail } from './job-cache'
+import { buildRunMetaTag, parseRunFolderMeta } from './ht-archive-import'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
 /** 主视图状态机：idle（输入）→ running（进度）→ done（结果）；error 单独处理 */
@@ -153,6 +154,8 @@ function autoDownloadInlineReport(reportHtml: string, key: string, label: string
  * v2.22：导出供高通量编排复用（每组独立报告 / 合并报告完成即落盘）。
  * v2.25：dir 参数 — 同一次高通量运行的报告统一目录前缀（TargetEval_HT_日期/G01_…/），
  *  浏览器支持 download 属性携带目录时归入同一新文件夹。
+ * v2.49：dir 携带组号/总组数时注入 targeteval:run meta 到下载的 HTML —
+ *  组号证据随内容走，不再依赖文件名形态（详见函数内注释）。
  */
 export function autoDownloadHtmlReport(url: string, key: string, label: string, dir?: string) {
   if (autoDownloadedKeys.has(key)) return
@@ -165,7 +168,28 @@ export function autoDownloadHtmlReport(url: string, key: string, label: string, 
         autoDownloadedKeys.delete(key)
         return
       }
-      const blob = await res.blob()
+      let blob = await res.blob()
+      // v2.49：高通量运行标记注入 — dir 携带「TargetEval_HT_日期_Ng/G{NN}」时把
+      // 组号+总组数写进 HTML（<meta name="targeteval:run">）。背景：download 属性的
+      // 目录段在 Firefox/Safari 被 W3C 规范丢弃、Chrome 建目录后用户从文件夹选文件
+      // file.name 无 G 前缀、手工重命名 — 文件名组号证据天然脆弱；内容里的标记
+      // 不受任何文件名形态影响（parseHtReportFile 优先读取）。
+      if (dir) {
+        const rm = parseRunFolderMeta(dir)
+        if (rm.group != null || rm.totalGroups != null) {
+          try {
+            const text = await blob.text()
+            if (!text.includes('targeteval:run')) {
+              const tag = `\n${buildRunMetaTag(rm.group, rm.totalGroups)}`
+              let injected = text.replace(/<head[^>]*>/i, (m) => `${m}${tag}`)
+              if (injected === text) injected = text.replace(/<html[^>]*>/i, (m) => `${m}<head>${tag}</head>`)
+              if (injected !== text) {
+                blob = new Blob([injected], { type: blob.type || 'text/html;charset=utf-8' })
+              }
+            }
+          } catch { /* 注入失败不阻塞下载 — 退回文件名通道 */ }
+        }
+      }
       // 文件名：优先服务端 Content-Disposition，回退默认名
       // v2.10 ①：优先解析 filename*（RFC 5987，携带中文报告标题），回退 filename=
       const cd = res.headers.get('content-disposition') ?? ''
@@ -280,7 +304,7 @@ export function useEvaluationFlow() {
       setNetworkIssue(false)
       applyJobSnapshot(data)
       // v2.36：终态瞬间把完整详情存入浏览器本地缓存（Serverless 实例回收后
-      // 服务端数据不持久，这层副本是刷新/回看的唯一兑底）
+      // 服务端数据不持久，这层副本是刷新/回看的唯一兜底）
       if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
       // v1.19：live 轮询到终态完成 → 自动下载 HTML 报告到本机
       // （历史查看路径不经过 pollOnce，不会误触发；deferred 作业 404 静默跳过）

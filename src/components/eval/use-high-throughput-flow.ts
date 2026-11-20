@@ -48,7 +48,7 @@ import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
-import { parseHtImportFiles, planArchiveSkips, sha256Hex16, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
+import { parseHtImportFiles, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -169,23 +169,31 @@ function reportIncompleteNote(job: JobDetail | null | undefined): string | undef
   return undefined
 }
 
+/** v2.49 applyArchiveSkips 结果：匹配数 + 未命中文件诊断（导入 toast 展示） */
+interface ArchiveSkipResult {
+  matched: number
+  /** 未命中文件的人话原因（逐文件一行，已截断） */
+  missLines: string[]
+  /** 仅命中已完成/进行中靶点的文件数（报告有效但对应靶点已完成，无需导入） */
+  doneOnlyCount: number
+}
+
 /** v2.38→v2.45 导入既有报告匹配 — 用 planArchiveSkips 统一严格规则 + v2.45 组号通道：
  *  单靶点 job 报告：序列靶点 SHA 精确等值 / 标签+长度严格相等且无歧义才标 skipped
  *  （用户反馈：旧包含式匹配把无报告的靶点也误跳了）；合并报告（文件名携带
  *  G{NN} 组号）：总组数对齐 + 组内靶点数一致 → 整组跳过（用户诉求「文件名中
- *  G73 之类的数字应该就能匹配」）。
- *  返回匹配数（调用方 toast）。 */
+ *  G73 之类的数字应该就能匹配」）。v2.49：未命中文件附带逐文件原因。 */
 function applyArchiveSkips(
   r: HTRunState,
   reports: HtArchiveReport[],
   shaByKey: Map<string, string | undefined>,
   fileName: string,
-): number {
-  const targets: HtMatchTarget[] = []
+): ArchiveSkipResult {
+  const matchable: HtMatchTarget[] = []
+  const all: HtMatchTarget[] = []
   for (const g of r.groups) {
     for (const it of g.items) {
-      if (it.status === 'done' || it.status === 'running') continue
-      targets.push({
+      const t: HtMatchTarget = {
         key: it.key,
         acc: it.sequence ? undefined : it.label,
         range: it.range,
@@ -195,10 +203,12 @@ function applyArchiveSkips(
         seqSha: shaByKey.get(it.key),
         seq: it.sequence,
         groupIndex: g.index,
-      })
+      }
+      all.push(t)
+      if (it.status !== 'done' && it.status !== 'running') matchable.push(t)
     }
   }
-  const matchedKeys = planArchiveSkips(reports, targets, { totalGroups: r.groups.length })
+  const matchedKeys = planArchiveSkips(reports, matchable, { totalGroups: r.groups.length })
   for (const it of r.groups.flatMap((g) => g.items)) {
     if (matchedKeys.has(it.key)) {
       it.status = 'skipped'
@@ -206,7 +216,13 @@ function applyArchiveSkips(
       it.skipNote = `已导入 ${fileName.slice(0, 40)} 的既有报告`
     }
   }
-  return matchedKeys.size
+  // v2.49 逐文件诊断（含已完成靶点提示 — 避免误报「不在清单」）
+  const diag = diagnoseArchiveImport(reports, matchable, { totalGroups: r.groups.length }, all)
+  return {
+    matched: matchedKeys.size,
+    missLines: diag.filter((d) => !d.matched && !d.doneOnly).map((d) => `${d.file}：${d.reason}`),
+    doneOnlyCount: diag.filter((d) => d.doneOnly).length,
+  }
 }
 
 /**
@@ -416,7 +432,7 @@ export function useHighThroughputFlow() {
           fails = 0
           setNetworkIssue(false)
           if (data.id === displayJobIdRef.current) setDisplayJob(data)
-          // v2.36：终态瞬间存入浏览器本地缓存（Serverless 实例回收后回看的唯一兑底）
+          // v2.36：终态瞬间存入浏览器本地缓存（Serverless 实例回收后回看的唯一兜底）
           if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
           if (data.status === 'done') finish('done')
           else if (data.status === 'error') finish('error')
@@ -1175,11 +1191,11 @@ export function useHighThroughputFlow() {
   /**
    * v2.38→v2.44 导入既有报告（zip 归档 / 单独 HTML 文件，可多选批量）— 匹配到的
    * 未评估靶点标 skipped（报告已在用户手里，不重复评估、不占配额）。返回匹配数
-   * （调用方 toast）；失败抛错。匹配循环在模块级 applyArchiveSkips
+   * + 未命中诊断（v2.49）；失败抛错。匹配循环在模块级 applyArchiveSkips
    * （react-hooks/immutability：直接在 useCallback 内改 runRef 会被 React 编译器拦，
    * 模块函数不受限）。
    */
-  const importArchive = useCallback(async (files: File | File[]): Promise<number> => {
+  const importArchive = useCallback(async (files: File | File[]): Promise<ArchiveSkipResult> => {
     if (!ensureEditable()) throw new Error('运行进行中，请先暂停或停止')
     const r = runRef.current
     if (!r) throw new Error('没有打开的运行')
@@ -1195,10 +1211,10 @@ export function useHighThroughputFlow() {
       }
     }
     const displayName = list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`
-    const matched = applyArchiveSkips(r, reports, shaByKey, displayName)
-    r.importedNote = matched > 0 ? `已从 ${displayName.slice(0, 40)} 导入 ${matched} 个靶点的既有报告（跳过评估）` : undefined
+    const result = applyArchiveSkips(r, reports, shaByKey, displayName)
+    r.importedNote = result.matched > 0 ? `已从 ${displayName.slice(0, 40)} 导入 ${result.matched} 个靶点的既有报告（跳过评估）` : undefined
     snapshot()
-    return matched
+    return result
   }, [ensureEditable, snapshot])
 
   /** v2.44：手动重新生成「高通量评估汇总报告」（回看已完成运行时 — 首次生成失败 /

@@ -37,7 +37,7 @@ import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDateTime } from './format'
 import { extractHtTargetsFromExcel } from './api'
-import { parseHtImportFiles, planArchiveSkips, sha256Hex16, type HtMatchTarget } from './ht-archive-import'
+import { parseHtImportFiles, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtMatchTarget } from './ht-archive-import'
 import type { HTRunState, HtSeqTarget } from './types'
 
 export interface HighThroughputPanelProps {
@@ -181,13 +181,36 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       }
       onSkipKeysChange([...next])
       setZipMeta({ name: list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`, reports: reports.length, matched })
+      // v2.49 逐文件诊断：未命中文件给出人话原因（用户此前只能看到「未命中」三个字）
+      const missLines = diagnoseArchiveImport(reports, targets, { totalGroups: groupTotal })
+        .filter((d) => !d.matched)
+        .map((d) => `${d.file}：${d.reason}`)
+      const missTail = missLines.length > 0
+        ? `\n未命中文件原因：\n${missLines.slice(0, 5).join('\n')}${missLines.length > 5 ? `\n…等共 ${missLines.length} 个文件` : ''}`
+        : ''
       if (matched > 0) {
         toast({
           title: `已匹配 ${matched} 个已有报告的靶点`,
-          description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告文件名中的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。',
+          description: (
+            <div className="whitespace-pre-line">
+              {`这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告携带的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。${missTail}`}
+            </div>
+          ),
+        })
+      } else if (matchedKeys.size > 0) {
+        toast({
+          title: '导入的报告与此前导入重复',
+          description: `对应靶点已在此前的导入中取消勾选（本次未重复计数）；可手动重新勾选恢复评估。`,
         })
       } else {
-        toast({ title: '导入的报告中没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 条报告记录但未命中。匹配需要：UniProt+区间/序列严格一致，或文件名携带组号（如 G73）且总组数与当前清单一致（多靶点组需序列长度可区分）。注意：新建运行的分组结构（组数/组内靶点）需与导出报告的运行一致，组号才能对上。` })
+        toast({
+          title: '导入的报告中没有匹配到当前清单的靶点',
+          description: (
+            <div className="whitespace-pre-line">
+              {`已识别 ${reports.length} 条报告记录但未命中。${missTail || '\n常见原因：清单分组结构与导出报告的运行不一致（组数/组内靶点变化，组号无法对齐）；或旧版报告无序列标记且文件名无组号。可改用「批量下载全部」的 zip 导入（含精确清单）。注意：新建运行的分组结构需与导出报告的运行一致，组号才能对上。'}`}
+            </div>
+          ),
+        })
       }
     } catch (e) {
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
