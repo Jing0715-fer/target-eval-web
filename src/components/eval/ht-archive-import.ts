@@ -19,12 +19,19 @@
  *  - 新增**组号通道**：HT 自动下载的报告文件名携带运行目录段（TargetEval_HT_日期_74g
  *    G74_组名.html — 浏览器把目录分隔符扁平化后 G{NN} 仍留在文件名里）。合并报告
  *    按组号 + 靶点数一致 + 总组数对齐 → 整组跳过；单靶点报告按组号只在运行侧
- *    该组恰好 1 个靶点时跳过（否则无法判定归属）；
+ *    该组恰好 1 个靶点时直接归属；
  *  - 新增**机器可读标记通道**（v2.45 起生成的报告内嵌 <meta name="targeteval:target(s)">
  *    携带 uniprot/range/seqSha/header/label）— 序列靶点单文件导入可走 SHA 精确匹配，
  *    不再依赖 h1/题目文本启发式；
  *  - 序列靶点旧报告的题目尾标签是身份识别名（非运行侧标签）— 严格标签通道对不上
  *    属预期，由组号通道/标记通道兜底。
+ *
+ * v2.45.1（用户实测 G73 单靶点报告仍匹配不上 — 源组 2 条链，报告是其中一条）：
+ *  - **多靶点组内消歧**：单靶点报告携带组号且该组多靶点时，组号已把候选限定在
+ *    本组 — 组内证据只需唯一定位：①SHA 精确（meta/清单）；②全同比对跨度
+ *    （归属报告题目「残基 X-Y」无同源度后缀 — 跨度 = 提交序列长度，例：O89342
+ *    残基 25-483 → 459aa 链）；③非归属报告的序列长度（提交长度）。组内唯一命中
+ *    才跳（同长度多靶点无法区分则不跳 — 宁重跑不误跳）。
  *
  * 匹配计划由 planArchiveSkips 统一计算（新建运行与既有运行导入同一套规则）。
  */
@@ -53,6 +60,10 @@ export interface HtArchiveReport {
   totalGroups?: number
   /** v2.45：合并报告覆盖的靶点数（靶点数 K 个 / 清单同组 job 条目数 / 题目尾标签数） */
   targetCount?: number
+  /** v2.45.1：全同比对区间跨度（题目「残基 X-Y」且无同源度后缀 — 跨度 = 提交序列
+   *  长度；多靶点组内按长度唯一定位靶点用。例：O89342 残基 25-483 → 跨度 459 =
+   *  提交的 459aa 构建链） */
+  alignedSpan?: number
 }
 
 /** 匹配的目标描述（新运行解析结果或既有运行的 item） */
@@ -206,8 +217,9 @@ export function planArchiveSkips(reports: HtArchiveReport[], targets: HtMatchTar
 
   // ── v2.45 组号通道：文件名/zip 路径/清单中的 G{NN}（用户诉求 — 报告文件名即携带组号）──
   //  对齐条件：①总组数双方已知且相等（清单可能被增删改过时组号已漂移，不可信）；
-  //  ②合并报告的靶点数与运行侧该组靶点数一致；③单靶点报告仅当运行侧该组恰 1 个
-  //  靶点（多靶点组无法判定报告归属谁）。任一不满足 → 退回上方严格通道的结果。
+  //  ②合并报告的靶点数与运行侧该组靶点数一致；③单靶点报告：该组恰 1 个靶点时
+  //  直接归属；多靶点时组内消歧（v2.45.1）— SHA 精确 / 全同跨度 / 提交长度，
+  //  组内唯一命中才跳（同长度多靶点无法区分则不跳 — 宁重跑不误跳）。
   const groupTargets = new Map<number, HtMatchTarget[]>()
   for (const t of targets) {
     if (t.groupIndex == null || t.groupIndex < 0) continue
@@ -227,9 +239,32 @@ export function planArchiveSkips(reports: HtArchiveReport[], targets: HtMatchTar
         // 合并报告覆盖整组：靶点数未知或与运行侧不一致 → 不可整组跳（宁重跑不误跳）
         if (rep.targetCount == null || rep.targetCount !== gt.length) continue
         for (const t of gt) skipped.add(t.key)
-      } else if (rep.kind === 'job' && gt.length === 1) {
-        // 单靶点报告 + 运行侧该组恰好 1 个靶点 → 报告必属该靶点
-        skipped.add(gt[0]!.key)
+      } else if (rep.kind === 'job') {
+        if (gt.length === 1) {
+          // 单靶点报告 + 运行侧该组恰好 1 个靶点 → 报告必属该靶点
+          skipped.add(gt[0]!.key)
+          continue
+        }
+        // v2.45.1 多靶点组内消歧（组号已把候选限定在本组 — 组内证据只需唯一定位）：
+        //  a. SHA 精确（v2.45+ 报告 meta / zip 清单 seqSha）
+        //  b. 全同比对跨度（归属报告题目「残基 X-Y」且无同源度后缀 — 跨度 = 提交长度；
+        //     例：O89342 残基 25-483 → 459 = 该组 459aa 链）
+        //  c. 非归属报告的序列长度（「NAME（序列靶点…）」形态 — h1 题目无 accession，
+        //     序列长度即提交长度）
+        //  归属报告的 seqLength 是 UniProt 全长（非提交长度）→ 不参与 c。
+        const seqTs = gt.filter((t) => !t.acc)
+        if (rep.seqSha) {
+          const shaHits = seqTs.filter((t) => t.seqSha === rep.seqSha)
+          if (shaHits.length > 0) {
+            for (const t of shaHits) skipped.add(t.key)
+            continue
+          }
+        }
+        const spanOrLen = rep.alignedSpan ?? (rep.uniprot ? undefined : rep.seqLength)
+        if (spanOrLen != null) {
+          const hits = seqTs.filter((t) => t.length === spanOrLen)
+          if (hits.length === 1) skipped.add(hits[0]!.key)
+        }
       }
     }
   }
@@ -473,6 +508,9 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
     const nextH1 = h1s[i + 1]
     const lenHit = lens.find((x) => x.at > h.at && (nextH1 == null || x.at < nextH1.at))
     const seqLength = lenHit?.len
+    // v2.45.1：同源度后缀（「UniProt 匹配 N%」/「nr 识别 N%」）— 有后缀时比对可能
+    // 含缺口，区间跨度 ≠ 提交长度 → 不做组内长度定位（宁重跑不误跳）
+    const hasIdentitySuffix = /(?:UniProt 匹配|nr 识别)\s*\d+(?:\.\d+)?\s*%/.test(inner)
     // 防误判：非 accession 页须是序列靶点形态（合并报告 LLM 标题可能恰好含全角括号）
     const seqShape = inner.includes('序列靶点') || inner.includes('同源') || inner.includes('nr 识别') || inner.includes('UniProt 匹配')
     const evidence = `h1:${name}|${accM?.[0] ?? ''}|${range?.join('-') ?? ''}|${seqLength ?? ''}`
@@ -486,6 +524,8 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
         uniprot: accM[0].toUpperCase(),
         range,
         seqLength,
+        // v2.45.1：全同比对（无同源度后缀）时的区间跨度 = 提交序列长度
+        alignedSpan: range && !hasIdentitySuffix ? range[1] - range[0] + 1 : undefined,
         stem: name,
         // v2.45：单靶点报告文件携带组号（组内仅 1 靶点时可判定归属；合并文件的
         //  h1 条目不带组号 — 源组多靶点时无法证明归属谁）

@@ -184,10 +184,10 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       if (matched > 0) {
         toast({
           title: `已匹配 ${matched} 个已有报告的靶点`,
-          description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告文件名中的组号（G{NN}，需总组数与靶点数对齐）。可手动重新勾选恢复评估。',
+          description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告文件名中的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。',
         })
       } else {
-        toast({ title: '导入的报告中没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 条报告记录但未命中。匹配需要：UniProt+区间/序列严格一致，或文件名携带组号（如 G74）且总组数、组内靶点数与当前清单一致。单独的合并报告（未知靶点标签）需保留下载时的原始文件名。` })
+        toast({ title: '导入的报告中没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 条报告记录但未命中。匹配需要：UniProt+区间/序列严格一致，或文件名携带组号（如 G73）且总组数与当前清单一致（多靶点组需序列长度可区分）。注意：新建运行的分组结构（组数/组内靶点）需与导出报告的运行一致，组号才能对上。` })
       }
     } catch (e) {
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
