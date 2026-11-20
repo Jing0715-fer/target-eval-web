@@ -158,7 +158,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       const targets: HtMatchTarget[] = []
       for (let i = 0; i < parsed.groups.length; i++) {
         for (let j = 0; j < parsed.groups[i].length; j++) {
-          targets.push({ key: `g:${i}:${j}`, acc: parsed.groups[i][j], range: parsed.groupRanges?.[i]?.[j] })
+          targets.push({ key: `g:${i}:${j}`, acc: parsed.groups[i][j], range: parsed.groupRanges?.[i]?.[j], groupIndex: i })
         }
       }
       for (let k = 0; k < seqGroups.length; k++) {
@@ -167,10 +167,10 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           const label = s.header
             ? `${s.header.length > 30 ? `${s.header.slice(0, 22)}…${s.header.slice(-7)}` : s.header} · ${s.length}aa`
             : `序列${j + 1} · ${s.length}aa`
-          targets.push({ key: `sq:${k}:${j}`, header: s.header, label, length: s.length, seqSha: await sha256Hex16(s.seq), seq: s.seq })
+          targets.push({ key: `sq:${k}:${j}`, header: s.header, label, length: s.length, seqSha: await sha256Hex16(s.seq), seq: s.seq, groupIndex: parsed.groups.length + k })
         }
       }
-      const matchedKeys = planArchiveSkips(reports, targets)
+      const matchedKeys = planArchiveSkips(reports, targets, { totalGroups: groupTotal })
       const next = new Set(skipSet)
       let matched = 0
       for (const key of matchedKeys) {
@@ -184,10 +184,10 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       if (matched > 0) {
         toast({
           title: `已匹配 ${matched} 个已有报告的靶点`,
-          description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。可手动重新勾选恢复评估。',
+          description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告文件名中的组号（G{NN}，需总组数与靶点数对齐）。可手动重新勾选恢复评估。',
         })
       } else {
-        toast({ title: '导入的报告中没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 条报告记录但未命中（仅单靶点报告参与匹配；UniProt/序列/区间需严格一致，同名不同序列的靶点不跳过）。` })
+        toast({ title: '导入的报告中没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 条报告记录但未命中。匹配需要：UniProt+区间/序列严格一致，或文件名携带组号（如 G74）且总组数、组内靶点数与当前清单一致。单独的合并报告（未知靶点标签）需保留下载时的原始文件名。` })
       }
     } catch (e) {
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })

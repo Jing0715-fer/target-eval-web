@@ -169,9 +169,11 @@ function reportIncompleteNote(job: JobDetail | null | undefined): string | undef
   return undefined
 }
 
-/** v2.38→v2.42 zip 导入匹配 — 用 planArchiveSkips 统一严格规则：
- *  只有单靶点 job 报告参与；序列靶点 SHA 精确等值 / 标签+长度严格相等且无歧义
- *  才标 skipped（用户反馈：旧包含式匹配把无报告的靶点也误跳了）。
+/** v2.38→v2.45 导入既有报告匹配 — 用 planArchiveSkips 统一严格规则 + v2.45 组号通道：
+ *  单靶点 job 报告：序列靶点 SHA 精确等值 / 标签+长度严格相等且无歧义才标 skipped
+ *  （用户反馈：旧包含式匹配把无报告的靶点也误跳了）；合并报告（文件名携带
+ *  G{NN} 组号）：总组数对齐 + 组内靶点数一致 → 整组跳过（用户诉求「文件名中
+ *  G73 之类的数字应该就能匹配」）。
  *  返回匹配数（调用方 toast）。 */
 function applyArchiveSkips(
   r: HTRunState,
@@ -192,10 +194,11 @@ function applyArchiveSkips(
         length: it.sequence?.length,
         seqSha: shaByKey.get(it.key),
         seq: it.sequence,
+        groupIndex: g.index,
       })
     }
   }
-  const matchedKeys = planArchiveSkips(reports, targets)
+  const matchedKeys = planArchiveSkips(reports, targets, { totalGroups: r.groups.length })
   for (const it of r.groups.flatMap((g) => g.items)) {
     if (matchedKeys.has(it.key)) {
       it.status = 'skipped'

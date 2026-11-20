@@ -30,6 +30,8 @@ import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
 import { matchProcessingSegments, type ProcessingSegmentMatch } from './uniprot'
+// v2.45：报告内嵌机器可读标记（targeteval:target）— 提交序列 SHA-256（服务端专用模块）
+import { createHash } from 'node:crypto'
 
 // ─── v2.31 聚合蛋白加工归属（PTM/Processing）────────────────────────────────
 
@@ -2642,6 +2644,27 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
     : input.ctx.targetIdentity
       ? `${input.ctx.targetIdentity.name}（序列靶点${targetIdentityTitleSuffix(input.ctx.targetIdentity)}${rangeSuffix}）`
       : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')
+  // v2.45 机器可读靶点标记：报告导入精确匹配用（uniprot/range/seqLength/header/seqSha/label）。
+  //  - uniprot 仅真 UniProt 靶点携带（序列靶点的同源命中不冒充 accession — 避免误匹配
+  //    到同源 UniProt 靶点）；
+  //  - seqSha = 提交序列 SHA-256 前 16 hex（与运行侧 sha256Hex16 同口径）；
+  //  - label = 运行侧序列靶点标签同公式（头22…尾7 截断 + 「· Naa」— 旧标签通道兼容）。
+  const metaTarget = (() => {
+    const seq = input.ctx.sequence || ''
+    const header = input.ctx.sequenceHeader?.trim() || undefined
+    const seqSha = seq ? createHash('sha256').update(seq).digest('hex').slice(0, 16) : undefined
+    const label = header && seq
+      ? `${header.length > 30 ? `${header.slice(0, 22)}…${header.slice(-7)}` : header} · ${seq.length}aa`
+      : undefined
+    return {
+      uniprot: u?.uniprotId,
+      range: u ? input.ctx.range : undefined,
+      seqLength: seq ? seq.length : (u?.sequenceLength || undefined),
+      header,
+      seqSha,
+      label,
+    }
+  })()
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2651,6 +2674,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <title>靶点结构解析可行性评估报告 — ${esc(proteinTitle)}</title>
+<meta name="targeteval:target" content="${esc(JSON.stringify(metaTarget))}">
 <style>
 ${SINGLE_REPORT_CSS}${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 </head>

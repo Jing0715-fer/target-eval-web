@@ -23,6 +23,7 @@
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import { createHash } from 'node:crypto'
 import { db } from '@/lib/db'
 import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput, matchProcessingSegments } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
@@ -2517,6 +2518,10 @@ class SegmentRunner {
       batchNote: this.input.batchNote,
       /** v2.16：靶点身份识别证据链（识别来源/一致性/近似 UniProt — 合并报告与前端展示） */
       targetIdentity: st.targetIdentity ?? undefined,
+      /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex
+       *  （合并报告 meta 标记携带 → 单独 HTML 报告导入时 SHA/标签精确匹配） */
+      sequenceHeader: st.sequenceHeader || undefined,
+      seqSha: st.sequence ? createHash('sha256').update(st.sequence).digest('hex').slice(0, 16) : undefined,
       construct: st.comparison
         ? {
             providedLength: st.comparison.providedLength,

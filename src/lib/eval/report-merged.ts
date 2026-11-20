@@ -102,6 +102,10 @@ export interface MergedTargetData {
   entryName?: string
   /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 单独评估页题目/刊头消费） */
   targetIdentity?: TargetIdentityInfo | null
+  /** v2.45：序列靶点原始提交标签头（报告导入精确匹配 — meta 标记携带；历史作业缺省） */
+  sequenceHeader?: string
+  /** v2.45：提交序列 SHA-256 前 16 hex（报告导入 SHA 精确匹配；历史作业缺省） */
+  seqSha?: string
 }
 
 /** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属）
@@ -211,6 +215,9 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       rangeSource?: string
       rangeOutsidePdbs?: PdbEntry[]
       rangeOutsideBlastHits?: BlastHit[]
+      /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex（报告导入匹配用） */
+      sequenceHeader?: string
+      seqSha?: string
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -278,6 +285,9 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       entryName: summary.uniprot?.entryName,
       // v2.16：序列靶点身份识别链（题目/刊头不再「未知靶点」）
       targetIdentity: summary.targetIdentity ?? null,
+      // v2.45：序列靶点导入匹配证据（原始标签头 + 序列 SHA — meta 标记携带）
+      sequenceHeader: summary.sequenceHeader,
+      seqSha: summary.seqSha,
     })
   }
   return targets
@@ -1669,6 +1679,15 @@ ${body}
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <title>${esc(reportTitle)} · ${esc(targets.map(t => t.label).join(' + '))}</title>
+<!-- v2.45 机器可读靶点标记（报告导入精确匹配用 — uniprot/range/seqLength/header/seqSha/label） -->
+<meta name="targeteval:targets" content="${esc(JSON.stringify(targets.map(t => ({
+  uniprot: t.uniprotId,
+  range: t.range,
+  seqLength: t.sequenceLength || undefined,
+  header: t.sequenceHeader,
+  seqSha: t.seqSha,
+  label: t.label,
+}))))}">
 <style>
 ${SINGLE_REPORT_CSS}
 

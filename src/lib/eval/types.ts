@@ -718,6 +718,10 @@ export interface JobSummary {
   batchNote?: string
   /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链；历史作业缺省） */
   targetIdentity?: TargetIdentityInfo
+  /** v2.45：序列靶点原始标签头（报告导入标签精确匹配用；历史作业缺省） */
+  sequenceHeader?: string
+  /** v2.45：提交序列 SHA-256 前 16 hex（报告导入 SHA 精确匹配用；历史作业缺省） */
+  seqSha?: string
 }
 
 // ─── AlphaFold 预测结构（v2.0 报告头图）────────────────────────────
