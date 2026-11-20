@@ -40,6 +40,15 @@ export interface UniprotFeature {
   end: number
 }
 
+/** v2.46：UniProt DOMAIN 结构域区间（报告预测结构视图「按域着色」用 — AFDB 模型
+ *  残基编号即 UniProt 坐标，区间可直接映射 resi；ESMFold 模型编号自 1 起不保证
+ *  对齐，不启用域着色） */
+export interface AfDomainRange {
+  name: string
+  start: number
+  end: number
+}
+
 export interface UniprotInfo {
   uniprotId: string
   entryName: string
@@ -722,6 +731,9 @@ export interface JobSummary {
   sequenceHeader?: string
   /** v2.45：提交序列 SHA-256 前 16 hex（报告导入 SHA 精确匹配用；历史作业缺省） */
   seqSha?: string
+  /** v2.46：UniProt DOMAIN 结构域区间（合并报告重渲染时预测结构视图「按域着色」用；
+   *  仅 AFDB 引擎（残基编号 = UniProt 坐标）时落库；无 DOMAIN 注释/历史作业缺省） */
+  afDomains?: AfDomainRange[]
 }
 
 // ─── AlphaFold 预测结构（v2.0 报告头图）────────────────────────────

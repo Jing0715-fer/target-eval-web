@@ -24,11 +24,11 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { BlastHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats, UniprotInfo } from './types'
-import { describeBlastStatus, targetIdentityTitleSuffix } from './types'
+import { describeBlastStatus, targetIdentityTitleSuffix, type AfDomainRange } from './types'
 import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb } from './types'
 import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
-import { ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { ensure3DmolBundle, plddtStyleApplyJs, afToolbarJs } from './alphafold'
 import { matchProcessingSegments, type ProcessingSegmentMatch } from './uniprot'
 // v2.45：报告内嵌机器可读标记（targeteval:target）— 提交序列 SHA-256（服务端专用模块）
 import { createHash } from 'node:crypto'
@@ -1465,6 +1465,10 @@ export interface ReportRenderInput {
     fracVeryHigh: number | null
     sequenceLength: number
   }
+  /** v2.46：UniProt DOMAIN 结构域区间（预测结构视图「按域着色」选项数据源；
+   *  仅 AFDB 模型传（残基编号 = UniProt 坐标直接映射）；无 DOMAIN 注释时缺省
+   *  → 工具条「UniProt 域」选项禁用置灰） */
+  afDomains?: AfDomainRange[]
   resolveImagePath: (meta: ParsedImage) => string
 }
 
@@ -1501,6 +1505,10 @@ export interface SingleBodyEmbedOptions {
     engine?: 'esmfold'
     /** v2.15：ESMFold 预测序列长度（engine='esmfold' 时展示） */
     sequenceLength?: number
+    /** v2.46：UniProt DOMAIN 结构域区间（公共 MODELS 池视图「按域着色」用 —
+     *  renderSingleReportBody 序列化进 stage data-domains，mtrViewerJs 初始化后
+     *  随工具条挂载；仅 AFDB 引擎视图传，ESMFold 编号不对齐不传） */
+    domains?: AfDomainRange[]
   }
   /** 客户实验数据图片走首页池复用（img 不带 src，由合并报告水合脚本从首页拷贝） */
   pooledImages?: boolean
@@ -1521,6 +1529,8 @@ export interface SingleReportBodyInput {
   alphafoldFigure?: ReportRenderInput['alphafoldFigure']
   alphafoldStructure?: ReportRenderInput['alphafoldStructure']
   esmfoldStructure?: ReportRenderInput['esmfoldStructure']
+  /** v2.46：UniProt DOMAIN 区间（AF 视图「按域着色」；仅 AFDB 模型有值） */
+  afDomains?: AfDomainRange[]
   /** 3Dmol bundle（单靶点报告外壳预取传入；合并嵌入模式无需 — 公共池脚本负责初始化） */
   af3dBundle?: string | null
   resolveImagePath?: (meta: ParsedImage) => string
@@ -1965,6 +1975,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const afP = emb?.afPooled
   /** v2.15：池化引擎为 ESMFold — 卡片标注/外链切换为 ESM Atlas 口径 */
   const efP = afP?.engine === 'esmfold' ? afP : undefined
+  // v2.46：下载文件名 + 域着色数据（脚本安全转义 — JSON 内 < 转为 \u003c 防 </script 逃逸）
+  const fnSafe = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, '_')
+  const afPooledFn = afP ? (efP ? 'ESMFold_prediction.pdb' : fnSafe(`${afP.modelId}-model_v${afP.version}.pdb`)) : ''
+  const afPooledDomainsAttr = afP && !efP && afP.domains?.length ? ` data-domains="${esc(JSON.stringify(afP.domains))}"` : ''
+  const afFileName = af ? fnSafe(`${af.modelId}-model_v${af.version}.pdb`) : ''
+  const afDomainsJs = JSON.stringify(input.afDomains ?? null).replace(/</g, '\\u003c')
   // v2.13：合并报告嵌入 — AF 视图走公共 MODELS 池（data-maf stage 由合并报告统一
   // 初始化）；无可内嵌模型时降级统计卡（mtr-af-stat — 合并报告附加样式）。
   const afBlockHtml = afP ? `
@@ -1975,7 +1991,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <div class="mtr-af-stat-note">${efP ? 'ESMFold 模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 ESM Atlas（下方链接）' : '模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 AlphaFold DB（下方链接）'}</div>
           <a class="mtr-af-link" href="${efP ? 'https://esmatlas.com/resources?action=fold' : `https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}`}" target="_blank" rel="noopener">${efP ? 'esmatlas.com' : 'alphafold.ebi.ac.uk'} →</a>
         </div>`
-        : `<div class="af-stage" data-maf="${esc(afP.mafKey)}">
+        : `<div class="af-stage" data-maf="${esc(afP.mafKey)}" data-afn="${esc(afPooledFn)}"${afPooledDomainsAttr}>
           <div class="af-canvas"></div>
           <img class="af-poster" alt="${efP ? 'ESMFold' : 'AlphaFold'} 预测结构（pLDDT 着色）">
         </div>
@@ -1985,7 +2001,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FFDB13"></i>50–70</span>
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>`}
-        <figcaption>${efP ? `<b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(afP.modelId)}（ESM Atlas 公共 API）· ${efP.sequenceLength ?? '—'} aa · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）· <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a>` : `<b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>`}</figcaption>
+        <figcaption>${efP ? `<b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹着色，PDB 模型可下载）<br>${esc(afP.modelId)}（ESM Atlas 公共 API）· ${efP.sequenceLength ?? '—'} aa · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）· <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a>` : `<b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹 / UniProt 域着色，PDB 模型可下载）<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>`}</figcaption>
       </figure>` : af ? `
       <figure class="af-fig">
         <div class="af-stage" id="af-stage">
@@ -2580,7 +2596,19 @@ export const SINGLE_REPORT_CSS = `  :root {
   .af-legend { display:flex; gap:10px; margin-top:6px; font-size:9.5px; font-family:var(--mono); color:var(--sub); justify-content:center; flex-wrap:wrap; }
   .af-legend span { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
   .af-legend i { display:inline-block; width:10px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); }
-  @media print { .af-stage .af-canvas { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } }
+  /* v2.46 预测结构视图工具条（下载 PDB + 着色切换 — 池化/独立视图共用；af-expand 在右上角无冲突） */
+  .af-tb { position:absolute; top:8px; left:8px; z-index:6; display:flex; gap:6px; align-items:center; }
+  .af-tb-btn { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); }
+  .af-tb-btn:hover { background:#fff; color:#1c1917; }
+  .af-tb-btn svg { flex:none; }
+  .af-tb-sel { padding:3px 5px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); max-width:132px; }
+  .af-tb-btn:focus-visible, .af-tb-sel:focus-visible { outline:2px solid #10b981; outline-offset:1px; }
+  .af-stage:not(.af-live) .af-tb { display:none; }
+  /* 域着色图例（条目多时滚动）与彩虹图例渐变条 */
+  .af-legend.af-lgd-scroll { max-height:76px; overflow-y:auto; justify-content:flex-start; }
+  .af-lgd-item { max-width:170px; overflow:hidden; text-overflow:ellipsis; }
+  .af-lgd-rb-bar { display:inline-block; width:56px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); background:linear-gradient(90deg,#4363D8,#46F0F0,#3CB44B,#FFE119,#F58231,#E6194B); }
+  @media print { .af-stage .af-canvas, .af-stage .af-tb { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } }
   .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
   .af-fig figcaption b { color:var(--ink); font-weight:600; }
   .af-fig figcaption a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
