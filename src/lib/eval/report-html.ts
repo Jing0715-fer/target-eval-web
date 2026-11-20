@@ -1303,11 +1303,25 @@ function blastRowsHtml(hits: BlastHit[], outside = false): string {
       <td class="num">${h.identity.toFixed(1)}%</td>
       <td class="num">${esc(h.evalueRaw)}</td>
       <td class="num">${esc(range)}${outside ? '<span class="rng-outside-chip">范围外</span>' : ''}</td>
-      <td class="t-nowrap">${esc(h.method || '—')}</td>
+      <td>${blastMethodChip(h.method)}</td>
       <td class="num">${h.resolution != null ? h.resolution.toFixed(2) : '—'}</td>
       <td class="td-id">${pmidLink(h.pubmedId)}</td>
     </tr>`
   }).join('')
+}
+
+/** v2.44：BLAST 表方法列短标签（用户反馈：RCSB 原始方法名如 ELECTRON MICROSCOPY
+ *  过长，与右侧分辨率列重叠）— 与 PDB 表同款 mth 色块：X-ray / Cryo-EM / NMR /
+ *  其他（限长 14 字符，完整名悬停 title 可见） */
+function blastMethodChip(method: string): string {
+  const m = (method || '').trim()
+  if (!m) return '<span class="mth mth-other">—</span>'
+  const up = m.toUpperCase()
+  if (up.includes('X-RAY') || up.includes('XRAY')) return '<span class="mth mth-xray">X-ray</span>'
+  if (up.includes('ELECTRON MICROSCOPY') || up.includes('CRYO-EM') || up.includes('CRYOEM') || up.includes('ELECTRON CRYSTALLOGRAPHY')) return '<span class="mth mth-cryoem">Cryo-EM</span>'
+  if (up.includes('NMR')) return '<span class="mth mth-nmr">NMR</span>'
+  if (m.length <= 14) return `<span class="mth mth-other" title="${esc(m)}">${esc(m)}</span>`
+  return `<span class="mth mth-other" title="${esc(m)}">${esc(m.slice(0, 13))}…</span>`
 }
 
 /** 范围外 BLAST 同源命中折叠区（灰色行 + 范围外 chip — v2.29） */
@@ -1528,12 +1542,18 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   // v2.16：序列靶点有身份识别（评估表名/nr 识别/同源推断）时题目用识别名 —
   // 不再笼统写「序列靶点评估」；后缀注明识别来源与一致性（评估表来源无后缀）
   const ti = ctx.targetIdentity
+  // v2.44：已归属 UniProt 但经序列匹配（UniProt 匹配 / nr 识别）定位且非全同时，
+  // 题目标注同源度（用户诉求「显示同源度，避免非标准名称作题目」— 全同 100% 不注）
+  const identityTitleSuffix = u && ti && ti.identity != null && ti.identity < 99.95
+    && (ti.source === 'uniprot-blast' || ti.source === 'blast-nr')
+    ? ` · ${ti.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(ti.identity)}%`
+    : ''
   // v2.31：聚合蛋白截短题目标注（P0DTD1 不同截短均为「Replicase polyprotein 1ab」—
   // 从 PTM/Processing 加工条目归属 nsp，题目区分同名截短靶点）
   const nspSuffix = nspTitleSuffix(u, ctx.range)
   const procMatch = u ? matchProcessingSegments(ctx.range, u.processingChains, u.sequenceLength) : null
   const proteinTitle = u
-    ? `${u.proteinName}${nspSuffix}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspSuffix}（${u.uniprotId}${identityTitleSuffix}${rangeSuffix}）`
     : ti
       ? `${ti.name}（序列靶点${targetIdentityTitleSuffix(ti)}${rangeSuffix}）`
       : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
@@ -2087,7 +2107,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <h1 class="rpt-title">${esc(proteinTitle)}</h1>
     <div class="rpt-subtitle">蛋白靶点结构解析可行性评估报告</div>
     <div class="meta-grid">
-      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
+      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）${identityTitleSuffix ? `<span class="id-src">${esc(identityTitleSuffix.trim())} — 序列靶点经同源匹配归属</span>` : ''}` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
       <div><b>蛋白名称</b> ${esc(u?.proteinName ?? ctx.targetIdentity?.name ?? '—')}</div>
       ${procMatch ? processingRowHtml(procMatch) : ''}
       <div><b>基因</b> ${esc(geneStr)}</div>
@@ -2610,8 +2630,15 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const body = await renderSingleReportBody({ ...input, af3dBundle })
   const u = input.ctx.uniprot
   const rangeSuffix = input.ctx.range ? ` · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : ''
+  // v2.44：序列匹配（UniProt 匹配 / nr 识别）归属且非全同时 <title> 同步标注同源度
+  //  （与 renderSingleReportBody 内 h1 同口径 — 单独报告导入匹配也从 <title> 提取）
+  const outTi = input.ctx.targetIdentity
+  const outIdentitySuffix = u && outTi && outTi.identity != null && outTi.identity < 99.95
+    && (outTi.source === 'uniprot-blast' || outTi.source === 'blast-nr')
+    ? ` · ${outTi.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(outTi.identity)}%`
+    : ''
   const proteinTitle = u
-    ? `${u.proteinName}${nspTitleSuffix(u, input.ctx.range)}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspTitleSuffix(u, input.ctx.range)}（${u.uniprotId}${outIdentitySuffix}${rangeSuffix}）`
     : input.ctx.targetIdentity
       ? `${input.ctx.targetIdentity.name}（序列靶点${targetIdentityTitleSuffix(input.ctx.targetIdentity)}${rangeSuffix}）`
       : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')

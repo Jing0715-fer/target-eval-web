@@ -198,6 +198,138 @@ interface ManifestEntry {
 }
 
 /**
+ * v2.44：解析一份**单独的报告 HTML 文件**（单靶点报告 / 组合并报告 / 统计看板）。
+ *
+ * 用户诉求：除 zip 归档外，支持导入单个报告文件（如浏览器下载的
+ * 「TargetEval_HT_2026-11-19_74g G74_TSLP受体轴三靶点独立评估.html」），
+ * 且可多选批量导入。
+ *
+ * 提取通道（无 manifest — 全部从 HTML 内容解析）：
+ *  - 统计看板：题目含「高通量评估汇总报告」→ 单条 dashboard（不参与匹配，仅计数）；
+ *  - 合并报告（v2.13+ 各靶点内嵌完整单独评估页）：
+ *    ① 题目尾部靶点标签清单「标题 · P123 + P456」（accession 形态直接可匹配）；
+ *    ② 逐内嵌页扫描：<h1 class="rpt-title">NAME（P12345 · 残基 X-Y）</h1> 与就近
+ *       「序列长度 N aa」配对 → 每靶点一条可匹配条目（accession / 区间 / 长度齐全）；
+ *  - 单靶点报告：同一套 h1 + 序列长度扫描（自身即唯一内嵌页）。
+ *
+ * 序列靶点条目的 stem 按靶点标签格式「header · Naa」构造（normLabel 归一后与
+ * 运行侧标签键严格相等 — planArchiveSkips 兜底通道）；证据不足时不产出
+ * （宁重跑不误跳，与 v2.42 严格匹配口径一致）。
+ */
+export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> {
+  let text: string
+  try {
+    text = await file.text()
+  } catch {
+    throw new Error(`无法读取文件 ${file.name}`)
+  }
+  // 防御上限（合并报告内嵌 3D 模型/图片可达十余 MB — 配对只需 h1 与序列长度行）
+  const capped = text.length > 26_000_000 ? text.slice(0, 26_000_000) : text
+  const stem = file.name.replace(/\.html?$/i, '')
+  const title = /<title>([^<]*)<\/title>/i.exec(capped)?.[1] ?? ''
+
+  // ① 统计看板（汇总件 — 不参与靶点匹配）
+  if (title.includes('高通量评估汇总报告') || /^00_统计看板/.test(stem)) {
+    return [{ kind: 'dashboard', path: file.name, stem }]
+  }
+
+  const out: HtArchiveReport[] = []
+  const seenEvidence = new Set<string>()
+
+  // ② 合并报告题目尾部的靶点标签清单（「reportTitle · A + B + C」— label = accession
+  //    或蛋白名；accession 形态可直接匹配 UniProt 靶点）
+  const mergedTitleM = /^(.*) · (.+ \+ .+)$/.exec(title)
+  if (mergedTitleM) {
+    for (const rawLabel of mergedTitleM[2].split(' + ')) {
+      const label = rawLabel.trim()
+      if (!label) continue
+      const accM = UNIPROT_ACC_RE.exec(label)
+      const lenM = /(\d{2,5})\s*aa$/i.exec(label)
+      const evidence = `title:${label}`
+      if (seenEvidence.has(evidence)) continue
+      seenEvidence.add(evidence)
+      out.push({
+        kind: 'job',
+        path: `${file.name}::${label}`,
+        uniprot: accM ? accM[0].toUpperCase() : undefined,
+        seqLength: lenM ? Number(lenM[1]) : undefined,
+        stem: label,
+      })
+    }
+  }
+
+  // ③ 内嵌/独立单靶点报告页：h1 题目（NAME（P12345 · 残基 X-Y）/ NAME（序列靶点 · …））
+  //    与其后、下一 h1 前的「序列长度 N aa」配对 → 每靶点一条可匹配条目
+  const h1Re = /<h1 class="rpt-title"[^>]*>([^<]+)<\/h1>/g
+  const lenRe = /序列长度<\/b>\s*(\d{2,5})\s*aa/g
+  const h1s: Array<{ title: string; at: number }> = []
+  let m: RegExpExecArray | null
+  while ((m = h1Re.exec(capped))) h1s.push({ title: m[1].trim(), at: m.index })
+  const lens: Array<{ len: number; at: number }> = []
+  while ((m = lenRe.exec(capped))) lens.push({ len: Number(m[1]), at: m.index })
+
+  for (let i = 0; i < h1s.length; i++) {
+    const h = h1s[i]!
+    // 单靶点页题目形态：「NAME（内层）」；合并报告首页/章节标题（无全角括号对）跳过
+    const shape = /^([^（]+)（([^）]*)）$/.exec(h.title)
+    if (!shape) continue
+    const name = shape[1].trim()
+    const inner = shape[2]
+    const accM = UNIPROT_ACC_RE.exec(inner)
+    const rangeM = /残基\s*(\d{1,5})\s*[-–]\s*(\d{1,5})/.exec(inner)
+    const range: [number, number] | undefined = rangeM && Number(rangeM[1]) >= 1 && Number(rangeM[2]) >= Number(rangeM[1])
+      ? [Number(rangeM[1]), Number(rangeM[2])]
+      : undefined
+    const nextH1 = h1s[i + 1]
+    const lenHit = lens.find((x) => x.at > h.at && (nextH1 == null || x.at < nextH1.at))
+    const seqLength = lenHit?.len
+    // 防误判：非 accession 页须是序列靶点形态（合并报告 LLM 标题可能恰好含全角括号）
+    const seqShape = inner.includes('序列靶点') || inner.includes('同源') || inner.includes('nr 识别') || inner.includes('UniProt 匹配')
+    const evidence = `h1:${name}|${accM?.[0] ?? ''}|${range?.join('-') ?? ''}|${seqLength ?? ''}`
+    if (seenEvidence.has(evidence)) continue
+
+    if (accM) {
+      seenEvidence.add(evidence)
+      out.push({
+        kind: 'job',
+        path: `${file.name}::${name}`,
+        uniprot: accM[0].toUpperCase(),
+        range,
+        seqLength,
+        stem: name,
+      })
+    } else if (seqShape) {
+      seenEvidence.add(evidence)
+      // stem 模拟运行侧序列靶点标签格式（header · Naa — 归一化后与标签键严格相等）
+      out.push({
+        kind: 'job',
+        path: `${file.name}::${name}`,
+        range,
+        seqLength,
+        stem: seqLength != null ? `${name} · ${seqLength}aa` : name,
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * v2.44：混合导入解析 — zip 归档与单独 HTML 报告统一入口（可多选批量）。
+ * 非报告文件（扩展名不识别）跳过；全部不可识别时返回空数组（调用方提示）。
+ */
+export async function parseHtImportFiles(files: File[]): Promise<HtArchiveReport[]> {
+  const out: HtArchiveReport[] = []
+  for (const f of files.slice(0, MAX_ZIP_FILES)) {
+    if (/\.zip$/i.test(f.name)) {
+      out.push(...(await parseHtArchive(f)))
+    } else if (/\.html?$/i.test(f.name)) {
+      out.push(...(await parseHtReportFile(f)))
+    }
+  }
+  return out
+}
+
+/**
  * 解析一份报告 zip → 可匹配报告列表。
  * 失败（非 zip / 损坏 / 空）抛错（调用方 toast）。
  */

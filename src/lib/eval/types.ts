@@ -620,10 +620,10 @@ export interface TargetIdentityInfo {
   /** 展示名（评估表蛋白名 / nr 命中蛋白名 / PDB 同源描述清洗结果） */
   name: string
   /** 识别来源 */
-  source: 'eval-table' | 'blast-nr' | 'blast-homolog'
-  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断） */
+  source: 'eval-table' | 'blast-nr' | 'blast-homolog' | 'uniprot-blast'
+  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断 / UniProt 序列匹配） */
   sourceLabel: string
-  /** 命中一致性 %（blast-nr / blast-homolog 时存在） */
+  /** 命中一致性 %（blast-nr / blast-homolog / uniprot-blast 时存在） */
   identity?: number
   /** 定位到的 UniProt accession（nr 命中 sp|ACC| / tr|ACC| 形态；回填未达阈值时为近似条目） */
   uniprotId?: string
@@ -641,13 +641,14 @@ export function describeTargetIdentitySource(source: TargetIdentityInfo['source'
     case 'eval-table': return '评估表'
     case 'blast-nr': return 'BLAST nr 识别'
     case 'blast-homolog': return 'PDB 同源推断'
+    case 'uniprot-blast': return 'UniProt 序列匹配'
   }
 }
 
-/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」；评估表来源为空） */
+/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」「 · UniProt 匹配 96%」；评估表来源为空） */
 export function targetIdentityTitleSuffix(ti: TargetIdentityInfo): string {
   if (ti.source === 'eval-table') return ''
-  const tag = ti.source === 'blast-nr' ? 'nr 识别' : '同源'
+  const tag = ti.source === 'blast-nr' ? 'nr 识别' : ti.source === 'uniprot-blast' ? 'UniProt 匹配' : '同源'
   return ti.identity != null ? ` · ${tag} ${Math.round(ti.identity)}%` : ` · ${tag}`
 }
 

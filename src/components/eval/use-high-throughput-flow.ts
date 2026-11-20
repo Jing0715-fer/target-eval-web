@@ -48,7 +48,7 @@ import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
-import { parseHtArchive, planArchiveSkips, sha256Hex16, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
+import { parseHtImportFiles, planArchiveSkips, sha256Hex16, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -1170,17 +1170,20 @@ export function useHighThroughputFlow() {
   }, [ensureEditable, resumeRun])
 
   /**
-   * v2.38：导入既有报告 zip — 匹配到的未评估靶点标 skipped（报告已在用户手里的
-   * zip 中，不重复评估、不占配额）。返回匹配数（调用方 toast）；失败抛错。
-   * 匹配循环在模块级 applyArchiveSkips（react-hooks/immutability：直接在
-   * useCallback 内改 runRef 会被 React 编译器拦，模块函数不受限）。
+   * v2.38→v2.44 导入既有报告（zip 归档 / 单独 HTML 文件，可多选批量）— 匹配到的
+   * 未评估靶点标 skipped（报告已在用户手里，不重复评估、不占配额）。返回匹配数
+   * （调用方 toast）；失败抛错。匹配循环在模块级 applyArchiveSkips
+   * （react-hooks/immutability：直接在 useCallback 内改 runRef 会被 React 编译器拦，
+   * 模块函数不受限）。
    */
-  const importArchive = useCallback(async (file: File): Promise<number> => {
+  const importArchive = useCallback(async (files: File | File[]): Promise<number> => {
     if (!ensureEditable()) throw new Error('运行进行中，请先暂停或停止')
     const r = runRef.current
     if (!r) throw new Error('没有打开的运行')
-    const reports = await parseHtArchive(file)
-    if (reports.length === 0) throw new Error('zip 内没有可识别的报告（HTML）')
+    const list = (Array.isArray(files) ? files : [files]).filter(Boolean)
+    if (list.length === 0) throw new Error('未选择要导入的报告文件')
+    const reports = await parseHtImportFiles(list)
+    if (reports.length === 0) throw new Error('所选文件中没有可识别的报告（支持 zip 归档与报告 HTML）')
     // 序列靶点预先算好 SHA（清单通道精确匹配）
     const shaByKey = new Map<string, string | undefined>()
     for (const g of r.groups) {
@@ -1188,11 +1191,32 @@ export function useHighThroughputFlow() {
         if (it.sequence) shaByKey.set(it.key, await sha256Hex16(it.sequence))
       }
     }
-    const matched = applyArchiveSkips(r, reports, shaByKey, file.name)
-    r.importedNote = matched > 0 ? `已从 ${file.name.slice(0, 40)} 导入 ${matched} 个靶点的既有报告（跳过评估）` : undefined
+    const displayName = list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`
+    const matched = applyArchiveSkips(r, reports, shaByKey, displayName)
+    r.importedNote = matched > 0 ? `已从 ${displayName.slice(0, 40)} 导入 ${matched} 个靶点的既有报告（跳过评估）` : undefined
     snapshot()
     return matched
   }, [ensureEditable, snapshot])
+
+  /** v2.44：手动重新生成「高通量评估汇总报告」（回看已完成运行时 — 首次生成失败 /
+   * 旧报告已过期 / 重跑后想刷新时）。清除旧结果标记后走 finalizeHtDashboard 同一
+   * 生成链路（评分统计 + 全靶点总表 + AI 整体可行性；完成后自动下载新 HTML）。 */
+  const regenerateDashboard = useCallback(async (): Promise<void> => {
+    const r = runRef.current
+    if (!r) { toast({ title: '没有打开的运行' }) ; return }
+    if (r.status === 'running' || r.dashboardPending) {
+      toast({ title: '汇总报告生成中', description: '请等待当前生成完成后重试。' })
+      return
+    }
+    if (!r.groups.some((g) => g.items.some((it) => it.status === 'done' && it.jobId))) {
+      toast({ title: '无法生成汇总报告', description: '该运行没有成功完成的靶点（全部失败/被取消/被跳过）— 可「重跑失败/不完整项」补齐后自动重新生成。', variant: 'destructive' })
+      return
+    }
+    r.dashboardId = undefined
+    r.dashboardError = undefined
+    snapshot()
+    await finalizeHtDashboardRef.current?.()
+  }, [snapshot])
 
   /** 打开一份历史运行（done = 回看；paused/interrupted = 提供恢复入口） */
   const openRunById = useCallback(
@@ -1387,7 +1411,9 @@ export function useHighThroughputFlow() {
     skipGroupPending,
     /** v2.38 全局重跑失败项并自动继续运行 */
     retryFailed,
-    /** v2.38 导入既有报告 zip（匹配到的未评估靶点标 skipped） */
+    /** v2.38 导入既有报告（zip / 单独 HTML，可多选；匹配到的未评估靶点标 skipped） */
     importArchive,
+    /** v2.44 手动重新生成汇总报告（回看已完成运行时） */
+    regenerateDashboard,
   }
 }

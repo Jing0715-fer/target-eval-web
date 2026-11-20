@@ -199,22 +199,23 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         ? { icon: <PauseCircle className="size-3" />, text: '已停止 · 可恢复', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
         : { icon: <CircleCheckBig className="size-3" />, text: '已完成', cls: 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' }
 
-  /** v2.38 报告 zip 导入（当前运行）：匹配到的未评估靶点标跳过 */
-  const handleZipImport = async (file: File | null | undefined) => {
-    if (!file || importingZip) return
+  /** v2.38→v2.44 报告导入（当前运行；zip 归档 / 单独 HTML，可多选）：匹配到的未评估靶点标跳过 */
+  const handleZipImport = async (files: FileList | null | undefined) => {
+    const list = files ? Array.from(files) : []
+    if (list.length === 0 || importingZip) return
     setImportingZip(true)
     try {
-      const matched = await flow.importArchive(file)
+      const matched = await flow.importArchive(list)
       if (matched > 0) {
         toast({
           title: `已导入 ${matched} 个靶点的既有报告`,
-          description: `这些靶点将跳过评估（报告见 ${file.name}）；点击「继续运行」评估其余靶点。`,
+          description: `这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。`,
         })
       } else {
-        toast({ title: 'zip 内没有匹配到当前运行的靶点', description: '已识别报告但未命中任何待评估靶点（UniProt/序列/区间需一致）。' })
+        toast({ title: '导入的报告中没有匹配到当前运行的靶点', description: '已识别报告但未命中任何待评估靶点（UniProt/序列/区间需一致）。' })
       }
     } catch (e) {
-      toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析该 zip', variant: 'destructive' })
+      toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
     } finally {
       setImportingZip(false)
       if (zipInputRef.current) zipInputRef.current.value = ''
@@ -415,10 +416,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               disabled={importingZip}
               onClick={() => zipInputRef.current?.click()}
               className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
-              title="导入既有报告 zip（如上次运行的批量下载包）— 匹配到的靶点直接跳过，不重复评估"
+              title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-              {importingZip ? '导入中…' : '导入报告（zip）'}
+              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
               保留记录并返回输入
@@ -474,10 +475,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               disabled={importingZip}
               onClick={() => zipInputRef.current?.click()}
               className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
-              title="导入既有报告 zip（如上次运行的批量下载包）— 匹配到的靶点直接跳过，不重复评估"
+              title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-              {importingZip ? '导入中…' : '导入报告（zip）'}
+              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
               保留记录并返回输入
@@ -486,13 +487,14 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         </div>
       )}
 
-      {/* v2.38 隐藏的 zip 文件选择器（暂停/停止/完成阶段共用） */}
+      {/* v2.38 隐藏的报告文件选择器（暂停/停止/完成阶段共用；v2.44 支持 zip + 单独 HTML 多选） */}
       <input
         ref={zipInputRef}
         type="file"
-        accept=".zip"
+        accept=".zip,.html,.htm"
+        multiple
         className="hidden"
-        onChange={(e) => void handleZipImport(e.target.files?.[0])}
+        onChange={(e) => void handleZipImport(e.target.files)}
       />
 
       {/* ── 当前组详情（running：复用 ProgressPanel — 阶段时间线 + 实时日志） ── */}
@@ -764,6 +766,19 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 <Gauge className="size-3.5" aria-hidden />
                 打开汇总报告
               </a>
+              {/* v2.44：回看已完成运行时可手动重新生成汇总报告（重跑后刷新 / 旧报告过期） */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={run.dashboardPending}
+                onClick={() => void flow.regenerateDashboard()}
+                className="h-8 gap-1.5 rounded-lg px-3 text-[12px] font-medium"
+                title="重新生成汇总报告（按当前全部已完成靶点重新汇总批次统计 + 全靶点总表 + AI 整体可行性，完成后自动下载新 HTML — 重跑/补齐靶点后刷新用）"
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                重新生成
+              </Button>
             </>
           ) : run.dashboardPending ? (
             <div className="min-w-0 flex-1">
@@ -773,15 +788,31 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               </p>
             </div>
           ) : (
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-semibold text-amber-700 dark:text-amber-400">
-                {run.dashboardError === '__done__' ? '本次运行没有成功完成的靶点，未生成汇总报告' : '汇总报告生成失败'}
-              </p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
-                {run.dashboardError === '__done__'
-                  ? '全部靶点均失败/被取消/被跳过，无可统计的评估结果（运行中作业被停止或服务实例回收时会出现此情况）。可点击「重跑失败/不完整项」补齐后重新生成。'
-                  : <>{run.dashboardError}（运行结果不受影响；重新下载 zip 会重试打包可用的看板）</>}
-              </p>
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2.5">
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-semibold text-amber-700 dark:text-amber-400">
+                  {run.dashboardError === '__done__' ? '本次运行没有成功完成的靶点，未生成汇总报告' : '汇总报告生成失败'}
+                </p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
+                  {run.dashboardError === '__done__'
+                    ? '全部靶点均失败/被取消/被跳过，无可统计的评估结果（运行中作业被停止或服务实例回收时会出现此情况）。可点击「重跑失败/不完整项」补齐后重新生成。'
+                    : <>{run.dashboardError}（运行结果不受影响；可重新生成或重新下载 zip 重试打包可用的看板）</>}
+                </p>
+              </div>
+              {run.dashboardError !== '__done__' && doneTargets > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={run.dashboardPending}
+                  onClick={() => void flow.regenerateDashboard()}
+                  className="h-8 gap-1.5 rounded-lg border-amber-500/40 px-3 text-[12px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400"
+                  title="重新生成汇总报告（按当前全部已完成靶点重新汇总，完成后自动下载新 HTML）"
+                >
+                  <RotateCcw className="size-3.5" aria-hidden />
+                  重新生成汇总报告
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -841,6 +872,20 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     : `重跑失败/不完整项（${retryableTargets}）`}
                 </Button>
               )}
+              {/* v2.44：无汇总报告状态的兜底入口（旧运行/生成标记被清 — 横幅未渲染时） */}
+              {!run.dashboardId && !run.dashboardPending && !run.dashboardError && doneTargets > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void flow.regenerateDashboard()}
+                  className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                  title="生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，单文件 — 完成后自动下载）"
+                >
+                  <Gauge className="size-3.5" aria-hidden />
+                  生成汇总报告
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
@@ -848,10 +893,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 disabled={importingZip}
                 onClick={() => zipInputRef.current?.click()}
                 className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
-                title="导入既有报告 zip — 匹配到的未评估靶点标跳过（用于补齐清单后重跑剩余靶点）"
+                title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的未评估靶点标跳过（用于补齐清单后重跑剩余靶点）"
               >
                 {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-                {importingZip ? '导入中…' : '导入报告（zip）'}
+                {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
               </Button>
             </>
           )}

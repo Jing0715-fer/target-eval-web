@@ -37,7 +37,7 @@ import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDateTime } from './format'
 import { extractHtTargetsFromExcel } from './api'
-import { parseHtArchive, planArchiveSkips, sha256Hex16, type HtMatchTarget } from './ht-archive-import'
+import { parseHtImportFiles, planArchiveSkips, sha256Hex16, type HtMatchTarget } from './ht-archive-import'
 import type { HTRunState, HtSeqTarget } from './types'
 
 export interface HighThroughputPanelProps {
@@ -142,16 +142,17 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
     return (seqGroups[Number(gi)]?.[Number(ti)]) != null
   }).length
 
-  // ── v2.38 报告 zip 导入（既有报告匹配 → 自动取消勾选） ──
+  // ── v2.38 报告导入（zip 归档 / v2.44 单独 HTML，可多选批量；既有报告匹配 → 自动取消勾选） ──
   const zipInputRef = useRef<HTMLInputElement>(null)
   const [importingZip, setImportingZip] = useState(false)
   const [zipMeta, setZipMeta] = useState<{ name: string; reports: number; matched: number } | null>(null)
-  const handleZipImport = async (file: File | null | undefined) => {
-    if (!file || importingZip) return
+  const handleZipImport = async (files: FileList | null | undefined) => {
+    const list = files ? Array.from(files) : []
+    if (list.length === 0 || importingZip) return
     setImportingZip(true)
     try {
-      const reports = await parseHtArchive(file)
-      if (reports.length === 0) throw new Error('zip 内没有可识别的报告（HTML）')
+      const reports = await parseHtImportFiles(list)
+      if (reports.length === 0) throw new Error('所选文件中没有可识别的报告（支持 zip 归档与报告 HTML）')
       // v2.42 严格匹配（planArchiveSkips）：只有单靶点 job 报告参与；序列靶点
       // SHA 精确等值 / 标签+长度严格相等且无歧义才跳 — 杜绝短标签包含式误跳
       const targets: HtMatchTarget[] = []
@@ -179,17 +180,17 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         }
       }
       onSkipKeysChange([...next])
-      setZipMeta({ name: file.name, reports: reports.length, matched })
+      setZipMeta({ name: list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`, reports: reports.length, matched })
       if (matched > 0) {
         toast({
           title: `已匹配 ${matched} 个已有报告的靶点`,
-          description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的 zip。可手动重新勾选恢复评估。',
+          description: '这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。可手动重新勾选恢复评估。',
         })
       } else {
-        toast({ title: 'zip 内没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 份报告但未命中（仅单靶点报告参与匹配；UniProt/序列/区间需严格一致，同名不同序列的靶点不跳过）。` })
+        toast({ title: '导入的报告中没有匹配到当前清单的靶点', description: `已识别 ${reports.length} 条报告记录但未命中（仅单靶点报告参与匹配；UniProt/序列/区间需严格一致，同名不同序列的靶点不跳过）。` })
       }
     } catch (e) {
-      toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析该 zip', variant: 'destructive' })
+      toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
     } finally {
       setImportingZip(false)
       if (zipInputRef.current) zipInputRef.current.value = ''
@@ -317,10 +318,11 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         <input
           ref={zipInputRef}
           type="file"
-          accept=".zip"
+          accept=".zip,.html,.htm"
+          multiple
           className="hidden"
           onChange={(e) => {
-            void handleZipImport(e.target.files?.[0])
+            void handleZipImport(e.target.files)
           }}
         />
         <Button
@@ -344,12 +346,12 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           disabled={importingZip}
           onClick={() => zipInputRef.current?.click()}
           className="h-7 gap-1.5 rounded-lg px-2.5 text-[11px] font-medium"
-          title="导入既有报告 zip（如上次运行的批量下载包）— 已有报告的靶点自动取消勾选（跳过评估，不占配额）"
+          title="导入既有报告（zip 归档或单独的报告 HTML 文件，可多选批量 — 如浏览器下载的「G74_xxx.html」）— 已有报告的靶点自动取消勾选（跳过评估，不占配额）"
         >
           {importingZip
             ? <LoaderCircle className="size-3 animate-spin" aria-hidden />
             : <FileArchive className="size-3" aria-hidden />}
-          {importingZip ? '导入中…' : '导入报告（zip）'}
+          {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
         </Button>
         <span className="font-mono text-[10px] text-muted-foreground/70">
           .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 序列行逐行成组（同链多靶点同组 · 抗体链忽略 · 同源多聚体只计 1 条 · 跨行完全同源 ≥95% 并为一组） · 导入会替换当前输入
@@ -486,7 +488,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             {zipMeta.name}
           </span>
           <span className="font-mono text-[11px] text-sky-700 dark:text-sky-400">
-            识别 {zipMeta.reports} 份报告 · 匹配 {zipMeta.matched} 个已完成靶点（已取消勾选，启动时跳过）
+            识别 {zipMeta.reports} 条报告记录 · 匹配 {zipMeta.matched} 个已完成靶点（已取消勾选，启动时跳过）
           </span>
         </div>
       )}
