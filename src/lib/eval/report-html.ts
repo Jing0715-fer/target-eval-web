@@ -19,6 +19,9 @@
  *    不再被顶栏遮挡）；⑪父页滚动锁（灯箱/AF 全屏开启期间锁父页 body overflow，
  *    滚轮落在 iframe 外不再派生滚动）。marker 升 rpt-zoom-v3，v1/v2 baked 旧报告
  *    serve 注入 v3 时自动清理旧根与旧句柄。
+ *  - v2.47：AF 3D 放大视图随 canvas 迁入「下载 PDB / 着色切换」工具条（v2.46 小窗
+ *    拥挤 → 小窗一律隐藏，仅放大后可见；图例双处同步 — 内嵌 af-legend + 全屏条
+ *    af-full-legend，重开全屏对齐当前已选着色）。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -166,6 +169,13 @@ export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配�
   .af-fullclose:hover { background:rgba(23,21,19,.88); }
   .af-fullslot { flex:1 1 auto; position:relative; margin:14px auto; width:min(96%,1400px); background:#fff; border-radius:10px; overflow:hidden; box-shadow:0 10px 44px rgba(0,0,0,.5); }
   @media (max-width:640px){ .af-fullslot{margin:8px auto;width:calc(100% - 16px);border-radius:8px} .af-fullttl span{display:none} .af-full-legend{margin-left:0} }
+  /* v2.47：AF 工具条（下载 PDB / 着色切换）仅放大视图显示 — 小窗拥挤一律隐藏（.af-stage .af-tb 见 SINGLE_REPORT_CSS）；canvas+工具条迁入全屏槽后可见，控件随全屏尺寸放大触控友好 */
+  .af-fullslot .af-tb { top:12px; left:12px; gap:8px; }
+  .af-fullslot .af-tb-btn { padding:5px 12px; font-size:10.5px; border-radius:6px; box-shadow:0 2px 8px rgba(28,25,23,.2); }
+  .af-fullslot .af-tb-sel { padding:5px 8px; font-size:10.5px; max-width:200px; border-radius:6px; box-shadow:0 2px 8px rgba(28,25,23,.2); }
+  /* 全屏条图例：域条目多时限高滚动 + 深底上渐变条边框可见 */
+  .af-full-legend.af-lgd-scroll { max-height:76px; overflow-y:auto; }
+  .af-full-legend .af-lgd-rb-bar { border-color:rgba(255,255,255,.35); }
   @media print { .rpt-zoom-badge, .af-expand, .af-fullwrap { display:none !important; } .rpt-zoom { display:none !important; } }
 `
 
@@ -505,7 +515,7 @@ export const LIGHTBOX_JS = `<script>
     wrap.setAttribute('aria-label', ttl + '放大视图');
     wrap.innerHTML =
       '<div class="af-fullbar">' +
-        '<div class="af-fullttl"><b>' + ttl + '</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合</span></div>' +
+        '<div class="af-fullttl"><b>' + ttl + '</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合 · 左上工具条可下载 PDB / 切换着色</span></div>' +
         LEGEND_AF +
         '<button type="button" class="af-fullclose" aria-label="退出放大视图">×</button>' +
       '</div>';
@@ -516,6 +526,13 @@ export const LIGHTBOX_JS = `<script>
     wrap.addEventListener('wheel', function (e) { e.preventDefault(); }, { passive: false });
     wrap.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
     slot.appendChild(cv); // canvas 迁移（3Dmol ResizeObserver → 全屏尺寸重渲染）
+    // v2.47：工具条（下载 PDB / 着色切换）随 canvas 迁入全屏 — 小窗拥挤仅放大后
+    // 可见；__afSync 把全屏条图例对齐当前已选着色（重开不再回显默认 pLDDT 图例）
+    var tbEl = stageEl.querySelector('.af-tb');
+    if (tbEl) {
+      slot.appendChild(tbEl);
+      if (tbEl.__afSync) { try { tbEl.__afSync(); } catch (e) { /* ignore */ } }
+    }
     stageEl.classList.add('af-expanded');
     document.body.appendChild(wrap);
     EMB.pin(wrap); // 嵌入形态 → 可视切片（含吸顶栏避让）
@@ -527,6 +544,7 @@ export const LIGHTBOX_JS = `<script>
       unwatchAf();
       EMB.unlock(); // v2.7.8 ⑪：父页滚动解锁
       stageEl.appendChild(cv); // 归位（viewer 随容器尺寸自动缩回）
+      if (tbEl) stageEl.appendChild(tbEl); // v2.47：工具条归位（小窗 CSS 隐藏）
       stageEl.classList.remove('af-expanded');
       wrap.remove();
       document.removeEventListener('keydown', onKey, true);
@@ -549,8 +567,8 @@ export const LIGHTBOX_JS = `<script>
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'af-expand';
-    btn.title = '放大交互 3D 视图';
-    btn.setAttribute('aria-label', '放大交互 3D 视图');
+    btn.title = '放大交互 3D 视图（放大后可下载 PDB / 切换着色）';
+    btn.setAttribute('aria-label', '放大交互 3D 视图（放大后可下载 PDB / 切换着色）');
     btn.innerHTML = ICON_EXPAND + '<span>放大</span>';
     btn.addEventListener('click', function (e) { e.stopPropagation(); afFullscreen(stageEl); });
     stageEl.appendChild(btn);
@@ -2001,7 +2019,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FFDB13"></i>50–70</span>
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>`}
-        <figcaption>${efP ? `<b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹着色，PDB 模型可下载）<br>${esc(afP.modelId)}（ESM Atlas 公共 API）· ${efP.sequenceLength ?? '—'} aa · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）· <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a>` : `<b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹 / UniProt 域着色，PDB 模型可下载）<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>`}</figcaption>
+        <figcaption>${efP ? `<b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹着色、下载 PDB 模型<br>${esc(afP.modelId)}（ESM Atlas 公共 API）· ${efP.sequenceLength ?? '—'} aa · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）· <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a>` : `<b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹 / UniProt 域着色、下载 PDB 模型<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>`}</figcaption>
       </figure>` : af ? `
       <figure class="af-fig">
         <div class="af-stage" id="af-stage">
@@ -2055,7 +2073,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           }
         })();
         </script>
-        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹 / UniProt 域着色，PDB 模型可下载）<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹 / UniProt 域着色、下载 PDB 模型<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
       </figure>`
     : (input.alphafoldFigure ? `
       <figure class="af-fig">
@@ -2122,7 +2140,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           }
         })();
         </script>
-        <figcaption><b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色（可切换彩虹着色，PDB 模型可下载）<br>${esc(ef.modelId)}（ESM Atlas 公共 API · 免登录）· ${ef.sequenceLength} aa · 平均 pLDDT ${ef.globalPlddt ?? '—'}${ef.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''} · ${Math.round(ef.pdbText.length / 1024)}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）；引用须注明计算预测而非实验结构 · <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a></figcaption>
+        <figcaption><b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹着色、下载 PDB 模型<br>${esc(ef.modelId)}（ESM Atlas 公共 API · 免登录）· ${ef.sequenceLength} aa · 平均 pLDDT ${ef.globalPlddt ?? '—'}${ef.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''} · ${Math.round(ef.pdbText.length / 1024)}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）；引用须注明计算预测而非实验结构 · <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a></figcaption>
       </figure>` : ''
 
   // ─── 报告主体组装（header → glance → 目录 → 章节 → footer；不含外壳）──────
@@ -2607,14 +2625,14 @@ export const SINGLE_REPORT_CSS = `  :root {
   .af-legend { display:flex; gap:10px; margin-top:6px; font-size:9.5px; font-family:var(--mono); color:var(--sub); justify-content:center; flex-wrap:wrap; }
   .af-legend span { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
   .af-legend i { display:inline-block; width:10px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); }
-  /* v2.46 预测结构视图工具条（下载 PDB + 着色切换 — 池化/独立视图共用；af-expand 在右上角无冲突） */
+  /* v2.46 预测结构视图工具条（下载 PDB + 着色切换 — 池化/独立视图共用）；v2.47 小窗拥挤 → 仅放大视图显示（迁入 .af-fullslot 后由 LIGHTBOX_CSS 恢复 flex） */
   .af-tb { position:absolute; top:8px; left:8px; z-index:6; display:flex; gap:6px; align-items:center; }
   .af-tb-btn { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); }
   .af-tb-btn:hover { background:#fff; color:#1c1917; }
   .af-tb-btn svg { flex:none; }
   .af-tb-sel { padding:3px 5px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); max-width:132px; }
   .af-tb-btn:focus-visible, .af-tb-sel:focus-visible { outline:2px solid #10b981; outline-offset:1px; }
-  .af-stage:not(.af-live) .af-tb { display:none; }
+  .af-stage .af-tb { display:none; } /* v2.47：小窗一律隐藏（仅全屏槽内可见） */
   /* 域着色图例（条目多时滚动）与彩虹图例渐变条 */
   .af-legend.af-lgd-scroll { max-height:76px; overflow-y:auto; justify-content:flex-start; }
   .af-lgd-item { max-width:170px; overflow:hidden; text-overflow:ellipsis; }

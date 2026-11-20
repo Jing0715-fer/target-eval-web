@@ -221,12 +221,13 @@ export function plddtStyleApplyJs(): string {
 const AF_DOMAINS_MAX = 24
 
 /**
- * 从 UniProt features 过滤 DOMAIN 结构域区间（v2.46）：
- *  - 仅 type === 'DOMAIN'（UniProt 结构域注释 — 用户「按 UniProt domain 划分着色」所指）；
+ * 从 UniProt features 过滤 DOMAIN 结构域区间（v2.46；v2.47 修复大小写）：
+ *  - 仅 type === 'Domain'（UniProt REST 原文大小写 — uniprot.ts FEATURE_KEEP 同款；
+ *    v2.46 误写成全大写 'DOMAIN' 恒不命中 → 域着色数据恒空、选项永远置灰）；
  *  - 区间有效性校验（end ≥ begin ≥ 1）+ 与序列长度弱校验（防异常注释越界）；
  *  - begin 升序稳定排序，名称截断 60 字符，上限 24 条；
  *  - AFDB 模型残基编号 = UniProt 坐标 → 区间直接映射 3Dmol resi（无需换算）。
- * 无 DOMAIN 注释/无归属时返回 undefined（报告「UniProt 域」选项禁用）。
+ * 无 Domain 注释/无归属时返回 undefined（报告「UniProt 域」选项禁用）。
  */
 export function extractAfDomains(
   features: UniprotFeature[] | undefined | null,
@@ -236,7 +237,7 @@ export function extractAfDomains(
   const limit = sequenceLength && sequenceLength > 0 ? sequenceLength : Number.MAX_SAFE_INTEGER
   const out: AfDomainRange[] = []
   for (const f of features) {
-    if (f.type !== 'DOMAIN') continue
+    if (f.type !== 'Domain') continue
     const start = Number(f.begin)
     const end = Number(f.end)
     if (!Number.isFinite(start) || !Number.isFinite(end)) continue
@@ -251,12 +252,16 @@ export function extractAfDomains(
 }
 
 /**
- * v2.46：预测结构视图工具条公共脚本（单靶点报告 AF/ESMFold 视图 + 合并报告公共
+ * v2.46/v2.47：预测结构视图工具条公共脚本（单靶点报告 AF/ESMFold 视图 + 合并报告公共
  * MODELS 池三处共用 — 一份实现防漂移）。注入后暴露：
  *  - window.__afPlddtApply(pdb, viewer)：pLDDT 四段着色（与初始化同源核心）；
  *  - window.__afTb.mount(stage, viewer, pdb, { fileName, domains })：给 af-stage
  *    挂载「下载 PDB + 着色切换」工具条（pLDDT 置信 / 彩虹 N→C / UniProt 域），
- *    切换时同步重建 af-legend 图例并刷新打印海报（pngURI）。
+ *    切换时同步重建图例并刷新打印海报（pngURI）。
+ *    v2.47：小窗拥挤 → 工具条 CSS 仅在放大视图（.af-fullslot 内）显示（小窗内
+ *    .af-stage .af-tb 一律 display:none，见 SINGLE_REPORT_CSS）；灯箱脚本放大时
+ *    把 .af-tb 随 canvas 迁入全屏槽、关闭时归位，并调 tb.__afSync() 把图例
+ *    （内嵌 .af-legend + 全屏条 .af-full-legend 双处）对齐当前已选着色。
  * 域着色仅 AFDB 模型启用（残基编号 = UniProt 坐标）；ESMFold 模型编号自 1 起
  * 不保证对齐 → 调用方不传 domains（选项禁用置灰）。
  */
@@ -295,10 +300,19 @@ export function afToolbarJs(): string {
           setTimeout(function () { a.remove(); try { URL.revokeObjectURL(url); } catch (er) {} }, 5000);
         } catch (e) { /* 下载失败静默（沙箱 iframe 拦截等） */ }
       });
-      // — 着色切换 + 图例 —
-      function legendEl() {
-        var fig = stage.closest ? stage.closest('figure') : null;
-        return fig ? fig.querySelector('.af-legend') : null;
+      // — 着色切换 + 图例（v2.47：图例双处同步 — 内嵌 .af-legend + 全屏条 .af-full-legend）—
+      function legendEls() {
+        var out = [];
+        try {
+          var fig = stage.closest ? stage.closest('figure') : null;
+          var fl = fig ? fig.querySelector('.af-legend') : null;
+          if (fl) out.push(fl);
+          // 全屏打开时 tb 已随 canvas 迁入 .af-fullslot → 自 tb 向上找全屏条图例
+          var wrap = tb.closest ? tb.closest('.af-fullwrap') : null;
+          var wl = wrap ? wrap.querySelector('.af-full-legend') : null;
+          if (wl) out.push(wl);
+        } catch (e) { /* ignore */ }
+        return out;
       }
       function legendHtml(mode) {
         if (mode === 'rainbow') {
@@ -316,6 +330,13 @@ export function afToolbarJs(): string {
              + '<span><i style="background:#FFDB13"></i>50–70</span>'
              + '<span><i style="background:#FF7D45"></i>&lt; 50</span>';
       }
+      function setLegends(mode) {
+        var els = legendEls();
+        for (var n = 0; n < els.length; n++) {
+          els[n].innerHTML = legendHtml(mode);
+          els[n].classList.toggle('af-lgd-scroll', mode === 'domain');
+        }
+      }
       function apply(mode) {
         try {
           if (mode === 'rainbow') {
@@ -330,11 +351,7 @@ export function afToolbarJs(): string {
           }
           viewer.render();
         } catch (e) { /* 切换失败保持当前样式 */ }
-        var lg = legendEl();
-        if (lg) {
-          lg.innerHTML = legendHtml(mode);
-          lg.classList.toggle('af-lgd-scroll', mode === 'domain');
-        }
+        setLegends(mode);
         // 打印海报跟随当前着色刷新
         try {
           var uri = viewer.pngURI ? viewer.pngURI() : null;
@@ -356,6 +373,8 @@ export function afToolbarJs(): string {
       tb.appendChild(dl);
       tb.appendChild(sel);
       stage.appendChild(tb);
+      // v2.47：放大打开时灯箱脚本调用 — 图例对齐当前已选着色（重开全屏不再回显默认 pLDDT 图例）
+      tb.__afSync = function () { setLegends(sel.value); };
     }
   };
 })();`
