@@ -391,6 +391,7 @@ export function describeEvidenceSource(s: OligoEvidenceSource): string {
     case 'uniprot-subunit': return 'UniProt · 亚基注释'
     case 'uniprot-interaction': return 'UniProt · 相互作用'
     case 'literature': return '文献标题'
+    default: return '其他证据' // v2.48.1：兜底 — 新增 source 值时不再隐式 undefined
   }
 }
 

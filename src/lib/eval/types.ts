@@ -651,6 +651,7 @@ export function describeTargetIdentitySource(source: TargetIdentityInfo['source'
     case 'blast-nr': return 'BLAST nr 识别'
     case 'blast-homolog': return 'PDB 同源推断'
     case 'uniprot-blast': return 'UniProt 序列匹配'
+    default: return '序列来源' // v2.48.1：兜底 — 新增 source 值时不再隐式 undefined
   }
 }
 
