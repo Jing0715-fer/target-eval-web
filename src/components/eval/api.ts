@@ -644,6 +644,26 @@ export async function fetchBatchReport(id: string): Promise<BatchReportInfo> {
   return data.batchReport
 }
 
+/** POST /api/evaluate/batch-report { regenerateOf } — 手动重新生成合并报告（需求B）
+ *  原地重生成：沿用同一记录 id 与既有作业数据（jobIds / relation / uploadId），
+ *  LLM 三段式重跑；成功覆盖 markdown / HTML，失败保留上一版内容。
+ *  v2.19 口径同 generateBatchReport：本地引擎配置随请求内联携带。 */
+export async function regenerateBatchReport(input: { id: string; goal?: string }): Promise<BatchReportInfo> {
+  const llm = getLlmEngineOverride()
+  const res = await fetch('/api/evaluate/batch-report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ regenerateOf: input.id, goal: input.goal, ...(llm ? { llm } : {}) }),
+  })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; batchReport?: BatchReportInfo; error?: string } | null
+  if (!res.ok || !data?.ok || !data.batchReport) {
+    throw new Error(data?.error ?? `重新生成请求失败（HTTP ${res.status}）`)
+  }
+  const started = data.batchReport
+  if (started.status !== 'running') return started // 兼容即时完成的响应
+  return waitForBatchReport(started.id)
+}
+
 /** GET /api/evaluate/batch-report（无 id）— 当前用户的合并报告列表（v1.13 批量评估历史） */
 export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
   const res = await fetch('/api/evaluate/batch-report', { cache: 'no-store' })

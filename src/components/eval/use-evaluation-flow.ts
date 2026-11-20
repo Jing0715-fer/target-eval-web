@@ -1110,6 +1110,18 @@ export function useEvaluationFlow() {
 
   const clearSubmitError = useCallback(() => setSubmitError(null), [])
 
+  /** 需求B：合并报告重新生成完成后同步 flow 状态（同 id 原地替换）—
+   *  切换到靶点视图再切回合并报告时仍显示新一版；batchRef 同步更新避免
+   *  后续 snapshot() 快照回写旧对象 */
+  const updateMergedReport = useCallback((fresh: BatchReportInfo) => {
+    setBatch(prev => {
+      if (!prev || prev.mergedReport?.id !== fresh.id) return prev
+      return { ...prev, mergedReport: fresh }
+    })
+    const st = batchRef.current
+    if (st && st.mergedReport?.id === fresh.id) st.mergedReport = fresh
+  }, [])
+
   return {
     phase,
     job,
@@ -1128,6 +1140,7 @@ export function useEvaluationFlow() {
     loadJobById,
     loadBatchReport,
     showMergedReport,
+    updateMergedReport,
     clearSubmitError,
   }
 }

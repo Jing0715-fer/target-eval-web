@@ -33,6 +33,8 @@ interface BatchReportBody {
   uploadId?: string
   relation?: RelationJudgment
   goal?: string
+  /** 需求B：手动重新生成 — 已有合并报告 id（沿用其 jobIds/relation/uploadId 原地重跑 LLM） */
+  regenerateOf?: string
   /** v2.19：用户本地引擎配置（localStorage → 请求内联携带；服务端不落盘） */
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
 }
@@ -91,6 +93,8 @@ function normalizeRelation(j: RelationJudgment | undefined): RelationJudgment {
 // 调用方继续服务旧 HTML（叠加既有 CSS/UX 升级注入）。
 // 并发去重：同 id 在途请求共享同一 Promise（iframe 预览 + 下载同时到达只渲染一次）。
 const upgradeInflight = new Map<string, Promise<string | null>>()
+/** 需求B：同 id 重新生成在途去重（进程内；DB status=running 为跨请求二道保险） */
+const regenInflight = new Set<string>()
 const MERGED_FMT_MARKER = 'mrg-fmt-v2.26'  // v2.26：共有结构全量交集补齐 + 受体–G 蛋白批次受体主导首页（旧报告重渲染即修复）
 
 async function upgradeLegacyHtml(record: BatchReport): Promise<string | null> {
@@ -186,6 +190,68 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '请求体不是合法 JSON' }, { status: 400 })
   }
 
+  // ── 需求B：手动重新生成既有合并报告（原地重跑 LLM 三段式，靶点数据不重评估）──
+  // 沿用原记录 id / jobIds / relation / uploadId；成功覆盖 markdown+HTML，
+  // 失败保留上一版内容（fail() 内处理）；同 id 在途去重（进程内 Set + DB status 双保险）
+  if (body.regenerateOf) {
+    const id = body.regenerateOf.trim()
+    const record = await db.batchReport.findUnique({ where: { id } })
+    if (!record) return notFound()
+    // 归属校验（与 GET 同口径：ownerKey 两层回退）
+    if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) {
+      return notFound()
+    }
+    if (record.status === 'running' || regenInflight.has(id)) {
+      return NextResponse.json({ ok: false, error: '该报告正在生成/重新生成中，请等待完成后再试' }, { status: 409 })
+    }
+    let jobIds: string[] = []
+    try { jobIds = JSON.parse(record.jobIds) } catch { /* ignore */ }
+    if (jobIds.length < 2) {
+      return NextResponse.json({ ok: false, error: '原报告缺少有效的作业清单（jobIds < 2），无法重新生成' }, { status: 400 })
+    }
+    let relation: RelationJudgment | null = null
+    try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
+    if (!isRelationJudgment(relation)) {
+      return NextResponse.json({ ok: false, error: '原报告的关系判定数据已损坏（relation 字段不合法），无法重新生成' }, { status: 400 })
+    }
+    relation = normalizeRelation(relation)
+    const uploadId = record.uploadId ?? undefined
+    if (uploadId && (!isUploadId(uploadId) || !(await uploadOwnedBy(uploadId, owner)))) {
+      return NextResponse.json({ ok: false, error: '无权使用原报告关联的上传（仅上传者本人可用）' }, { status: 403 })
+    }
+    // 置 running 并清空 markdown：GET 的旧版兼容分支会把「running + 有 markdown」
+    // 判为 done（v1.12 遗留口径）— 保留 markdown 会让前端轮询立即假成功；
+    // 清空后 running 态无歧义，旧内容仅在内存（ctx.prevMarkdown）与磁盘 HTML 保留，
+    // 失败时由 fail() 写回 DB（进程崩溃则按普通 running 超时口径处理，旧 HTML 仍可下载）
+    await db.batchReport.update({
+      where: { id },
+      data: { status: 'running', error: null, markdown: null, updatedAt: new Date() },
+    })
+    regenInflight.add(id)
+    const llmOverride = sanitizeLlmOverride(body.llm)
+    const prevMarkdown = record.markdown ?? ''
+    void runWithLlmOverride(llmOverride, () => runBatchReportGeneration({
+      batchReportId: id,
+      jobIds,
+      uploadId,
+      relation,
+      goal: body.goal,
+      prevMarkdown,
+    })).finally(() => { regenInflight.delete(id) })
+    return NextResponse.json({
+      ok: true,
+      batchReport: {
+        id,
+        jobIds,
+        relation,
+        status: 'running',
+        markdown: '',
+        sequenceAttribution: [],
+        createdAt: record.createdAt.toISOString(),
+      },
+    })
+  }
+
   // v2.8：取消 6 作业截断 → 全量合并；防御性上限（与关系判断路由/前端一致）超限明确告知
   const MAX_BATCH_JOBS = 30
   const jobIds = (body.jobIds ?? []).filter(Boolean)
@@ -256,21 +322,32 @@ export async function POST(req: Request) {
   })
 }
 
-/** 后台生成合并报告：传播同源检索 → 聚合上传数据 → LLM 三段式 → markdown/HTML 落库 → 更新终态 */
+/** 后台生成合并报告：传播同源检索 → 聚合上传数据 → LLM 三段式 → markdown/HTML 落库 → 更新终态
+ *  需求B：ctx.prevMarkdown 非空 = 重新生成既有报告 — 失败时保留上一版内容（status 回 done
+ *  + error 附「已保留上一版」说明，旧 markdown/HTML 不受影响）而非置 error 终态 */
 async function runBatchReportGeneration(ctx: {
   batchReportId: string
   jobIds: string[]
   uploadId?: string
   relation: RelationJudgment
   goal?: string
+  prevMarkdown?: string
 }): Promise<void> {
   const { batchReportId, jobIds, uploadId, relation } = ctx
   const startedAt = Date.now()
   const fail = async (msg: string) => {
     console.error(`[batch-report] 合并报告生成失败（${batchReportId}）：${msg}`)
+    // 重新生成且已有上一版内容 → 旧 markdown 写回 DB（开始时已清空防假成功）
+    // + status 回 done + error 附说明：旧 markdown/HTML 不受影响，GET/前端照常展示旧版
+    const keepPrev = (ctx.prevMarkdown ?? '').length > 0
     await db.batchReport.update({
       where: { id: batchReportId },
-      data: { status: 'error', error: msg.slice(0, 500), updatedAt: new Date() },
+      data: {
+        status: keepPrev ? 'done' : 'error',
+        ...(keepPrev ? { markdown: ctx.prevMarkdown } : {}),
+        error: (keepPrev ? `重新生成失败（已保留上一版内容）：${msg}` : msg).slice(0, 500),
+        updatedAt: new Date(),
+      },
     }).catch(() => undefined)
   }
   try {
