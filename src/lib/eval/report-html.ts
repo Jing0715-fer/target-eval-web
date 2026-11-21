@@ -779,7 +779,8 @@ export const TABLE_FILTER_JS = `<script>
     blast: [
       ['default', '默认（Identity ↓）'],
       ['ident-desc', 'Identity 高→低'], ['ident-asc', 'Identity 低→高'],
-      ['e-asc', 'E-value 小→大'], ['cov-desc', '覆盖 大→小'], ['res-asc', '分辨率 小→大']
+      ['e-asc', 'E-value 小→大'], ['cov-desc', '覆盖 大→小'], ['res-asc', '分辨率 小→大'],
+      ['id-asc', 'PDB ID A→Z']
     ]
   };
   function numAttr(el, k) { var v = parseFloat(el.getAttribute(k)); return Number.isFinite(v) ? v : null; }
@@ -1457,7 +1458,7 @@ function blastRowsHtml(hits: BlastHit[], outside = false): string {
       ? h.queryTo - h.queryFrom + 1
       : (h.queryCoverage != null && h.queryCoverage > 0 ? h.queryCoverage : '')
     return `
-    <tr${outside ? ' class="tr-outside"' : ''} data-m="${blastMethodKey(h.method)}" data-ident="${h.identity}" data-res="${h.resolution ?? ''}" data-cov="${covSpan}" data-e="${Number.isFinite(h.evalue) ? h.evalue : ''}">
+    <tr${outside ? ' class="tr-outside"' : ''} data-m="${blastMethodKey(h.method)}" data-ident="${h.identity}" data-res="${h.resolution ?? ''}" data-cov="${covSpan}" data-e="${Number.isFinite(h.evalue) ? h.evalue : ''}" data-id="${h.pdbId ?? ''}">
       <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
       <td class="t-desc">${esc(h.description)}</td>
       <td class="num">${h.identity.toFixed(1)}%</td>
