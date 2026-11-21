@@ -24,6 +24,13 @@
  *    af-full-legend，重开全屏对齐当前已选着色）。
  *  - v2.48：PDB / BLAST 列表筛选排序（TABLE_FILTER_JS — 方法 chips + 排序下拉 +
  *    计数；PDB 主表与折叠表同组跨表作用于全量行，激活时折叠区暂避、默认态归位）。
+ *  - v2.53：① 方法 chips 之外新增分辨率阈值快捷筛选（≤2Å/≤3Å toggle chips —
+ *    TABLE_FILTER_JS 内 RES_KEYS，无分辨率数据的表不渲染）；② .tbl-ctl 样式抽离
+ *    TABLE_FILTER_CSS 单源（SINGLE_REPORT_CSS 内嵌 + 服务端注入共用）；③ 旧报告
+ *    回填 — applyTableFilterUpgrade 三路径（v2 原样 / v1 摘旧脚本换新版 / 无标记
+ *    全量注入），TBL_BOOTSTRAP_JS 从单元格文本提取 data-* 并标组（幂等回填缺失
+ *    属性，v1 报告 BLAST 行缺 data-id 在此补齐）；④ 合并报告共有结构与受体×G
+ *    蛋白表接入 data-tbl="shared"（report-merged.ts，pdb 类排序 + 方法/阈值筛选）。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -762,13 +769,17 @@ export const UX_PAGE_JS = `<script>
 //  blast / blast-out 各自独立成组）。分组作用域 = 最近 section（合并报告多靶点
 //  各自的 section id 唯一 — 不串组）。激活筛选/排序时全部可见行并入首表、折叠区
 //  暂避；恢复默认则按 __home 归位原分布（预览 20 + 折叠余量的结构不变）。
-const TABLE_FILTER_MARKER = 'rpt-tbl-v1'
+//  v2.53：① 方法 chips 之外新增分辨率阈值快捷筛选（≤2Å / ≤3Å toggle，无分辨率
+//  数据的表不渲染）；② marker 升 rpt-tbl-v2 — v1 报告（v2.48-v2.52 生成）由
+//  applyTableFilterUpgrade 在服务端摘旧脚本注入新版，历史无标记报告注入自举。
+const TABLE_FILTER_MARKER = 'rpt-tbl-v2'
 
 export const TABLE_FILTER_JS = `<script>
-/* ${TABLE_FILTER_MARKER} PDB/BLAST 列表筛选排序（v2.48）*/
+/* ${TABLE_FILTER_MARKER} PDB/BLAST 列表筛选排序（v2.48；v2.53 分辨率阈值）*/
 (function () {
   var M_LABEL = { xray: 'X-ray', cryoem: 'Cryo-EM', nmr: 'NMR', other: '其他' };
   var M_ORDER = ['xray', 'cryoem', 'nmr', 'other'];
+  var RES_KEYS = [2, 3]; // v2.53 分辨率阈值（Å）
   var SORTS = {
     pdb: [
       ['default', '默认（分辨率 ↑）'],
@@ -822,6 +833,12 @@ export const TABLE_FILTER_JS = `<script>
     var mCounts = {};
     rows.forEach(function (r) { var m = r.getAttribute('data-m') || 'other'; mCounts[m] = (mCounts[m] || 0) + 1; });
     var mKeys = M_ORDER.filter(function (k) { return mCounts[k]; });
+    var resCounts = {}; // v2.53 阈值命中计数（无分辨率数据 → 不渲染该组）
+    var hasRes = false;
+    rows.forEach(function (r) {
+      var v = numAttr(r, 'data-res');
+      if (v != null) { hasRes = true; RES_KEYS.forEach(function (k) { if (v <= k) resCounts[k] = (resCounts[k] || 0) + 1; }); }
+    });
     var sorts = SORTS[kind];
     var firstWrap = grp.tables[0].closest ? (grp.tables[0].closest('.tbl-wrap') || grp.tables[0]) : grp.tables[0];
     var ctl = document.createElement('div');
@@ -836,12 +853,18 @@ export const TABLE_FILTER_JS = `<script>
         html += '<button type="button" class="tc-chip" data-m="' + k + '" aria-pressed="false">' + (M_LABEL[k] || k) + ' ' + mCounts[k] + '</button>';
       });
     }
+    if (hasRes) {
+      html += '<span class="tc-lbl">分辨率</span>';
+      RES_KEYS.forEach(function (k) {
+        if (resCounts[k]) html += '<button type="button" class="tc-chip tc-res" data-res="' + k + '" aria-pressed="false" title="仅显示分辨率 ≤' + k + 'Å 的条目，再次点击取消">≤' + k + 'Å ' + resCounts[k] + '</button>';
+      });
+    }
     html += '<span class="tc-lbl">排序</span><select class="tc-sel" aria-label="排序方式">';
     sorts.forEach(function (s) { html += '<option value="' + s[0] + '">' + s[1] + '</option>'; });
     html += '</select><span class="tc-count"></span>';
     ctl.innerHTML = html;
     firstWrap.parentNode.insertBefore(ctl, firstWrap);
-    var state = { m: 'all', sort: 'default' };
+    var state = { m: 'all', res: 0, sort: 'default' };
     var countEl = ctl.querySelector('.tc-count');
     var selEl = ctl.querySelector('.tc-sel');
     var hides = []; // 激活期间暂避的次表宿主（details 折叠区 / .tbl-wrap）
@@ -850,10 +873,19 @@ export const TABLE_FILTER_JS = `<script>
       if (host) hides.push(host);
     });
     function render() {
-      var active = state.m !== 'all' || state.sort !== 'default';
-      var vis = rows.filter(function (r) { return state.m === 'all' || (r.getAttribute('data-m') || 'other') === state.m; });
+      var active = state.m !== 'all' || state.res > 0 || state.sort !== 'default';
+      var vis = rows.filter(function (r) {
+        if (state.m !== 'all' && (r.getAttribute('data-m') || 'other') !== state.m) return false;
+        if (state.res > 0) { var rv = numAttr(r, 'data-res'); if (rv == null || rv > state.res) return false; }
+        return true;
+      });
       var sk = sortKey(state.sort);
       if (sk && ACCESS[sk.k]) vis.sort(function (a, b) { return cmp(ACCESS[sk.k](a), ACCESS[sk.k](b), sk.dir); });
+      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip.tc-res'), function (c) {
+        var on = parseInt(c.getAttribute('data-res'), 10) === state.res;
+        c.classList.toggle('tc-on', on);
+        if (c.setAttribute) c.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
       var first = grp.tables[0].tBodies[0];
       if (!first) return;
       if (active) {
@@ -872,8 +904,14 @@ export const TABLE_FILTER_JS = `<script>
     ctl.addEventListener('click', function (e) {
       var chip = e.target && e.target.closest ? e.target.closest('.tc-chip') : null;
       if (!chip || !ctl.contains(chip)) return;
+      if (chip.classList.contains('tc-res')) { // v2.53 阈值 toggle（再次点击取消）
+        var rv = parseInt(chip.getAttribute('data-res'), 10);
+        state.res = state.res === rv ? 0 : rv;
+        render();
+        return;
+      }
       state.m = chip.getAttribute('data-m') || 'all';
-      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip'), function (c) {
+      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip:not(.tc-res)'), function (c) {
         var on = c === chip;
         c.classList.toggle('tc-on', on);
         if (c.setAttribute) c.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -885,6 +923,120 @@ export const TABLE_FILTER_JS = `<script>
   });
 })();
 </script>`
+
+/** v2.53：.tbl-ctl 工具条样式单源（SINGLE_REPORT_CSS 内嵌 + 旧报告服务端注入共用）
+ *  — 从 v2.48 的 SINGLE_REPORT_CSS 块抽离；所需变量（--mono/--line/--accent 等）
+ *  在 v2.48 之前的旧报告 :root 同样定义（实测核对），注入即可用 */
+export const TABLE_FILTER_CSS = `  /* v2.48/v2.53 PDB/BLAST 列表筛选排序工具条（TABLE_FILTER_JS 挂载 — chips + 阈值 + 排序下拉 + 计数） */
+  .tbl-ctl { display:flex; flex-wrap:wrap; align-items:center; gap:5px 8px; margin:2px 0 10px; font-family:var(--mono); }
+  .tc-lbl { font-size:9px; color:var(--faint); letter-spacing:1.2px; margin-left:2px; }
+  .tbl-ctl .tc-lbl:first-child { margin-left:0; }
+  .tc-chip { padding:2px 10px; border-radius:10px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; letter-spacing:.4px; line-height:1.7; cursor:pointer; transition:border-color .12s, color .12s; }
+  .tc-chip:hover { border-color:#c7ece0; color:var(--accent-2); }
+  .tc-chip.tc-on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .tc-chip:focus-visible, .tc-sel:focus-visible { outline:2px solid #10b981; outline-offset:1px; }
+  .tc-sel { padding:2.5px 6px; border-radius:5px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; cursor:pointer; }
+  .tc-count { margin-left:auto; font-size:9.5px; color:var(--faint); white-space:nowrap; }
+  .tc-count.tc-filtered { color:#b45309; font-weight:700; }
+  @media print { .tbl-ctl { display:none !important; } }
+`
+
+// ─── v2.53 旧报告表筛选自举（服务端按需注入 — 无/旧标记的 report.html）──────
+//  自举在注入的 TABLE_FILTER_JS 之前运行（脚本顺序保证）：
+//  ① 未标组表格：按表头识别种类（含 Identity → blast；含分辨率 → pdb），折叠区
+//    class fold-outside → {kind}-out 独立组，其余 fold 与主表同组；互作复合物
+//    卡片（.cx-card）内表格跳过 — 多卡片同 section 会跨表串行；
+//  ② 行属性回填：从单元格文本提取 data-id/data-m/data-res/data-date/
+//    data-ident/data-e/data-cov（仅填缺失 — v1 报告 BLAST 行缺 data-id 在此补齐，
+//    方法列兼容 mth 色块 class 与纯文本两种历史形态）。
+export const TBL_BOOTSTRAP_JS = `<script>
+/* rpt-tblboot-v1 旧报告表格筛选自举（v2.53）*/
+(function () {
+  function mkey(td) {
+    var chip = td.querySelector('.mth');
+    var cls = chip ? chip.className : '';
+    if (/mth-xray/.test(cls)) return 'xray';
+    if (/mth-cryoem/.test(cls)) return 'cryoem';
+    if (/mth-nmr/.test(cls)) return 'nmr';
+    if (chip) return 'other';
+    var t = (td.textContent || '').toUpperCase();
+    if (t.indexOf('X-RAY') >= 0 || t.indexOf('XRAY') >= 0) return 'xray';
+    if (t.indexOf('ELECTRON MICROSCOPY') >= 0 || t.indexOf('CRYO') >= 0) return 'cryoem';
+    if (t.indexOf('NMR') >= 0) return 'nmr';
+    return 'other';
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('table.tbl-data'), function (t) {
+    if (t.closest && t.closest('.cx-card')) return; // 互作复合物卡片表：多卡片同节不并入
+    var head = t.tHead && t.tHead.rows[0];
+    if (!head) return;
+    var ths = [];
+    Array.prototype.forEach.call(head.cells, function (c) { ths.push((c.textContent || '').trim()); });
+    var colOf = function (re) { for (var i = 0; i < ths.length; i++) if (re.test(ths[i])) return i; return -1; };
+    var isBlast = ths.some(function (h) { return h.indexOf('Identity') >= 0; });
+    var isPdb = !isBlast && ths.some(function (h) { return h.indexOf('分辨率') >= 0; });
+    if (!isBlast && !isPdb) return;
+    if (!t.getAttribute('data-tbl')) {
+      var kind = isBlast ? 'blast' : 'pdb';
+      var group = kind;
+      var det = t.closest ? t.closest('details') : null;
+      if (det && det.className.indexOf('fold-outside') >= 0) group = kind + '-out';
+      t.setAttribute('data-tbl', group);
+    }
+    var cId = colOf(/^PDB/), cM = colOf(/方法/), cRes = colOf(/分辨率/), cDate = colOf(/日期/);
+    var cIdent = colOf(/Identity/), cE = colOf(/E-value/i), cCov = colOf(/覆盖/);
+    var tb = t.tBodies[0];
+    if (!tb) return;
+    Array.prototype.forEach.call(tb.rows, function (tr) {
+      var cells = tr.cells;
+      var cell = function (i) { return i >= 0 && cells[i] ? cells[i] : null; };
+      var idc = cell(cId);
+      if (idc && !tr.hasAttribute('data-id')) {
+        var mm = (idc.textContent || '').trim().match(/\\b[0-9A-Z]{4}\\b/);
+        tr.setAttribute('data-id', mm ? mm[0] : '');
+      }
+      var mc = cell(cM);
+      if (mc && !tr.hasAttribute('data-m')) tr.setAttribute('data-m', mkey(mc));
+      var rc = cell(cRes);
+      if (rc && !tr.hasAttribute('data-res')) { var rv = parseFloat(rc.textContent); tr.setAttribute('data-res', isFinite(rv) ? String(rv) : ''); }
+      var dc = cell(cDate);
+      if (dc && !tr.hasAttribute('data-date')) { var dm = (dc.textContent || '').match(/\\d{4}-\\d{2}-\\d{2}/); tr.setAttribute('data-date', dm ? dm[0] : ''); }
+      var ic = cell(cIdent);
+      if (ic && !tr.hasAttribute('data-ident')) { var iv = parseFloat(ic.textContent); tr.setAttribute('data-ident', isFinite(iv) ? String(iv) : ''); }
+      var ec = cell(cE);
+      if (ec && !tr.hasAttribute('data-e')) { var ev = parseFloat(ec.textContent); tr.setAttribute('data-e', isFinite(ev) ? String(ev) : ''); }
+      var cc = cell(cCov);
+      if (cc && !tr.hasAttribute('data-cov')) {
+        var ct = (cc.textContent || '').trim();
+        var cm = ct.match(/(\\d+)\\s*[-\\u2013\\u2014~]\\s*(\\d+)/);
+        var span = cm ? (parseInt(cm[2], 10) - parseInt(cm[1], 10) + 1) : (parseInt(ct, 10) || '');
+        tr.setAttribute('data-cov', span);
+      }
+    });
+  });
+})();
+</script>`
+
+const TBL_V1_RE = /<script>\s*\/\* rpt-tbl-v1[\s\S]*?<\/script>/
+
+/** v2.53：报告服务端表筛选升级（幂等，三类路径）：
+ *  - 已含 rpt-tbl-v2（当前版本生成）→ 原样返回；
+ *  - 含 rpt-tbl-v1（v2.48-v2.52 生成）→ 摘除旧脚本 → 注入自举 + 新版
+ *    TABLE_FILTER_JS（行为随服务端代码演进；CSS 旧报告已内嵌无需重复）；
+ *  - 无标记（v2.48 之前的历史报告）→ 注入 TABLE_FILTER_CSS + 自举 + 新版 JS
+ *    （与 applyUxUpgrade 同款服务端按需注入，不改磁盘文件）。 */
+export function applyTableFilterUpgrade(html: string): string {
+  if (html.includes(TABLE_FILTER_MARKER)) return html
+  let out = html
+  if (TBL_V1_RE.test(out)) {
+    out = out.replace(TBL_V1_RE, '')
+  } else {
+    const h = out.indexOf('</head>')
+    if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-tbl-ctl">${TABLE_FILTER_CSS}</style>\n${out.slice(h)}`
+  }
+  const b = out.lastIndexOf('</body>')
+  if (b >= 0) out = `${out.slice(0, b)}${TBL_BOOTSTRAP_JS}\n${TABLE_FILTER_JS}\n${out.slice(b)}`
+  return out
+}
 
 /** 旧报告兼容：无 UX 标记的历史 report.html，注入打印版式 + 复制/横滚 CSS+JS（幂等，已有则原样返回） */
 export function applyUxUpgrade(html: string): string {
@@ -2789,18 +2941,8 @@ export const SINGLE_REPORT_CSS = `  :root {
   .af-legend.af-lgd-scroll { max-height:76px; overflow-y:auto; justify-content:flex-start; }
   .af-lgd-item { max-width:170px; overflow:hidden; text-overflow:ellipsis; }
   .af-lgd-rb-bar { display:inline-block; width:56px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); background:linear-gradient(90deg,#4363D8,#46F0F0,#3CB44B,#FFE119,#F58231,#E6194B); }
-  /* v2.48 PDB/BLAST 列表筛选排序工具条（TABLE_FILTER_JS 挂载 — chips + 排序下拉 + 计数） */
-  .tbl-ctl { display:flex; flex-wrap:wrap; align-items:center; gap:5px 8px; margin:2px 0 10px; font-family:var(--mono); }
-  .tc-lbl { font-size:9px; color:var(--faint); letter-spacing:1.2px; margin-left:2px; }
-  .tbl-ctl .tc-lbl:first-child { margin-left:0; }
-  .tc-chip { padding:2px 10px; border-radius:10px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; letter-spacing:.4px; line-height:1.7; cursor:pointer; transition:border-color .12s, color .12s; }
-  .tc-chip:hover { border-color:#c7ece0; color:var(--accent-2); }
-  .tc-chip.tc-on { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .tc-chip:focus-visible, .tc-sel:focus-visible { outline:2px solid #10b981; outline-offset:1px; }
-  .tc-sel { padding:2.5px 6px; border-radius:5px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; cursor:pointer; }
-  .tc-count { margin-left:auto; font-size:9.5px; color:var(--faint); white-space:nowrap; }
-  .tc-count.tc-filtered { color:#b45309; font-weight:700; }
-  @media print { .tbl-ctl { display:none !important; } }
+  /* v2.53：PDB/BLAST 列表筛选排序工具条样式抽离单源（TABLE_FILTER_CSS — 与旧报告服务端注入共用） */
+  ${TABLE_FILTER_CSS}
   @media print { .af-stage .af-canvas, .af-stage .af-tb { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } }
   .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
   .af-fig figcaption b { color:var(--ink); font-weight:600; }

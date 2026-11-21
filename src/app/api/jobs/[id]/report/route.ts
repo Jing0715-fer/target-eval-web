@@ -7,7 +7,7 @@ import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
-import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -33,6 +33,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   html = applyZoomUpgrade(html)
   // v2.7.6：旧报告（无 UX 标记）注入 A4 打印分页 + InChIKey/SMILES 复制 + 表格横滚指示；幂等
   html = applyUxUpgrade(html)
+  // v2.53：旧报告（无/旧表筛选标记）注入或升级 PDB/BLAST 列表筛选排序；幂等
+  html = applyTableFilterUpgrade(html)
   const url = new URL(req.url)
   const download = url.searchParams.get('download') === '1'
   const headers: Record<string, string> = {

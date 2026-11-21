@@ -1092,7 +1092,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const SHARED_PDB_COLGROUP = `<colgroup>
     <col style="width:74px"><col style="width:62px"><col style="width:64px"><col style="width:172px"><col><col style="width:86px"><col style="width:72px">
   </colgroup>`
-  // v1.24：全部展示（移除前 60 截断）
+  // v1.24：全部展示（移除前 60 截断）；v2.53 行携带 data-m/-res/-date/-id +
+  // 表标 data-tbl="shared"（TABLE_FILTER_JS 消费 — pdb 类排序：分辨率/日期/PDB ID + 方法/阈值筛选）
   const sharedRows = sharedStructures.map(s => {
     const covChips = s.coverage.map(c =>
       `<span class="cov-chip" title="${esc(c.proteinName)}">${esc(c.uniprotId)}${c.chainRanges ? `<span class="cov-rng">${esc(c.chainRanges)}</span>` : ''}</span>`,
@@ -1100,8 +1101,9 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const lit = s.pubmedId
       ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${s.pubmedId}/" target="_blank" rel="noopener">${s.pubmedId}</a>`
       : '—'
+    const mKey = s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'
     return `
-    <tr>
+    <tr data-m="${mKey}" data-res="${s.resolution ?? ''}" data-date="${esc(s.releaseDate.slice(0, 10))}" data-id="${s.pdbId}">
       <td class="td-id"><a href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener">${s.pdbId}</a></td>
       <td><span class="mth mth-${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}">${s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : esc(s.method.slice(0, 8))}</span></td>
       <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
@@ -1171,7 +1173,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       ${sharedCovSumChips ? `<div class="sh-cov-sum">${sharedCovSumChips}</div>` : ''}
     </div>
     <p class="note">按覆盖靶点数降序、分辨率升序排列；「覆盖靶点」列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号），×N 为覆盖靶点数。各靶点单独报告页中的同一 PDB 亦带 ◈ 徽标，可互相印证。</p>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="shared">
       ${SHARED_PDB_COLGROUP}
       <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>覆盖靶点</th><th>标题</th><th class="num">释放日期</th><th>文献</th></tr></thead>
       <tbody>${sharedRows}</tbody>
@@ -1598,7 +1600,7 @@ ${body}
       ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${s.pubmedId}/" target="_blank" rel="noopener">${s.pubmedId}</a>`
       : '—'
     return `
-    <tr>
+    <tr data-m="${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}" data-res="${s.resolution ?? ''}" data-date="${esc(s.releaseDate.slice(0, 10))}" data-id="${s.pdbId}">
       <td class="td-id"><a href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener">${s.pdbId}</a></td>
       <td><span class="mth mth-${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}">${s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : esc(s.method.slice(0, 8))}</span></td>
       <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
@@ -1617,7 +1619,7 @@ ${body}
       <div class="sh-cov-sum">${gpcrBatch.receptor.uniprotId ? `<span class="sh-cov-chip">${esc(gpcrBatch.receptor.uniprotId)}<i>${receptorGComplex.length}</i></span>` : ''}${gpcrBatch.gproteins.map(g => g.uniprotId ? `<span class="sh-cov-chip" title="${esc(g.proteinName)} — G 蛋白伴侣">${esc(g.uniprotId)}<i>${receptorGComplex.filter(s => s.coverage.some(c => c.uniprotId === g.uniprotId)).length}</i></span>` : '').join('')}</div>
     </div>
     <p class="note">这些条目证实「${esc(receptorShort(gpcrBatch.receptor))}–G 蛋白复合物」已有直接解析先例：共表达 / 体外组装路线可借鉴其组分构成与化学计量（覆盖列 ×N 为该 PDB 覆盖的输入靶点数，深绿底为受体、浅底为 G 蛋白伴侣实体）；复合物的有效分子量与 Cryo-EM 适用性应结合下方受体的完整评估综合判断。全部批内共有结构（含仅覆盖 G 蛋白组分之间的条目）见页底「批次级补充分析」折叠。</p>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="shared">
       ${SHARED_PDB_COLGROUP}
       <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>覆盖组分</th><th>标题</th><th class="num">释放日期</th><th>文献</th></tr></thead>
       <tbody>${rxCxRows}</tbody>
