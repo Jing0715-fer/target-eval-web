@@ -31,6 +31,12 @@
  *    全量注入），TBL_BOOTSTRAP_JS 从单元格文本提取 data-* 并标组（幂等回填缺失
  *    属性，v1 报告 BLAST 行缺 data-id 在此补齐）；④ 合并报告共有结构与受体×G
  *    蛋白表接入 data-tbl="shared"（report-merged.ts，pdb 类排序 + 方法/阈值筛选）。
+ *  - v2.54：列表导出 CSV —— 工具条新增「导出 CSV」按钮（tc-chip tc-x — 复用基类
+ *    样式，v1/v2 历史报告零 CSS 注入即可用），导出当前筛选+排序状态下可见行
+ *    （BOM + CRLF，Excel 中文零乱码；表头取首表 thead，行内 .rng-outside-chip /
+ *    .lig-more 装饰性片段剔除；文件名 = 标题 slug + 组名 + 筛选状态）。marker 升
+ *    rpt-tbl-v3：applyTableFilterUpgrade 对 v1/v2 摘旧脚本外补注入最新
+ *    TABLE_FILTER_CSS（tc-x 悬停等新增样式全路径生效；同规则重复注入无害）。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -772,10 +778,12 @@ export const UX_PAGE_JS = `<script>
 //  v2.53：① 方法 chips 之外新增分辨率阈值快捷筛选（≤2Å / ≤3Å toggle，无分辨率
 //  数据的表不渲染）；② marker 升 rpt-tbl-v2 — v1 报告（v2.48-v2.52 生成）由
 //  applyTableFilterUpgrade 在服务端摘旧脚本注入新版，历史无标记报告注入自举。
-const TABLE_FILTER_MARKER = 'rpt-tbl-v2'
+//  v2.54：③ 「导出 CSV」按钮 —— 导出当前筛选+排序状态下的可见行（curVis 与
+//  render() 同步；thead 表头 + 单元格文本，装饰性片段剔除；BOM+CRLF Excel 友好）。
+const TABLE_FILTER_MARKER = 'rpt-tbl-v3'
 
 export const TABLE_FILTER_JS = `<script>
-/* ${TABLE_FILTER_MARKER} PDB/BLAST 列表筛选排序（v2.48；v2.53 分辨率阈值）*/
+/* ${TABLE_FILTER_MARKER} PDB/BLAST 列表筛选排序（v2.48；v2.53 分辨率阈值；v2.54 CSV 导出）*/
 (function () {
   var M_LABEL = { xray: 'X-ray', cryoem: 'Cryo-EM', nmr: 'NMR', other: '其他' };
   var M_ORDER = ['xray', 'cryoem', 'nmr', 'other'];
@@ -862,9 +870,11 @@ export const TABLE_FILTER_JS = `<script>
     html += '<span class="tc-lbl">排序</span><select class="tc-sel" aria-label="排序方式">';
     sorts.forEach(function (s) { html += '<option value="' + s[0] + '">' + s[1] + '</option>'; });
     html += '</select><span class="tc-count"></span>';
+    html += '<button type="button" class="tc-chip tc-x" title="导出当前列表（含筛选与排序状态）为 CSV 文件，可直接用 Excel / WPS 打开">导出 CSV</button>';
     ctl.innerHTML = html;
     firstWrap.parentNode.insertBefore(ctl, firstWrap);
     var state = { m: 'all', res: 0, sort: 'default' };
+    var curVis = rows; // v2.54：当前筛选+排序状态下的可见行（render 同步 — CSV 导出用）
     var countEl = ctl.querySelector('.tc-count');
     var selEl = ctl.querySelector('.tc-sel');
     var hides = []; // 激活期间暂避的次表宿主（details 折叠区 / .tbl-wrap）
@@ -872,6 +882,44 @@ export const TABLE_FILTER_JS = `<script>
       var host = t.closest ? (t.closest('details') || t.closest('.tbl-wrap')) : null;
       if (host) hides.push(host);
     });
+    // v2.54：CSV 导出（当前可见行 = curVis；表头取首表 thead）
+    function csvCell(s) {
+      s = String(s || '').replace(/\\s+/g, ' ').trim();
+      return /[",\\r\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    function cellText(td) {
+      var c = td.cloneNode(true);
+      // 装饰性片段不入 CSV：范围外 chip / 配体「等N」后缀 / 复制按钮
+      if (c.querySelectorAll) {
+        Array.prototype.forEach.call(c.querySelectorAll('.rng-outside-chip,.lig-more,.copy-btn'), function (n) { n.remove(); });
+      }
+      return csvCell(c.textContent || '');
+    }
+    function exportCsv() {
+      var lines = [];
+      var hr = grp.tables[0].tHead && grp.tables[0].tHead.rows[0];
+      if (hr) {
+        var head = [];
+        Array.prototype.forEach.call(hr.cells, function (c) { head.push(csvCell(c.textContent)); });
+        lines.push(head.join(','));
+      }
+      curVis.forEach(function (r) {
+        var cells = [];
+        Array.prototype.forEach.call(r.cells, function (c) { cells.push(cellText(c)); });
+        lines.push(cells.join(','));
+      });
+      var st = ''; // 筛选/排序状态入文件名，多次导出可区分
+      if (state.m !== 'all') st += '-' + state.m;
+      if (state.res > 0) st += '-le' + state.res + 'A';
+      if (state.sort !== 'default') st += '-' + state.sort;
+      var base = (document.title || 'report').replace(/[\\\\/:*?"<>|\\s—·（）()]+/g, '').slice(0, 24) || 'report';
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob(['\\ufeff' + lines.join('\\r\\n')], { type: 'text/csv;charset=utf-8' }));
+      a.download = base + '-' + grp.kind + st + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+    }
     function render() {
       var active = state.m !== 'all' || state.res > 0 || state.sort !== 'default';
       var vis = rows.filter(function (r) {
@@ -881,6 +929,7 @@ export const TABLE_FILTER_JS = `<script>
       });
       var sk = sortKey(state.sort);
       if (sk && ACCESS[sk.k]) vis.sort(function (a, b) { return cmp(ACCESS[sk.k](a), ACCESS[sk.k](b), sk.dir); });
+      curVis = vis; // v2.54：与渲染态同步（CSV 导出取当前可见行）
       Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip.tc-res'), function (c) {
         var on = parseInt(c.getAttribute('data-res'), 10) === state.res;
         c.classList.toggle('tc-on', on);
@@ -904,6 +953,7 @@ export const TABLE_FILTER_JS = `<script>
     ctl.addEventListener('click', function (e) {
       var chip = e.target && e.target.closest ? e.target.closest('.tc-chip') : null;
       if (!chip || !ctl.contains(chip)) return;
+      if (chip.classList.contains('tc-x')) { exportCsv(); return; } // v2.54
       if (chip.classList.contains('tc-res')) { // v2.53 阈值 toggle（再次点击取消）
         var rv = parseInt(chip.getAttribute('data-res'), 10);
         state.res = state.res === rv ? 0 : rv;
@@ -911,7 +961,7 @@ export const TABLE_FILTER_JS = `<script>
         return;
       }
       state.m = chip.getAttribute('data-m') || 'all';
-      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip:not(.tc-res)'), function (c) {
+      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip:not(.tc-res):not(.tc-x)'), function (c) {
         var on = c === chip;
         c.classList.toggle('tc-on', on);
         if (c.setAttribute) c.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -927,7 +977,7 @@ export const TABLE_FILTER_JS = `<script>
 /** v2.53：.tbl-ctl 工具条样式单源（SINGLE_REPORT_CSS 内嵌 + 旧报告服务端注入共用）
  *  — 从 v2.48 的 SINGLE_REPORT_CSS 块抽离；所需变量（--mono/--line/--accent 等）
  *  在 v2.48 之前的旧报告 :root 同样定义（实测核对），注入即可用 */
-export const TABLE_FILTER_CSS = `  /* v2.48/v2.53 PDB/BLAST 列表筛选排序工具条（TABLE_FILTER_JS 挂载 — chips + 阈值 + 排序下拉 + 计数） */
+export const TABLE_FILTER_CSS = `  /* v2.48/v2.53/v2.54 PDB/BLAST 列表筛选排序工具条（TABLE_FILTER_JS 挂载 — chips + 阈值 + 排序下拉 + 计数 + CSV 导出） */
   .tbl-ctl { display:flex; flex-wrap:wrap; align-items:center; gap:5px 8px; margin:2px 0 10px; font-family:var(--mono); }
   .tc-lbl { font-size:9px; color:var(--faint); letter-spacing:1.2px; margin-left:2px; }
   .tbl-ctl .tc-lbl:first-child { margin-left:0; }
@@ -938,6 +988,8 @@ export const TABLE_FILTER_CSS = `  /* v2.48/v2.53 PDB/BLAST 列表筛选排序�
   .tc-sel { padding:2.5px 6px; border-radius:5px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; cursor:pointer; }
   .tc-count { margin-left:auto; font-size:9.5px; color:var(--faint); white-space:nowrap; }
   .tc-count.tc-filtered { color:#b45309; font-weight:700; }
+  .tc-x { margin-left:6px; color:var(--accent-2,#047857); border-color:#c7ece0; background:#f0fdf7; }
+  .tc-x:hover { border-color:var(--accent-2,#047857); background:#d9f5e8; }
   @media print { .tbl-ctl { display:none !important; } }
 `
 
@@ -1016,23 +1068,22 @@ export const TBL_BOOTSTRAP_JS = `<script>
 })();
 </script>`
 
-const TBL_V1_RE = /<script>\s*\/\* rpt-tbl-v1[\s\S]*?<\/script>/
+const TBL_OLD_RE = /<script>\s*\/\* rpt-tbl-v[12][\s\S]*?<\/script>/
 
-/** v2.53：报告服务端表筛选升级（幂等，三类路径）：
- *  - 已含 rpt-tbl-v2（当前版本生成）→ 原样返回；
- *  - 含 rpt-tbl-v1（v2.48-v2.52 生成）→ 摘除旧脚本 → 注入自举 + 新版
- *    TABLE_FILTER_JS（行为随服务端代码演进；CSS 旧报告已内嵌无需重复）；
- *  - 无标记（v2.48 之前的历史报告）→ 注入 TABLE_FILTER_CSS + 自举 + 新版 JS
- *    （与 applyUxUpgrade 同款服务端按需注入，不改磁盘文件）。 */
+/** v2.53/v2.54：报告服务端表筛选升级（幂等，三类路径）：
+ *  - 已含 rpt-tbl-v3（当前版本生成）→ 原样返回；
+ *  - 含 rpt-tbl-v1/v2（v2.48-v2.53 生成）→ 摘除旧脚本 → 注入自举 + 新版
+ *    TABLE_FILTER_JS（行为随服务端代码演进）；
+ *  - 无标记（v2.48 之前的历史报告）→ 同上全量注入。
+ *  v2.54：CSS 注入不再按路径区分 —— v1/v2 旧版内嵌 CSS 缺 tc-x 等新增规则
+ *  （v2.53 曾因 tc-res 复用 tc-chip 基类而免注入侥幸无恙），统一补注入
+ *  TABLE_FILTER_CSS（同规则重复声明无害，新增规则全路径生效）。 */
 export function applyTableFilterUpgrade(html: string): string {
   if (html.includes(TABLE_FILTER_MARKER)) return html
   let out = html
-  if (TBL_V1_RE.test(out)) {
-    out = out.replace(TBL_V1_RE, '')
-  } else {
-    const h = out.indexOf('</head>')
-    if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-tbl-ctl">${TABLE_FILTER_CSS}</style>\n${out.slice(h)}`
-  }
+  if (TBL_OLD_RE.test(out)) out = out.replace(TBL_OLD_RE, '')
+  const h = out.indexOf('</head>')
+  if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-tbl-ctl">${TABLE_FILTER_CSS}</style>\n${out.slice(h)}`
   const b = out.lastIndexOf('</body>')
   if (b >= 0) out = `${out.slice(0, b)}${TBL_BOOTSTRAP_JS}\n${TABLE_FILTER_JS}\n${out.slice(b)}`
   return out
