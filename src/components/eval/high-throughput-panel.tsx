@@ -69,7 +69,7 @@ export interface HighThroughputPanelProps {
 }
 
 const inputBase =
-  'w-full rounded-lg border border-input bg-card text-foreground outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 dark:placeholder:text-muted-foreground/60'
+  'w-full rounded-lg border border-input bg-card text-foreground outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-muted-foreground/85 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 dark:placeholder:text-muted-foreground/80'
 
 /** Excel 导入客户端预校验上限（与服务端 HT_EXCEL_MAX_BYTES 一致） */
 const MAX_EXCEL_BYTES = 10 * 1024 * 1024
@@ -376,7 +376,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             : <FileArchive className="size-3" aria-hidden />}
           {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
         </Button>
-        <span className="font-mono text-[10px] text-muted-foreground/70">
+        <span className="font-mono text-[10px] text-muted-foreground/85">
           .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 序列行逐行成组（同链多靶点同组 · 抗体链忽略 · 同源多聚体只计 1 条 · 跨行完全同源 ≥95% 并为一组） · 导入会替换当前输入
         </span>
       </div>
@@ -486,7 +486,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           逐组出报告 · 限流自动暂停
         </span>
         {groupTotal > 0 && (
-          <span className="font-mono text-[10px] text-muted-foreground/70">
+          <span className="font-mono text-[10px] text-muted-foreground/85">
             复合物组 {parsed.groups.filter((g) => g.length > 1).length} · 单靶点组 {parsed.groups.filter((g) => g.length === 1).length}
             {seqGroups.length > 0 ? ` · 序列兜底组 ${seqGroups.length}` : ''}
           </span>
@@ -654,7 +654,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                   <span className="font-mono text-[11px] text-foreground/90">
                     {r.groups.length} 组 · {r.totalTargetCount} 靶点
                   </span>
-                  <span className="font-mono text-[10px] text-muted-foreground/70">{formatDateTime(new Date(r.createdAt).toISOString())}</span>
+                  <span className="font-mono text-[10px] text-muted-foreground/85">{formatDateTime(new Date(r.createdAt).toISOString())}</span>
                   <span className="ml-auto flex items-center gap-1">
                     {r.status !== 'done' ? (
                       <Button
@@ -702,7 +702,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                       type="button"
                       onClick={() => onDeleteRun(r.id)}
                       aria-label="删除该运行记录"
-                      className="flex size-7 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-accent hover:text-red-600"
+                      className="flex size-7 items-center justify-center rounded text-muted-foreground/80 transition-colors hover:bg-accent hover:text-red-600"
                     >
                       <Trash2 className="size-3" />
                     </button>

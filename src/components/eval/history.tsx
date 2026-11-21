@@ -94,7 +94,7 @@ function JobRow({
             size="icon"
             aria-label="删除该评估记录"
             className={cn(
-              'text-muted-foreground/60 hover:bg-red-500/[0.08] hover:text-red-600',
+              'text-muted-foreground/80 hover:bg-red-500/[0.08] hover:text-red-600',
               dense ? 'size-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100' : 'size-8',
             )}
             disabled={deleting}
@@ -124,10 +124,10 @@ function EmptyHistoryState({ compact = false }: { compact?: boolean }) {
       )}
     >
       <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-        <History className="size-5 text-muted-foreground/60" />
+        <History className="size-5 text-muted-foreground/80" />
       </div>
       <p className="text-sm font-medium text-muted-foreground">暂无评估记录</p>
-      <p className="text-xs text-muted-foreground/70">
+      <p className="text-xs text-muted-foreground/85">
         完成第一次靶点评估后，记录将显示在此处（仅你自己的记录可见）
       </p>
     </div>
@@ -481,7 +481,7 @@ export function RecentEvaluations({
       aria-label="最近评估"
     >
       <div className="flex shrink-0 items-center gap-2 px-4 pb-2">
-        <span className="lin-eyebrow shrink-0 text-muted-foreground/70">最近评估</span>
+        <span className="lin-eyebrow shrink-0 text-muted-foreground/85">最近评估</span>
         <PrivacyBadge className="hidden xl:inline-flex" />
         {/* v2.25 批量下载：全部已完成报告打包 zip */}
         <Button
@@ -515,10 +515,10 @@ export function RecentEvaluations({
       ) : empty ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-1.5 px-4 py-6 text-center">
           <div className="flex size-8 items-center justify-center rounded-full bg-muted">
-            <History className="size-4 text-muted-foreground/60" />
+            <History className="size-4 text-muted-foreground/80" />
           </div>
           <p className="text-[12.5px] font-medium text-muted-foreground">暂无评估记录</p>
-          <p className="text-[11px] text-muted-foreground/70">
+          <p className="text-[11px] text-muted-foreground/85">
             完成第一次靶点评估后，记录将显示在此处
           </p>
         </div>
@@ -539,7 +539,7 @@ export function RecentEvaluations({
           ))}
           {(jobs.length > 8 || batches.length > 4) && (
             <div className="px-2.5 pt-1.5 pb-1 text-center">
-              <span className="font-mono text-[10px] text-muted-foreground/60">
+              <span className="font-mono text-[10px] text-muted-foreground/80">
                 共 {batches.length} 份合并报告 · {jobs.length} 条单靶点记录
               </span>
             </div>

@@ -346,7 +346,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             {phasePill.icon}
             {phasePill.text}
           </span>
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground/60">
+          <span className="ml-auto font-mono text-[10px] text-muted-foreground/80">
             {run.resumedCount > 0 ? `重新开始 × ${run.resumedCount}` : '首次运行'}
           </span>
         </div>
@@ -378,13 +378,13 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/70">组</span>
+          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/85">组</span>
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
             <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${(doneGroups / Math.max(1, run.groups.length)) * 100}%` }} />
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/70">靶点</span>
+          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/85">靶点</span>
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
             <div className="h-full rounded-full bg-primary/60 transition-[width] duration-500" style={{ width: `${(doneTargets / Math.max(1, run.totalTargetCount)) * 100}%` }} />
           </div>
@@ -527,7 +527,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
           <div className="flex flex-wrap items-center gap-2 border-b border-border/70 px-4 py-2.5">
             <Layers className="size-3.5 shrink-0 text-primary" aria-hidden />
             <p className="text-[12.5px] font-semibold text-foreground">当前组 G{String(currentGroup.index + 1).padStart(2, '0')}</p>
-            <span className="font-mono text-[10.5px] text-muted-foreground/70">
+            <span className="font-mono text-[10.5px] text-muted-foreground/85">
               {currentGroup.targets.join(' · ')}
             </span>
           </div>
@@ -547,7 +547,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       {/* ── 组矩阵（v2.25 紧凑网格：一行多组；xl 3 列 / 2xl 4 列） ── */}
       <section aria-label="分组进度矩阵" className="flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="lin-eyebrow text-muted-foreground/70">Groups · 分组矩阵（{run.groups.length} 组 · 每组独立报告）</p>
+          <p className="lin-eyebrow text-muted-foreground/85">Groups · 分组矩阵（{run.groups.length} 组 · 每组独立报告）</p>
           {/* v2.25 批量下载：当前运行全部报告 → zip（每组子文件夹 + 合并报告 + README） */}
           {reportableGroups > 0 && (
             <Button
@@ -592,7 +592,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     {meta.icon}
                     {meta.label}
                   </span>
-                  <span className="font-mono text-[9.5px] text-muted-foreground/70">
+                  <span className="font-mono text-[9.5px] text-muted-foreground/85">
                     {g.targets.length === 0
                       ? (g.items.length > 1 ? `序列 ×${g.items.length}` : '单序列')
                       : g.targets.length > 1
@@ -654,7 +654,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                               <button
                                 type="button"
                                 onClick={() => flow.retryItem(g.index, it.key)}
-                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-accent hover:text-primary"
+                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/85 transition-colors hover:bg-accent hover:text-primary"
                                 title={it.status === 'done' ? '重跑此靶点（补齐缺失的报告章节）' : '重跑此靶点（重置为待评估）'}
                                 aria-label={`重跑靶点 ${it.label}`}
                               >
@@ -665,7 +665,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                               <button
                                 type="button"
                                 onClick={() => flow.toggleSkipItem(g.index, it.key)}
-                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-accent hover:text-emerald-600"
+                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/85 transition-colors hover:bg-accent hover:text-emerald-600"
                                 title="恢复评估此靶点"
                                 aria-label={`恢复靶点 ${it.label}`}
                               >
@@ -675,7 +675,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                               <button
                                 type="button"
                                 onClick={() => flow.toggleSkipItem(g.index, it.key)}
-                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-accent hover:text-amber-600"
+                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/85 transition-colors hover:bg-accent hover:text-amber-600"
                                 title="跳过此靶点（不评估，可随时恢复）"
                                 aria-label={`跳过靶点 ${it.label}`}
                               >
@@ -844,7 +844,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
 
       {/* ── 底部操作（v2.25：取消按钮与内容区拉开间距 mt-2；说明文字上移） ── */}
       <div className="flex flex-col gap-2.5">
-        <span className="font-mono text-[10.5px] text-muted-foreground/60">
+        <span className="font-mono text-[10.5px] text-muted-foreground/80">
           每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器 30 天
         </span>
         <div className="flex flex-wrap items-center gap-2.5">
@@ -962,7 +962,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <Terminal className="size-4 shrink-0 text-primary" aria-hidden />
               第 {logDialogGroup != null ? logDialogGroup + 1 : 0} 组运行日志
               {logDialogGroupData && (
-                <span className="font-mono text-[11px] font-normal text-muted-foreground/70">
+                <span className="font-mono text-[11px] font-normal text-muted-foreground/85">
                   {logDialogGroupData.targets.length > 0
                     ? logDialogGroupData.targets.join(' · ')
                     : `${logDialogGroupData.items.length} 条序列`}

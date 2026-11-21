@@ -95,14 +95,14 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
               )}
             >
               {f.label}
-              <span className={cn('ml-1.5 tabular-nums', active ? 'text-primary-foreground/70' : 'text-muted-foreground/60')}>
+              <span className={cn('ml-1.5 tabular-nums', active ? 'text-primary-foreground/70' : 'text-muted-foreground/80')}>
                 {count}
               </span>
             </button>
           )
         })}
         {ligandCount != null && ligandCount > 0 && (
-          <span className="ml-auto font-mono text-[11px] text-muted-foreground/70">
+          <span className="ml-auto font-mono text-[11px] text-muted-foreground/85">
             涉及配体 {ligandCount} 个
           </span>
         )}
@@ -133,7 +133,7 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
                     {pdbs.length === 0 ? (
                       <>
                         <span>该靶点暂无直接关联的 PDB 结构</span>
-                        <span className="text-xs text-muted-foreground/60">
+                        <span className="text-xs text-muted-foreground/80">
                           同源结构证据见下方「BLAST 同源结构」章节；可行性结论以文献与同源证据为主
                         </span>
                       </>

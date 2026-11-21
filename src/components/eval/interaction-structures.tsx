@@ -216,7 +216,7 @@ function ComplexCard({ c }: { c: InteractionComplexInfo }) {
           className="inline-flex items-center gap-1 text-sm font-bold text-foreground hover:text-primary"
         >
           {c.complexAc}
-          <ExternalLink className="size-3 text-muted-foreground/60" />
+          <ExternalLink className="size-3 text-muted-foreground/80" />
         </a>
         {c.name && <span className="min-w-0 text-xs leading-relaxed text-muted-foreground">{c.name}</span>}
         {c.assembly && (
@@ -270,7 +270,7 @@ function ComplexCard({ c }: { c: InteractionComplexInfo }) {
                 <TableCell className="border-b border-border/70 px-2.5 py-2 align-top leading-relaxed">
                   {x.isTarget && <b className="mr-1 text-primary">【靶点】</b>}
                   {x.name}
-                  {x.description && <span className="ml-1 text-[10.5px] text-muted-foreground/70"> · {x.description.slice(0, 44)}</span>}
+                  {x.description && <span className="ml-1 text-[10.5px] text-muted-foreground/85"> · {x.description.slice(0, 44)}</span>}
                 </TableCell>
                 <TableCell className="border-b border-border/70 px-2.5 py-2 align-top font-mono text-[11px]">
                   <a
@@ -321,7 +321,7 @@ function ComplexCard({ c }: { c: InteractionComplexInfo }) {
             </FoldMore>
           )}
           {sharedOmitted > 0 && (
-            <p className="text-[11px] text-muted-foreground/70">
+            <p className="text-[11px] text-muted-foreground/85">
               另有 {sharedOmitted} 个共有结构超出详情拉取上限未列出（总数已计入）。
             </p>
           )}
@@ -342,10 +342,10 @@ function ComplexCard({ c }: { c: InteractionComplexInfo }) {
               return (
                 <div key={`${c.complexAc}-solo-${comp.accession}`} className="flex flex-col gap-2 rounded-md border border-border/70 bg-muted/40 p-2.5">
                   <div className="text-xs font-semibold text-foreground">
-                    {comp.name} <span className="ml-1 font-mono text-[10.5px] font-normal text-muted-foreground/60">{comp.accession}</span>
+                    {comp.name} <span className="ml-1 font-mono text-[10.5px] font-normal text-muted-foreground/80">{comp.accession}</span>
                     <span className="ml-1.5 font-normal text-muted-foreground">
                       — {comp.soloPdbCount ?? list.length} 个单独结构
-                      <span className="ml-1 text-[10.5px] text-muted-foreground/70">（不含复合物其他组分）</span>
+                      <span className="ml-1 text-[10.5px] text-muted-foreground/85">（不含复合物其他组分）</span>
                     </span>
                   </div>
                   {list.length > 0 && <SoloTable list={head} />}
@@ -355,14 +355,14 @@ function ComplexCard({ c }: { c: InteractionComplexInfo }) {
                     </FoldMore>
                   )}
                   {omitted > 0 && (
-                    <p className="text-[11px] text-muted-foreground/70">
+                    <p className="text-[11px] text-muted-foreground/85">
                       另有 {omitted} 个单独结构超出详情拉取上限未列出（总数已计入）。
                     </p>
                   )}
                 </div>
               )
             })}
-            <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+            <p className="text-[11px] leading-relaxed text-muted-foreground/85">
               单独结构仅含单一组分（不含复合物其他组分）— 可用于组分域边界设计与构象状态对照，但不能证明复合物组装形式。
             </p>
           </div>
@@ -386,7 +386,7 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline gap-2">
         <h3 className="text-sm font-bold text-foreground">互作复合物组分结构</h3>
-        <span className="font-mono text-[10.5px] text-muted-foreground/70">
+        <span className="font-mono text-[10.5px] text-muted-foreground/85">
           Complex Portal curated · {itx.complexes.length} 个复合物
         </span>
       </div>
@@ -410,7 +410,7 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
             {itx.binaryPartners.map(b => (
               <li key={`bin-${b.accession}`} className="flex flex-col gap-1 px-3.5 py-2.5 sm:flex-row sm:items-baseline sm:gap-3">
                 <span className="w-44 shrink-0 text-xs font-semibold text-foreground">
-                  {b.geneName ?? b.accession} <span className="ml-1 font-mono text-[10.5px] font-normal text-muted-foreground/60">{b.accession}</span>
+                  {b.geneName ?? b.accession} <span className="ml-1 font-mono text-[10.5px] font-normal text-muted-foreground/80">{b.accession}</span>
                 </span>
                 <span className="min-w-0 flex-1 text-xs leading-relaxed text-foreground/80">
                   <span
@@ -438,7 +438,7 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
                           className="mx-0.5 font-mono text-[11px] font-semibold text-primary hover:underline"
                         >
                           {p.pdbId}
-                          <span className="ml-0.5 font-normal text-muted-foreground/60">
+                          <span className="ml-0.5 font-normal text-muted-foreground/80">
                             {p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}
                           </span>
                         </a>
@@ -448,7 +448,7 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
                     '无复合物结构/同源结构支持'
                   )}
                   {b.pdbCount > 0 && (
-                    <span className="ml-1.5 text-muted-foreground/70">
+                    <span className="ml-1.5 text-muted-foreground/85">
                       ；伙伴自身 {b.pdbCount} 个结构
                       {b.representativePdbs.length > 0 && (
                         <span className="ml-1">
@@ -462,7 +462,7 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
                               className="mx-0.5 font-mono text-[11px] font-semibold text-primary hover:underline"
                             >
                               {p.pdbId}
-                              <span className="ml-0.5 font-normal text-muted-foreground/60">
+                              <span className="ml-0.5 font-normal text-muted-foreground/80">
                                 {p.resolution != null ? p.resolution.toFixed(1) + 'Å' : ''}
                               </span>
                             </a>
@@ -473,13 +473,13 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
                     </span>
                   )}
                   {b.evidenceNote && (
-                    <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/60">{b.evidenceNote}</span>
+                    <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/80">{b.evidenceNote}</span>
                   )}
                 </span>
               </li>
             ))}
           </ul>
-          <p className="border-t border-border/70 px-3.5 py-2.5 text-[11px] leading-relaxed text-muted-foreground/60">
+          <p className="border-t border-border/70 px-3.5 py-2.5 text-[11px] leading-relaxed text-muted-foreground/80">
             可信度口径（v2.33）：仅当存在<b className="mx-0.5 text-foreground/80">复合物结构</b>（靶点与伙伴出现在同一 PDB 条目）或<b className="mx-0.5 text-foreground/80">同源复合物结构</b>（靶点同源链与伙伴/伙伴同源基因共结构）时，binary 互作才可完全信任并用于共表达增重路线设计与分子量估算；仅有实验互作证据（IntAct）的伙伴可信度有限 —<b className="mx-0.5 text-foreground/80">不应据此认定可用于增大蛋白分子量做 Cryo-EM</b>，如需采用须先 pull-down/SPR/SEC-MALS 验证互作、化学计量与组装效率。伙伴自身结构仅代表该伙伴条目已解析，不构成靶点-伙伴互作的结构证据。
           </p>
         </details>

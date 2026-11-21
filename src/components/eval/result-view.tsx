@@ -84,14 +84,14 @@ function SpecCell({
 }) {
   return (
     <div className={cn('flex flex-col gap-1 bg-card px-4 py-3.5', className)}>
-      <span className="lin-eyebrow text-muted-foreground/70">{label}</span>
+      <span className="lin-eyebrow text-muted-foreground/85">{label}</span>
       <span className="flex flex-wrap items-baseline gap-2">
         <span className="text-xl font-semibold tabular-nums tracking-[-0.02em] text-foreground">
           {value}
         </span>
         {badge}
       </span>
-      {sub && <span className="truncate text-[11px] text-muted-foreground/70" title={sub}>{sub}</span>}
+      {sub && <span className="truncate text-[11px] text-muted-foreground/85" title={sub}>{sub}</span>}
     </div>
   )
 }
@@ -177,9 +177,9 @@ function SectionHeader({
     <div className="flex flex-wrap items-baseline gap-2.5 border-b border-border pb-2">
       <span className="lin-eyebrow text-primary">{no}</span>
       <h2 className="text-[17px] font-semibold tracking-[-0.015em] text-foreground">{title}</h2>
-      <span className="lin-eyebrow hidden text-muted-foreground/60 sm:inline">{en}</span>
+      <span className="lin-eyebrow hidden text-muted-foreground/80 sm:inline">{en}</span>
       {count && (
-        <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/70">
+        <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/85">
           {count}
         </span>
       )}
@@ -252,14 +252,14 @@ function BlastStatusBox({ status, note, provider }: { status?: BlastStatusCode; 
         ? 'text-violet-600 dark:text-violet-400'
         : status === 'skipped-homolog'
           ? 'text-teal-600 dark:text-teal-400'
-          : 'text-muted-foreground/60'
+          : 'text-muted-foreground/80'
   return (
     <div className={cn('flex items-start gap-3 rounded-xl border px-4 py-5', tone)}>
       <SearchX className={cn('mt-0.5 size-4.5 shrink-0', iconTone)} aria-hidden />
       <div className="min-w-0 text-sm leading-relaxed text-foreground/80">
         {info}
         {status !== 'failed' && (
-          <p className="mt-1.5 text-xs text-muted-foreground/70">
+          <p className="mt-1.5 text-xs text-muted-foreground/85">
             可行性结论主要基于直接结构与文献证据；如需同源检索，可在高级选项中开启「强制 BLAST」后重新评估。
           </p>
         )}
@@ -291,7 +291,7 @@ function ReportFrame({
   /** v2.51：报告原地重跑完成后 +1 → src 追加 cache-bust 强制 iframe 重拉新 HTML */
   reloadNonce?: number
 }) {
-  const [height, setHeight] = useState(1600)
+  const [height, setHeight] = useState(560) // v2.55：加载占位从 1600px 收窄 — 报告到达后同步真实高度，避免白屏期巨型空洞
   const [loaded, setLoaded] = useState(false)
 
   const syncHeight = useCallback(() => {
@@ -647,7 +647,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <Crosshair className="size-3 shrink-0" aria-hidden />
           {u.uniprotId ? `当前靶点 ${u.uniprotId}` : `序列靶点${summary.targetIdentity ? ` · ${summary.targetIdentity.sourceLabel}` : ''}`}
         </span>
-        <span className="font-mono text-[11px] text-muted-foreground/70">
+        <span className="font-mono text-[11px] text-muted-foreground/85">
           作业 {job.id.slice(0, 8)} · 耗时 {formatDuration(Math.round((summary.durationMs ?? 0) / 1000))}
         </span>
       </div>
@@ -706,7 +706,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               {g}
             </span>
           ))}
-          <span className="font-sans text-muted-foreground/70">
+          <span className="font-sans text-muted-foreground/85">
             {u.organism || '未知物种'} · {u.sequenceLength?.toLocaleString?.() ?? '—'} aa
           </span>
         </div>
@@ -718,7 +718,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         )}
         {summary.construct && (
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-muted-foreground">
-            <span className="lin-eyebrow text-muted-foreground/70">客户构建</span>
+            <span className="lin-eyebrow text-muted-foreground/85">客户构建</span>
             <span className="rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 text-primary">
               {summary.construct.providedLength.toLocaleString()} aa
               {summary.construct.start != null && summary.construct.end != null
@@ -905,12 +905,12 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                     {llmA.applied && llmA.overall !== 0 ? `（总体 ${llmA.overall > 0 ? '+' : '−'}${Math.abs(llmA.overall)}）` : ''}
                   </span>
                   <span className="flex flex-wrap items-center gap-1.5">
-                    <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                    <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                     <AdjChip label="X-ray" v={llmA.xray} />
                     <AdjChip label="Cryo-EM" v={llmA.cryoem} />
                     <AdjChip label="NMR" v={llmA.nmr} />
                   </span>
-                  <span className="font-mono text-[11px] text-muted-foreground/70">
+                  <span className="font-mono text-[11px] text-muted-foreground/85">
                     置信度 {llmA.confidence === 'high' ? '高' : llmA.confidence === 'medium' ? '中' : '低'}
                     {llmA.engine ? ` · ${llmA.engine}` : ''} · {(llmA.durationMs / 1000).toFixed(1)}s
                   </span>
@@ -943,10 +943,10 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                       {oligo.stoichiometry}
                     </span>
                   )}
-                  <span className="font-mono text-[11px] text-muted-foreground/70">置信度 {oligoConfZh}</span>
+                  <span className="font-mono text-[11px] text-muted-foreground/85">置信度 {oligoConfZh}</span>
                   {adj && (
                     <span className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                       <AdjChip label="X-ray" v={adj.xray} />
                       <AdjChip label="Cryo-EM" v={adj.cryoem} />
                       <AdjChip label="NMR" v={adj.nmr} />
@@ -998,7 +998,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   </span>
                   {mwAdj && (
                     <span className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                       <AdjChip label="X-ray" v={mwAdj.xray} />
                       <AdjChip label="Cryo-EM" v={mwAdj.cryoem} />
                       <AdjChip label="NMR" v={mwAdj.nmr} />
@@ -1053,7 +1053,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                                     </span>
                                   ))}
                                   <b className="ml-1 text-foreground">= 装配 ~{c.totalKda} kDa</b>
-                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/60">{c.note}</span>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/80">{c.note}</span>
                                 </span>
                               </li>
                             ))}
@@ -1084,7 +1084,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                                   <b className="ml-1 text-foreground">
                                     = 同源装配 ~{h.totalKda} kDa → 靶点换算 ~{h.estimatedKda} kDa
                                   </b>
-                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/60">{h.note}</span>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/80">{h.note}</span>
                                 </span>
                               </li>
                             ))}
@@ -1098,7 +1098,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                             {sizedPartners.slice(0, 8).map(p => (
                               <li key={`mwp-${p.accession}`} className="text-xs leading-6 text-foreground/80">
                                 <b className="text-foreground">{p.geneName ?? p.proteinName ?? p.accession}</b>
-                                <span className="mx-1.5 font-mono text-[10.5px] text-muted-foreground/70">{p.accession}</span>
+                                <span className="mx-1.5 font-mono text-[10.5px] text-muted-foreground/85">{p.accession}</span>
                                 <span className="mr-1.5 font-mono text-[11px]">{p.lengthAa} aa ~{p.kda} kDa</span>
                                 <span
                                   className={cn(
@@ -1113,7 +1113,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                                   {p.evidenceLevel === 'complex' ? '复合物结构' : p.evidenceLevel === 'homolog' ? '同源复合物结构' : '仅实验证据'}
                                 </span>
                                 {p.evidencePdbIds?.length
-                                  ? <span className="font-mono text-[10.5px] text-muted-foreground/70">证据：{p.evidencePdbIds.join('、')}</span>
+                                  ? <span className="font-mono text-[10.5px] text-muted-foreground/85">证据：{p.evidencePdbIds.join('、')}</span>
                                   : (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog')
                                     ? null
                                     : <span className="text-amber-700 dark:text-amber-400">无结构证据支持，未计入装配估计 — 不可据此认定可用于 Cryo-EM 增重</span>}
@@ -1184,7 +1184,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   </span>
                   {itxAdj && (
                     <span className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                       <AdjChip label="X-ray" v={itxAdj.xray} />
                       <AdjChip label="Cryo-EM" v={itxAdj.cryoem} />
                       <AdjChip label="NMR" v={itxAdj.nmr} />
@@ -1310,7 +1310,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 本靶点与批次内其他靶点经分析判定为<span className="font-semibold text-violet-600 dark:text-violet-400">关联靶点</span>，
                 已按单靶点流程生成完整独立评估报告，展示于合并报告的该靶点单独评估页（与单独评估同格式：评估分析 / 可行性评分 / PDB 结构与文献全量展开 / 同源 / 客户实验数据）
               </p>
-              <p className="text-xs text-muted-foreground/70">
+              <p className="text-xs text-muted-foreground/85">
                 下方数据区块（评分 / PDB / BLAST / 文献）为该靶点的独立数据；合并报告可经上方切换栏查看
               </p>
             </CardContent>
@@ -1318,7 +1318,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         ) : reportMd ? (
           <Card className="rounded-xl border-border bg-card shadow-none">
             <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
-              <div className="mb-4 flex items-center gap-2 text-muted-foreground/70">
+              <div className="mb-4 flex items-center gap-2 text-muted-foreground/85">
                 <BookOpenText className="size-3.5" aria-hidden />
                 <span className="lin-eyebrow">Analysis · 由大语言模型基于下方结构化数据生成，结论供参考</span>
               </div>
@@ -1334,7 +1334,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <p className="text-sm text-muted-foreground">
                 该作业未内联保存报告文本（历史版本作业）
               </p>
-              <p className="text-xs text-muted-foreground/70">
+              <p className="text-xs text-muted-foreground/85">
                 可点击上方「在线预览报告」或「下载 HTML」查看完整报告
               </p>
             </CardContent>
@@ -1461,14 +1461,14 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   </div>
                   <LigandPropsRow d={l.detail} />
                   {(l.detail?.iupacName ?? l.pubchem?.iupacName) && (
-                    <p className="text-[11px] leading-relaxed break-all text-muted-foreground/70">
+                    <p className="text-[11px] leading-relaxed break-all text-muted-foreground/85">
                       IUPAC 名 <span className="font-mono">{l.detail?.iupacName ?? l.pubchem?.iupacName}</span>
                     </p>
                   )}
-                  <p className="text-xs text-muted-foreground/70">
+                  <p className="text-xs text-muted-foreground/85">
                     PDB 化学组分库无对应条目 — 已通过 PubChem 识别{ l.pubchem && <>，点击 <span className="font-mono">CID {l.pubchem.cid}</span> 查看化合物详情</> }
                   </p>
-                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
+                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/80">
                     输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}
                   </p>
                   </div>
@@ -1508,18 +1508,18 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                               : 'border-border bg-muted/60 text-foreground/80 hover:border-ring/60 hover:text-primary',
                           )}
                         >
-                          {s.pdbId}{s.resolution != null && <span className="ml-1.5 font-normal text-muted-foreground/70">{s.resolution.toFixed(1)}</span>}
+                          {s.pdbId}{s.resolution != null && <span className="ml-1.5 font-normal text-muted-foreground/85">{s.resolution.toFixed(1)}</span>}
                           {s.alsoTarget && <span className="ml-1 text-primary">★</span>}
                         </a>
                       ))}
                       {l.totalStructures > 12 && (
-                        <span className="inline-flex min-h-7 items-center px-1 font-mono text-[11px] text-muted-foreground/60">+{l.totalStructures - 12}</span>
+                        <span className="inline-flex min-h-7 items-center px-1 font-mono text-[11px] text-muted-foreground/80">+{l.totalStructures - 12}</span>
                       )}
                     </div>
                   ) : (
-                    <p className="text-xs text-muted-foreground/70">暂无含该配体的 PDB 结构记录</p>
+                    <p className="text-xs text-muted-foreground/85">暂无含该配体的 PDB 结构记录</p>
                   )}
-                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
+                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/80">
                     输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}{l.detail?.inchiKey ? ` · InChIKey ${l.detail.inchiKey}` : ''}
                   </p>
                   </div>
@@ -1621,7 +1621,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-[-0.01em]">
                 评估报告 · {u.proteinName || u.uniprotId}{u.nspLabel ? ` ${u.nspLabel}` : ''}
               </DialogTitle>
-              <DialogDescription className="font-mono text-[11px] text-muted-foreground/70">
+              <DialogDescription className="font-mono text-[11px] text-muted-foreground/85">
                 完整 HTML 报告 · 可直接打印
               </DialogDescription>
             </div>
@@ -1677,7 +1677,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                     </div>
                   </div>
                 ) : (
-                  <p className="font-mono text-xs text-muted-foreground/70">报告加载中…</p>
+                  <p className="font-mono text-xs text-muted-foreground/85">报告加载中…</p>
                 )}
               </div>
             )}
@@ -1710,7 +1710,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             <li>· 全部章节生成失败时保留当前版本内容（不影响现有报告）</li>
             <li>· v2.51 之前完成的旧报告缺少数据快照，无法原地重跑（会明确提示）</li>
           </ul>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
             LLM 引擎使用当前配置（顶栏引擎徽标所示）；可在顶栏「引擎设置」中切换后再重新生成。评分与结构化数据区块保持原值。
           </p>
           <div className="flex justify-end gap-2">

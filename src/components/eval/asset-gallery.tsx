@@ -42,7 +42,7 @@ export function AssetGallery({ assets }: { assets: AssetItem[] }) {
               <h4 className="text-sm font-semibold tracking-[-0.01em] text-foreground">
                 {KIND_SECTION_TITLE[g.kind] ?? '实验图'}
               </h4>
-              <span className="eval-eyebrow text-muted-foreground/70">
+              <span className="eval-eyebrow text-muted-foreground/85">
                 {g.items.length} 张
               </span>
               <KindBadge kind={g.kind} className="translate-y-px" />

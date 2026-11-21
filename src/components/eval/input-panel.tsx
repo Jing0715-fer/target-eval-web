@@ -139,7 +139,7 @@ function StepSection({
               tone === 'done'
                 ? 'border-primary bg-primary text-primary-foreground shadow-[0_0_0_3px_rgb(94_106_210/0.15)]'
                 : tone === 'optional'
-                  ? 'border-dashed border-border bg-background text-muted-foreground/70'
+                  ? 'border-dashed border-border bg-background text-muted-foreground/85'
                   : 'border-border bg-background text-muted-foreground',
             )}
           >
@@ -610,7 +610,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
 
   // Linear 式输入框：8px 圆角 + 发丝线 + 表面底 + 薰衣草焦点环
   const inputBase =
-    'w-full rounded-lg border border-input bg-card text-foreground outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 dark:placeholder:text-muted-foreground/60'
+    'w-full rounded-lg border border-input bg-card text-foreground outline-none transition-[border-color,box-shadow] duration-200 placeholder:text-muted-foreground/85 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 dark:placeholder:text-muted-foreground/80'
 
   const hintText = 'flex items-center gap-1 text-[11px]'
 
@@ -721,14 +721,14 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     </p>
                   )}
                   {uniprot.trim() === '' && (
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="lin-eyebrow text-muted-foreground/70">示例</span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="lin-eyebrow text-muted-foreground/85">示例</span>
                       {EXAMPLE_UNIPROTS.map((ex) => (
                         <button
                           key={ex.id}
                           type="button"
                           onClick={() => setUniprot(ex.id)}
-                          className="min-h-7 rounded-md border border-border bg-muted px-2 font-mono text-[10.5px] text-muted-foreground transition-colors hover:border-ring hover:text-primary"
+                          className="min-h-8 rounded-md border border-border bg-muted px-2.5 font-mono text-[10.5px] text-muted-foreground transition-colors hover:border-ring hover:text-primary"
                         >
                           {ex.id} · {ex.name}
                         </button>
@@ -736,7 +736,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       <button
                         type="button"
                         onClick={() => setUniprot(EXAMPLE_UNIPROTS.map(ex => ex.id).join(', '))}
-                        className="min-h-7 rounded-md border border-primary/30 bg-primary/[0.06] px-2 font-mono text-[10.5px] text-primary transition-colors hover:border-primary/60"
+                        className="min-h-8 rounded-md border border-primary/30 bg-primary/[0.06] px-2.5 font-mono text-[10.5px] text-primary transition-colors hover:border-primary/60"
                       >
                         多靶点示例（EGFR + p53）
                       </button>
@@ -747,19 +747,19 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   <Collapsible open={companionOpen} onOpenChange={setCompanionOpen} className="mt-0.5">
                     <div className="rounded-lg border border-border">
                       <CollapsibleTrigger className="flex min-h-8 w-full items-center gap-2 rounded-lg px-3 text-[11.5px] font-medium text-muted-foreground outline-none transition-colors hover:bg-accent">
-                        <Dna className={cn('size-3.5', companionValid ? 'text-primary' : 'text-muted-foreground/60')} />
+                        <Dna className={cn('size-3.5', companionValid ? 'text-primary' : 'text-muted-foreground/80')} />
                         补充构建序列（可选）
                         {companionValid && (
                           <span className={badgeCls}>
                             {companionInfo.count.toLocaleString()} aa · 将合并评估
                           </span>
                         )}
-                        <span className="ml-auto hidden font-mono text-[10px] font-normal text-muted-foreground/70 sm:inline">
+                        <span className="ml-auto hidden font-mono text-[10px] font-normal text-muted-foreground/85 sm:inline">
                           {companionValid ? 'UniProt 为主 · 序列做构建边界' : '同一靶点时自动合并'}
                         </span>
                         <ChevronDown
                           className={cn(
-                            'size-3.5 shrink-0 text-muted-foreground/60 transition-transform duration-200',
+                            'size-3.5 shrink-0 text-muted-foreground/80 transition-transform duration-200',
                             companionOpen && 'rotate-180',
                           )}
                         />
@@ -802,14 +802,14 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                             : 'cursor-not-allowed text-muted-foreground/40',
                         )}
                       >
-                        <Ruler className={cn('size-3.5', rangeValid ? 'text-primary' : 'text-muted-foreground/60')} />
+                        <Ruler className={cn('size-3.5', rangeValid ? 'text-primary' : 'text-muted-foreground/80')} />
                         评估范围（可选）
                         {rangeValid && (
                           <span className={badgeCls}>
                             残基 {rangeStartN}-{rangeEndN}
                           </span>
                         )}
-                        <span className="ml-auto hidden font-mono text-[10px] font-normal text-muted-foreground/70 sm:inline">
+                        <span className="ml-auto hidden font-mono text-[10px] font-normal text-muted-foreground/85 sm:inline">
                           {!rangeEnabled
                             ? '多靶点时不可用'
                             : rangeValid
@@ -818,7 +818,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                         </span>
                         <ChevronDown
                           className={cn(
-                            'size-3.5 shrink-0 text-muted-foreground/60 transition-transform duration-200',
+                            'size-3.5 shrink-0 text-muted-foreground/80 transition-transform duration-200',
                             rangeOpen && 'rotate-180',
                           )}
                         />
@@ -992,7 +992,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
               tone={ligandChips.length > 0 ? 'done' : 'optional'}
               right={
                 ligandChips.length > 0 ? (
-                  <span className="font-mono text-[10px] text-muted-foreground/70">
+                  <span className="font-mono text-[10px] text-muted-foreground/85">
                     {ligandChips.length}/{MAX_LIGANDS}
                   </span>
                 ) : undefined
@@ -1039,7 +1039,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                           type="button"
                           onClick={() => removeLigandChip(c.id)}
                           aria-label="移除配体"
-                          className="flex size-5.5 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-accent hover:text-red-600"
+                          className="flex size-5.5 shrink-0 items-center justify-center rounded text-muted-foreground/80 transition-colors hover:bg-accent hover:text-red-600"
                         >
                           <X className="size-3" />
                         </button>
@@ -1063,7 +1063,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                     placeholder={ligandChips.length >= MAX_LIGANDS
                       ? `已达上限 ${MAX_LIGANDS} 条`
                       : '名称 / 分子式 / ID，逗号分隔'}
-                    className="h-10 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-foreground outline-none ring-0 transition-colors placeholder:text-muted-foreground/70 focus-visible:ring-0"
+                    className="h-10 min-w-0 flex-1 rounded-md border-0 bg-transparent px-2.5 text-[13px] text-foreground outline-none ring-0 transition-colors placeholder:text-muted-foreground/85 focus-visible:ring-0"
                   />
                   <Button
                     type="button"
@@ -1154,14 +1154,14 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             <Collapsible open={advOpen} onOpenChange={setAdvOpen}>
               <div className="border-t border-border/70">
                 <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 px-4 text-[12.5px] font-medium text-muted-foreground outline-none transition-colors hover:bg-accent sm:px-5">
-                  <Settings2 className="size-3.5 shrink-0 text-muted-foreground/60" />
+                  <Settings2 className="size-3.5 shrink-0 text-muted-foreground/80" />
                   高级选项
-                  <span className="ml-auto truncate font-mono text-[10.5px] font-normal text-muted-foreground/70">
+                  <span className="ml-auto truncate font-mono text-[10.5px] font-normal text-muted-foreground/85">
                     BLAST {blastEnabled ? (forceBlast ? '强制' : '自动') : '关闭'} · PDB {maxPdb >= MAX_PDB_UNLIMITED ? '≤ ∞' : `≤ ${maxPdb}`}
                   </span>
                   <ChevronDown
                     className={cn(
-                      'size-3.5 text-muted-foreground/60 transition-transform duration-200',
+                      'size-3.5 text-muted-foreground/80 transition-transform duration-200',
                       advOpen && 'rotate-180',
                     )}
                   />
@@ -1268,7 +1268,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             </Button>
             <div className="hidden shrink-0 flex-col items-end gap-1 sm:flex">
               <span className="eval-kbd">{kbdHint}</span>
-              <span className="text-[10px] leading-none text-muted-foreground/70">开始评估</span>
+              <span className="text-[10px] leading-none text-muted-foreground/85">开始评估</span>
             </div>
           </div>
         </div>

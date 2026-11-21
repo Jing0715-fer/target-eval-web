@@ -179,10 +179,10 @@ function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }
           {t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}
         </span>
       )}
-      <span className="truncate font-mono text-[11px] text-muted-foreground/70" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
+      <span className="truncate font-mono text-[11px] text-muted-foreground/85" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
         {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'}
       </span>
-      {right && <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/70">{right}</span>}
+      {right && <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/85">{right}</span>}
     </div>
   )
 }
@@ -260,7 +260,7 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
           <span className="rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">无 UniProt</span>
         )}
         <span
-          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
+          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/85"
           title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}
         >
           {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'} · {t.sequenceLength} aa
@@ -468,7 +468,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
           <ArrowLeft className="size-3.5" />
           新建评估
         </Button>
-        <span className="font-mono text-[11px] text-muted-foreground/70">
+        <span className="font-mono text-[11px] text-muted-foreground/85">
           合并报告 {report.id.slice(0, 8)} · {targetLabels.length} 个关联靶点
         </span>
       </div>
@@ -524,7 +524,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
           {/* v1.10 同源证据：系统比对一致性徽标行 */}
           {homologPairs.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-              <span className="lin-eyebrow text-muted-foreground/70">序列一致性（系统比对）</span>
+              <span className="lin-eyebrow text-muted-foreground/85">序列一致性（系统比对）</span>
               {homologPairs.map(p => (
                 <span
                   key={`${p.a}-${p.b}`}
@@ -545,7 +545,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
 
         {/* 参与靶点 chips */}
         <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-muted-foreground">
-          <span className="lin-eyebrow text-muted-foreground/70">批次靶点</span>
+          <span className="lin-eyebrow text-muted-foreground/85">批次靶点</span>
           {targetLabels.map((l, i) => (
             <span key={`${l}-${i}`} className="rounded-md border border-border px-1.5 py-0.5">
               {l}
@@ -693,7 +693,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                     }[a.kind]
                     return (
                       <tr key={a.index} className="border-b border-border/60 last:border-0" title={a.note}>
-                        <td className="px-3 py-2 font-mono text-muted-foreground/60">{i + 1}</td>
+                        <td className="px-3 py-2 font-mono text-muted-foreground/80">{i + 1}</td>
                         <td className="max-w-56 truncate px-3 py-2 text-foreground/80" title={a.header}>
                           {a.header || '（未命名序列）'}
                         </td>
@@ -741,7 +741,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
         })()}
         <Card className="rounded-xl border-border bg-card shadow-none">
           <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
-            <div className="mb-4 flex items-center gap-2 text-muted-foreground/70">
+            <div className="mb-4 flex items-center gap-2 text-muted-foreground/85">
               <BookOpenText className="size-3.5" aria-hidden />
               <span className="lin-eyebrow">Analysis · 由大语言模型基于批次结构化数据生成，结论供参考</span>
             </div>
@@ -811,7 +811,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
         >
           <details className="group overflow-hidden rounded-xl border border-border bg-card">
             <summary className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1.5 px-5 py-3.5 list-none [&::-webkit-details-marker]:hidden">
-              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/60 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/80 transition-transform duration-200 group-open:rotate-180" aria-hidden />
               <span id="sec-merged-oligomer" className="lin-eyebrow text-muted-foreground">
                 Oligomeric State · 聚集形式判定（{oligoTargets.length} 个靶点 · 已计入各靶点评分）
               </span>
@@ -847,7 +847,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                     <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-sm font-semibold text-foreground">
                         {t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}
-                        {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground/70">{t.uniprotId}</span>}
+                        {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground/85">{t.uniprotId}</span>}
                       </span>
                       <span className={cn('inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-semibold', badgeCls)}>{catZh}</span>
                       {o.stoichiometry && (
@@ -855,7 +855,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                           {o.stoichiometry}
                         </span>
                       )}
-                      <span className="ml-auto font-mono text-[10.5px] text-muted-foreground/60">置信度 {confZh}</span>
+                      <span className="ml-auto font-mono text-[10.5px] text-muted-foreground/80">置信度 {confZh}</span>
                     </div>
                     <p className="text-[13px] leading-6 text-foreground/80">{o.summary}</p>
                     {t.mwAugment?.applicable && (
@@ -885,7 +885,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                   </div>
                 )
               })}
-              <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+              <p className="text-[11px] leading-relaxed text-muted-foreground/85">
                 聚集形式由系统按证据优先级判定（已有结构 → 同源结构 → UniProt interaction → 文献）；判定与调整已计入各靶点评分，分析已融入上方合并分析全文，完整明细见下载的 HTML 报告。
               </p>
             </div>
@@ -996,7 +996,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
               <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-[-0.01em]">
                 合并评估报告 · {report.id.slice(0, 8)}
               </DialogTitle>
-              <DialogDescription className="font-mono text-[11px] text-muted-foreground/70">
+              <DialogDescription className="font-mono text-[11px] text-muted-foreground/85">
                 完整 HTML 报告 · 可直接打印
               </DialogDescription>
             </div>
@@ -1052,7 +1052,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                     </div>
                   </div>
                 ) : (
-                  <p className="font-mono text-xs text-muted-foreground/70">报告加载中…</p>
+                  <p className="font-mono text-xs text-muted-foreground/85">报告加载中…</p>
                 )}
               </div>
             )}
@@ -1097,7 +1097,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                 placeholder="如：评估 Cryo-EM 结构解析可行性 — 作为本次生成的上下文；留空则不带目标生成"
                 className="resize-none rounded-lg text-xs"
               />
-              <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+              <p className="text-[11px] leading-relaxed text-muted-foreground/85">
                 LLM 引擎使用当前配置（顶栏引擎徽标所示）；可在顶栏「引擎设置」中切换后再重新生成。
               </p>
             </div>
