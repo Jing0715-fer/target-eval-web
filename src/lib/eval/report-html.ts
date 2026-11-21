@@ -37,6 +37,11 @@
  *    .lig-more 装饰性片段剔除；文件名 = 标题 slug + 组名 + 筛选状态）。marker 升
  *    rpt-tbl-v3：applyTableFilterUpgrade 对 v1/v2 摘旧脚本外补注入最新
  *    TABLE_FILTER_CSS（tc-x 悬停等新增样式全路径生效；同规则重复注入无害）。
+ *  - v2.56：报告排版审查修复（fixture 渲染 + VLM 审查 + DOM 核实三重）：
+ *    ① PDB 表「文献」列 72→84px（8 位 PMID + lit-dot 圆点实测溢出 5px 贴边截断）；
+ *    ② .lig-id-pc PubChem 徽章 #4c5fd7 靛蓝 → 青绿 #0f766e（全页唯一紫色破坏
+ *    语义色统一，且违反项目禁用 indigo 规则）；③ 配体卡 2+1 布局末卡占满整行
+ *    （.lig-grid > :last-child:nth-child(odd) span — 右列不再留洞）。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
@@ -629,6 +634,11 @@ export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.
     .lig-ident, .cov-fig, blockquote { break-inside: avoid-page; }
     thead { display: table-header-group; }
     .tbl-wrap { overflow: visible; }
+    /* v2.56：打印时解除 colgroup 固定列宽 — A4 内容宽 ~718px 而固定列总和 ~706px，
+       标题列被挤成单词竖排窄条；改为按内容自动分配（标题列吸收余量） */
+    .tbl-wrap col { width: auto !important; }
+    /* v2.56：打印恢复全文（行高截断仅为屏显优化） */
+    .t-clamp { display:block; overflow:visible; }
     table { table-layout: auto !important; min-width: 0 !important; font-size: 9.5px; }
     th { white-space: normal; overflow: visible; text-overflow: clip; }
     th, td { padding: 4px 6px; }
@@ -1353,7 +1363,7 @@ function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, Liter
       <td><span class="mth mth-${p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'}">${esc(methodLabel(p))}</span></td>
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
       <td class="t-rng"${p.chainRanges ? ` title="${esc(p.chainRanges)}（UniProt 残基编号范围）"` : ''}>${esc(p.chainRanges || '—')}${outside ? '<span class="rng-outside-chip">范围外</span>' : ''}</td>
-      <td class="t-title">${esc(p.title)}</td>
+      <td class="t-title" title="${esc(p.title)}"><span class="t-clamp">${esc(p.title)}</span></td>
       <td class="num">${esc(p.releaseDate || '—')}</td>
       <td class="t-lig" title="${esc(p.ligands.slice(0, 5).join('; '))}">${ligShow ? esc(ligShow) : '—'}${p.ligands.length > 2 ? `<span class="lig-more"> 等${p.ligands.length}</span>` : ''}</td>
       <td class="t-journal">${esc(p.journal || '—')}</td>
@@ -1367,7 +1377,7 @@ function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, Liter
 /** PDB 数据表 colgroup（固定列宽，杜绝长内容挤压/重叠；窄屏由 .tbl-wrap 横向滚动） */
 const PDB_COLGROUP = `<colgroup>
   <col style="width:74px"><col style="width:62px"><col style="width:64px"><col style="width:96px"><col>
-  <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:72px">
+  <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:84px">
 </colgroup>`
 
 /** PDB 表头（v2.29 提为模块级常量 — 主表/范围外折叠表共用） */
@@ -1519,7 +1529,7 @@ function soloRowHtml(p: PdbEntry): string {
       <td class="td-id"><a href="https://www.rcsb.org/structure/${esc(p.pdbId)}" target="_blank" rel="noopener">${esc(p.pdbId)}</a></td>
       <td>${sharedMethodBadge(p)}</td>
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
-      <td class="t-title">${esc(p.title)}</td>
+      <td class="t-title" title="${esc(p.title)}"><span class="t-clamp">${esc(p.title)}</span></td>
       <td class="num">${esc(p.releaseDate || '—')}</td>
       <td class="t-journal">${esc(p.journal || '—')}</td>
       <td class="td-id">${pmidLink(p.pubmedId)}</td>
@@ -1663,7 +1673,7 @@ function blastRowsHtml(hits: BlastHit[], outside = false): string {
     return `
     <tr${outside ? ' class="tr-outside"' : ''} data-m="${blastMethodKey(h.method)}" data-ident="${h.identity}" data-res="${h.resolution ?? ''}" data-cov="${covSpan}" data-e="${Number.isFinite(h.evalue) ? h.evalue : ''}" data-id="${h.pdbId ?? ''}">
       <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
-      <td class="t-desc">${esc(h.description)}</td>
+      <td class="t-desc" title="${esc(h.description)}"><span class="t-clamp">${esc(h.description)}</span></td>
       <td class="num">${h.identity.toFixed(1)}%</td>
       <td class="num">${esc(h.evalueRaw)}</td>
       <td class="num">${esc(range)}${outside ? '<span class="rng-outside-chip">范围外</span>' : ''}</td>
@@ -2765,6 +2775,10 @@ export const SINGLE_REPORT_CSS = `  :root {
   td.td-id a, .t-nowrap { white-space:nowrap; }
   td.td-id { font-family:var(--mono); }
   .t-title, .t-desc { font-family:var(--serif); overflow-wrap:break-word; }
+  /* v2.56：长标题 3 行截断（全文字在 td title 悬停可见；打印恢复全文、CSV 导出
+    不受影响 — textContent 保留全文，-webkit-box 仅视觉折叠）— 长表行高归一，
+    斑马纹恢复行定位价值 */
+  .t-clamp { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
   .t-lig { font-size:11px; overflow-wrap:anywhere; }
   .t-journal { font-size:11px; }
   .t-rng { font-family:var(--mono); font-size:11px; color:var(--sub); overflow-wrap:anywhere; }
@@ -3002,6 +3016,8 @@ export const SINGLE_REPORT_CSS = `  :root {
 
   /* ── 配体卡（v2.0；v2.7 + 2D 结构式与计算性质双栏卡）── */
   .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr)); gap:14px; margin-top:8px; }
+  /* v2.56：奇数末卡占满整行 — 2+1 布局不再右列留洞 */
+  .lig-grid > .lig-card:last-child:nth-child(odd) { grid-column:1 / -1; }
   .lig-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:14px 18px; break-inside:avoid; }
   .lig-fail { border-style:dashed; opacity:.78; }
   .lig-main { display:flex; gap:14px; align-items:flex-start; }
@@ -3012,7 +3028,7 @@ export const SINGLE_REPORT_CSS = `  :root {
   .lig-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
   .lig-id { font-family:var(--mono); font-size:14.5px; font-weight:700; color:#065f46; background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; }
   .lig-id-fail { color:#92400e; background:#fffbeb; border-color:#fde68a; }
-  .lig-id-pc { color:#4c5fd7; background:#eef0fd; border-color:#c6cdf6; }
+  .lig-id-pc { color:#0f766e; background:#f0fdfa; border-color:#99f6e4; }
   .lig-iupac { margin-top:7px; font-size:10.5px; line-height:1.65; color:var(--faint); overflow-wrap:anywhere; }
   .lig-name { font-size:13px; font-weight:600; color:var(--ink); overflow-wrap:anywhere; min-width:120px; }
   .lig-src { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--faint); letter-spacing:.4px; }
