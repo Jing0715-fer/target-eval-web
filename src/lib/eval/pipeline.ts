@@ -2443,6 +2443,24 @@ class SegmentRunner {
       st.reportPath = path.join(reportDir, 'report.html')
       await fs.writeFile(st.reportPath, html, 'utf-8')
       st.reportMarkdown = generatedFullMarkdown || null
+      // v2.51：LLM 数据上下文快照（reportContext + 渲染元数据）落盘 — 供
+      // POST /api/jobs/{id}/regenerate-report 原地重跑 LLM 章节（不重收集数据）。
+      // 仅单靶点报告模式（deferred 并入合并报告，HT 有整靶点重跑通道）；失败不
+      // 阻塞评估（旧作业无快照 → 重跑接口明确提示重新评估）。
+      if (!deferReport) {
+        try {
+          const snapshot = {
+            v: 1 as const,
+            ctx: this.reportContext(),
+            methodStats: st.scores!.methodStats,
+            afFigure: st.afFigure,
+            totalPdbFound: st.totalPdbFound,
+            durationMs: Date.now() - st.t0,
+            assetDir: st.assetDir,
+          }
+          await fs.writeFile(path.join(reportDir, 'llm-ctx.json'), JSON.stringify(snapshot), 'utf-8')
+        } catch { /* 快照失败不阻塞报告 */ }
+      }
     }
     const reportPath = st.reportPath
 
