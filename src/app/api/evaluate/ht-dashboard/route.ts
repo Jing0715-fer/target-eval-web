@@ -19,6 +19,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
+import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { runWithLlmOverride, sanitizeLlmOverride, getEngineSummary } from '@/lib/eval/llm-provider'
 import type { HtDashboard } from '@prisma/client'
 import {
@@ -229,20 +230,23 @@ export async function GET(req: Request) {
   }
 
   // id 形态守卫 + 查询容错（非 cuid / 查询异常 → 404，不翻 500）
-  if (!/^[a-z0-9]{20,40}$/i.test(id)) return notFound('看板不存在')
+  // v2.57：inline 预览（新标签页锚链接/iframe）与 download 链接的 404 返友好 HTML；
+  // 纯 id 的 JSON 状态轮询（前端 fetch）保持 JSON。
+  const htmlView = url.searchParams.get('inline') === '1' || url.searchParams.get('download') === '1'
+  if (!/^[a-z0-9]{20,40}$/i.test(id)) return htmlView ? reportNotFoundResponse({ kind: 'dashboard' }) : notFound('看板不存在')
   let record: HtDashboard | null = null
   try {
     record = await db.htDashboard.findUnique({ where: { id } })
   } catch {
-    return notFound('看板不存在')
+    return htmlView ? reportNotFoundResponse({ kind: 'dashboard' }) : notFound('看板不存在')
   }
-  if (!record) return notFound('看板不存在')
+  if (!record) return htmlView ? reportNotFoundResponse({ kind: 'dashboard' }) : notFound('看板不存在')
   if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) {
-    return notFound('看板不存在')
+    return htmlView ? reportNotFoundResponse({ kind: 'dashboard' }) : notFound('看板不存在')
   }
 
   if (url.searchParams.get('inline') === '1' || url.searchParams.get('download') === '1') {
-    if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该看板无 HTML 文件' }, { status: 404 })
+    if (!record.htmlPath) return reportNotFoundResponse({ kind: 'dashboard', reason: '该看板无 HTML 文件（生成失败或未落盘）' })
     try {
       const html = await fs.readFile(record.htmlPath, 'utf-8')
       if (url.searchParams.get('download') === '1') {
@@ -263,7 +267,7 @@ export async function GET(req: Request) {
         },
       })
     } catch {
-      return NextResponse.json({ ok: false, error: '看板文件已过期清理' }, { status: 404 })
+      return reportNotFoundResponse({ kind: 'dashboard', reason: '看板文件已过期清理（磁盘数据已被回收或重置）' })
     }
   }
 

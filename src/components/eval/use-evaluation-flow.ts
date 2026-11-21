@@ -1078,6 +1078,10 @@ export function useEvaluationFlow() {
               applyJobSnapshot(cached)
               return
             }
+            // v2.57：确无缓存副本 → 明确告知记录已不在服务器（数据清理/环境重置），
+            // 不再误导为「稍后重试」；引导查收本机自动下载的报告或重新评估
+            setSubmitError('该评估记录已不在服务器上 — 运行数据可能已过保留期或随环境重置被清空。报告生成完成时会自动下载 HTML 到本机下载目录，请先在本机查收；如需重新查看请重新发起评估。')
+            return
           }
           throw new Error(`HTTP ${res.status}`)
         }

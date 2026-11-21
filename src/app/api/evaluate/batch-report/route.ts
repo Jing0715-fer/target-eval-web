@@ -12,6 +12,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound, ownerListFilter } from '@/lib/eval/request-guard'
+import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
 import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
@@ -483,16 +484,19 @@ export async function GET(req: Request) {
   }
 
   const record = await db.batchReport.findUnique({ where: { id } })
-  if (!record) return notFound()
+  // v2.57：inline 预览（iframe/新窗口直开）的 404 返友好 HTML 页；
+  // 无 inline 的 JSON 状态轮询保持 JSON（前端 fetch 消费）。
+  const inlineView = url.searchParams.get('inline') === '1'
+  if (!record) return inlineView ? reportNotFoundResponse({ kind: 'merged' }) : notFound()
   // 归属校验（v2.5：与 request-guard.isOwnedBy 统一两层回退，移除同 IP 段掩码分支 ——
   // 代理重写 XFF 的部署下该分支会让「知道 ID 者皆可访问」）
   if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) {
-    return notFound()
+    return inlineView ? reportNotFoundResponse({ kind: 'merged' }) : notFound()
   }
 
   // inline 预览模式 — 返回 HTML（允许 iframe 嵌入，用于报告预览 Dialog）
   if (url.searchParams.get('inline') === '1') {
-    if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
+    if (!record.htmlPath) return reportNotFoundResponse({ kind: 'merged', reason: '该报告无 HTML 文件（生成失败或未落盘）' })
     try {
       let html = await fs.readFile(record.htmlPath, 'utf-8')
       // v2.13：旧版报告自动升级重渲染（首页同单独评估字体版式 + 每靶点完整单独评估页）
@@ -508,7 +512,7 @@ export async function GET(req: Request) {
         },
       })
     } catch {
-      return NextResponse.json({ ok: false, error: '报告文件已过期清理' }, { status: 404 })
+      return reportNotFoundResponse({ kind: 'merged', reason: '报告文件已过期清理（磁盘数据已被回收或重置）' })
     }
   }
 
