@@ -7,6 +7,8 @@
  *
  * 组成：
  *  - loadHtDashboardRows：从 DB 加载各已完成作业的摘要行（评分/计数/区间/结论素材）
+ *    v2.60：作业已不在服务器（实例回收/过期）时，可用前端上传的浏览器本地缓存
+ *    快照（ArchivedJobSnapshot）恢复统计行 — 汇总报告在服务器数据丢失后仍可重建
  *  - computeHtStats：批次统计（分数分布、方法可用性、覆盖率、推进档位计数）
  *  - ruleVerdict：确定性一句话结论（评分 + 结构证据；LLM 失败/超限时的兜底）
  *  - generateHtDashboardReport：LLM 整体可行性报告（失败静默降级 — 看板仍渲染
@@ -61,6 +63,8 @@ export interface HtDashboardRow {
   reportMarkdown?: string
   /** v2.36 汇总报告：匹配到的原始 Excel 行文本（折叠快照） */
   excelText?: string
+  /** v2.60：本行数据来自浏览器本地缓存快照（服务端作业已过期 — 在线/离线链接不可用，仅展开报告可用） */
+  fromArchive?: boolean
 }
 
 export interface HtVerdict {
@@ -105,56 +109,121 @@ export interface HtDashboardEntry {
   label?: string
 }
 
-/** 从 DB 加载统计行（不校验归属 — 路由层负责） */
-export async function loadHtDashboardRows(entries: HtDashboardEntry[]): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
+/** v2.60：浏览器本地缓存恢复的作业快照 — 服务端作业已过期（实例回收/起出保留期）
+ *  时由前端从本地缓存（作业完成瞬间的终态详情副本）提取上传，恢复该靶点的统计行。
+ *  字段为看板统计所需最小集：评分 summary + 结构/同源计数 + 报告正文。 */
+export interface ArchivedJobSnapshot {
+  jobId: string
+  uniprotId?: string
+  title?: string
+  /** 评分摘要对象（与 DB EvaluationJob.summary JSON 同构；必须含 scores） */
+  summary: Record<string, unknown>
+  pdbCount: number
+  blastHitCount: number
+  reportMarkdown?: string
+}
+
+/** 行构建的公共素材（DB 作业与缓存快照共用同一构造器 — 字段口径一致） */
+interface RowSource {
+  jobId: string
+  entry: HtDashboardEntry
+  uniprotId?: string | null
+  title?: string | null
+  summary: Record<string, unknown> | null
+  pdbCount: number
+  blastHitCount: number
+  reportMarkdown?: string | null
+  hasReport: boolean
+  fromArchive?: boolean
+}
+
+/** 从评分摘要等素材构造统计行（summary 缺失 → null） */
+function buildDashboardRow(src: RowSource): HtDashboardRow | null {
+  const summary = src.summary
+  if (!summary) return null
+  const uni = (summary.uniprot ?? {}) as Record<string, unknown>
+  const scores = (summary.scores ?? {}) as Record<string, Record<string, unknown> & { score?: number }>
+  const methodStats = (summary.methodStats ?? {}) as Record<string, unknown>
+  const range = summary.range as [number, number] | undefined
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  // v2.36：评估报告正文（汇总报告内嵌展开区）+ 标题（无 label 时的展示兑底）
+  const reportMarkdown = typeof src.reportMarkdown === 'string' && src.reportMarkdown.trim() ? src.reportMarkdown : undefined
+  return {
+    jobId: src.jobId,
+    label: (src.entry.label || src.uniprotId || src.title || src.jobId).slice(0, 60),
+    uniprotId: src.uniprotId ?? undefined,
+    proteinName: String(uni.proteinName || src.uniprotId || src.entry.label || '未知靶点').slice(0, 80)
+      // v2.31：聚合蛋白截短追加 nsp 标注（同名靶点行可区分 — 如 P0DTD1 的不同 nsp 构建）
+      + (uni.nspLabel ? ` ${String(uni.nspLabel).slice(0, 24)}` : ''),
+    organism: String(uni.organism ?? ''),
+    range: Array.isArray(range) && range.length === 2 && range[0] >= 1 && range[1] >= range[0] ? [range[0], range[1]] : undefined,
+    overall: num(scores.overall?.score),
+    xray: num(scores.xray?.score),
+    cryoem: num(scores.cryoem?.score),
+    nmr: num(scores.nmr?.score),
+    directPdbCount: src.pdbCount,
+    blastHitCount: src.blastHitCount,
+    coverage: num(summary.coverage),
+    methodXrayCount: num(methodStats.xrayCount),
+    methodCryoemCount: num(methodStats.cryoemCount),
+    methodNmrCount: num(methodStats.nmrCount),
+    bestResolution: typeof methodStats.bestResolution === 'number' ? methodStats.bestResolution : null,
+    ligandCount: num(summary.ligandCount),
+    literatureCount: num(summary.literatureCount),
+    reportLlmOk: summary.reportLlmOk === true,
+    durationMs: num(summary.durationMs),
+    hasReport: src.hasReport,
+    reportMarkdown,
+    fromArchive: src.fromArchive ? true : undefined,
+  }
+}
+
+/** 从 DB 加载统计行（不校验归属 — 路由层负责）；v2.60：DB 无该作业时回退
+ *  前端上传的缓存快照（archivedByJob）恢复统计行（行标 fromArchive）。 */
+export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedByJob?: Map<string, ArchivedJobSnapshot>): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
   const rows: HtDashboardRow[] = []
   let jobCount = 0
   for (const entry of entries) {
     if (!entry.jobId) continue
     jobCount++
     const job = await db.evaluationJob.findUnique({ where: { id: entry.jobId } })
-    if (!job || job.status !== 'done') continue
-    let summary: Record<string, unknown> | null = null
-    try { summary = job.summary ? JSON.parse(job.summary) : null } catch { /* ignore */ }
-    if (!summary) continue
-    const uni = (summary.uniprot ?? {}) as Record<string, unknown>
-    const scores = (summary.scores ?? {}) as Record<string, Record<string, unknown> & { score?: number }>
-    const methodStats = (summary.methodStats ?? {}) as Record<string, unknown>
-    const range = summary.range as [number, number] | undefined
-    let pdbs: PdbEntry[] = []
-    let blastHits: BlastHit[] = []
-    try { pdbs = job.pdbs ? JSON.parse(job.pdbs) : [] } catch { /* ignore */ }
-    try { blastHits = job.blastHits ? JSON.parse(job.blastHits) : [] } catch { /* ignore */ }
-    const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
-    // v2.36：评估报告正文（汇总报告内嵌展开区）+ 标题（无 label 时的展示兑底）
-    const reportMarkdown = typeof job.reportMarkdown === 'string' && job.reportMarkdown.trim() ? job.reportMarkdown : undefined
-    rows.push({
-      jobId: job.id,
-      label: (entry.label || job.uniprotId || job.title || job.id).slice(0, 60),
-      uniprotId: job.uniprotId ?? undefined,
-      proteinName: String(uni.proteinName || job.uniprotId || entry.label || '未知靶点').slice(0, 80)
-        // v2.31：聚合蛋白截短追加 nsp 标注（同名靶点行可区分 — 如 P0DTD1 的不同 nsp 构建）
-        + (uni.nspLabel ? ` ${String(uni.nspLabel).slice(0, 24)}` : ''),
-      organism: String(uni.organism ?? ''),
-      range: Array.isArray(range) && range.length === 2 && range[0] >= 1 && range[1] >= range[0] ? [range[0], range[1]] : undefined,
-      overall: num(scores.overall?.score),
-      xray: num(scores.xray?.score),
-      cryoem: num(scores.cryoem?.score),
-      nmr: num(scores.nmr?.score),
-      directPdbCount: pdbs.length,
-      blastHitCount: blastHits.length,
-      coverage: num(summary.coverage),
-      methodXrayCount: num(methodStats.xrayCount),
-      methodCryoemCount: num(methodStats.cryoemCount),
-      methodNmrCount: num(methodStats.nmrCount),
-      bestResolution: typeof methodStats.bestResolution === 'number' ? methodStats.bestResolution : null,
-      ligandCount: num(summary.ligandCount),
-      literatureCount: num(summary.literatureCount),
-      reportLlmOk: summary.reportLlmOk === true,
-      durationMs: num(summary.durationMs),
-      hasReport: Boolean(job.reportPath),
-      reportMarkdown,
-    })
+    if (job && job.status === 'done') {
+      let summary: Record<string, unknown> | null = null
+      try { summary = job.summary ? JSON.parse(job.summary) : null } catch { /* ignore */ }
+      let pdbs: PdbEntry[] = []
+      let blastHits: BlastHit[] = []
+      try { pdbs = job.pdbs ? JSON.parse(job.pdbs) : [] } catch { /* ignore */ }
+      try { blastHits = job.blastHits ? JSON.parse(job.blastHits) : [] } catch { /* ignore */ }
+      const row = buildDashboardRow({
+        jobId: job.id,
+        entry,
+        uniprotId: job.uniprotId,
+        title: job.title,
+        summary,
+        pdbCount: pdbs.length,
+        blastHitCount: blastHits.length,
+        reportMarkdown: job.reportMarkdown,
+        hasReport: Boolean(job.reportPath),
+      })
+      if (row) rows.push(row)
+    } else {
+      // v2.60：作业不在服务器（实例回收/过期）→ 用前端上传的缓存快照恢复
+      const snap = archivedByJob?.get(entry.jobId)
+      if (!snap) continue
+      const row = buildDashboardRow({
+        jobId: snap.jobId,
+        entry,
+        uniprotId: snap.uniprotId ?? null,
+        title: snap.title ?? null,
+        summary: snap.summary,
+        pdbCount: snap.pdbCount,
+        blastHitCount: snap.blastHitCount,
+        reportMarkdown: snap.reportMarkdown ?? null,
+        hasReport: false, // 服务器无报告文件 — 在线/离线链接均不可用，仅展开报告可用
+        fromArchive: true,
+      })
+      if (row) rows.push(row)
+    }
   }
   return { rows, jobCount }
 }
@@ -391,6 +460,8 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   const { rows, stats, verdicts, markdown, llmOk, llmErrors, engineSummary, origin } = input
   const verdictByJob = new Map(verdicts.map(v => [v.jobId, v]))
   const sorted = [...rows].sort((a, b) => b.overall - a.overall)
+  // v2.60：缓存恢复行（服务端作业已过期 — 由浏览器本地快照重建统计）头部提示 + 行内徽标
+  const recoveredCount = rows.filter(r => r.fromArchive).length
 
   const body = renderMarkdown(markdown || '（AI 整体可行性报告未生成 — 见上方提示；统计与每靶点结论不受影响）', 0)
 
@@ -412,7 +483,7 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
     return `<tr class="mt-row" data-overall="${r.overall}" data-xray="${r.xray}" data-cryoem="${r.cryoem}" data-nmr="${r.nmr}" data-pdb="${r.directPdbCount}" data-cov="${Math.round(r.coverage)}" data-verdict="${v.verdict}" data-search="${search}">
 <td class="td-idx">${idx + 1}</td>
 <td class="td-target">
-  <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}</div>
+  <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用，行内可展开报告正文">缓存恢复</span>' : ''}</div>
   ${r.uniprotId && r.label !== r.uniprotId ? `<div class="tg-sub mono">${esc(r.uniprotId)}${r.proteinName && r.proteinName !== r.label ? ` · ${esc(r.proteinName)}` : ''}</div>` : (r.proteinName && r.proteinName !== r.label ? `<div class="tg-sub">${esc(r.proteinName)}</div>` : '')}
   ${r.organism ? `<div class="tg-sub">${esc(r.organism)}</div>` : ''}
   ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已折叠）">${esc(r.excelText)}</div>` : ''}
@@ -500,6 +571,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 .tg-range{color:var(--accent-2);font-family:var(--mono);font-size:11px}
 .tg-sub{font-size:10.5px;color:var(--sub);line-height:1.6}
 .tg-excel{margin-top:4px;padding:4px 8px;border-left:2px solid #b8e6d2;background:var(--accent-bg);font-size:10.5px;color:var(--sub);line-height:1.6;overflow-wrap:anywhere;border-radius:0 4px 4px 0}
+.tg-cache{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #fde68a;background:#fffbeb;color:#a16207;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
 .score{display:inline-block;min-width:34px;text-align:center;border-radius:5px;padding:1px 7px;font-family:var(--mono);font-size:12px;font-weight:700}
 .score.hi{color:#0f766e;background:#ccfbf1}.score.md{color:#a16207;background:#fef3c7}.score.lo{color:#b91c1c;background:#fee2e2}
 .xc{font-size:11px;color:var(--ink)}
@@ -551,6 +623,8 @@ tr.mt-report>td{padding:0 12px 14px;background:#fbfdfc;border-bottom:1px solid v
     <div><b>靶点规模</b> ${stats.totalTargets} 个（成功 ${stats.loadedTargets}${stats.failedTargets ? ` · 失败 ${stats.failedTargets}` : ''}）</div>
   </div>
 </div>
+
+${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，行内可展开报告正文；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.length - recoveredCount} 个靶点数据完整来自服务器。</div>` : ''}
 
 ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 

@@ -30,6 +30,7 @@ import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges, restrictCoverageToRange, uncoveredRangesWithin } from './pdbe'
 import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, takePresubmittedBlast, type BlastPollState, type BlastNrHit } from './blast'
 import { submitUniprotSequenceBlast, collectUniprotSequenceBlast, type UniprotBlastJob } from './uniprot-blast'
+import { submitPeptideSearch, collectPeptideSearch, type PeptideSearchJob } from './peptide-search'
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
@@ -170,6 +171,14 @@ interface PipelineState {
   upHits: BlastNrHit[] | null
   /** v2.44：UniProt 序列匹配身份处理完成（回填/近似记录已落 — 重入守卫） */
   upIdentityDone: boolean
+  /** v2.58：UniProt 全库精确匹配（Peptide Search）提交的作业（跨段保留） */
+  psBlast: PeptideSearchJob | null
+  /** v2.58：精确匹配检索完成（命中已存 psAccessions；轮询地址不再使用） */
+  psBlastDone: boolean
+  /** v2.58：精确匹配命中的条目 accession（随 checkpoint 续跑；供身份处理重入） */
+  psAccessions: string[] | null
+  /** v2.58：精确匹配身份处理完成（回填/放弃已落 — 重入守卫） */
+  psIdentityDone: boolean
   // ── RCSB PDB ──
   totalPdbFound: number
   directPdbs: PdbEntry[]
@@ -276,6 +285,10 @@ function freshState(): PipelineState {
     upBlastDone: false,
     upHits: null,
     upIdentityDone: false,
+    psBlast: null,
+    psBlastDone: false,
+    psAccessions: null,
+    psIdentityDone: false,
     totalPdbFound: 0,
     directPdbs: [],
     pdbCompletedIds: [],
@@ -1664,6 +1677,7 @@ class SegmentRunner {
     // ── v2.16 靶点身份识别级联（纯序列输入且尚无 UniProt 归属时）──────────
     //  级联顺序（用户语义）：评估表蛋白名（phaseUniprot 已派生）→ PDB 同源描述推断
     //  → BLAST nr 兜底（定位真实蛋白身份；sp|ACC| 命中 ≥85% 时回填 UniProt 全量元数据）
+    //  → EBI Swiss-Prot 直查（v2.44）→ UniProt 全库精确匹配（v2.58，含 TrEMBL）
     if (!st.uniprotInfo && st.sequence.length >= 30 && (!st.nrBlastDone || !st.nrIdentityDone)
       && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody'
       && st.blastStatus.status !== 'failed') {
@@ -1892,6 +1906,110 @@ class SegmentRunner {
         this.log(`UniProt 序列匹配完成 — 最佳命中（一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）低于阈值 — 全新/人工构建序列或短片段巧合匹配，靶点身份保持现有证据`, 'warn')
       }
       st.upIdentityDone = true
+    }
+
+    // ── v2.58：UniProt 全库精确序列匹配兜底（Peptide Search — 覆盖含 TrEMBL 的
+    //    全部 UniProtKB 条目，索引级秒级查询）──
+    //    级联至此（PDB 同源回填 → BLAST nr → EBI Swiss-Prot 直查）仍未归属的
+    //    两类漏网场景：
+    //     ① 靶点只有 TrEMBL 条目（冷门物种/未审校蛋白）— EBI 直查仅扫 Swiss-Prot，
+    //       只能找到 40-85% 近缘 ortholog（未达回填阈值）→ 精确子串匹配直接定位
+    //       本物种条目（用户诉求「nr/Swiss-Prot 同源度不够时继续想办法回填」）；
+    //     ② NCBI 患病日（RCSB 兜底下 nr 仅 90s 短预算 / 双亡 failed 时 nr 跳过）—
+    //       nr 失效后精确匹配仍可定位（blastStatus=failed 照常执行，同 EBI 口径）。
+    //    语义安全性：精确子串匹配天然保守 — 带标签/突变/融合构建不构成子串 →
+    //    不匹配（交由 BLAST 路径处理），不会误绑。
+    if (!st.uniprotInfo && st.sequence.length >= 30 && !st.psBlastDone
+      && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody') {
+      const psGateMs = Math.min(15_000, Math.max(4_000, this.segBudgetMs * 0.3))
+      if (budgetLeft(this.cb) < psGateMs) {
+        return this.handoff()
+      }
+      try {
+        this.report('blast', st.psBlast
+          ? 'UniProt 全库精确匹配检索中（等待结果）…'
+          : '靶点身份尚未确定 — 提交 UniProt 全库精确序列匹配…', 0.97)
+        if (!st.psBlast) {
+          st.psBlast = await submitPeptideSearch(st.sequence, this.deadlineSignal())
+        }
+        const outcome = await collectPeptideSearch(st.psBlast, {
+          deadline: this.cb.deadline,
+          resume: { attempts: st.psBlast.attempts, startedAt: st.psBlast.startedAt },
+          signal: this.signal,
+          onProgress: msg => this.report('blast', msg, 0.97),
+        })
+        if ('stillRunning' in outcome) {
+          st.psBlast = outcome.job
+          return this.handoff()
+        }
+        st.psBlastDone = true
+        st.psAccessions = outcome.accessions
+        this.log(outcome.accessions.length
+          ? `UniProt 全库精确匹配完成：${outcome.accessions.length} 个条目完整包含提交序列（${outcome.accessions.slice(0, 4).join('、')}${outcome.accessions.length > 4 ? ' 等' : ''}）`
+          : 'UniProt 全库精确匹配完成 — 无完整包含提交序列的条目（带标签/突变构建或全新序列 — BLAST 路径的近似身份已是最佳证据）')
+      } catch (e) {
+        if (this.signal.aborted) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        const deadlineCut = this.cb.deadline != null && this.cb.deadline > 0 && Date.now() >= this.cb.deadline - 2_000
+        if (deadlineCut) {
+          this.log(`UniProt 精确匹配被段预算切断（${msg.slice(0, 80)}）— 下一段继续`, 'warn')
+          return this.handoff()
+        }
+        this.log(`UniProt 精确匹配失败（${msg.slice(0, 120)}）— 靶点身份保持现有证据，评估继续`, 'warn')
+        st.psBlastDone = true
+      }
+    }
+
+    // v2.58：精确匹配的身份处理（候选整形 + 服务端复核 + 回填）
+    //  候选整形：去 isoform 后缀（P00533-2 → P00533）去重；非 A0A 前缀优先
+    //  （旧式 accession 更可能是已审校主体条目；A0A 为 TrEMBL 常见前缀）。
+    //  复核：取回条目序列后确认确实完整包含提交序列（防 API 索引滞后错配），
+    //  并据此定位评估区间（提交序列 = 条目内第 s-e 位，非全长按截短口径分流）。
+    if (!st.uniprotInfo && st.psAccessions && st.psAccessions.length > 0 && !st.psIdentityDone) {
+      const idGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
+      if (budgetLeft(this.cb) < idGateMs) {
+        return this.handoff()
+      }
+      const base = st.psAccessions.map(a => a.split('-')[0])
+      const seen = new Set<string>()
+      const candidates = [...base.filter(a => !/^A0A/i.test(a)), ...base.filter(a => /^A0A/i.test(a))]
+        .filter(a => { if (seen.has(a) || !/^[A-Z0-9]{6,10}$/i.test(a)) return false; seen.add(a); return true })
+      let attributed = false
+      for (const acc of candidates.slice(0, 4)) {
+        const info = await fetchUniprotInfo(acc)
+        if (!info) continue
+        const idx = info.sequence.toUpperCase().indexOf(st.sequence.toUpperCase())
+        if (idx < 0) {
+          this.log(`精确匹配候选 ${acc} 服务端复核未通过（条目序列不含提交序列 — 索引可能滞后）— 跳过该候选`, 'warn')
+          continue
+        }
+        const s = idx + 1
+        const e = idx + st.sequence.length
+        st.uniprotInfo = info
+        st.targetIdentity = {
+          name: (info.proteinName || acc).slice(0, 100),
+          source: 'uniprot-exact',
+          sourceLabel: describeTargetIdentitySource('uniprot-exact'),
+          identity: 100,
+          uniprotId: acc,
+          uniprotEntry: info.entryName,
+          organism: info.organism,
+          geneName: info.geneNames[0],
+          note: `UniProt 全库精确序列匹配（含未审校 TrEMBL）→ 已归属 UniProt ${acc}（提交序列 = 该条目第 ${s}-${e} 位，完全一致；此前 BLAST 路径未达回填阈值）`,
+        }
+        this.log(`UniProt 精确匹配命中 ${acc}（${(info.proteinName || '').slice(0, 60)}，提交序列 = 条目第 ${s}-${e} 位，完全一致）— 回填元数据…`)
+        if (!st.blastRange) {
+          st.blastRange = { start: s, end: e }
+          this.log(`精确匹配定位：提交序列 = ${acc} 第 ${s}-${e} 位 → 评估区间 ${s}-${e}（非全长按截短口径分流）`)
+        }
+        await this.rebuildStructureDataAfterBackfill(info)
+        attributed = true
+        break
+      }
+      if (!attributed && candidates.length > 0) {
+        this.log(`精确匹配候选均未通过复核（${candidates.slice(0, 4).join('、')}）— 靶点身份保持现有证据`, 'warn')
+      }
+      st.psIdentityDone = true
     }
     this.advance('gate')
     return null
@@ -2266,6 +2384,9 @@ class SegmentRunner {
       rangeSource: this.rangeSourceLabel(), // v2.29：区间来源标签（结果页/折叠区文案）
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs : undefined, // v2.29：无重叠结构（折叠保留展示）
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits : undefined,
+      /** v2.59：BLAST nr 全库检索命中（身份识别级联实际执行 nr 时携带 — 报告
+       *  BLAST 章节展示「前 5 条直出 + 其余折叠」；未执行时缺省） */
+      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 20) : undefined,
       directPdbs: st.directPdbs,
       blastHits: st.blastHits,
       blastStatus: st.blastStatus,
@@ -2516,6 +2637,9 @@ class SegmentRunner {
       /** v2.29：与区间无链范围重叠的结构（折叠保留展示 — 前端灰色行；上限 200/100） */
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs.slice(0, 200) : undefined,
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits.slice(0, 100) : undefined,
+      /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档，≤20 条；
+       *  结果页/报告展示前 5 条 + 折叠；nr 未执行/无命中/历史作业缺省） */
+      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 20) : undefined,
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,

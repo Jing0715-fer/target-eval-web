@@ -195,6 +195,35 @@ export interface BlastHit {
   entityId?: number
 }
 
+/** v2.59：BLAST nr 全库检索命中（靶点身份识别级联 — PDB 库同源不足以归属
+ *  UniProt 时提交序列改查 NCBI nr；命中主体多为 UniProt 序列条目）。
+ *  原定义于 blast.ts（v2.16），v2.59 移入公共类型（JobSummary/报告上下文携带）；
+ *  blast.ts re-export 保持旧导入兼容。 */
+export interface BlastNrHit {
+  /** UniProt accession（sp/tr 形态命中时）；其他来源为原始 accession（gb/ref 等） */
+  accession: string
+  /** UniProt 条目名（如 P53_HUMAN — sp|ACC|ENTRY 的第三段） */
+  entryName?: string
+  /** 蛋白描述（OS=/GN= 等字段前的主体描述文本） */
+  description: string
+  organism?: string
+  geneName?: string
+  /** 0-100 一致性（identity / align-len，与 parseBlastXml 同口径） */
+  identity: number
+  evalue: number
+  evalueRaw: string
+  queryCoverage: number
+  /** 首个 HSP 的查询（提交序列）1-based 起止位（提交序列在命中主体上的覆盖范
+   *  围证据 — 用于推导提交序列在 UniProt 条目内的残基区间，非全长按截短口径对待） */
+  queryFrom?: number
+  queryTo?: number
+  /** 首个 HSP 的命中主体（nr 条目 = UniProt 序列）1-based 起止位 */
+  hitFrom?: number
+  hitTo?: number
+  /** sp = SwissProt（已审校条目，UniProt 归属可信度高）；tr = TrEMBL；其他（gb/ref/pdb/无前缀） */
+  db: 'sp' | 'tr' | 'other'
+}
+
 // ─── PubMed ───────────────────────────────────────────────────────────────────
 
 export interface LiteratureItem {
@@ -629,10 +658,10 @@ export interface TargetIdentityInfo {
   /** 展示名（评估表蛋白名 / nr 命中蛋白名 / PDB 同源描述清洗结果） */
   name: string
   /** 识别来源 */
-  source: 'eval-table' | 'blast-nr' | 'blast-homolog' | 'uniprot-blast'
-  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断 / UniProt 序列匹配） */
+  source: 'eval-table' | 'blast-nr' | 'blast-homolog' | 'uniprot-blast' | 'uniprot-exact'
+  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断 / UniProt 序列匹配 / UniProt 精确匹配） */
   sourceLabel: string
-  /** 命中一致性 %（blast-nr / blast-homolog / uniprot-blast 时存在） */
+  /** 命中一致性 %（blast-nr / blast-homolog / uniprot-blast 时存在；uniprot-exact 恒为 100） */
   identity?: number
   /** 定位到的 UniProt accession（nr 命中 sp|ACC| / tr|ACC| 形态；回填未达阈值时为近似条目） */
   uniprotId?: string
@@ -651,13 +680,14 @@ export function describeTargetIdentitySource(source: TargetIdentityInfo['source'
     case 'blast-nr': return 'BLAST nr 识别'
     case 'blast-homolog': return 'PDB 同源推断'
     case 'uniprot-blast': return 'UniProt 序列匹配'
+    case 'uniprot-exact': return 'UniProt 精确匹配' // v2.58：全库（含 TrEMBL）精确子串匹配回填
     default: return '序列来源' // v2.48.1：兜底 — 新增 source 值时不再隐式 undefined
   }
 }
 
-/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」「 · UniProt 匹配 96%」；评估表来源为空） */
+/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」「 · UniProt 匹配 96%」；评估表/精确匹配为空 — 精确匹配已是完全归属，无需百分比标注） */
 export function targetIdentityTitleSuffix(ti: TargetIdentityInfo): string {
-  if (ti.source === 'eval-table') return ''
+  if (ti.source === 'eval-table' || ti.source === 'uniprot-exact') return ''
   const tag = ti.source === 'blast-nr' ? 'nr 识别' : ti.source === 'uniprot-blast' ? 'UniProt 匹配' : '同源'
   return ti.identity != null ? ` · ${tag} ${Math.round(ti.identity)}%` : ` · ${tag}`
 }
@@ -694,6 +724,9 @@ export interface JobSummary {
   rangeOutsidePdbs?: PdbEntry[]
   /** v2.29：与评估区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100）；历史作业缺省 */
   rangeOutsideBlastHits?: BlastHit[]
+  /** v2.59：BLAST nr 全库检索命中（靶点身份识别级联实际执行 nr 检索时存档，≤20 条；
+   *  报告/结果页展示「前 5 条直出 + 其余折叠」；nr 未执行/无命中/历史作业缺省） */
+  blastNrHits?: BlastNrHit[]
   /** 合并评估（UniProt+序列同靶点）时的构建信息 */
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+ 作业存在；历史作业缺省） */

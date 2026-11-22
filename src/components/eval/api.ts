@@ -23,6 +23,7 @@ import {
   migrateMinimaxEndpoint,
   type LocalEngineStore,
 } from './llm-store-migration'
+import { getCachedJobDetail } from './job-cache'
 
 /** GET /api/jobs — 最近作业列表 */
 export async function fetchJobList(): Promise<JobListItem[]> {
@@ -750,6 +751,23 @@ export interface HtDashboardInfo {
   title?: string
   error?: string | null
   createdAt?: string
+  /** v2.60：本次生成从浏览器本地缓存快照恢复的靶点数（服务端作业已过期/实例回收） */
+  recoveredCount?: number
+  /** v2.60：无数据副本被跳过的靶点数（服务端已过期且本地缓存无快照） */
+  droppedCount?: number
+  /** v2.60：被跳过靶点的展示标签（最多 10 条 — toast 提示用） */
+  droppedLabels?: string[]
+}
+
+/** v2.60：上传给服务端的作业缓存快照（服务端作业已过期时恢复统计行；与
+ *  ArchivedJobSnapshot 同构 — summary 为 DB EvaluationJob.summary JSON 的副本） */
+export interface HtArchivedSnapshotInput {
+  jobId: string
+  uniprotId?: string
+  summary: Record<string, unknown>
+  pdbCount: number
+  blastHitCount: number
+  reportMarkdown?: string
 }
 
 /** 看板条目（与 zip 归档同构 — 服务端据此计算离线链接命名） */
@@ -760,10 +778,54 @@ export interface HtDashboardEntry {
   label?: string
 }
 
+/** v2.60：单条快照报告正文字符上限（体积控制 — 超长截断，统计与结论不受影响） */
+const SNAPSHOT_MD_MAX_CHARS = 300_000
+/** v2.60：快照总负载字符预算（超出后丢弃后续快照的报告正文，再超出则不再附带） */
+const SNAPSHOT_TOTAL_BUDGET_CHARS = 8_000_000
+
+/** v2.60：从浏览器本地作业缓存提取缺失作业的快照（仅 done 且有评分 summary 的
+ *  作业可恢复）。体积控制：单条正文截断 + 总预算（超出后新快照不再附正文，
+ *  再超出则停止附带 — 该靶点计入 dropped，生成仍可部分完成）。 */
+function buildSnapshotsForMissing(missingJobIds: string[]): HtArchivedSnapshotInput[] {
+  const out: HtArchivedSnapshotInput[] = []
+  let used = 0
+  for (const id of missingJobIds) {
+    const d = getCachedJobDetail(id)
+    if (!d || d.status !== 'done' || !d.summary) continue
+    let md = typeof d.reportMarkdown === 'string' ? d.reportMarkdown : undefined
+    if (md && md.length > SNAPSHOT_MD_MAX_CHARS) md = `${md.slice(0, SNAPSHOT_MD_MAX_CHARS)}\n\n（报告正文过长已截断）`
+    const snap: HtArchivedSnapshotInput = {
+      jobId: id,
+      uniprotId: d.uniprotId ?? undefined,
+      summary: d.summary as unknown as Record<string, unknown>,
+      pdbCount: d.pdbs?.length ?? 0,
+      blastHitCount: d.blastHits?.length ?? 0,
+      reportMarkdown: md,
+    }
+    const size = JSON.stringify(snap).length
+    if (used + size > SNAPSHOT_TOTAL_BUDGET_CHARS) {
+      // 预算耗尽：先试丢正文，再不够则放弃本条（后续靶点计入 dropped）
+      const lean: HtArchivedSnapshotInput = { ...snap, reportMarkdown: undefined }
+      const leanSize = JSON.stringify(lean).length
+      if (used + leanSize > SNAPSHOT_TOTAL_BUDGET_CHARS) continue
+      out.push(lean)
+      used += leanSize
+      continue
+    }
+    out.push(snap)
+    used += size
+    if (out.length >= 600) break
+  }
+  return out
+}
+
 /**
  * POST /api/evaluate/ht-dashboard — 高通量运行完成后生成统计看板（服务端异步：
  * POST 立即返回 running，此处轮询 GET 至终态）。LLM 失败不阻塞 — 统计与每靶点
  * 规则结论仍渲染。v2.19：本地引擎配置随请求内联携带。
+ * v2.60 两阶段重试：服务端发现部分作业已不在 DB（实例回收/过期）时返 409 +
+ * missingJobIds（不创建看板）；此处从浏览器本地缓存提取这些作业的终态快照
+ * 重试（allowPartial — 仍缺的靶点计入 dropped 跳过，不再整单失败「作业不存在」）。
  */
 export async function generateHtDashboard(input: {
   entries: HtDashboardEntry[]
@@ -772,25 +834,44 @@ export async function generateHtDashboard(input: {
   excelRows?: Array<{ label: string; text: string }>
 }): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
-  const res = await fetch('/api/evaluate/ht-dashboard', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(llm ? { ...input, llm } : input),
-  })
-  const data = (await res.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo; error?: string } | null
+  const post = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>
+    fetch('/api/evaluate/ht-dashboard', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...input, ...(llm ? { llm } : {}), ...extra }),
+    })
+  let res = await post()
+  let data = (await res.json().catch(() => null)) as {
+    ok?: boolean
+    dashboard?: HtDashboardInfo
+    error?: string
+    missingJobIds?: string[]
+  } | null
+  // v2.60 阶段二：部分作业不在服务器 → 附带浏览器缓存快照重试（部分完成）
+  if (res.status === 409 && Array.isArray(data?.missingJobIds) && data.missingJobIds.length > 0) {
+    const archived = buildSnapshotsForMissing(data.missingJobIds)
+    res = await post({ archived: archived.length ? archived : undefined, allowPartial: true })
+    data = (await res.json().catch(() => null)) as typeof data
+  }
   if (!res.ok || !data?.ok || !data.dashboard) {
     throw new Error(data?.error ?? `统计看板生成失败（HTTP ${res.status}）`)
   }
   if (data.dashboard.status !== 'running') return data.dashboard
+  // POST 应答携带的恢复/跳过信息（GET 状态不回传 — 轮询终态后合并回结果供调用方提示）
+  const recoverInfo = {
+    ...(data.dashboard.recoveredCount != null ? { recoveredCount: data.dashboard.recoveredCount } : {}),
+    ...(data.dashboard.droppedCount != null ? { droppedCount: data.dashboard.droppedCount } : {}),
+    ...(data.dashboard.droppedLabels?.length ? { droppedLabels: data.dashboard.droppedLabels } : {}),
+  }
   // 轮询至终态（LLM 整体报告 ≤2 分钟；失败/超时均如实返回 — 调用方降级提示）
   const t0 = Date.now()
   for (;;) {
     await new Promise(r => setTimeout(r, 3000))
     const d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store' })
       .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
-    if (d?.dashboard && d.dashboard.status !== 'running') return d.dashboard
+    if (d?.dashboard && d.dashboard.status !== 'running') return { ...d.dashboard, ...recoverInfo }
     if (Date.now() - t0 > 240_000) {
-      return { id: data.dashboard.id, status: 'error', error: '统计看板生成超时（可稍后从历史重试）' }
+      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（可稍后从历史重试）', ...recoverInfo }
     }
   }
 }

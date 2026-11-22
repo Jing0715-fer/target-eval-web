@@ -30,6 +30,7 @@ import {
   resolveZipHrefs,
   htDashboardTitle,
   attachExcelRows,
+  type ArchivedJobSnapshot,
   type HtDashboardEntry,
 } from '@/lib/eval/ht-dashboard'
 
@@ -43,6 +44,37 @@ interface DashboardBody {
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
   excelRows?: Array<{ label?: unknown; text?: unknown }>
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
+  /** v2.60：浏览器本地缓存恢复的作业快照（服务端作业已过期时恢复统计行） */
+  archived?: unknown
+  /** v2.60：允许部分生成（仍缺失的靶点计入 dropped 跳过，不整单失败） */
+  allowPartial?: boolean
+}
+
+/** v2.60：archived 快照消毒（≤600 条；summary 必须是非空对象且含 scores 对象 —
+ *  与 DB EvaluationJob.summary JSON 同构；正文 ≤30 万字符防负载膨胀） */
+function sanitizeArchived(v: unknown): Map<string, ArchivedJobSnapshot> {
+  const out = new Map<string, ArchivedJobSnapshot>()
+  if (!Array.isArray(v)) return out
+  for (const e of v) {
+    if (!e || typeof e !== 'object' || out.size >= 600) continue
+    const o = e as { jobId?: unknown; uniprotId?: unknown; title?: unknown; summary?: unknown; pdbCount?: unknown; blastHitCount?: unknown; reportMarkdown?: unknown }
+    const jobId = typeof o.jobId === 'string' ? o.jobId.trim() : ''
+    if (!/^[a-z0-9]{20,40}$/i.test(jobId) || out.has(jobId)) continue
+    if (!o.summary || typeof o.summary !== 'object' || Array.isArray(o.summary)) continue
+    const summary = o.summary as Record<string, unknown>
+    if (!summary.scores || typeof summary.scores !== 'object' || Array.isArray(summary.scores)) continue
+    const int = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? Math.min(Math.round(x), 1_000_000) : 0)
+    out.set(jobId, {
+      jobId,
+      uniprotId: typeof o.uniprotId === 'string' ? o.uniprotId.trim().slice(0, 60) || undefined : undefined,
+      title: typeof o.title === 'string' ? o.title.trim().slice(0, 120) || undefined : undefined,
+      summary,
+      pdbCount: int(o.pdbCount),
+      blastHitCount: int(o.blastHitCount),
+      reportMarkdown: typeof o.reportMarkdown === 'string' && o.reportMarkdown.trim() ? o.reportMarkdown.slice(0, 300_000) : undefined,
+    })
+  }
+  return out
 }
 
 /** excelRows 消毒：{label, text} 形态（≤600 行；每字段截断） */
@@ -102,22 +134,51 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '条目中没有评估作业（jobId）— 统计看板需要至少 1 个已完成靶点' }, { status: 400 })
   }
 
-  // 归属校验：全部作业须为本人创建（merged 条目在 zip 规划时按 DB 归属读取，此处校验 job）
-  const jobs = await db.evaluationJob.findMany({ where: { id: { in: jobIds } }, select: { id: true, ownerKey: true, ownerMask: true } })
-  if (jobs.length !== jobIds.length) return notFound()
+  // ── v2.60 归属与存在性校验（不再整单 404「作业不存在」）──
+  //  DB 有记录且归属本人 → 正常参与统计；
+  //  DB 无记录（实例回收/过期）→ 用前端上传的浏览器缓存快照恢复统计行；
+  //  DB 有记录但非本人 → 静默剔除（不泄露存在性，快照也不采信）；
+  //  DB 无记录且无快照 → allowPartial 时计入 dropped 跳过，否则 409 让前端
+  //  先回本地缓存提取快照重试（两阶段 — 覆盖「运行中途环境重置后续跑」场景）。
+  const archivedByJob = sanitizeArchived(body.archived)
+  const jobs = await db.evaluationJob.findMany({ where: { id: { in: jobIds } }, select: { id: true, ownerKey: true, ownerMask: true, status: true } })
+  const jobById = new Map(jobs.map(j => [j.id, j]))
+  // 快照仅用于 DB 无记录的作业（DB 有记录一律以 DB 为准 — 含他人作业不采信快照）
+  for (const id of jobById.keys()) archivedByJob.delete(id)
+  const ownedIds = new Set<string>()
   for (const j of jobs) {
-    if (!isOwnedBy(j, owner)) return notFound()
+    if (isOwnedBy(j, owner)) ownedIds.add(j.id)
   }
-  // 至少 1 个已完成作业（可统计）
-  const doneCount = await db.evaluationJob.count({ where: { id: { in: jobIds }, status: 'done' } })
-  if (doneCount === 0) {
+  const missingIds: string[] = []
+  for (const id of new Set(jobIds)) {
+    if (!jobById.has(id) && !archivedByJob.has(id)) missingIds.push(id)
+  }
+  if (missingIds.length > 0 && body.allowPartial !== true) {
+    return NextResponse.json({
+      ok: false,
+      error: `部分靶点作业已不在服务器（${missingIds.length} 个 — 实例回收或超出保留期），可从浏览器本地缓存恢复`,
+      missingJobIds: missingIds,
+    }, { status: 409 })
+  }
+  // 采信的条目：本人 DB 作业 / 有快照的缺失作业（mergedId 条目仅参与 zip 链接规划，保留）
+  const kept = entries.filter(e => !e.jobId || ownedIds.has(e.jobId) || archivedByJob.has(e.jobId))
+  const keptJobIds = kept.filter(e => e.jobId).map(e => e.jobId as string)
+  const recoveredCount = keptJobIds.filter(id => !jobById.has(id)).length
+  const droppedEntries = entries.filter(e => e.jobId && !ownedIds.has(e.jobId) && !archivedByJob.has(e.jobId))
+  const droppedLabels = droppedEntries.map(e => (e.label ?? e.jobId ?? '').slice(0, 40)).filter(Boolean).slice(0, 10)
+  if (keptJobIds.length === 0) {
+    return NextResponse.json({ ok: false, error: '条目中没有可统计的评估作业（均已过期且无本地缓存副本）' }, { status: 400 })
+  }
+  // 至少 1 个可统计行（本人已完成作业 / 有效快照 — summary 含 scores）
+  const ownedDoneCount = jobs.filter(j => ownedIds.has(j.id) && j.status === 'done').length
+  if (ownedDoneCount === 0 && recoveredCount === 0) {
     return NextResponse.json({ ok: false, error: '没有已完成的评估作业（统计看板需要至少 1 个成功靶点）' }, { status: 400 })
   }
 
   const record = await db.htDashboard.create({
     data: {
-      jobIds: JSON.stringify(jobIds),
-      entries: JSON.stringify(entries),
+      jobIds: JSON.stringify(keptJobIds),
+      entries: JSON.stringify(kept),
       goal: body.goal?.trim().slice(0, 500) || null,
       ownerKey: owner.key,
       ownerMask: owner.mask,
@@ -131,24 +192,36 @@ export async function POST(req: Request) {
   const excelRows = sanitizeExcelRows(body.excelRows)
   void runWithLlmOverride(llmOverride, () => runDashboardGeneration({
     dashboardId: record.id,
-    entries,
+    entries: kept,
+    archivedByJob,
     goal: body.goal?.trim().slice(0, 500),
     origin: new URL(req.url).origin,
     excelRows,
   }))
 
-  return NextResponse.json({ ok: true, dashboard: { id: record.id, status: 'running', jobIds } })
+  return NextResponse.json({
+    ok: true,
+    dashboard: {
+      id: record.id,
+      status: 'running',
+      jobIds: keptJobIds,
+      ...(recoveredCount > 0 ? { recoveredCount } : {}),
+      ...(droppedEntries.length > 0 ? { droppedCount: droppedEntries.length, droppedLabels } : {}),
+    },
+  })
 }
 
-/** 后台生成：行加载 → 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
+/** 后台生成：行加载（v2.60 含缓存快照回退）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
 async function runDashboardGeneration(ctx: {
   dashboardId: string
   entries: HtDashboardEntry[]
+  /** v2.60：DB 无记录作业的浏览器缓存快照（恢复统计行） */
+  archivedByJob?: Map<string, ArchivedJobSnapshot>
   goal?: string
   origin: string
   excelRows?: Array<{ label: string; text: string }>
 }): Promise<void> {
-  const { dashboardId, entries, goal, excelRows } = ctx
+  const { dashboardId, entries, archivedByJob, goal, excelRows } = ctx
   const startedAt = Date.now()
   const fail = async (msg: string) => {
     await db.htDashboard.update({
@@ -157,14 +230,15 @@ async function runDashboardGeneration(ctx: {
     }).catch(() => undefined)
   }
   try {
-    const { rows, jobCount } = await loadHtDashboardRows(entries)
+    const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob)
     if (rows.length === 0) return void (await fail('没有可统计的已完成靶点'))
     const stats = computeHtStats(rows, jobCount)
     const generated = await generateHtDashboardReport(rows, stats, goal)
     const engineSummary = await getEngineSummary()
-    // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）
+    // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）；
+    // v2.60：缓存恢复行无服务器报告文件，zip 内无对应文件 — 不挂离线链接
     const zipHrefs = await resolveZipHrefs(entries)
-    for (const r of rows) r.zipHref = zipHrefs.get(r.jobId)
+    for (const r of rows) r.zipHref = r.fromArchive ? undefined : zipHrefs.get(r.jobId)
 
     const generatedAt = new Date().toISOString().replace('T', ' ').slice(0, 16)
     const title = htDashboardTitle(jobCount, generatedAt)

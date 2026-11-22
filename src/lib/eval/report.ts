@@ -7,7 +7,7 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, TargetIdentityInfo, UniprotInfo } from './types'
+import type { BlastHit, BlastNrHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, TargetIdentityInfo, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
 import type { AlphafoldSummaryInfo, EsmfoldSummaryInfo } from './types'
 import type { LigandResolution } from './ligand'
@@ -40,6 +40,9 @@ export interface ReportContext {
   rangeOutsidePdbs?: PdbEntry[]
   /** v2.29：与评估区间无重叠的 BLAST 同源命中（折叠保留展示 — 灰色行） */
   rangeOutsideBlastHits?: BlastHit[]
+  /** v2.59：BLAST nr 全库检索命中（靶点身份识别级联实际执行 nr 时携带 —
+   *  报告 BLAST 章节展示，前 5 条直出 + 其余折叠；未执行时缺省） */
+  blastNrHits?: BlastNrHit[]
   directPdbs: PdbEntry[]
   blastHits: BlastHit[]
   /** BLAST 执行状态（跳过/失败原因 — 供报告说明） */
