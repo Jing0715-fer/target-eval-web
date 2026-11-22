@@ -86,6 +86,11 @@ function groupStatusMeta(g: HTGroupState): { icon: React.ReactNode; label: strin
   }
 }
 
+/** v2.60：导入既有报告而跳过的靶点（完成口径计入「载入」；旧版运行回退 skipNote 前缀） */
+function isImportedItem(it: { imported?: boolean; status: string; skipNote?: string }): boolean {
+  return it.imported === true || (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))
+}
+
 /** 组内靶点 chip 状态点颜色 */
 function itemDotCls(status: string): string {
   switch (status) {
@@ -173,7 +178,12 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const allItems = run.groups.flatMap((g) => g.items)
   const doneGroups = run.groups.filter((g) => g.status === 'done').length
   const doneTargets = allItems.filter((it) => it.status === 'done').length
-  const skippedTargets = allItems.filter((it) => it.status === 'skipped').length
+  /** v2.60：导入既有报告而跳过的靶点（计入完成口径 — 「N 评估 + M 载入」；
+   *  旧版 localStorage 运行无 imported 字段，回退按 skipNote 前缀「已导入」识别） */
+  const importedTargets = allItems.filter((it) => isImportedItem(it)).length
+  /** 完成口径：评估完成 + 载入（进度条与完成数展示） */
+  const settledTargets = doneTargets + importedTargets
+  const skippedTargets = allItems.filter((it) => it.status === 'skipped' && !isImportedItem(it)).length
   const failedTargets = allItems.filter((it) => it.status === 'error' || it.status === 'canceled').length
   /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
   const incompleteTargets = allItems.filter((it) => it.status === 'done' && it.reportIncomplete).length
@@ -353,7 +363,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
           <h1 className="text-2xl leading-snug font-semibold tracking-[-0.02em] text-foreground sm:text-[28px]">高通量评估</h1>
           <span className="font-mono text-sm font-normal text-muted-foreground">
-            组 {doneGroups}/{run.groups.length} 完成 · 靶点 {doneTargets}/{run.totalTargetCount}
+            组 {doneGroups}/{run.groups.length} 完成 · 靶点 {settledTargets}/{run.totalTargetCount}
+            {importedTargets > 0 ? `（${doneTargets} 评估 + ${importedTargets} 载入）` : ''}
             {skippedTargets > 0 ? ` · 跳过 ${skippedTargets}` : ''}
             {!isRunning && failedTargets > 0 ? ` · 失败 ${failedTargets}` : ''}
             {!isRunning && incompleteTargets > 0 ? ` · 报告不完整 ${incompleteTargets}` : ''}
@@ -374,7 +385,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         <div className="flex items-baseline justify-between gap-2">
           <span className="text-[12.5px] font-medium text-foreground">总体进度</span>
           <span className="font-mono text-[11px] text-muted-foreground">
-            已用时 {formatDuration(flow.elapsedSec)} · {doneGroups}/{run.groups.length} 组完成 · {doneTargets}/{run.totalTargetCount} 靶点完成
+            已用时 {formatDuration(flow.elapsedSec)} · {doneGroups}/{run.groups.length} 组完成 · {settledTargets}/{run.totalTargetCount} 靶点完成{importedTargets > 0 ? `（${doneTargets} 评估 + ${importedTargets} 载入）` : ''}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -386,7 +397,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         <div className="flex items-center gap-2">
           <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/85">靶点</span>
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-            <div className="h-full rounded-full bg-primary/60 transition-[width] duration-500" style={{ width: `${(doneTargets / Math.max(1, run.totalTargetCount)) * 100}%` }} />
+            <div className="h-full rounded-full bg-primary/60 transition-[width] duration-500" style={{ width: `${(settledTargets / Math.max(1, run.totalTargetCount)) * 100}%` }} />
           </div>
         </div>
       </div>
@@ -460,7 +471,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">运行已手动停止（可恢复）</p>
               <p className="mt-0.5 break-words text-xs leading-relaxed text-amber-700/85 dark:text-amber-400/85">
-                已完成 {doneTargets} 个靶点的结果保留{skippedTargets > 0 ? `（另跳过 ${skippedTargets} 个）` : ''}；未开始/被中断的靶点可随时继续，失败的靶点可单独重跑。
+                已完成 {settledTargets} 个靶点的结果保留{importedTargets > 0 ? `（${doneTargets} 个评估完成 + ${importedTargets} 个载入既有报告）` : ''}{skippedTargets > 0 ? `；另手动跳过 ${skippedTargets} 个` : ''}；未开始/被中断的靶点可随时继续，失败的靶点可单独重跑。
               </p>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                 「继续运行」从断点恢复（已完成的靶点不重复评估）；也可先在组卡片中跳过不需要的靶点、重跑失败项，或导入既有报告 zip 跳过已完成靶点。
@@ -575,7 +586,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             /** v2.41：本组报告不完整（done 但部分章节失败）靶点数 */
             const gIncomplete = g.items.filter((it) => it.status === 'done' && it.reportIncomplete).length
             const gPending = g.items.filter((it) => it.status === 'pending').length
-            const gSkipped = g.items.filter((it) => it.status === 'skipped').length
+            const gImported = g.items.filter((it) => isImportedItem(it)).length
+            const gSkipped = g.items.filter((it) => it.status === 'skipped' && !isImportedItem(it)).length
             return (
               <li
                 key={g.index}
@@ -598,6 +610,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                       : g.targets.length > 1
                         ? `复合物 ×${g.targets.length}`
                         : '单靶点'}
+                    {gImported > 0 ? ` · 载入 ${gImported}` : ''}
                     {gSkipped > 0 ? ` · 跳过 ${gSkipped}` : ''}
                     {gIncomplete > 0 ? ` · 报告不完整 ${gIncomplete}` : ''}
                     {g.startedAt && g.finishedAt ? ` · ${formatDuration((g.finishedAt - g.startedAt) / 1000)}` : ''}
@@ -612,6 +625,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   {g.items.map((it) => {
                     // v2.41：done+报告不完整 → 可操作（重跑）；其余 done 不可操作
                     const actionable = editable && it.status !== 'running' && (it.status !== 'done' || it.reportIncomplete)
+                    // v2.60：导入既有报告的靶点 — emerald 徽标（计入完成，不似手动跳过的删除线）
+                    const imported = isImportedItem(it)
                     return (
                       <span
                         key={it.key}
@@ -621,18 +636,23 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                           it.status === 'error'
                             ? 'border-red-500/30 bg-red-500/[0.05] text-red-700 dark:text-red-400'
                             : it.status === 'skipped'
-                              ? 'border-sky-500/30 bg-sky-500/[0.05] text-sky-700/80 line-through decoration-sky-500/40 dark:text-sky-400/80'
+                              ? imported
+                                ? 'border-emerald-500/30 bg-emerald-500/[0.05] text-emerald-700/90 dark:text-emerald-400/90'
+                                : 'border-sky-500/30 bg-sky-500/[0.05] text-sky-700/80 line-through decoration-sky-500/40 dark:text-sky-400/80'
                               : it.status === 'done' && it.reportIncomplete
                                 ? 'border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-400'
                                 : 'border-border bg-muted/40 text-foreground/90',
                         )}
                         title={it.reportMissingNote ?? it.skipNote ?? it.error ?? (it.range ? `${it.label} · 评估区间 ${it.range[0]}-${it.range[1]}（仅保留链范围重叠的结构）` : it.label)}
                       >
-                        <span className={cn('size-1.5 shrink-0 rounded-full', it.status === 'done' && it.reportIncomplete ? 'bg-amber-500' : itemDotCls(it.status))} aria-hidden />
+                        <span className={cn('size-1.5 shrink-0 rounded-full', it.status === 'done' && it.reportIncomplete ? 'bg-amber-500' : imported ? 'bg-emerald-500/70' : itemDotCls(it.status))} aria-hidden />
                         <span className="truncate">
                           {it.label}
                           {it.range && <span className="text-primary/90">:{it.range[0]}-{it.range[1]}</span>}
                         </span>
+                        {imported && (
+                          <span className="shrink-0 font-sans text-[9px] font-medium text-emerald-600/90 dark:text-emerald-400/90" title={it.skipNote}>载入</span>
+                        )}
                         {it.status === 'done' && it.reportIncomplete && (
                           <span className="shrink-0 font-sans text-[9px] font-medium text-amber-600/90 dark:text-amber-400/90" title={it.reportMissingNote}>不完整</span>
                         )}
@@ -778,7 +798,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-semibold text-foreground">汇总报告 · 统计看板 + 全靶点总表已生成</p>
                 <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                  单文件离线自包含：批次统计（分布/方法可用性/覆盖率）+ 全靶点结论总表（评分与原始表内容合一，可筛选可排序，行内展开完整报告正文）+ AI 整体可行性报告；HTML 已自动下载，zip「批量下载全部」后离线链接可直接点开。
+                  单文件离线自包含：批次统计（分布/方法可用性/覆盖率）+ 全靶点结论总表（总分与 X-ray/Cryo-EM/NMR 评分分列可单独排序，回补 UniProt 徽标醒目可点，序列一键复制，「完整报告」新标签打开内嵌的全靶点完整报告附录）+ AI 整体可行性报告；HTML 已自动下载，zip「批量下载全部」后离线链接可直接点开。
                 </p>
               </div>
               <a

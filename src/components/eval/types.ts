@@ -990,6 +990,9 @@ export interface HTGroupItemState {
   error?: string
   /** v2.38：跳过原因备注（如「已导入 xxx.zip 的既有报告」；手动跳过时缺省） */
   skipNote?: string
+  /** v2.60：本靶点因「导入既有报告」而跳过（区别于手动跳过 — 进度统计计入已完成：
+   *  「N 评估 + M 载入」；旧版 localStorage 运行无此字段，回退按 skipNote 前缀「已导入」识别） */
+  imported?: boolean
   /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
   reportIncomplete?: boolean
   /** v2.41：报告不完整说明（缺章数/失败摘要 — chip tooltip 与重跑确认展示） */

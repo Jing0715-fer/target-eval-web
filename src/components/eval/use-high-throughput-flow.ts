@@ -214,6 +214,7 @@ function applyArchiveSkips(
       it.status = 'skipped'
       it.error = undefined
       it.skipNote = `已导入 ${fileName.slice(0, 40)} 的既有报告`
+      it.imported = true // v2.60：进度统计计入已完成（「N 评估 + M 载入」）
     }
   }
   // v2.49 逐文件诊断（含已完成靶点提示 — 避免误报「不在清单」）
@@ -786,10 +787,11 @@ export function useHighThroughputFlow() {
       stopTick()
       snapshot()
       const doneTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'done').length
-      const skippedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'skipped').length
+      const importedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.imported === true || (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))).length
+      const skippedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'skipped' && it.imported !== true && !(it.skipNote ?? '').startsWith('已导入')).length
       toast({
         title: '高通量评估已停止',
-        description: `已完成的 ${doneTargets} 个靶点结果保留${skippedTargets > 0 ? `（另跳过 ${skippedTargets} 个）` : ''}；可「继续运行」从断点恢复，或在组卡片中跳过/重跑指定靶点后再继续。`,
+        description: `已完成的 ${doneTargets + importedTargets} 个靶点结果保留${importedTargets > 0 ? `（${doneTargets} 个评估完成 + ${importedTargets} 个载入既有报告）` : ''}${skippedTargets > 0 ? `；另手动跳过 ${skippedTargets} 个` : ''}；可「继续运行」从断点恢复，或在组卡片中跳过/重跑指定靶点后再继续。`,
       })
       return
     }
@@ -803,14 +805,15 @@ export function useHighThroughputFlow() {
     void finalizeHtDashboard()
     const doneGroups = runState.groups.filter((g) => g.status === 'done').length
     const reports = runState.groups.filter((g) => g.mergedReportId || g.items.some((it) => it.status === 'done')).length
-    const skippedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'skipped').length
+    const skippedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'skipped' && it.imported !== true && !(it.skipNote ?? '').startsWith('已导入')).length
+    const importedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.imported === true || (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))).length
     // v2.42：完成提示诚实化 — 如实报告未成功靶点数（作业被取消/失败不再被「完成」掩盖）
     const failedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'error' || it.status === 'canceled').length
     const incompleteTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'done' && it.reportIncomplete).length
     const unfinished = failedTargets + incompleteTargets
     toast({
       title: unfinished > 0 ? `高通量评估完成（${unfinished} 个靶点未成功）` : '高通量评估完成',
-      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告${skippedTargets > 0 ? `（跳过 ${skippedTargets} 个靶点）` : ''}${unfinished > 0 ? `；${failedTargets > 0 ? `${failedTargets} 个失败/被取消` : ''}${failedTargets > 0 && incompleteTargets > 0 ? '、' : ''}${incompleteTargets > 0 ? `${incompleteTargets} 个报告不完整` : ''}，可「重跑失败/不完整项」补齐` : ''}；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
+      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告${importedTargets > 0 ? `（另载入 ${importedTargets} 个靶点的既有报告，未重复评估）` : ''}${skippedTargets > 0 ? `（手动跳过 ${skippedTargets} 个靶点）` : ''}${unfinished > 0 ? `；${failedTargets > 0 ? `${failedTargets} 个失败/被取消` : ''}${failedTargets > 0 && incompleteTargets > 0 ? '、' : ''}${incompleteTargets > 0 ? `${incompleteTargets} 个报告不完整` : ''}，可「重跑失败/不完整项」补齐` : ''}；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
     })
   }
 
@@ -848,7 +851,19 @@ export function useHighThroughputFlow() {
     saveHTRun(runState)
     setRun(cloneRun(runState))
     try {
-      const dash = await generateHtDashboard({ entries, goal: runState.goal, excelRows: runState.excelRows })
+      // v2.61：各序列靶点的提交序列（jobId → 全文 — 汇总表「复制序列」按钮与全靶点
+      // 完整报告页展示；≤600 条、总量 600K 字符防载荷膨胀 — 超出部分静默丢弃）
+      const sequences: Array<{ jobId: string; sequence: string }> = []
+      let seqChars = 0
+      for (const g of runState.groups) {
+        for (const it of g.items) {
+          if (it.status !== 'done' || !it.jobId || !it.sequence) continue
+          if (sequences.length >= 600 || seqChars + it.sequence.length > 600_000) continue
+          sequences.push({ jobId: it.jobId, sequence: it.sequence })
+          seqChars += it.sequence.length
+        }
+      }
+      const dash = await generateHtDashboard({ entries, goal: runState.goal, excelRows: runState.excelRows, sequences })
       runState.dashboardPending = false
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
@@ -860,9 +875,16 @@ export function useHighThroughputFlow() {
           '高通量统计看板（评分统计 + AI 整体可行性报告）',
           runFolderRef.current,
         )
+        // v2.60：数据恢复 / 部分跳过提示（服务端作业过期时由浏览器缓存快照重建）
+        const recoverTail = (dash.recoveredCount ?? 0) > 0
+          ? `已从浏览器本地缓存恢复 ${dash.recoveredCount} 个靶点的统计数据（服务端数据已过期 — 看板内标「缓存恢复」）；`
+          : ''
+        const dropTail = (dash.droppedCount ?? 0) > 0
+          ? `${dash.droppedCount} 个靶点因服务端与本地缓存均无数据被跳过${dash.droppedLabels?.length ? `（如 ${dash.droppedLabels.slice(0, 3).join('、')}）` : ''}；`
+          : ''
         toast({
           title: '统计看板已生成',
-          description: `评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
+          description: `${recoverTail}${dropTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
         })
       } else {
         runState.dashboardError = dash.error ?? '统计看板生成失败'
@@ -1100,10 +1122,12 @@ export function useHighThroughputFlow() {
     if (it.status === 'skipped') {
       it.status = 'pending'
       it.skipNote = undefined
+      it.imported = undefined // v2.60：恢复评估 — 脱离「载入」统计口径
       touchGroupForRerun(g, r)
     } else if (it.status !== 'done' && it.status !== 'running') {
       it.status = 'skipped'
       it.skipNote = '手动跳过（不评估）'
+      it.imported = undefined
     }
     snapshot()
   }, [ensureEditable, snapshot])
@@ -1121,6 +1145,7 @@ export function useHighThroughputFlow() {
       it.status = 'pending'
       it.error = undefined
       it.skipNote = undefined
+      it.imported = undefined
       it.reportIncomplete = undefined
       it.reportMissingNote = undefined
       it.jobId = undefined // v2.41 修复：清旧作业引用（重置为重新提交）
