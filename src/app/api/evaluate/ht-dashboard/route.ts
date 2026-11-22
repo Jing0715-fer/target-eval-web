@@ -43,6 +43,8 @@ interface DashboardBody {
   goal?: string
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
   excelRows?: Array<{ label?: unknown; text?: unknown }>
+  /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 全靶点完整报告页展示） */
+  sequences?: Array<{ jobId?: unknown; sequence?: unknown }>
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
   /** v2.60：浏览器本地缓存恢复的作业快照（服务端作业已过期时恢复统计行） */
   archived?: unknown
@@ -89,6 +91,27 @@ function sanitizeExcelRows(v: unknown): Array<{ label: string; text: string }> {
     if (!label && !text) continue
     out.push({ label, text })
     if (out.length >= 600) break
+  }
+  return out
+}
+
+/** v2.61 sequences 消毒：{jobId, sequence} 形态（≤600 条；序列清洗到氨基酸字符集
+ *  — 与 cleanSequence 同口径；单条 ≤50K；总量预算 600K 防载荷膨胀） */
+function sanitizeSequences(v: unknown): Map<string, string> {
+  const out = new Map<string, string>()
+  if (!Array.isArray(v)) return out
+  let total = 0
+  for (const e of v) {
+    if (!e || typeof e !== 'object' || out.size >= 600) continue
+    const o = e as { jobId?: unknown; sequence?: unknown }
+    const jobId = typeof o.jobId === 'string' ? o.jobId.trim() : ''
+    if (!/^[a-z0-9]{20,40}$/i.test(jobId) || out.has(jobId)) continue
+    const seq = typeof o.sequence === 'string'
+      ? o.sequence.replace(/\s+/g, '').replace(/[^ACDEFGHIKLMNPQRSTVWYBXZJUO*-]/gi, '').toUpperCase()
+      : ''
+    if (!seq || seq.length > 50_000 || total + seq.length > 600_000) continue
+    out.set(jobId, seq)
+    total += seq.length
   }
   return out
 }
@@ -190,6 +213,7 @@ export async function POST(req: Request) {
   // 后台生成（LLM 在用户引擎作用域内；失败静默降级 — 统计/规则结论不受影响）
   const llmOverride = sanitizeLlmOverride(body.llm)
   const excelRows = sanitizeExcelRows(body.excelRows)
+  const sequencesByJob = sanitizeSequences(body.sequences)
   void runWithLlmOverride(llmOverride, () => runDashboardGeneration({
     dashboardId: record.id,
     entries: kept,
@@ -197,6 +221,7 @@ export async function POST(req: Request) {
     goal: body.goal?.trim().slice(0, 500),
     origin: new URL(req.url).origin,
     excelRows,
+    sequencesByJob,
   }))
 
   return NextResponse.json({
@@ -211,7 +236,7 @@ export async function POST(req: Request) {
   })
 }
 
-/** 后台生成：行加载（v2.60 含缓存快照回退）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
+/** 后台生成：行加载（v2.60 含缓存快照回退；v2.61 含序列回填）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
 async function runDashboardGeneration(ctx: {
   dashboardId: string
   entries: HtDashboardEntry[]
@@ -220,8 +245,10 @@ async function runDashboardGeneration(ctx: {
   goal?: string
   origin: string
   excelRows?: Array<{ label: string; text: string }>
+  /** v2.61：jobId → 提交序列全文（汇总表复制按钮 + 全靶点完整报告页） */
+  sequencesByJob?: Map<string, string>
 }): Promise<void> {
-  const { dashboardId, entries, archivedByJob, goal, excelRows } = ctx
+  const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob } = ctx
   const startedAt = Date.now()
   const fail = async (msg: string) => {
     await db.htDashboard.update({
@@ -230,7 +257,7 @@ async function runDashboardGeneration(ctx: {
     }).catch(() => undefined)
   }
   try {
-    const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob)
+    const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob)
     if (rows.length === 0) return void (await fail('没有可统计的已完成靶点'))
     const stats = computeHtStats(rows, jobCount)
     const generated = await generateHtDashboardReport(rows, stats, goal)

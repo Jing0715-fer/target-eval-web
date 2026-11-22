@@ -851,7 +851,19 @@ export function useHighThroughputFlow() {
     saveHTRun(runState)
     setRun(cloneRun(runState))
     try {
-      const dash = await generateHtDashboard({ entries, goal: runState.goal, excelRows: runState.excelRows })
+      // v2.61：各序列靶点的提交序列（jobId → 全文 — 汇总表「复制序列」按钮与全靶点
+      // 完整报告页展示；≤600 条、总量 600K 字符防载荷膨胀 — 超出部分静默丢弃）
+      const sequences: Array<{ jobId: string; sequence: string }> = []
+      let seqChars = 0
+      for (const g of runState.groups) {
+        for (const it of g.items) {
+          if (it.status !== 'done' || !it.jobId || !it.sequence) continue
+          if (sequences.length >= 600 || seqChars + it.sequence.length > 600_000) continue
+          sequences.push({ jobId: it.jobId, sequence: it.sequence })
+          seqChars += it.sequence.length
+        }
+      }
+      const dash = await generateHtDashboard({ entries, goal: runState.goal, excelRows: runState.excelRows, sequences })
       runState.dashboardPending = false
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
