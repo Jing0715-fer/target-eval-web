@@ -798,7 +798,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-semibold text-foreground">汇总报告 · 统计看板 + 全靶点总表已生成</p>
                 <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                  单文件离线自包含：批次统计（分布/方法可用性/覆盖率）+ 全靶点结论总表（总分与 X-ray/Cryo-EM/NMR 评分分列可单独排序，回补 UniProt 徽标醒目可点，序列一键复制，「完整报告」新标签打开内嵌的全靶点完整报告附录）+ AI 整体可行性报告；HTML 已自动下载，zip「批量下载全部」后离线链接可直接点开。
+                  单文件离线自包含：批次统计（分布/方法可用性/覆盖率）+ 全靶点结论总表（总分与 X-ray/Cryo-EM/NMR 评分分列可单独排序，回补 UniProt 徽标醒目可点，序列一键复制，「完整报告」新标签弹出该靶点自己的完整评估报告）+ AI 整体可行性报告；HTML 已自动下载，zip「批量下载全部」后离线链接可直接点开。
                 </p>
               </div>
               <a

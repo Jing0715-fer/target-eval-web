@@ -832,7 +832,7 @@ export async function generateHtDashboard(input: {
   goal?: string
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
   excelRows?: Array<{ label: string; text: string }>
-  /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 全靶点完整报告页展示） */
+  /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 单靶点完整报告弹出页展示） */
   sequences?: Array<{ jobId: string; sequence: string }>
 }): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()

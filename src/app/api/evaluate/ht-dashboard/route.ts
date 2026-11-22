@@ -43,7 +43,7 @@ interface DashboardBody {
   goal?: string
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
   excelRows?: Array<{ label?: unknown; text?: unknown }>
-  /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 全靶点完整报告页展示） */
+  /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 单靶点完整报告弹出页展示） */
   sequences?: Array<{ jobId?: unknown; sequence?: unknown }>
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
   /** v2.60：浏览器本地缓存恢复的作业快照（服务端作业已过期时恢复统计行） */
@@ -245,7 +245,7 @@ async function runDashboardGeneration(ctx: {
   goal?: string
   origin: string
   excelRows?: Array<{ label: string; text: string }>
-  /** v2.61：jobId → 提交序列全文（汇总表复制按钮 + 全靶点完整报告页） */
+  /** v2.61：jobId → 提交序列全文（汇总表复制按钮 + 单靶点弹出报告页） */
   sequencesByJob?: Map<string, string>
 }): Promise<void> {
   const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob } = ctx
