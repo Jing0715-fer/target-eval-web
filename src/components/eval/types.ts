@@ -227,6 +227,8 @@ export interface MergedTargetLite {
   rangeSource?: string
   rangeOutsidePdbs?: PdbEntry[]
   rangeOutsideBlastHits?: BlastHit[]
+  /** v2.59：BLAST nr 全库检索命中（BlastNrTable 展示；历史报告缺省） */
+  blastNrHits?: BlastNrHit[]
   /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
@@ -700,6 +702,9 @@ export interface JobSummary {
   rangeOutsidePdbs?: PdbEntry[]
   /** v2.29：与区间无重叠的 BLAST 同源命中（折叠保留展示；上限 100） */
   rangeOutsideBlastHits?: BlastHit[]
+  /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档，≤20 条；
+   *  结果页 BLAST 章节展示前 5 条 + 折叠；nr 未执行/历史作业缺省） */
+  blastNrHits?: BlastNrHit[]
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+） */
   blast?: BlastStatusInfo
@@ -859,6 +864,31 @@ export interface BlastHit {
   resolution: number | null
   /** v1.31 主引文 PubMed ID（报告「文献」列直跳） */
   pubmedId?: string
+}
+
+/** v2.59：BLAST nr 全库检索命中（靶点身份识别级联 — PDB 库同源不足以归属
+ *  UniProt 时提交序列改查 NCBI nr；与后端 lib/eval/types.ts BlastNrHit 同构） */
+export interface BlastNrHit {
+  /** UniProt accession（sp/tr 形态命中时）；其他来源为原始 accession（gb/ref 等） */
+  accession: string
+  /** UniProt 条目名（如 P53_HUMAN） */
+  entryName?: string
+  description: string
+  organism?: string
+  geneName?: string
+  /** 0-100 一致性 */
+  identity: number
+  evalue: number
+  evalueRaw: string
+  queryCoverage: number
+  /** 首个 HSP 在提交序列上的 1-based 起止位 */
+  queryFrom?: number
+  queryTo?: number
+  /** 首个 HSP 在命中主体（UniProt 序列）上的 1-based 起止位 */
+  hitFrom?: number
+  hitTo?: number
+  /** sp = SwissProt（已审校）；tr = TrEMBL；其他（gb/ref/pdb/无前缀） */
+  db: 'sp' | 'tr' | 'other'
 }
 
 export interface LiteratureItem {

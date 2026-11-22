@@ -41,7 +41,11 @@
  */
 import { createHash } from 'node:crypto'
 import { searchRcsbHomologs } from './rcsb-search'
-import type { BlastHit } from './types'
+import type { BlastHit, BlastNrHit } from './types'
+
+/** v2.59：BlastNrHit 移至 types.ts（JobSummary/报告上下文携带 — 避免类型环）；
+ *  此处 re-export 保持既有 `from './blast'` 导入兼容 */
+export type { BlastNrHit }
 
 const BLAST_URL = 'https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi'
 /** v2.39 终局等待窗口：全场其他作业都收尾后，本 BLAST 再等这么久仍无结果才判失败 */
@@ -768,31 +772,7 @@ export async function runBlastWithRetry(
 }
 
 // ─── v2.16 BLAST nr 靶点身份识别（纯序列输入无 UniProt 归属时的兜底）──────────────
-
-export interface BlastNrHit {
-  /** UniProt accession（sp/tr 形态命中时）；其他来源为原始 accession */
-  accession: string
-  /** UniProt 条目名（如 P53_HUMAN — sp|ACC|ENTRY 的第三段） */
-  entryName?: string
-  /** 蛋白描述（OS=/GN= 等字段前的主体描述文本） */
-  description: string
-  organism?: string
-  geneName?: string
-  /** 0-100 一致性（identity / align-len，与 parseBlastXml 同口径） */
-  identity: number
-  evalue: number
-  evalueRaw: string
-  queryCoverage: number
-  /** v2.30：首个 HSP 的查询（提交序列）1-based 起止位（提交序列在命中主体上的覆盖范
-   *  围证据 — 用于推导提交序列在 UniProt 条目内的残基区间，非全长按截短口径对待） */
-  queryFrom?: number
-  queryTo?: number
-  /** v2.30：首个 HSP 的命中主体（nr 条目 = UniProt 序列）1-based 起止位 */
-  hitFrom?: number
-  hitTo?: number
-  /** sp = SwissProt（已审校条目，UniProt 归属可信度高）；tr = TrEMBL；其他（gb/ref/pdb/无前缀） */
-  db: 'sp' | 'tr' | 'other'
-}
+// BlastNrHit 接口 v2.59 起定义于 types.ts（上方 re-export 保持导入兼容）
 
 /** nr defline 的 UniProt 前缀形态：sp|P04637|P53_HUMAN / tr|A0A8G0KJC2|...
  *  注：10 位 accession（A0A8G0KJC2）的 4 位扩展段必须在捕获组内（否则只捕到前 6 位） */

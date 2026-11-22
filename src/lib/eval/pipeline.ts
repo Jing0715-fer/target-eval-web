@@ -2384,6 +2384,9 @@ class SegmentRunner {
       rangeSource: this.rangeSourceLabel(), // v2.29：区间来源标签（结果页/折叠区文案）
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs : undefined, // v2.29：无重叠结构（折叠保留展示）
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits : undefined,
+      /** v2.59：BLAST nr 全库检索命中（身份识别级联实际执行 nr 时携带 — 报告
+       *  BLAST 章节展示「前 5 条直出 + 其余折叠」；未执行时缺省） */
+      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 20) : undefined,
       directPdbs: st.directPdbs,
       blastHits: st.blastHits,
       blastStatus: st.blastStatus,
@@ -2634,6 +2637,9 @@ class SegmentRunner {
       /** v2.29：与区间无链范围重叠的结构（折叠保留展示 — 前端灰色行；上限 200/100） */
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs.slice(0, 200) : undefined,
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits.slice(0, 100) : undefined,
+      /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档，≤20 条；
+       *  结果页/报告展示前 5 条 + 折叠；nr 未执行/无命中/历史作业缺省） */
+      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 20) : undefined,
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,

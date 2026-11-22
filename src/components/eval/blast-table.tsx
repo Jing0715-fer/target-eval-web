@@ -4,9 +4,10 @@ import { useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { cn } from '@/lib/utils'
 import { MethodBadge } from './badges'
 import { formatEvalue, formatResolution } from './format'
-import type { BlastHit } from './types'
+import type { BlastHit, BlastNrHit } from './types'
 
 /** 折叠阈值：超过该数量时默认只显示前 N 条 */
 const COLLAPSED_COUNT = 15
@@ -215,6 +216,131 @@ export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]
           </Button>
         </div>
       )}
+    </div>
+  )
+}
+
+/** v2.59：nr 命中折叠阈值（前 5 条直出，其余折叠 — 用户指定） */
+const NR_COLLAPSED_COUNT = 5
+
+/** v2.59：BLAST nr 全库检索命中表（靶点身份识别证据 — PDB 库同源不足以归属
+ *  UniProt 时提交序列改查 NCBI nr 全库；前 5 条直出 + 其余折叠）。 */
+export function BlastNrTable({ hits }: { hits: BlastNrHit[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const collapsed = !expanded && hits.length > NR_COLLAPSED_COUNT
+  const visible = collapsed ? hits.slice(0, NR_COLLAPSED_COUNT) : hits
+
+  const rows = (list: BlastNrHit[]) => list.map((h, i) => {
+    const isUniprot = h.db !== 'other' && /^[A-Z0-9]{6,10}$/.test(h.accession)
+    return (
+      <TableRow key={`${h.accession}-${i}`} className="border-border/60 hover:bg-accent/50">
+        <TableCell className="pl-4 align-top">
+          {isUniprot ? (
+            <a
+              href={`https://www.uniprot.org/uniprotkb/${h.accession}`}
+              target="_blank"
+              rel="noreferrer"
+              title={`跳转 UniProt ${h.accession}`}
+              className="font-mono text-xs font-semibold text-primary underline-offset-2 hover:underline"
+            >
+              {h.accession}
+            </a>
+          ) : (
+            <span className="break-all font-mono text-xs text-foreground/80">{h.accession || '—'}</span>
+          )}
+          {h.entryName && (
+            <div className="mt-0.5 max-w-44 truncate text-[10.5px] text-muted-foreground/80" title={h.entryName}>
+              {h.entryName}
+            </div>
+          )}
+        </TableCell>
+        <TableCell
+          className="max-w-64 truncate text-xs text-foreground/80"
+          title={[h.description, h.organism, h.geneName].filter(Boolean).join(' · ')}
+        >
+          {h.description || '—'}
+        </TableCell>
+        <TableCell className="font-mono text-xs tabular-nums text-foreground/90">
+          {h.identity != null ? `${Number(h.identity.toFixed(1))}%` : '—'}
+        </TableCell>
+        <TableCell className="font-mono text-xs tabular-nums text-foreground/80">
+          {formatEvalue(h.evalue)}
+        </TableCell>
+        <TableCell
+          className="font-mono text-xs tabular-nums text-foreground/80"
+          title="首个 HSP 在提交序列上的残基区间（1-based 闭区间）"
+        >
+          {h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
+            ? `${h.queryFrom}-${h.queryTo}`
+            : h.queryCoverage > 0
+              ? `${h.queryCoverage} aa`
+              : '—'}
+        </TableCell>
+        <TableCell className="pr-4">
+          <span
+            className={cn(
+              'inline-flex items-center rounded-full border px-2 py-px font-mono text-[10px] font-semibold whitespace-nowrap',
+              h.db === 'sp'
+                ? 'border-emerald-600/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                : h.db === 'tr'
+                  ? 'border-amber-600/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                  : 'border-border bg-muted text-muted-foreground',
+            )}
+            title={h.db === 'sp' ? 'Swiss-Prot 人工审校条目 — UniProt 归属可信度高' : h.db === 'tr' ? 'UniProt TrEMBL 自动注释条目' : 'nr 库其他来源条目（gb/ref 等，非 UniProt 形态）'}
+          >
+            {h.db === 'sp' ? 'Swiss-Prot' : h.db === 'tr' ? 'TrEMBL' : 'nr 其他'}
+          </span>
+        </TableCell>
+      </TableRow>
+    )
+  })
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/70 bg-muted/40 px-4 py-2.5">
+        <p className="text-xs font-semibold text-foreground">BLAST nr 全库检索</p>
+        <p className="font-mono text-[10px] tracking-wide text-muted-foreground/85">NCBI nr · {hits.length} hits · 靶点身份识别</p>
+      </div>
+      <div className="eval-scroll overflow-auto">
+        <Table>
+          <TableHeader className="sticky top-0 z-10 bg-muted/60">
+            <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+              <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">UniProt / 编号</TableHead>
+              <TableHead className="eval-eyebrow h-9 min-w-44 text-muted-foreground">描述</TableHead>
+              <TableHead className="eval-eyebrow h-9 text-muted-foreground">Identity</TableHead>
+              <TableHead className="eval-eyebrow h-9 text-muted-foreground">E-value</TableHead>
+              <TableHead className="eval-eyebrow h-9 min-w-24 text-muted-foreground" title="首个 HSP 在提交序列上的残基区间（1-based 闭区间）">覆盖范围</TableHead>
+              <TableHead className="eval-eyebrow h-9 pr-4 text-muted-foreground">库</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>{rows(visible)}</TableBody>
+        </Table>
+      </div>
+      {hits.length > NR_COLLAPSED_COUNT && (
+        <div className="border-t border-border/70">
+          <Button
+            variant="ghost"
+            onClick={() => setExpanded((v) => !v)}
+            className="h-10 w-full gap-1.5 rounded-none font-mono text-[11px] text-muted-foreground hover:bg-accent hover:text-primary"
+            aria-expanded={expanded}
+          >
+            {expanded ? (
+              <>
+                <ChevronUp className="size-3.5" />
+                收起 · 仍可滚动查看全部 {hits.length} 条
+              </>
+            ) : (
+              <>
+                <ChevronDown className="size-3.5" />
+                展开全部 {hits.length} 条 nr 命中（当前显示前 {NR_COLLAPSED_COUNT} 条）
+              </>
+            )}
+          </Button>
+        </div>
+      )}
+      <p className="border-t border-border/60 px-4 py-2.5 text-[11px] leading-relaxed text-muted-foreground/85">
+        PDB 库同源不足以归属 UniProt（一致性 &lt;85% 或覆盖 &lt;40%，或检索失败）时，提交序列自动改查 NCBI nr 全库定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。
+      </p>
     </div>
   )
 }

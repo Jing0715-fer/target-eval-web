@@ -36,7 +36,7 @@ import { RatingBadge } from './badges'
 import { EvalLogConsole } from './log-console'
 import { formatDuration, formatPercent, formatResolution, logLevel, scoreLevel } from './format'
 import { PdbTable } from './pdb-table'
-import { BlastTable } from './blast-table'
+import { BlastTable, BlastNrTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { AssetGallery } from './asset-gallery'
 import { Ligand2dFigure } from './ligand-2d'
@@ -491,6 +491,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
     : undefined
   const outsidePdbs = summary.rangeOutsidePdbs ?? []
   const outsideBlastHits = summary.rangeOutsideBlastHits ?? []
+  /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行时存档 — BLAST 章节展示） */
+  const nrHits = summary.blastNrHits ?? []
   /** v2.4：内联 HTML 报告（无状态同步评估）— srcDoc 渲染 + Blob 下载，不经 /api/jobs/{id}/report */
   const inlineReportHtml = job.stateless ? (job.reportHtml ?? null) : null
   /** v1.31：web 端直接内嵌完整 HTML 报告（与「下载 HTML」同一份文件，样式 100% 一致）。
@@ -1543,10 +1545,12 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           en="Homologs"
           count={
             blastHits.length > 0
-              ? `${blastHits.length} 条命中${blastShared ? ' · 家族共享' : blastViaRcsb ? ' · RCSB 兜底' : ''}`
-              : blastInfo
-                ? '未运行'
-                : '—'
+              ? `${blastHits.length} 条命中${blastShared ? ' · 家族共享' : ''}${blastViaRcsb ? ' · RCSB 兜底' : ''}${nrHits.length ? ` · nr ${nrHits.length}` : ''}`
+              : nrHits.length > 0
+                ? `nr ${nrHits.length} 命中`
+                : blastInfo
+                  ? '未运行'
+                  : '—'
           }
         />
         {blastViaRcsb && blastHits.length > 0 && (
@@ -1559,6 +1563,16 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <BlastTable hits={blastHits} outsideHits={outsideBlastHits} rangeLabel={rangeLabel} />
         ) : (
           <BlastStatusBox status={blastInfo?.status} note={blastInfo?.note} provider={blastInfo?.provider} />
+        )}
+        {/* v2.59：nr 全库检索命中（靶点身份识别证据 — 前 5 条直出 + 折叠） */}
+        {nrHits.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, ease: 'easeOut' }}
+          >
+            <BlastNrTable hits={nrHits} />
+          </motion.div>
         )}
       </motion.section>
 
