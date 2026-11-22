@@ -40,6 +40,15 @@ export interface UniprotFeature {
   end: number
 }
 
+/** v2.46：UniProt DOMAIN 结构域区间（报告预测结构视图「按域着色」用 — AFDB 模型
+ *  残基编号即 UniProt 坐标，区间可直接映射 resi；ESMFold 模型编号自 1 起不保证
+ *  对齐，不启用域着色） */
+export interface AfDomainRange {
+  name: string
+  start: number
+  end: number
+}
+
 export interface UniprotInfo {
   uniprotId: string
   entryName: string
@@ -620,10 +629,10 @@ export interface TargetIdentityInfo {
   /** 展示名（评估表蛋白名 / nr 命中蛋白名 / PDB 同源描述清洗结果） */
   name: string
   /** 识别来源 */
-  source: 'eval-table' | 'blast-nr' | 'blast-homolog'
-  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断） */
+  source: 'eval-table' | 'blast-nr' | 'blast-homolog' | 'uniprot-blast'
+  /** 来源中文标签（评估表 / BLAST nr 识别 / PDB 同源推断 / UniProt 序列匹配） */
   sourceLabel: string
-  /** 命中一致性 %（blast-nr / blast-homolog 时存在） */
+  /** 命中一致性 %（blast-nr / blast-homolog / uniprot-blast 时存在） */
   identity?: number
   /** 定位到的 UniProt accession（nr 命中 sp|ACC| / tr|ACC| 形态；回填未达阈值时为近似条目） */
   uniprotId?: string
@@ -641,13 +650,15 @@ export function describeTargetIdentitySource(source: TargetIdentityInfo['source'
     case 'eval-table': return '评估表'
     case 'blast-nr': return 'BLAST nr 识别'
     case 'blast-homolog': return 'PDB 同源推断'
+    case 'uniprot-blast': return 'UniProt 序列匹配'
+    default: return '序列来源' // v2.48.1：兜底 — 新增 source 值时不再隐式 undefined
   }
 }
 
-/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」；评估表来源为空） */
+/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」「 · UniProt 匹配 96%」；评估表来源为空） */
 export function targetIdentityTitleSuffix(ti: TargetIdentityInfo): string {
   if (ti.source === 'eval-table') return ''
-  const tag = ti.source === 'blast-nr' ? 'nr 识别' : '同源'
+  const tag = ti.source === 'blast-nr' ? 'nr 识别' : ti.source === 'uniprot-blast' ? 'UniProt 匹配' : '同源'
   return ti.identity != null ? ` · ${tag} ${Math.round(ti.identity)}%` : ` · ${tag}`
 }
 
@@ -707,6 +718,9 @@ export interface JobSummary {
   /** v2.15：ESMFold 公共 API 预测结构信息（AFDB 无收录时的兜底；失败/超限 available=false） */
   esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
+  /** v2.41：LLM 报告未完整生成的章节数（失败/放弃重试的章节；缺省或 0 = 完整）—
+   * 高通量运行据此标记「报告不完整」靶点，可一键重跑补齐 */
+  reportLlmMissing?: number
   /** v2.13：deferred 批次同样按单靶点流程生成完整独立报告（展示并入合并报告的
    * 靶点单独评估页）；reportDeferred 仅表示 HTML 不单独落盘 */
   reportDeferred?: boolean
@@ -714,6 +728,13 @@ export interface JobSummary {
   batchNote?: string
   /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链；历史作业缺省） */
   targetIdentity?: TargetIdentityInfo
+  /** v2.45：序列靶点原始标签头（报告导入标签精确匹配用；历史作业缺省） */
+  sequenceHeader?: string
+  /** v2.45：提交序列 SHA-256 前 16 hex（报告导入 SHA 精确匹配用；历史作业缺省） */
+  seqSha?: string
+  /** v2.46：UniProt DOMAIN 结构域区间（合并报告重渲染时预测结构视图「按域着色」用；
+   *  仅 AFDB 引擎（残基编号 = UniProt 坐标）时落库；无 DOMAIN 注释/历史作业缺省） */
+  afDomains?: AfDomainRange[]
 }
 
 // ─── AlphaFold 预测结构（v2.0 报告头图）────────────────────────────
@@ -820,8 +841,11 @@ export interface SequenceAttribution {
 }
 
 /** 关系类型 → 中文描述（前后端共用） */
-export function describeRelationType(t: TargetRelationType): string {
-  switch (t) {
+/** v2.48.1：参数放宽为 string + default 兜底 — 运行时 relation.relationType 可能来自
+ *  未枚举校验的历史/外部输入（describeRelationType 无匹配时隐式 undefined 曾致
+ *  esc(undefined) 渲染崩溃）；非空未知字符串原样返回（调用方均经 esc() 转义，展示安全） */
+export function describeRelationType(t: string): string {
+  switch (t as TargetRelationType) {
     case 'complex': return '复合物亚基（物理相互作用）'
     case 'antibody-antigen': return '抗体-抗原配对'
     case 'fusion': return '融合构建（多结构域串联）'
@@ -829,6 +853,7 @@ export function describeRelationType(t: TargetRelationType): string {
     case 'pathway': return '同通路/功能相关'
     case 'independent': return '相互独立'
     case 'other': return '其他关联'
+    default: return (t || '').trim() || '其他关联'
   }
 }
 

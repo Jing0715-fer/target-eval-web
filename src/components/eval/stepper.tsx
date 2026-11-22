@@ -21,7 +21,14 @@ export function Stepper({ step, className }: { step: number; className?: string 
         const done = i < step
         const active = i === step
         return (
-          <li key={s.label} className="flex min-w-0 flex-1 items-center gap-1 sm:gap-1.5">
+          <li
+            key={s.label}
+            className={cn(
+              'flex min-w-0 items-center gap-1 sm:gap-1.5',
+              // v2.55：末步不占 flex-1 — 此前 4 段等分导致「报告」节点后拖出约 1/4 宽的悬空连线空白
+              i < STEPS.length - 1 ? 'flex-1' : 'shrink-0',
+            )}
+          >
             <span className="flex shrink-0 items-center gap-1.5">
               <span
                 className={cn(
@@ -43,7 +50,7 @@ export function Stepper({ step, className }: { step: number; className?: string 
               <span
                 className={cn(
                   'text-[11.5px] font-medium whitespace-nowrap transition-colors',
-                  done || active ? 'text-foreground' : 'text-muted-foreground/60',
+                  done || active ? 'text-foreground' : 'text-muted-foreground/80',
                 )}
               >
                 {s.label}

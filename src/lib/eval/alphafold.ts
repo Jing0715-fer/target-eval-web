@@ -23,6 +23,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { apiCache } from './cache'
+import type { AfDomainRange, UniprotFeature } from './types'
 
 const AFDB_API = 'https://alphafold.ebi.ac.uk/api/prediction'
 const AFDB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36'
@@ -152,15 +153,15 @@ export async function ensure3DmolBundle(): Promise<string | null> {
 const PLDDT_COLORS = { hi: '#0053D6', mid: '#65CBF3', low: '#FFDB13', poor: '#FF7D45' } as const
 
 /**
- * pLDDT 四段着色脚本（v2.7.2 抽出共用 — 无头截图页与报告内嵌 3Dmol 交互视图同源，
- * 防两处逻辑漂移）。IIFE 接受 (pdb, viewer)；调用方作用域需已定义同名变量且
- * viewer 已 addModel 完成模型加载。
+ * pLDDT 四段着色核心（函数体文本 — 期望 pdb / viewer 两个绑定在包装作用域内可用）。
+ * v2.46 抽出：plddtStyleApplyJs（初始化内联）与 afToolbarJs（运行时切换回 pLDDT
+ * 模式）共用同一段逻辑，防两处漂移。
  * 关键语义（v2.7 修复）：3Dmol 的 resi 数组是「任一命中」（仅端点残基着色，
  * 区间中段无样式 → 结构大片透明看不到）；区间选择必须用 "min-max" 字符串
  * （propertyMatches 解析 (\d+)\s*-\s*(\d+) 为闭区间，全区间残基着色）。
  */
-export function plddtStyleApplyJs(): string {
-  return `(function (pdb, viewer) {
+function plddtApplyCoreJs(): string {
+  return `
   // 残基 pLDDT（B-factor 列）分桶
   var lines = pdb.split('\\n');
   var resB = {};
@@ -202,7 +203,181 @@ export function plddtStyleApplyJs(): string {
     }
   } catch (e) { ok = false; }
   if (!ok) viewer.setStyle({}, { cartoon: { color: 'spectrum' } });
-})(pdb, viewer);`
+`
+}
+
+/**
+ * pLDDT 四段着色脚本（v2.7.2 抽出共用 — 无头截图页与报告内嵌 3Dmol 交互视图同源，
+ * 防两处逻辑漂移）。IIFE 接受 (pdb, viewer)；调用方作用域需已定义同名变量且
+ * viewer 已 addModel 完成模型加载。
+ */
+export function plddtStyleApplyJs(): string {
+  return `(function (pdb, viewer) {${plddtApplyCoreJs()}})(pdb, viewer);`
+}
+
+// ─── v2.46：UniProt 域划分提取（报告预测结构视图「按域着色」数据源）───────────
+
+/** 落库/内嵌的 DOMAIN 区间上限（防重复序列蛋白如纤维粘连蛋白撑爆报告与图例） */
+const AF_DOMAINS_MAX = 24
+
+/**
+ * 从 UniProt features 过滤 DOMAIN 结构域区间（v2.46；v2.47 修复大小写）：
+ *  - 仅 type === 'Domain'（UniProt REST 原文大小写 — uniprot.ts FEATURE_KEEP 同款；
+ *    v2.46 误写成全大写 'DOMAIN' 恒不命中 → 域着色数据恒空、选项永远置灰）；
+ *  - 区间有效性校验（end ≥ begin ≥ 1）+ 与序列长度弱校验（防异常注释越界）；
+ *  - begin 升序稳定排序，名称截断 60 字符，上限 24 条；
+ *  - AFDB 模型残基编号 = UniProt 坐标 → 区间直接映射 3Dmol resi（无需换算）。
+ * 无 Domain 注释/无归属时返回 undefined（报告「UniProt 域」选项禁用）。
+ */
+export function extractAfDomains(
+  features: UniprotFeature[] | undefined | null,
+  sequenceLength: number | undefined | null,
+): AfDomainRange[] | undefined {
+  if (!features || !features.length) return undefined
+  const limit = sequenceLength && sequenceLength > 0 ? sequenceLength : Number.MAX_SAFE_INTEGER
+  const out: AfDomainRange[] = []
+  for (const f of features) {
+    if (f.type !== 'Domain') continue
+    const start = Number(f.begin)
+    const end = Number(f.end)
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue
+    if (start < 1 || end < start) continue
+    if (start > limit || end - start + 1 > limit) continue
+    const name = (f.description ?? '').trim().slice(0, 60) || 'Domain'
+    out.push({ name, start, end })
+  }
+  if (!out.length) return undefined
+  out.sort((a, b) => a.start - b.start)
+  return out.slice(0, AF_DOMAINS_MAX)
+}
+
+/**
+ * v2.46/v2.47：预测结构视图工具条公共脚本（单靶点报告 AF/ESMFold 视图 + 合并报告公共
+ * MODELS 池三处共用 — 一份实现防漂移）。注入后暴露：
+ *  - window.__afPlddtApply(pdb, viewer)：pLDDT 四段着色（与初始化同源核心）；
+ *  - window.__afTb.mount(stage, viewer, pdb, { fileName, domains })：给 af-stage
+ *    挂载「下载 PDB + 着色切换」工具条（pLDDT 置信 / 彩虹 N→C / UniProt 域），
+ *    切换时同步重建图例并刷新打印海报（pngURI）。
+ *    v2.47：小窗拥挤 → 工具条 CSS 仅在放大视图（.af-fullslot 内）显示（小窗内
+ *    .af-stage .af-tb 一律 display:none，见 SINGLE_REPORT_CSS）；灯箱脚本放大时
+ *    把 .af-tb 随 canvas 迁入全屏槽、关闭时归位，并调 tb.__afSync() 把图例
+ *    （内嵌 .af-legend + 全屏条 .af-full-legend 双处）对齐当前已选着色。
+ * 域着色仅 AFDB 模型启用（残基编号 = UniProt 坐标）；ESMFold 模型编号自 1 起
+ * 不保证对齐 → 调用方不传 domains（选项禁用置灰）。
+ */
+export function afToolbarJs(): string {
+  return `(function () {
+  if (window.__afTb) return;
+  window.__afPlddtApply = function (pdb, viewer) {${plddtApplyCoreJs()}  };
+  var PALETTE = ['#E64B35', '#4DBBD5', '#00A087', '#3C5488', '#F39B7F', '#8491B4',
+                 '#91D1C2', '#DC9300', '#7E6148', '#B09C85', '#0C90A0', '#C49A2C'];
+  function escT(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  window.__afTb = {
+    mount: function (stage, viewer, pdb, opts) {
+      if (!stage || !viewer || !pdb || stage.__afTbDone) return;
+      stage.__afTbDone = true;
+      opts = opts || {};
+      var fileName = opts.fileName || 'model.pdb';
+      var domains = opts.domains || null;
+      var tb = document.createElement('div');
+      tb.className = 'af-tb';
+      // — 下载按钮（内嵌 PDB 文本 → Blob → a[download]）—
+      var dl = document.createElement('button');
+      dl.type = 'button';
+      dl.className = 'af-tb-btn';
+      dl.title = '下载预测结构 PDB 文件（' + fileName + '）';
+      dl.setAttribute('aria-label', '下载预测结构 PDB 文件');
+      dl.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5v9m0 0l-3.5-3.5M8 10.5l3.5-3.5M2.5 13.5h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>PDB';
+      dl.addEventListener('click', function () {
+        try {
+          var blob = new Blob([pdb], { type: 'chemical/x-pdb' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url; a.download = fileName;
+          a.style.display = 'none';
+          (document.body || stage).appendChild(a);
+          a.click();
+          setTimeout(function () { a.remove(); try { URL.revokeObjectURL(url); } catch (er) {} }, 5000);
+        } catch (e) { /* 下载失败静默（沙箱 iframe 拦截等） */ }
+      });
+      // — 着色切换 + 图例（v2.47：图例双处同步 — 内嵌 .af-legend + 全屏条 .af-full-legend）—
+      function legendEls() {
+        var out = [];
+        try {
+          var fig = stage.closest ? stage.closest('figure') : null;
+          var fl = fig ? fig.querySelector('.af-legend') : null;
+          if (fl) out.push(fl);
+          // 全屏打开时 tb 已随 canvas 迁入 .af-fullslot → 自 tb 向上找全屏条图例
+          var wrap = tb.closest ? tb.closest('.af-fullwrap') : null;
+          var wl = wrap ? wrap.querySelector('.af-full-legend') : null;
+          if (wl) out.push(wl);
+        } catch (e) { /* ignore */ }
+        return out;
+      }
+      function legendHtml(mode) {
+        if (mode === 'rainbow') {
+          return '<span class="af-lgd-rb"><i class="af-lgd-rb-bar"></i>N 端 → C 端（彩虹渐变）</span>';
+        }
+        if (mode === 'domain' && domains && domains.length) {
+          var h = '';
+          for (var i = 0; i < domains.length; i++) {
+            h += '<span class="af-lgd-item" title="' + escT(domains[i].name) + '（残基 ' + domains[i].start + '-' + domains[i].end + '）"><i style="background:' + PALETTE[i % PALETTE.length] + '"></i>' + escT(domains[i].name) + ' ' + domains[i].start + '-' + domains[i].end + '</span>';
+          }
+          return h + '<span class="af-lgd-item"><i style="background:#e7e5e4"></i>无注释区段</span>';
+        }
+        return '<span><i style="background:#0053D6"></i>pLDDT ≥ 90</span>'
+             + '<span><i style="background:#65CBF3"></i>70–90</span>'
+             + '<span><i style="background:#FFDB13"></i>50–70</span>'
+             + '<span><i style="background:#FF7D45"></i>&lt; 50</span>';
+      }
+      function setLegends(mode) {
+        var els = legendEls();
+        for (var n = 0; n < els.length; n++) {
+          els[n].innerHTML = legendHtml(mode);
+          els[n].classList.toggle('af-lgd-scroll', mode === 'domain');
+        }
+      }
+      function apply(mode) {
+        try {
+          if (mode === 'rainbow') {
+            viewer.setStyle({}, { cartoon: { color: 'spectrum' } });
+          } else if (mode === 'domain' && domains && domains.length) {
+            viewer.setStyle({}, { cartoon: { color: '#e7e5e4' } });
+            for (var i = 0; i < domains.length; i++) {
+              viewer.setStyle({ resi: String(domains[i].start) + '-' + String(domains[i].end) }, { cartoon: { color: PALETTE[i % PALETTE.length] } });
+            }
+          } else {
+            window.__afPlddtApply(pdb, viewer);
+          }
+          viewer.render();
+        } catch (e) { /* 切换失败保持当前样式 */ }
+        setLegends(mode);
+        // 打印海报跟随当前着色刷新
+        try {
+          var uri = viewer.pngURI ? viewer.pngURI() : null;
+          var p = stage.querySelector('.af-poster');
+          if (uri && p) p.src = uri;
+        } catch (e) { /* ignore */ }
+      }
+      var sel = document.createElement('select');
+      sel.className = 'af-tb-sel';
+      sel.title = '切换结构着色方式';
+      sel.setAttribute('aria-label', '结构着色方式');
+      var oP = document.createElement('option'); oP.value = 'plddt'; oP.textContent = 'pLDDT 置信';
+      var oR = document.createElement('option'); oR.value = 'rainbow'; oR.textContent = '彩虹 N→C';
+      var oD = document.createElement('option'); oD.value = 'domain';
+      if (domains && domains.length) { oD.textContent = 'UniProt 域'; oD.title = '按 UniProt DOMAIN 结构域注释区间着色'; }
+      else { oD.textContent = 'UniProt 域（无注释）'; oD.disabled = true; oD.title = '该靶点无 UniProt DOMAIN 注释（或模型残基编号与 UniProt 坐标不对齐）'; }
+      sel.appendChild(oP); sel.appendChild(oR); sel.appendChild(oD);
+      sel.addEventListener('change', function () { apply(sel.value); });
+      tb.appendChild(dl);
+      tb.appendChild(sel);
+      stage.appendChild(tb);
+      // v2.47：放大打开时灯箱脚本调用 — 图例对齐当前已选着色（重开全屏不再回显默认 pLDDT 图例）
+      tb.__afSync = function () { setLegends(sel.value); };
+    }
+  };
+})();`
 }
 
 export function buildRenderPage(bundleJs: string, pdbText: string, width: number, height: number): string {

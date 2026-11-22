@@ -359,7 +359,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                   {/* API Key */}
                   <section className="flex flex-col gap-1.5">
                     <Label htmlFor="llm-apikey" className="lin-eyebrow text-muted-foreground">
-                      API Key {provider && !provider.needsKey && <span className="normal-case text-muted-foreground/70">（该供应商可不填）</span>}
+                      API Key {provider && !provider.needsKey && <span className="normal-case text-muted-foreground/85">（该供应商可不填）</span>}
                     </Label>
                     <div className="relative">
                       <Input
@@ -381,7 +381,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                         {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                       </button>
                     </div>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+                    <p className="text-[11px] leading-relaxed text-muted-foreground/85">
                       Key 保存在浏览器本地（仅你本人可用）：随你发起的评估请求发送到服务器代为调用，服务端不落盘、不共享给其他用户；清除浏览器数据会同时清除已存 Key。
                     </p>
                   </section>
@@ -439,7 +439,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                           )}
                           {!modelsLoading && !modelsError && (
                             <>
-                              <div className="px-3 py-1 font-mono text-[10px] tracking-wider text-muted-foreground/70 uppercase">
+                              <div className="px-3 py-1 font-mono text-[10px] tracking-wider text-muted-foreground/85 uppercase">
                                 {modelQueryDirty
                                   ? (filteredModels.length > 0 ? `${filteredModels.length} / ${models.length} models` : `无匹配 — 共 ${models.length} 个，清空输入查看全部`)
                                   : `共 ${models.length} 个模型`}

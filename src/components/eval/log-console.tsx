@@ -161,9 +161,9 @@ export function EvalLogConsole({ logs, title, live = true, className }: EvalLogC
       <CardContent className="flex flex-col gap-2.5 px-5 py-4">
         {/* 工具栏：标题 + 行数/级别统计 + 过滤/搜索/操作 */}
         <div className="flex flex-wrap items-center gap-2">
-          <Terminal className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
+          <Terminal className="size-3.5 shrink-0 text-muted-foreground/80" aria-hidden />
           <h3 className="lin-eyebrow shrink-0 text-muted-foreground">{heading}</h3>
-          <span className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] tabular-nums text-muted-foreground/70">
+          <span className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] tabular-nums text-muted-foreground/85">
             {filtered.length !== rows.length ? `${filtered.length}/${rows.length} 行` : `${rows.length} 行`}
             {errCount > 0 && <span className="text-red-500/90">·{errCount} 错误</span>}
             {warnCount > 0 && <span className="text-amber-500/90">·{warnCount} 警告</span>}
@@ -191,7 +191,7 @@ export function EvalLogConsole({ logs, title, live = true, className }: EvalLogC
                     'rounded-[5px] px-2 py-0.5 font-mono text-[10px] transition-colors',
                     levelFilter === f.key
                       ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(22_23_29/0.08)]'
-                      : 'text-muted-foreground/70 hover:text-foreground',
+                      : 'text-muted-foreground/85 hover:text-foreground',
                   )}
                 >
                   {f.label}
@@ -217,7 +217,7 @@ export function EvalLogConsole({ logs, title, live = true, className }: EvalLogC
                   type="button"
                   onClick={() => setQuery('')}
                   aria-label="清除筛选"
-                  className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground/60 hover:text-foreground"
+                  className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground/80 hover:text-foreground"
                 >
                   <X className="size-3" />
                 </button>

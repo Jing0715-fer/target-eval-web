@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { evaluateSyncStream, fetchBatchReport, generateBatchReport, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation } from './api'
 import { addSessionJob, getSessionJob } from './session-history'
-import { cacheJobDetail, getCachedJobDetail } from './job-cache'
+import { cacheBatchReport, cacheJobDetail, getCachedBatchReport, getCachedJobDetail } from './job-cache'
+import { buildRunMetaTag, parseRunFolderMeta } from './ht-archive-import'
 import type { BatchReportInfo, EvaluateRequest, JobDetail, RelationJudgment, SequenceAttribution } from './types'
 
 /** 主视图状态机：idle（输入）→ running（进度）→ done（结果）；error 单独处理 */
@@ -153,6 +154,8 @@ function autoDownloadInlineReport(reportHtml: string, key: string, label: string
  * v2.22：导出供高通量编排复用（每组独立报告 / 合并报告完成即落盘）。
  * v2.25：dir 参数 — 同一次高通量运行的报告统一目录前缀（TargetEval_HT_日期/G01_…/），
  *  浏览器支持 download 属性携带目录时归入同一新文件夹。
+ * v2.49：dir 携带组号/总组数时注入 targeteval:run meta 到下载的 HTML —
+ *  组号证据随内容走，不再依赖文件名形态（详见函数内注释）。
  */
 export function autoDownloadHtmlReport(url: string, key: string, label: string, dir?: string) {
   if (autoDownloadedKeys.has(key)) return
@@ -165,7 +168,28 @@ export function autoDownloadHtmlReport(url: string, key: string, label: string, 
         autoDownloadedKeys.delete(key)
         return
       }
-      const blob = await res.blob()
+      let blob = await res.blob()
+      // v2.49：高通量运行标记注入 — dir 携带「TargetEval_HT_日期_Ng/G{NN}」时把
+      // 组号+总组数写进 HTML（<meta name="targeteval:run">）。背景：download 属性的
+      // 目录段在 Firefox/Safari 被 W3C 规范丢弃、Chrome 建目录后用户从文件夹选文件
+      // file.name 无 G 前缀、手工重命名 — 文件名组号证据天然脆弱；内容里的标记
+      // 不受任何文件名形态影响（parseHtReportFile 优先读取）。
+      if (dir) {
+        const rm = parseRunFolderMeta(dir)
+        if (rm.group != null || rm.totalGroups != null) {
+          try {
+            const text = await blob.text()
+            if (!text.includes('targeteval:run')) {
+              const tag = `\n${buildRunMetaTag(rm.group, rm.totalGroups)}`
+              let injected = text.replace(/<head[^>]*>/i, (m) => `${m}${tag}`)
+              if (injected === text) injected = text.replace(/<html[^>]*>/i, (m) => `${m}<head>${tag}</head>`)
+              if (injected !== text) {
+                blob = new Blob([injected], { type: blob.type || 'text/html;charset=utf-8' })
+              }
+            }
+          } catch { /* 注入失败不阻塞下载 — 退回文件名通道 */ }
+        }
+      }
       // 文件名：优先服务端 Content-Disposition，回退默认名
       // v2.10 ①：优先解析 filename*（RFC 5987，携带中文报告标题），回退 filename=
       const cd = res.headers.get('content-disposition') ?? ''
@@ -280,7 +304,7 @@ export function useEvaluationFlow() {
       setNetworkIssue(false)
       applyJobSnapshot(data)
       // v2.36：终态瞬间把完整详情存入浏览器本地缓存（Serverless 实例回收后
-      // 服务端数据不持久，这层副本是刷新/回看的唯一兑底）
+      // 服务端数据不持久，这层副本是刷新/回看的唯一兜底）
       if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
       // v1.19：live 轮询到终态完成 → 自动下载 HTML 报告到本机
       // （历史查看路径不经过 pollOnce，不会误触发；deferred 作业 404 静默跳过）
@@ -897,7 +921,8 @@ export function useEvaluationFlow() {
     if (ids.length > 0) {
       setCanceling(true)
       try {
-        await Promise.allSettled(ids.map(id => fetch(`/api/jobs/${id}`, { method: 'DELETE' })))
+        // v2.42：取消模式（保留日志与结果 — 与历史页的删除语义分开）
+        await Promise.allSettled(ids.map(id => fetch(`/api/jobs/${id}?mode=cancel`, { method: 'DELETE' })))
       } catch {
         // 忽略取消请求失败（作业可能已结束）
       } finally {
@@ -909,7 +934,7 @@ export function useEvaluationFlow() {
       if (id && !syncCtrl) {
         setCanceling(true)
         try {
-          await fetch(`/api/jobs/${id}`, { method: 'DELETE' })
+          await fetch(`/api/jobs/${id}?mode=cancel`, { method: 'DELETE' })
         } catch {
           // 忽略
         } finally {
@@ -949,13 +974,29 @@ export function useEvaluationFlow() {
   }, [])
 
   /** 从历史记录加载合并报告（v1.13：批量评估历史）
-   *  拉取 BatchReport → 构造最小 batch 状态 → 切到 done + merged 视图 */
+   *  拉取 BatchReport → 构造最小 batch 状态 → 切到 done + merged 视图
+   *  v2.37：成功打开即留入本地缓存；服务端 404/网络异常 → 回退本地副本 */
   const loadBatchReport = useCallback(
     async (id: string) => {
       setLoadingHistoryJob(true)
       setSubmitError(null)
+      let report: (BatchReportInfo & { fromCache?: boolean }) | null = null
       try {
-        const report = await fetchBatchReport(id)
+        report = await fetchBatchReport(id)
+        // v2.37：服务端仍在 → 立即留入浏览器本地缓存（实例回收后仍可回看）
+        cacheBatchReport(report)
+      } catch {
+        // v2.37：服务端 404（Serverless 实例回收）/ 网络异常 → 浏览器本地缓存副本
+        report = getCachedBatchReport(id)
+      }
+      if (!report) {
+        setSubmitError(
+          '无法加载该合并报告：服务端已无此记录（部署平台为 Serverless 实例，空闲回收后运行数据不持久），且本浏览器未留存该报告副本。各靶点的单靶点报告 HTML 已在完成时自动下载到本机下载目录，可从那里查看。',
+        )
+        setLoadingHistoryJob(false)
+        return
+      }
+      try {
         // 各靶点标签：优先取 targets 中的 uniprot/蛋白名；降级用 jobIds 序号
         // v2.31：蛋白名追加 nsp 标注（聚合蛋白截短 — 同名靶点可区分）
         const labels = (report.targets ?? []).map(t => {
@@ -983,23 +1024,28 @@ export function useEvaluationFlow() {
           sequenceAttribution: report.sequenceAttribution ?? undefined,
         })
         // 同步加载第一个靶点的详情作为 flow.job（ResultView 切换栏需要）
+        // v2.37：成功即缓存；服务端已回收时回退本地副本
         if (report.jobIds.length > 0) {
           try {
             const res = await fetch(`/api/jobs/${report.jobIds[0]}`, { cache: 'no-store' })
             if (res.ok) {
               const data = (await res.json()) as JobDetail
+              if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
               jobIdRef.current = data.id
               displayJobIdRef.current = data.id
               applyJobSnapshot(data)
+            } else if (res.status === 404) {
+              const cached = getCachedJobDetail(report.jobIds[0])
+              if (cached) {
+                jobIdRef.current = cached.id
+                displayJobIdRef.current = cached.id
+                applyJobSnapshot(cached)
+              }
             }
           } catch { /* 靶点详情加载失败不阻断合并报告展示 */ }
         }
         setPhase('done')
         if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
-      } catch {
-        setSubmitError(
-          '无法加载该合并报告：服务端已无此记录（部署平台为 Serverless 实例，空闲回收后运行数据不持久），且合并报告正文未在浏览器留存副本。各靶点的单靶点报告 HTML 已在完成时自动下载到本机下载目录，可从那里查看。',
-        )
       } finally {
         setLoadingHistoryJob(false)
       }
@@ -1032,6 +1078,10 @@ export function useEvaluationFlow() {
               applyJobSnapshot(cached)
               return
             }
+            // v2.57：确无缓存副本 → 明确告知记录已不在服务器（数据清理/环境重置），
+            // 不再误导为「稍后重试」；引导查收本机自动下载的报告或重新评估
+            setSubmitError('该评估记录已不在服务器上 — 运行数据可能已过保留期或随环境重置被清空。报告生成完成时会自动下载 HTML 到本机下载目录，请先在本机查收；如需重新查看请重新发起评估。')
+            return
           }
           throw new Error(`HTTP ${res.status}`)
         }
@@ -1064,6 +1114,18 @@ export function useEvaluationFlow() {
 
   const clearSubmitError = useCallback(() => setSubmitError(null), [])
 
+  /** 需求B：合并报告重新生成完成后同步 flow 状态（同 id 原地替换）—
+   *  切换到靶点视图再切回合并报告时仍显示新一版；batchRef 同步更新避免
+   *  后续 snapshot() 快照回写旧对象 */
+  const updateMergedReport = useCallback((fresh: BatchReportInfo) => {
+    setBatch(prev => {
+      if (!prev || prev.mergedReport?.id !== fresh.id) return prev
+      return { ...prev, mergedReport: fresh }
+    })
+    const st = batchRef.current
+    if (st && st.mergedReport?.id === fresh.id) st.mergedReport = fresh
+  }, [])
+
   return {
     phase,
     job,
@@ -1082,6 +1144,7 @@ export function useEvaluationFlow() {
     loadJobById,
     loadBatchReport,
     showMergedReport,
+    updateMergedReport,
     clearSubmitError,
   }
 }

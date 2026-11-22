@@ -1,43 +1,52 @@
 'use client'
 
 /**
- * 高通量评估运行视图（v2.22）：running / paused / done 三态共用。
+ * 高通量评估运行视图（v2.22）：running / paused / stopped / done 四态共用。
  *
- *  · 刊头：状态徽标（运行中 / 已暂停（限流）/ 已完成）+ 组进度 + GOAL 摘要
+ *  · 刊头：状态徽标（运行中 / 已暂停（限流或手动）/ 已停止（可恢复）/ 已完成）+ 组进度 + GOAL 摘要
  *  · 总进度条：组 × 靶点双轨
- *  · 暂停横幅：限流原因 + 「重新开始运行」（配额恢复后手动续跑）— 用户核心诉求
+ *  · 暂停横幅：原因 + 「重新开始运行」（配额恢复后手动续跑）— 用户核心诉求
+ *  · v2.38 停止横幅：手动停止后可恢复（继续运行 / 重跑失败项 / 返回输入）
+ *  · v2.38 靶点级操作（非 running）：每个靶点 chip 可跳过/恢复/重跑；组级
+ *    「重跑失败」「跳过未开始」；「导入报告（zip）」把已有报告的靶点标跳过
  *  · 组矩阵（v2.25 紧凑化）：响应式多列网格（sm 2 列 / xl 3 列 / 2xl 4 列），
  *    一行可容纳多个组卡；组内靶点 chips 自换行
  *  · 当前组详情（running）：复用 ProgressPanel — 继承 v2.21 的阶段时间线与日志控制台
- *  · 日志回看（v2.25）：「运行日志」按钮开独立弹窗（不再卡片内联展开 — 解决
- *    「展开后无法收回」且大幅压缩组卡占位）；弹窗内复用 EvalLogConsole 全功能
+ *  · 日志回看（v2.25）：「运行日志」按钮开独立弹窗；弹窗内复用 EvalLogConsole 全功能
  *  · v2.25 批量下载：当前运行 / 每组均可一键打包 zip（每组子文件夹 + 合并报告 + README）
  */
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   AlertTriangle,
+  Ban,
   CircleCheckBig,
   Download,
+  FileArchive,
   FileDown,
   FileText,
   Gauge,
   Hourglass,
   Layers,
   LoaderCircle,
+  Pause,
   PauseCircle,
+  Play,
   RotateCcw,
+  ExternalLink,
   Terminal,
+  Undo2,
   XCircle,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDuration } from './format'
-import { getCachedJobDetail } from './job-cache'
+import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import { EvalLogConsole } from './log-console'
 import { ProgressPanel } from './progress-panel'
-import type { BatchState } from './use-evaluation-flow'
+import type { BatchItem, BatchState } from './use-evaluation-flow'
 import type { useHighThroughputFlow } from './use-high-throughput-flow'
 import type { HTGroupState, JobDetail } from './types'
 
@@ -50,7 +59,9 @@ export interface HighThroughputViewProps {
   onNewEvaluation: () => void
 }
 
-/** 组状态 → 图标 + 文案 */
+/** 组状态 → 图标 + 文案；v2.42 诚实化：done 组内含失败/取消/报告不完整项时
+ *  不再显示绿色「已完成」，改琥珀色「完成（N 未成功）」— 与靶点真实结局一致
+ *  （用户反馈：作业被取消后组徽章仍显示已完成，误导判断） */
 function groupStatusMeta(g: HTGroupState): { icon: React.ReactNode; label: string; cls: string } {
   switch (g.status) {
     case 'judging':
@@ -59,8 +70,13 @@ function groupStatusMeta(g: HTGroupState): { icon: React.ReactNode; label: strin
       return { icon: <LoaderCircle className="size-3.5 animate-spin text-primary" />, label: '评估中', cls: 'border-primary/40 bg-primary/[0.07] text-primary' }
     case 'merging':
       return { icon: <LoaderCircle className="size-3.5 animate-spin text-violet-600 dark:text-violet-400" />, label: '合并报告生成中', cls: 'border-violet-500/40 bg-violet-500/[0.08] text-violet-700 dark:text-violet-400' }
-    case 'done':
+    case 'done': {
+      const notOk = g.items.filter((it) => (it.status === 'error' || it.status === 'canceled' || (it.status === 'done' && it.reportIncomplete))).length
+      if (notOk > 0) {
+        return { icon: <AlertTriangle className="size-3.5 text-amber-600 dark:text-amber-400" />, label: `完成（${notOk} 未成功）`, cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
+      }
       return { icon: <CircleCheckBig className="size-3.5 text-emerald-600 dark:text-emerald-400" />, label: '已完成', cls: 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' }
+    }
     case 'paused':
       return { icon: <PauseCircle className="size-3.5 text-amber-600 dark:text-amber-400" />, label: '已暂停', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
     case 'canceled':
@@ -79,6 +95,8 @@ function itemDotCls(status: string): string {
       return 'bg-emerald-500'
     case 'error':
       return 'bg-red-500'
+    case 'skipped':
+      return 'bg-sky-500/60'
     case 'canceled':
       return 'bg-muted-foreground/40'
     default:
@@ -86,10 +104,31 @@ function itemDotCls(status: string): string {
   }
 }
 
-/** 当前组 → ProgressPanel 的 BatchState 形状（继承组内进度呈现） */
+/** v2.42：单靶点「查看报告」— 新标签页打开。
+ *  序列靶点/非关联组 = 独立报告 HTML（/api/jobs/{id}/report）；
+ *  关联复合物组（deferred，无独立 HTML）→ 组合并报告 inline（含本靶点单独评估页） */
+function openTargetReport(g: HTGroupState, it: { jobId?: string; label: string; sequence?: string }): void {
+  if (!it.jobId) return
+  const deferred = !it.sequence && g.relation?.related === true && g.items.length > 1
+  if (deferred) {
+    if (g.mergedReportId) {
+      window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(g.mergedReportId)}&inline=1`, '_blank', 'noopener')
+    } else {
+      toast({
+        title: '暂无可打开的报告',
+        description: '该靶点属关联复合物组，报告并入组合并评估报告（本组尚未生成合并报告 — 可先重跑/补齐后查看）。',
+        variant: 'destructive',
+      })
+    }
+    return
+  }
+  window.open(`/api/jobs/${it.jobId}/report`, '_blank', 'noopener')
+}
+
+/** 当前组 → ProgressPanel 的 BatchState 形状（继承组内进度呈现；v2.38 跳过项不进面板） */
 function buildBatchForPanel(g: HTGroupState | undefined): BatchState | null {
   if (!g) return null
-  const started = g.items.filter((it) => it.jobId || it.status !== 'pending')
+  const started = g.items.filter((it) => it.status !== 'skipped' && (it.jobId || it.status !== 'pending'))
   if (started.length === 0 && g.status === 'judging') {
     return {
       total: g.targets.length,
@@ -107,7 +146,8 @@ function buildBatchForPanel(g: HTGroupState | undefined): BatchState | null {
       key: it.key,
       label: it.label,
       jobId: it.jobId,
-      status: it.status === 'pending' ? ('running' as const) : it.status,
+      // skipped 已在上方过滤；TS 无法从 filter 收窄 — 显式排除
+      status: (it.status === 'pending' ? 'running' : it.status === 'skipped' ? 'canceled' : it.status) as BatchItem['status'],
       error: it.error,
     })),
     done: g.status === 'done',
@@ -124,15 +164,28 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const [groupLogs, setGroupLogs] = useState<Record<number, { loading: boolean; lines: string[] }>>({})
   /** v2.25 日志弹窗：当前打开的组（null = 关闭） */
   const [logDialogGroup, setLogDialogGroup] = useState<number | null>(null)
+  /** v2.38 报告 zip 导入（非 running 阶段） */
+  const [importingZip, setImportingZip] = useState(false)
+  const zipInputRef = useRef<HTMLInputElement>(null)
 
   if (!run) return null
 
+  const allItems = run.groups.flatMap((g) => g.items)
   const doneGroups = run.groups.filter((g) => g.status === 'done').length
-  const doneTargets = run.groups.flatMap((g) => g.items).filter((it) => it.status === 'done').length
+  const doneTargets = allItems.filter((it) => it.status === 'done').length
+  const skippedTargets = allItems.filter((it) => it.status === 'skipped').length
+  const failedTargets = allItems.filter((it) => it.status === 'error' || it.status === 'canceled').length
+  /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
+  const incompleteTargets = allItems.filter((it) => it.status === 'done' && it.reportIncomplete).length
+  /** v2.41：全局重跑入口的靶点数（失败/中断 + 报告不完整） */
+  const retryableTargets = failedTargets + incompleteTargets
   const currentGroup = run.groups.find((g) => g.index === run.currentIndex && (g.status !== 'done' && g.status !== 'canceled'))
   const isRunning = flow.phase === 'running'
   const isPaused = flow.phase === 'paused'
+  const isStopped = flow.phase === 'stopped'
   const isDone = flow.phase === 'done'
+  /** 非运行阶段（可编辑靶点选择 / 导入 zip） */
+  const editable = !isRunning
   /** 已产出报告的组数（v2.25 批量下载入口可用性） */
   const reportableGroups = run.groups.filter(
     (g) => g.mergedReportId || g.items.some((it) => it.status === 'done' && it.jobId),
@@ -141,15 +194,65 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const phasePill = isRunning
     ? { icon: <LoaderCircle className="size-3 animate-spin" />, text: '高通量运行中', cls: 'border-primary/40 bg-primary/[0.07] text-primary' }
     : isPaused
-      ? { icon: <PauseCircle className="size-3" />, text: run.status === 'interrupted' ? '已中断 · 可恢复' : '已自动暂停（限流）', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
-      : { icon: <CircleCheckBig className="size-3" />, text: '已完成', cls: 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' }
+      ? { icon: <PauseCircle className="size-3" />, text: run.status === 'interrupted' ? '已中断 · 可恢复' : '已暂停（可恢复）', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
+      : isStopped
+        ? { icon: <PauseCircle className="size-3" />, text: '已停止 · 可恢复', cls: 'border-amber-500/40 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400' }
+        : { icon: <CircleCheckBig className="size-3" />, text: '已完成', cls: 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' }
 
-  /** 组日志回看：拉取组内全部作业的持久化日志并拼接（打开弹窗时按需拉取一次）
-   *  v2.36：服务端 404（Serverless 实例回收）→ 回退浏览器缓存副本的日志 */
+  /** v2.38→v2.49 报告导入（当前运行；zip 归档 / 单独 HTML，可多选）：匹配到的未评估靶点标跳过；
+   *  未命中文件附带逐文件原因（v2.49 — 此前只有一句「未命中」，用户无从排查） */
+  const handleZipImport = async (files: FileList | null | undefined) => {
+    const list = files ? Array.from(files) : []
+    if (list.length === 0 || importingZip) return
+    setImportingZip(true)
+    try {
+      const result = await flow.importArchive(list)
+      // v2.49 逐文件诊断文本（未命中原因 + 已完成提示）
+      const missTail = result.missLines.length > 0
+        ? `\n未命中文件原因：\n${result.missLines.slice(0, 5).join('\n')}${result.missLines.length > 5 ? `\n…等共 ${result.missLines.length} 个文件` : ''}`
+        : ''
+      const doneNote = result.doneOnlyCount > 0
+        ? `\n另有 ${result.doneOnlyCount} 个文件的靶点在当前运行中已完成/进行中（无需导入）。`
+        : ''
+      if (result.matched > 0) {
+        toast({
+          title: `已导入 ${result.matched} 个靶点的既有报告`,
+          description: (
+            <div className="whitespace-pre-line">
+              {`这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。${doneNote}${missTail}`}
+            </div>
+          ),
+        })
+      } else if (result.doneOnlyCount > 0 && result.missLines.length === 0) {
+        toast({
+          title: '导入的报告对应靶点均已完成',
+          description: '报告对应的靶点在当前运行中已完成或正在进行 — 无需导入。',
+        })
+      } else {
+        toast({
+          title: '导入的报告中没有匹配到当前运行的靶点',
+          description: (
+            <div className="whitespace-pre-line">
+              {`已识别报告但未命中任何待评估靶点（UniProt/序列/区间需一致）。${doneNote}${missTail || '\n可改用「批量下载全部」的 zip 导入（清单含组号与序列指纹，匹配最可靠）。'}`}
+            </div>
+          ),
+        })
+      }
+    } catch (e) {
+      toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
+    } finally {
+      setImportingZip(false)
+      if (zipInputRef.current) zipInputRef.current.value = ''
+    }
+  }
+
+  /** 组日志回看：拉取组内全部作业的持久化日志并拼接。
+   *  v2.42：每次打开都重新拉取（旧缓存永不刷新 — 停止/重跑后 item.jobId 变了，
+   *  弹窗仍在展示旧作业的日志，用户误以为任务被取消/未重跑）。
+   *  服务端 404（Serverless 实例回收）→ 回退浏览器缓存副本的日志 */
   const openGroupLogs = async (g: HTGroupState) => {
     setLogDialogGroup(g.index)
-    if (groupLogs[g.index]) return
-    setGroupLogs((prev) => ({ ...prev, [g.index]: { loading: true, lines: [] } }))
+    setGroupLogs((prev) => ({ ...prev, [g.index]: { loading: true, lines: prev[g.index]?.lines ?? [] } }))
     const jobIds = [...new Set(g.items.map((it) => it.jobId).filter((x): x is string => Boolean(x)))]
     const fetched: string[] = []
     if (jobIds.length === 0) {
@@ -157,9 +260,15 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
     } else {
       const results = await Promise.allSettled(
         jobIds.map((id) =>
-          fetch(`/api/jobs/${id}`, { cache: 'no-store' }).then((r) => {
-            if (r.ok) return r.json() as Promise<JobDetail>
-            // 404 → 尝试浏览器本地缓存副本（作业完成时已自动存入）
+          fetch(`/api/jobs/${id}`, { cache: 'no-store' }).then(async (r) => {
+            if (r.ok) {
+              const data = (await r.json()) as JobDetail
+              // v2.37：服务端仍在的终态详情 → 立即留入本地缓存
+              // （本弹窗下次打开、以及实例回收后均可离线回看）
+              if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
+              return data
+            }
+            // 404 → 尝试浏览器本地缓存副本（作业完成/回看时已自动存入）
             if (r.status === 404) {
               const cached = getCachedJobDetail(id)
               if (cached) return cached
@@ -237,14 +346,17 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             {phasePill.icon}
             {phasePill.text}
           </span>
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground/60">
+          <span className="ml-auto font-mono text-[10px] text-muted-foreground/80">
             {run.resumedCount > 0 ? `重新开始 × ${run.resumedCount}` : '首次运行'}
           </span>
         </div>
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
           <h1 className="text-2xl leading-snug font-semibold tracking-[-0.02em] text-foreground sm:text-[28px]">高通量评估</h1>
           <span className="font-mono text-sm font-normal text-muted-foreground">
-            组 {Math.min(run.currentIndex + 1, run.groups.length)}/{run.groups.length} · 靶点 {doneTargets}/{run.totalTargetCount}
+            组 {doneGroups}/{run.groups.length} 完成 · 靶点 {doneTargets}/{run.totalTargetCount}
+            {skippedTargets > 0 ? ` · 跳过 ${skippedTargets}` : ''}
+            {!isRunning && failedTargets > 0 ? ` · 失败 ${failedTargets}` : ''}
+            {!isRunning && incompleteTargets > 0 ? ` · 报告不完整 ${incompleteTargets}` : ''}
           </span>
         </div>
         {run.goal && (
@@ -266,33 +378,33 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/70">组</span>
+          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/85">组</span>
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
             <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${(doneGroups / Math.max(1, run.groups.length)) * 100}%` }} />
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/70">靶点</span>
+          <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/85">靶点</span>
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
             <div className="h-full rounded-full bg-primary/60 transition-[width] duration-500" style={{ width: `${(doneTargets / Math.max(1, run.totalTargetCount)) * 100}%` }} />
           </div>
         </div>
       </div>
 
-      {/* ── 暂停横幅（限流自动暂停 / 中断恢复） ── */}
+      {/* ── 暂停横幅（限流自动暂停 / 手动暂停 / 中断恢复） ── */}
       {(isPaused || run.status === 'interrupted') && (
         <div className="flex flex-col gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3.5">
           <div className="flex items-start gap-2.5">
             <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">
-                {run.status === 'interrupted' ? '运行被中断（页面刷新/关闭）' : '评估已自动暂停'}
+                {run.status === 'interrupted' ? '运行被中断（页面刷新/关闭）' : '评估已暂停'}
               </p>
               <p className="mt-0.5 break-words text-xs leading-relaxed text-amber-700/85 dark:text-amber-400/85">
                 {run.pausedReason ?? '前端编排因页面刷新中断；服务器侧仍在执行的作业会继续，恢复后自动接上等待结果。'}
               </p>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                配额恢复后点击下方「重新开始运行」— 从断点继续（已完成的组与靶点不会重复评估，不浪费配额）。
+                点击下方「继续运行」从断点恢复（已完成的组与靶点不会重复评估，不浪费配额）；也可先在组卡片中跳过/重跑指定靶点，或导入既有报告 zip 跳过已完成靶点。
               </p>
             </div>
           </div>
@@ -304,7 +416,34 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
             >
               <RotateCcw className="size-3.5" aria-hidden />
-              重新开始运行
+              继续运行
+            </Button>
+            {retryableTargets > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void flow.retryFailed()}
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即继续运行`}
+              >
+                <Play className="size-3.5" aria-hidden />
+                {incompleteTargets > 0 && failedTargets === 0
+                  ? `重跑报告不完整项（${incompleteTargets}）并继续`
+                  : `重跑失败/不完整项（${retryableTargets}）并继续`}
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={importingZip}
+              onClick={() => zipInputRef.current?.click()}
+              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+              title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
+            >
+              {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
+              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
               保留记录并返回输入
@@ -313,13 +452,82 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         </div>
       )}
 
+      {/* ── v2.38 停止横幅（手动停止 — 可恢复） ── */}
+      {isStopped && (
+        <div className="flex flex-col gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3.5">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">运行已手动停止（可恢复）</p>
+              <p className="mt-0.5 break-words text-xs leading-relaxed text-amber-700/85 dark:text-amber-400/85">
+                已完成 {doneTargets} 个靶点的结果保留{skippedTargets > 0 ? `（另跳过 ${skippedTargets} 个）` : ''}；未开始/被中断的靶点可随时继续，失败的靶点可单独重跑。
+              </p>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                「继续运行」从断点恢复（已完成的靶点不重复评估）；也可先在组卡片中跳过不需要的靶点、重跑失败项，或导入既有报告 zip 跳过已完成靶点。
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void flow.resumeRun()}
+              className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+            >
+              <RotateCcw className="size-3.5" aria-hidden />
+              继续运行
+            </Button>
+            {retryableTargets > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void flow.retryFailed()}
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即继续运行`}
+              >
+                <Play className="size-3.5" aria-hidden />
+                {incompleteTargets > 0 && failedTargets === 0
+                  ? `重跑报告不完整项（${incompleteTargets}）并继续`
+                  : `重跑失败/不完整项（${retryableTargets}）并继续`}
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={importingZip}
+              onClick={() => zipInputRef.current?.click()}
+              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+              title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
+            >
+              {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
+              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
+              保留记录并返回输入
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* v2.38 隐藏的报告文件选择器（暂停/停止/完成阶段共用；v2.44 支持 zip + 单独 HTML 多选） */}
+      <input
+        ref={zipInputRef}
+        type="file"
+        accept=".zip,.html,.htm"
+        multiple
+        className="hidden"
+        onChange={(e) => void handleZipImport(e.target.files)}
+      />
+
       {/* ── 当前组详情（running：复用 ProgressPanel — 阶段时间线 + 实时日志） ── */}
       {isRunning && currentGroup && (
         <section aria-label="当前组详情" className={cn('rounded-xl border bg-card', currentGroup.index === run.currentIndex ? 'border-primary/30' : 'border-border')}>
           <div className="flex flex-wrap items-center gap-2 border-b border-border/70 px-4 py-2.5">
             <Layers className="size-3.5 shrink-0 text-primary" aria-hidden />
             <p className="text-[12.5px] font-semibold text-foreground">当前组 G{String(currentGroup.index + 1).padStart(2, '0')}</p>
-            <span className="font-mono text-[10.5px] text-muted-foreground/70">
+            <span className="font-mono text-[10.5px] text-muted-foreground/85">
               {currentGroup.targets.join(' · ')}
             </span>
           </div>
@@ -339,7 +547,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       {/* ── 组矩阵（v2.25 紧凑网格：一行多组；xl 3 列 / 2xl 4 列） ── */}
       <section aria-label="分组进度矩阵" className="flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="lin-eyebrow text-muted-foreground/70">Groups · 分组矩阵（{run.groups.length} 组 · 每组独立报告）</p>
+          <p className="lin-eyebrow text-muted-foreground/85">Groups · 分组矩阵（{run.groups.length} 组 · 每组独立报告）</p>
           {/* v2.25 批量下载：当前运行全部报告 → zip（每组子文件夹 + 合并报告 + README） */}
           {reportableGroups > 0 && (
             <Button
@@ -363,6 +571,11 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             const meta = groupStatusMeta(g)
             const logs = groupLogs[g.index]
             const hasReport = g.status === 'done' && (g.mergedReportId || g.items.some((it) => it.status === 'done' && it.jobId))
+            const gFailed = g.items.filter((it) => it.status === 'error' || it.status === 'canceled').length
+            /** v2.41：本组报告不完整（done 但部分章节失败）靶点数 */
+            const gIncomplete = g.items.filter((it) => it.status === 'done' && it.reportIncomplete).length
+            const gPending = g.items.filter((it) => it.status === 'pending').length
+            const gSkipped = g.items.filter((it) => it.status === 'skipped').length
             return (
               <li
                 key={g.index}
@@ -379,34 +592,101 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     {meta.icon}
                     {meta.label}
                   </span>
-                  <span className="font-mono text-[9.5px] text-muted-foreground/70">
+                  <span className="font-mono text-[9.5px] text-muted-foreground/85">
                     {g.targets.length === 0
                       ? (g.items.length > 1 ? `序列 ×${g.items.length}` : '单序列')
                       : g.targets.length > 1
                         ? `复合物 ×${g.targets.length}`
                         : '单靶点'}
+                    {gSkipped > 0 ? ` · 跳过 ${gSkipped}` : ''}
+                    {gIncomplete > 0 ? ` · 报告不完整 ${gIncomplete}` : ''}
                     {g.startedAt && g.finishedAt ? ` · ${formatDuration((g.finishedAt - g.startedAt) / 1000)}` : ''}
                   </span>
                 </div>
 
-                {/* 靶点 chips（状态点 + 标签 + 区间后缀 + 错误摘要；紧凑字号） */}
+                {/* 靶点 chips（状态点 + 标签 + 区间后缀 + 错误摘要；紧凑字号）
+                    v2.38：非运行阶段 chip 尾部附小操作钮 — 跳过/恢复（Ban/Undo2）、
+                    重跑（RotateCcw，失败/中断/跳过项）；v2.41：报告不完整的 done 项
+                    琥珀色标记 + 可重跑（补齐缺失章节） */}
                 <div className="flex flex-wrap gap-1">
-                  {g.items.map((it) => (
-                    <span
-                      key={it.key}
-                      className={cn(
-                        'inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10px]',
-                        it.status === 'error' ? 'border-red-500/30 bg-red-500/[0.05] text-red-700 dark:text-red-400' : 'border-border bg-muted/40 text-foreground/90',
-                      )}
-                      title={it.error ?? (it.range ? `${it.label} · 评估区间 ${it.range[0]}-${it.range[1]}（仅保留链范围重叠的结构）` : it.label)}
-                    >
-                      <span className={cn('size-1.5 shrink-0 rounded-full', itemDotCls(it.status))} aria-hidden />
-                      <span className="truncate">
-                        {it.label}
-                        {it.range && <span className="text-primary/90">:{it.range[0]}-{it.range[1]}</span>}
+                  {g.items.map((it) => {
+                    // v2.41：done+报告不完整 → 可操作（重跑）；其余 done 不可操作
+                    const actionable = editable && it.status !== 'running' && (it.status !== 'done' || it.reportIncomplete)
+                    return (
+                      <span
+                        key={it.key}
+                        className={cn(
+                          'inline-flex max-w-full items-center gap-1 rounded-md border py-0.5 pl-1.5 font-mono text-[10px]',
+                          actionable ? 'pr-0.5' : 'pr-1.5',
+                          it.status === 'error'
+                            ? 'border-red-500/30 bg-red-500/[0.05] text-red-700 dark:text-red-400'
+                            : it.status === 'skipped'
+                              ? 'border-sky-500/30 bg-sky-500/[0.05] text-sky-700/80 line-through decoration-sky-500/40 dark:text-sky-400/80'
+                              : it.status === 'done' && it.reportIncomplete
+                                ? 'border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-400'
+                                : 'border-border bg-muted/40 text-foreground/90',
+                        )}
+                        title={it.reportMissingNote ?? it.skipNote ?? it.error ?? (it.range ? `${it.label} · 评估区间 ${it.range[0]}-${it.range[1]}（仅保留链范围重叠的结构）` : it.label)}
+                      >
+                        <span className={cn('size-1.5 shrink-0 rounded-full', it.status === 'done' && it.reportIncomplete ? 'bg-amber-500' : itemDotCls(it.status))} aria-hidden />
+                        <span className="truncate">
+                          {it.label}
+                          {it.range && <span className="text-primary/90">:{it.range[0]}-{it.range[1]}</span>}
+                        </span>
+                        {it.status === 'done' && it.reportIncomplete && (
+                          <span className="shrink-0 font-sans text-[9px] font-medium text-amber-600/90 dark:text-amber-400/90" title={it.reportMissingNote}>不完整</span>
+                        )}
+                        {/* v2.42：靶点完成后即可新标签页查看报告（独立报告 / 关联组并入合并报告） */}
+                        {it.status === 'done' && it.jobId && (
+                          <button
+                            type="button"
+                            onClick={() => openTargetReport(g, it)}
+                            className="flex size-4.5 shrink-0 items-center justify-center rounded text-primary/70 transition-colors hover:bg-accent hover:text-primary"
+                            title="新标签页查看此靶点的报告"
+                            aria-label={`查看靶点 ${it.label} 的报告`}
+                          >
+                            <ExternalLink className="size-2.5" aria-hidden />
+                          </button>
+                        )}
+                        {actionable && (
+                          <span className="inline-flex shrink-0 items-center gap-0.5">
+                            {(it.status === 'error' || it.status === 'canceled' || it.status === 'skipped' || (it.status === 'done' && it.reportIncomplete)) && (
+                              <button
+                                type="button"
+                                onClick={() => flow.retryItem(g.index, it.key)}
+                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/85 transition-colors hover:bg-accent hover:text-primary"
+                                title={it.status === 'done' ? '重跑此靶点（补齐缺失的报告章节）' : '重跑此靶点（重置为待评估）'}
+                                aria-label={`重跑靶点 ${it.label}`}
+                              >
+                                <RotateCcw className="size-2.5" aria-hidden />
+                              </button>
+                            )}
+                            {it.status === 'skipped' ? (
+                              <button
+                                type="button"
+                                onClick={() => flow.toggleSkipItem(g.index, it.key)}
+                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/85 transition-colors hover:bg-accent hover:text-emerald-600"
+                                title="恢复评估此靶点"
+                                aria-label={`恢复靶点 ${it.label}`}
+                              >
+                                <Undo2 className="size-2.5" aria-hidden />
+                              </button>
+                            ) : it.status !== 'done' ? (
+                              <button
+                                type="button"
+                                onClick={() => flow.toggleSkipItem(g.index, it.key)}
+                                className="flex size-4.5 items-center justify-center rounded text-muted-foreground/85 transition-colors hover:bg-accent hover:text-amber-600"
+                                title="跳过此靶点（不评估，可随时恢复）"
+                                aria-label={`跳过靶点 ${it.label}`}
+                              >
+                                <Ban className="size-2.5" aria-hidden />
+                              </button>
+                            ) : null}
+                          </span>
+                        )}
                       </span>
-                    </span>
-                  ))}
+                    )
+                  })}
                 </div>
 
                 {/* 组级错误摘要（限两行，全文 tooltip） */}
@@ -418,7 +698,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   </p>
                 )}
 
-                {/* 操作行：报告入口 · 单组批量下载 · 日志弹窗 */}
+                {/* 操作行：报告入口 · 单组批量下载 · 日志弹窗 · v2.38 组级重跑失败/跳过未开始 */}
                 <div className="mt-auto flex flex-wrap items-center gap-1 pt-0.5">
                   {hasReport && groupReportEntry(g)}
                   {hasReport && (
@@ -431,6 +711,28 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     >
                       <FileDown className="size-3" aria-hidden />
                       本组打包
+                    </button>
+                  )}
+                  {editable && (gFailed > 0 || gIncomplete > 0) && (
+                    <button
+                      type="button"
+                      onClick={() => flow.retryGroupFailures(g.index)}
+                      className="inline-flex h-7 items-center gap-1 rounded-lg border border-border bg-muted/40 px-2 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
+                      title={`重置本组 ${gFailed + gIncomplete} 个失败/中断${gIncomplete > 0 ? `/报告不完整（${gIncomplete}）` : ''}靶点（点击「继续运行」后重跑）`}
+                    >
+                      <RotateCcw className="size-3" aria-hidden />
+                      重跑失败/不完整（{gFailed + gIncomplete}）
+                    </button>
+                  )}
+                  {editable && gPending > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => flow.skipGroupPending(g.index)}
+                      className="inline-flex h-7 items-center gap-1 rounded-lg border border-border bg-muted/40 px-2 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-amber-600"
+                      title={`跳过本组 ${gPending} 个未开始的靶点（不评估，可随时恢复）`}
+                    >
+                      <Ban className="size-3" aria-hidden />
+                      跳过未开始（{gPending}）
                     </button>
                   )}
                   <button
@@ -488,6 +790,19 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 <Gauge className="size-3.5" aria-hidden />
                 打开汇总报告
               </a>
+              {/* v2.44：回看已完成运行时可手动重新生成汇总报告（重跑后刷新 / 旧报告过期） */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={run.dashboardPending}
+                onClick={() => void flow.regenerateDashboard()}
+                className="h-8 gap-1.5 rounded-lg px-3 text-[12px] font-medium"
+                title="重新生成汇总报告（按当前全部已完成靶点重新汇总批次统计 + 全靶点总表 + AI 整体可行性，完成后自动下载新 HTML — 重跑/补齐靶点后刷新用）"
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                重新生成
+              </Button>
             </>
           ) : run.dashboardPending ? (
             <div className="min-w-0 flex-1">
@@ -497,35 +812,127 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               </p>
             </div>
           ) : (
-            <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
-              汇总报告生成失败：{run.dashboardError}（运行结果不受影响；重新下载 zip 会重试打包可用的看板）
-            </p>
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2.5">
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-semibold text-amber-700 dark:text-amber-400">
+                  {run.dashboardError === '__done__' ? '本次运行没有成功完成的靶点，未生成汇总报告' : '汇总报告生成失败'}
+                </p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-amber-700/90 dark:text-amber-400/90">
+                  {run.dashboardError === '__done__'
+                    ? '全部靶点均失败/被取消/被跳过，无可统计的评估结果（运行中作业被停止或服务实例回收时会出现此情况）。可点击「重跑失败/不完整项」补齐后重新生成。'
+                    : <>{run.dashboardError}（运行结果不受影响；可重新生成或重新下载 zip 重试打包可用的看板）</>}
+                </p>
+              </div>
+              {run.dashboardError !== '__done__' && doneTargets > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={run.dashboardPending}
+                  onClick={() => void flow.regenerateDashboard()}
+                  className="h-8 gap-1.5 rounded-lg border-amber-500/40 px-3 text-[12px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400"
+                  title="重新生成汇总报告（按当前全部已完成靶点重新汇总，完成后自动下载新 HTML）"
+                >
+                  <RotateCcw className="size-3.5" aria-hidden />
+                  重新生成汇总报告
+                </Button>
+              )}
+            </div>
           )}
         </div>
       )}
 
       {/* ── 底部操作（v2.25：取消按钮与内容区拉开间距 mt-2；说明文字上移） ── */}
       <div className="flex flex-col gap-2.5">
-        <span className="font-mono text-[10.5px] text-muted-foreground/60">
-          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器（最近 5 次）
+        <span className="font-mono text-[10.5px] text-muted-foreground/80">
+          每组报告完成即自动下载到本机下载目录的同一文件夹（TargetEval_HT_日期_Ng/…）· 运行完成后汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）自动下载 · 报告与日志保留在服务端 30 天 · 运行结构保留在浏览器 30 天
         </span>
         <div className="flex flex-wrap items-center gap-2.5">
           {isRunning && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={flow.canceling}
-              onClick={() => void flow.cancelRun()}
-              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:text-red-400"
-            >
-              <XCircle className="size-3.5" aria-hidden />
-              {flow.canceling ? '正在停止…' : '停止运行（保留已完成组）'}
-            </Button>
+            <>
+              {/* v2.38 手动暂停：不取消服务器作业（跑完照常记结果），随时可恢复 */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => flow.pauseRun()}
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:text-amber-400"
+                title="暂停编排（不再开新作业；正在执行的作业会跑完并记录结果）— 可随时从断点继续"
+              >
+                <Pause className="size-3.5" aria-hidden />
+                暂停（可恢复）
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={flow.canceling}
+                onClick={() => void flow.cancelRun()}
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:text-red-400"
+                title="停止运行并取消服务器上正在执行的作业（已完成的结果保留；可随时「继续运行」恢复）"
+              >
+                <XCircle className="size-3.5" aria-hidden />
+                {flow.canceling ? '正在停止…' : '停止运行（可恢复）'}
+              </Button>
+            </>
           )}
           {isDone && (
-            <Button type="button" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground">
-              开始新的高通量评估
+            <>
+              <Button type="button" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground">
+                开始新的高通量评估
+              </Button>
+              {retryableTargets > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void flow.retryFailed()}
+                  className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                  title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即重新运行（汇总报告将重新生成）`}
+                >
+                  <Play className="size-3.5" aria-hidden />
+                  {incompleteTargets > 0 && failedTargets === 0
+                    ? `重跑报告不完整项（${incompleteTargets}）`
+                    : `重跑失败/不完整项（${retryableTargets}）`}
+                </Button>
+              )}
+              {/* v2.44：无汇总报告状态的兜底入口（旧运行/生成标记被清 — 横幅未渲染时） */}
+              {!run.dashboardId && !run.dashboardPending && !run.dashboardError && doneTargets > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void flow.regenerateDashboard()}
+                  className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                  title="生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，单文件 — 完成后自动下载）"
+                >
+                  <Gauge className="size-3.5" aria-hidden />
+                  生成汇总报告
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={importingZip}
+                onClick={() => zipInputRef.current?.click()}
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的未评估靶点标跳过（用于补齐清单后重跑剩余靶点）"
+              >
+                {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
+                {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+              </Button>
+            </>
+          )}
+          {isStopped && (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void flow.resumeRun()}
+              className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+            >
+              <RotateCcw className="size-3.5" aria-hidden />
+              继续运行
             </Button>
           )}
           {reportableGroups > 0 && (
@@ -536,7 +943,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               disabled={flow.archiving}
               onClick={() => void flow.archiveRun()}
               className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
-              title="打包本次运行全部报告为单个 zip（每组一个子文件夹，含合并报告与 README 清单）"
+              title="打包本次运行全部报告为单个 zip（每组一个子文件夹，含合并报告与 README 清单；内附靶点清单可回导跳过已完成靶点）"
             >
               {flow.archiving
                 ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden />
@@ -555,7 +962,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <Terminal className="size-4 shrink-0 text-primary" aria-hidden />
               第 {logDialogGroup != null ? logDialogGroup + 1 : 0} 组运行日志
               {logDialogGroupData && (
-                <span className="font-mono text-[11px] font-normal text-muted-foreground/70">
+                <span className="font-mono text-[11px] font-normal text-muted-foreground/85">
                   {logDialogGroupData.targets.length > 0
                     ? logDialogGroupData.targets.join(' · ')
                     : `${logDialogGroupData.items.length} 条序列`}

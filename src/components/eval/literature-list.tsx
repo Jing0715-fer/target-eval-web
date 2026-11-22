@@ -68,7 +68,7 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
                     {it.journal && <span className="italic">{it.journal}</span>}
                     {it.year && <span>{it.journal ? '· ' : ''}{it.year}</span>}
                     {it.doi && (
-                      <span className="max-w-full truncate font-mono text-[11px] text-muted-foreground/70" title={it.doi}>
+                      <span className="max-w-full truncate font-mono text-[11px] text-muted-foreground/85" title={it.doi}>
                         DOI: {it.doi}
                       </span>
                     )}
@@ -86,7 +86,7 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
                   {/* 关联结构 */}
                   {linked.length > 0 && (
                     <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                      <span className="eval-eyebrow text-muted-foreground/70">关联结构</span>
+                      <span className="eval-eyebrow text-muted-foreground/85">关联结构</span>
                       {linked.slice(0, MAX_LINKED_PDB).map((p) => (
                         <a
                           key={p.pdbId}
@@ -101,7 +101,7 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
                       ))}
                       {linked.length > MAX_LINKED_PDB && (
                         <span
-                          className="font-mono text-[10px] text-muted-foreground/60"
+                          className="font-mono text-[10px] text-muted-foreground/80"
                           title={linked.slice(MAX_LINKED_PDB).map((p) => p.pdbId).join(', ')}
                         >
                           +{linked.length - MAX_LINKED_PDB}

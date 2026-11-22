@@ -116,7 +116,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
           {uploading ? (
             <LoaderCircle className="size-6 animate-spin text-primary" />
           ) : (
-            <FileUp className="size-6 text-muted-foreground/60" />
+            <FileUp className="size-6 text-muted-foreground/80" />
           )}
           <div className="text-[13px] font-medium text-foreground/90">
             {uploading
@@ -136,7 +136,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
           {uploading && uploadProgress?.phase === 'parsing' && (
             <div className="text-[11px] text-muted-foreground/80">分块上传完成，后台解析中（多图识别约需 10–90 秒）…</div>
           )}
-          <div className="font-mono text-[10.5px] leading-relaxed text-muted-foreground/70">
+          <div className="font-mono text-[10.5px] leading-relaxed text-muted-foreground/85">
             .docx（≤ 20MB）· 自动解析 UniProt ID、序列与实验图片，AI 提取目标与科学问题
           </div>
         </div>
@@ -227,7 +227,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             ) : null}
             {insights?.proteinName && (
               <span
-                className="ml-auto min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
+                className="ml-auto min-w-0 truncate font-mono text-[11px] text-muted-foreground/85"
                 title={`${insights.proteinName}${insights.organism ? ` · ${insights.organism}` : ''}`}
               >
                 {insights.proteinName}{insights.organism ? ` · ${insights.organism}` : ''}
@@ -321,7 +321,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                     <PillBottle className="size-3 text-primary" />
                     从评估表提取的配体
-                    <span className="font-normal text-muted-foreground/70">
+                    <span className="font-normal text-muted-foreground/85">
                       （提交评估时自动归一为 PDB 化学组分 / PubChem 信息，无需手动输入）
                     </span>
                   </div>
@@ -343,19 +343,19 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               <div className="flex flex-col gap-1.5">
                 {eSeqNotes && (
                   <p className="break-words text-xs leading-relaxed text-muted-foreground">
-                    <span className="lin-eyebrow mr-1.5 text-muted-foreground/70">构建</span>
+                    <span className="lin-eyebrow mr-1.5 text-muted-foreground/85">构建</span>
                     {eSeqNotes}
                   </p>
                 )}
                 {eHomologs && (
                   <p className="break-words text-xs leading-relaxed text-muted-foreground">
-                    <span className="lin-eyebrow mr-1.5 text-muted-foreground/70">同源</span>
+                    <span className="lin-eyebrow mr-1.5 text-muted-foreground/85">同源</span>
                     {eHomologs}
                   </p>
                 )}
                 {eConcerns.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="lin-eyebrow text-muted-foreground/70">风险</span>
+                    <span className="lin-eyebrow text-muted-foreground/85">风险</span>
                     {eConcerns.map((c, i) => (
                       <span key={i} className="break-words rounded-sm border border-amber-500/30 bg-amber-500/[0.07] px-1.5 py-0.5 text-[11px] text-amber-700 dark:text-amber-400">
                         <Lightbulb className="mr-0.5 inline size-2.5" aria-hidden />
@@ -389,7 +389,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                 title={`命中依据：${r.matchedOn === 'gene' ? '基因符号/别名精确命中' : r.matchedOn === 'protein' ? '蛋白名命中' : '全文检索命中'}${r.alternates?.length ? `；备选：${r.alternates.map(a => `${a.accession}（${a.organism ?? '未知物种'}${a.reviewed ? ' · 已评审' : ''}）`).join('、')}` : ''}`}
               >
                 <span className="font-mono text-[12px] font-semibold text-foreground/90">{r.name}</span>
-                <ArrowRight className="size-3 shrink-0 text-muted-foreground/60" aria-hidden />
+                <ArrowRight className="size-3 shrink-0 text-muted-foreground/80" aria-hidden />
                 <span className="font-mono text-[12px] font-semibold text-primary">{r.accession}</span>
                 <span
                   className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
@@ -405,7 +405,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                 </span>
                 {r.alternates?.length ? (
                   <span
-                    className="shrink-0 font-mono text-[10px] text-muted-foreground/70"
+                    className="shrink-0 font-mono text-[10px] text-muted-foreground/85"
                     title={r.alternates.map(a => `${a.accession}（${a.organism ?? '未知物种'}${a.reviewed ? ' · 已评审' : ''}）`).join('；')}
                   >
                     备选 {r.alternates.length}
@@ -507,7 +507,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   </div>
                   {s.seq && (
                     <p
-                      className="mt-1 truncate font-mono text-[11px] text-muted-foreground/70"
+                      className="mt-1 truncate font-mono text-[11px] text-muted-foreground/85"
                       title={s.seq}
                     >
                       {s.seq}
@@ -536,7 +536,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
               const sec = parsed.images.filter(im => im.kind === 'sec').length
               if (!gel && !sec) return null
               return (
-                <span className="text-muted-foreground/70">
+                <span className="text-muted-foreground/85">
                   （{[gel ? `${gel} 张 SDS-PAGE 胶图` : null, sec ? `${sec} 张 SEC 分子筛图` : null].filter(Boolean).join(' · ')}）
                 </span>
               )
@@ -567,7 +567,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   )}
                 </div>
                 <div className="flex items-start gap-1 px-2 py-1.5">
-                  <FileCheck2 className="mt-0.5 size-3 shrink-0 text-muted-foreground/60" />
+                  <FileCheck2 className="mt-0.5 size-3 shrink-0 text-muted-foreground/80" />
                   <p
                     className="line-clamp-2 text-[11px] leading-snug text-muted-foreground"
                     title={img.caption || `${img.sizeKB} KB`}

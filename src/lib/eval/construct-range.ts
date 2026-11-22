@@ -24,6 +24,12 @@
  * —— 防 accession 自带 isoform 段「P12345-12」被当成「45-12」，防标签/克隆号段
  * 「SLC10A1-3C」「CD1-H5243」中间夹的数字被当区间；仅数字-数字 / 字母前缀 / aa
  * 前缀三类形态；无区间证据的靶点不强行配（过滤缺省保留，宁缺勿错）。
+ *
+ * v2.37 年份区间守卫：纯数字区间两端均落在 1900-2099 且跨度 ≤60（如
+ * 「2022-2024 流行株」「2019-2021 年度」）判为年份区间，不作为残基区间 —
+ * 用户实测：序列靶点被错误附上「2022-2024」评估区间（把流行年份当残基编号，
+ * 作业按 3 残基截短构建分流）。仅纯数字形态设防（字母前缀 M1-L507 / aa 前缀
+ * aa64-742 不可能是年份）。
  */
 import type { ResidueRange } from './range-filter'
 
@@ -69,6 +75,16 @@ function pickRange(m: RegExpExecArray, si: number, ei: number): ResidueRange | n
   return [s, e]
 }
 
+/**
+ * v2.37 年份区间守卫：纯数字区间两端均在 1900-2099 且跨度 ≤60 → 判为年份区间
+ * （「2022-2024」「2019-2021」等流行株/收录年份写法），不作为残基区间。
+ * 两端落在年份窗口但跨度 >60（如 1900-2050）仍按残基区间对待（大蛋白截短构建）。
+ * 供 API 路由复用：作业 options.range 中的年份区间同样忽略（含历史/续跑快照）。
+ */
+export function isYearSpan(s: number, e: number): boolean {
+  return s >= 1900 && s <= 2099 && e >= 1900 && e <= 2099 && e - s <= 60
+}
+
 interface RangePattern {
   src: string
   flags: string
@@ -81,8 +97,15 @@ const RANGE_PATTERNS: RangePattern[] = [
   { src: '(?:^|[^0-9A-Za-z])[aA][aA](\\d{1,5})\\s*[-–]\\s*(\\d{1,5})(?![0-9])', flags: '', pick: m => pickRange(m, 1, 2) },
   // S2-E748 / M1-L507 / R22-R421（字母前缀 author numbering）
   { src: '(?:^|[^0-9A-Za-z])([A-Za-z])(\\d{1,5})\\s*[-–]\\s*([A-Za-z])(\\d{1,5})(?![0-9])', flags: '', pick: m => pickRange(m, 2, 4) },
-  // 83-548 / 4393-5324 / 23-234（纯数字）
-  { src: '(?:^|[^0-9A-Za-z])(\\d{1,5})\\s*[-–]\\s*(\\d{1,5})(?![0-9])', flags: '', pick: m => pickRange(m, 1, 2) },
+  // 83-548 / 4393-5324 / 23-234（纯数字；v2.37 年份守卫 — 两端均在 1900-2099 且跨度 ≤60 的年份区间除外）
+  {
+    src: '(?:^|[^0-9A-Za-z])(\\d{1,5})\\s*[-–]\\s*(\\d{1,5})(?![0-9])',
+    flags: '',
+    pick: m => {
+      const r = pickRange(m, 1, 2)
+      return r && isYearSpan(r[0], r[1]) ? null : r
+    },
+  },
 ]
 
 /** 从一段文本解析首个残基区间（无则 null） */
@@ -221,7 +244,8 @@ const BUILD_SCAN_CELL_MAX = 400
 export interface RowScanResult {
   /** 行内 UniProt 靶点（含区间；序 = 单元格出现序；行内 acc|区间去重） */
   targets: HtRowTarget[]
-  /** 行内全部构建区间（owner 去重后；供无 UniProt 行的序列靶点 1:1 配对） */
+  /** 行内全部构建区间（owner 去重；v2.37 起仅供排查/兼容导出 — 序列兜底靶点
+   *  不再据此配对，评估区间由管线在 BLAST 归属后推导） */
   seqRanges: ResidueRange[]
 }
 

@@ -19,6 +19,7 @@ import {
   Loader2,
   ChevronDown,
   Printer,
+  RefreshCw,
   RotateCcw,
   Ruler,
   SearchX,
@@ -41,6 +42,7 @@ import { AssetGallery } from './asset-gallery'
 import { Ligand2dFigure } from './ligand-2d'
 import { InteractionStructures } from './interaction-structures'
 import type { BlastStatusCode, JobDetail, LigandDetail, ScoreItem } from './types'
+import { regenerateJobReport } from './api'
 
 /* ---------------- 通用小组件 ---------------- */
 
@@ -82,14 +84,14 @@ function SpecCell({
 }) {
   return (
     <div className={cn('flex flex-col gap-1 bg-card px-4 py-3.5', className)}>
-      <span className="lin-eyebrow text-muted-foreground/70">{label}</span>
+      <span className="lin-eyebrow text-muted-foreground/85">{label}</span>
       <span className="flex flex-wrap items-baseline gap-2">
         <span className="text-xl font-semibold tabular-nums tracking-[-0.02em] text-foreground">
           {value}
         </span>
         {badge}
       </span>
-      {sub && <span className="truncate text-[11px] text-muted-foreground/70" title={sub}>{sub}</span>}
+      {sub && <span className="truncate text-[11px] text-muted-foreground/85" title={sub}>{sub}</span>}
     </div>
   )
 }
@@ -175,9 +177,9 @@ function SectionHeader({
     <div className="flex flex-wrap items-baseline gap-2.5 border-b border-border pb-2">
       <span className="lin-eyebrow text-primary">{no}</span>
       <h2 className="text-[17px] font-semibold tracking-[-0.015em] text-foreground">{title}</h2>
-      <span className="lin-eyebrow hidden text-muted-foreground/60 sm:inline">{en}</span>
+      <span className="lin-eyebrow hidden text-muted-foreground/80 sm:inline">{en}</span>
       {count && (
-        <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/70">
+        <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/85">
           {count}
         </span>
       )}
@@ -250,14 +252,14 @@ function BlastStatusBox({ status, note, provider }: { status?: BlastStatusCode; 
         ? 'text-violet-600 dark:text-violet-400'
         : status === 'skipped-homolog'
           ? 'text-teal-600 dark:text-teal-400'
-          : 'text-muted-foreground/60'
+          : 'text-muted-foreground/80'
   return (
     <div className={cn('flex items-start gap-3 rounded-xl border px-4 py-5', tone)}>
       <SearchX className={cn('mt-0.5 size-4.5 shrink-0', iconTone)} aria-hidden />
       <div className="min-w-0 text-sm leading-relaxed text-foreground/80">
         {info}
         {status !== 'failed' && (
-          <p className="mt-1.5 text-xs text-muted-foreground/70">
+          <p className="mt-1.5 text-xs text-muted-foreground/85">
             可行性结论主要基于直接结构与文献证据；如需同源检索，可在高级选项中开启「强制 BLAST」后重新评估。
           </p>
         )}
@@ -279,14 +281,17 @@ function ReportFrame({
   iframeRef,
   onFail,
   reportHtml,
+  reloadNonce,
 }: {
   jobId: string
   iframeRef: React.RefObject<HTMLIFrameElement | null>
   onFail: () => void
   /** v2.4 无状态同步评估：内联 HTML 报告（srcDoc 直接渲染，不经 /api/jobs/{id}/report） */
   reportHtml?: string | null
+  /** v2.51：报告原地重跑完成后 +1 → src 追加 cache-bust 强制 iframe 重拉新 HTML */
+  reloadNonce?: number
 }) {
-  const [height, setHeight] = useState(1600)
+  const [height, setHeight] = useState(560) // v2.55：加载占位从 1600px 收窄 — 报告到达后同步真实高度，避免白屏期巨型空洞
   const [loaded, setLoaded] = useState(false)
 
   const syncHeight = useCallback(() => {
@@ -333,7 +338,7 @@ function ReportFrame({
       <iframe
         ref={iframeRef}
         srcDoc={reportHtml ?? undefined}
-        src={reportHtml ? undefined : `/api/jobs/${jobId}/report`}
+        src={reportHtml ? undefined : `/api/jobs/${jobId}/report${reloadNonce ? `?_r=${reloadNonce}` : ''}`}
         title="评估报告（与下载 HTML 一致）"
         aria-label="评估报告（与下载 HTML 一致）"
         onLoad={() => {
@@ -368,6 +373,69 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const [embedFailed, setEmbedFailed] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const reportFrameRef = useRef<HTMLIFrameElement>(null)
+
+  // ── v2.51：单靶点报告 LLM 原地重跑（沿用既有数据，仅重跑 LLM 章节）──
+  const [regenOpen, setRegenOpen] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
+  const [regenElapsed, setRegenElapsed] = useState(0)
+  /** 重跑成功后的本地覆盖（reportMarkdown / 章节标记 — props.job 不重拉） */
+  const [regenFresh, setRegenFresh] = useState<{ reportMarkdown?: string | null; reportLlmOk?: boolean; reportLlmMissing?: number } | null>(null)
+  /** 重跑完成后 +1 → 内嵌/预览 iframe 追加 cache-bust 强制重拉新 HTML */
+  const [reloadNonce, setReloadNonce] = useState(0)
+  const regenStartRef = useRef(0)
+
+  // 重跑进行中计时（分钟级 — 展示已等待时长，避免误认为卡死）
+  useEffect(() => {
+    if (!regenerating) return
+    const t = setInterval(() => {
+      setRegenElapsed(Math.floor((Date.now() - regenStartRef.current) / 1000))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [regenerating])
+
+  const runRegen = async () => {
+    if (regenerating) return
+    setRegenOpen(false)
+    regenStartRef.current = Date.now()
+    setRegenElapsed(0)
+    setRegenerating(true)
+    try {
+      const result = await regenerateJobReport(job.id)
+      // 拉取最新作业详情（reportMarkdown / summary 章节标记 / 日志）
+      let fresh: JobDetail | null = null
+      try {
+        const res = await fetch(`/api/jobs/${job.id}`, { cache: 'no-store' })
+        if (res.ok) fresh = (await res.json()) as JobDetail
+      } catch { /* 详情拉取失败 → 用重跑接口返回的缺章数兜底 */ }
+      setRegenFresh({
+        reportMarkdown: fresh ? fresh.reportMarkdown ?? null : undefined,
+        reportLlmOk: fresh?.summary?.reportLlmOk ?? true,
+        reportLlmMissing: fresh?.summary?.reportLlmMissing ?? result.missing,
+      })
+      setReloadNonce(n => n + 1)
+      setEmbedFailed(false)
+      if (result.missing > 0) {
+        toast({
+          title: '报告已重新生成（部分章节失败）',
+          description: `${result.missing} 个章节未生成（供应商限流/超时常见）— 已展示成功章节；可再次「重新生成报告」补齐。`,
+          variant: 'destructive',
+        })
+      } else {
+        toast({
+          title: '报告已重新生成',
+          description: 'LLM 分析已按既有数据原地重跑，在线展示与下载文件均已更新。',
+        })
+      }
+    } catch (e) {
+      toast({
+        title: '报告重新生成失败',
+        description: e instanceof Error ? e.message : '请稍后重试（当前版本内容未受影响）',
+        variant: 'destructive',
+      })
+    } finally {
+      setRegenerating(false)
+    }
+  }
 
   const openPreview = () => {
     setPreviewLoaded(false)
@@ -411,8 +479,10 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   const ms = summary.methodStats
   const blastInfo = summary.blast ?? null
   const ligands = summary.ligands ?? []
-  const reportMd = job.reportMarkdown?.trim() || null
-  const reportLlmFailed = summary.reportLlmOk === false
+  /** v2.51：重跑后的本地覆盖优先（props.job 未变时展示最新版本） */
+  const reportMd = ((regenFresh && regenFresh.reportMarkdown !== undefined ? regenFresh.reportMarkdown : job.reportMarkdown))?.trim() || null
+  const reportMissing = regenFresh ? (regenFresh.reportLlmMissing ?? 0) : (summary.reportLlmMissing ?? 0)
+  const reportLlmFailed = (regenFresh ? regenFresh.reportLlmOk : summary.reportLlmOk) === false || reportMissing > 0
   const reportDeferred = summary.reportDeferred === true
   /** v2.29：评估区间与范围外结构（重叠优先展示 / 折叠保留） */
   const rangeInfo = summary.range ?? null
@@ -427,6 +497,9 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
    *  单靶点作业且报告已生成时启用；deferred（并入合并报告）或文件丢失时降级为下方 React 数据区块。
    *  v2.36：浏览器缓存副本（服务端实例已回收）无服务端文件 → 直接走 markdown 数据区块 */
   const embedReport = !reportDeferred && !job.fromCache && (job.reportAvailable === true || Boolean(inlineReportHtml)) && !embedFailed
+  /** v2.51：报告 LLM 原地重跑可用（服务端单靶点报告 + v2.51 后完成的作业才有快照；
+   *  旧作业无快照时接口返回明确错误引导重新评估，按钮仍展示让用户知道能力存在） */
+  const canRegen = job.status === 'done' && !reportDeferred && !job.fromCache && !job.stateless && job.reportAvailable === true
 
   const downloadReport = () => {
     // v2.36：缓存副本无服务端文件 → 导出 markdown 文本（另存 .md）
@@ -574,7 +647,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <Crosshair className="size-3 shrink-0" aria-hidden />
           {u.uniprotId ? `当前靶点 ${u.uniprotId}` : `序列靶点${summary.targetIdentity ? ` · ${summary.targetIdentity.sourceLabel}` : ''}`}
         </span>
-        <span className="font-mono text-[11px] text-muted-foreground/70">
+        <span className="font-mono text-[11px] text-muted-foreground/85">
           作业 {job.id.slice(0, 8)} · 耗时 {formatDuration(Math.round((summary.durationMs ?? 0) / 1000))}
         </span>
       </div>
@@ -633,7 +706,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               {g}
             </span>
           ))}
-          <span className="font-sans text-muted-foreground/70">
+          <span className="font-sans text-muted-foreground/85">
             {u.organism || '未知物种'} · {u.sequenceLength?.toLocaleString?.() ?? '—'} aa
           </span>
         </div>
@@ -645,7 +718,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         )}
         {summary.construct && (
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-muted-foreground">
-            <span className="lin-eyebrow text-muted-foreground/70">客户构建</span>
+            <span className="lin-eyebrow text-muted-foreground/85">客户构建</span>
             <span className="rounded-md border border-primary/30 bg-primary/[0.06] px-1.5 py-0.5 text-primary">
               {summary.construct.providedLength.toLocaleString()} aa
               {summary.construct.start != null && summary.construct.end != null
@@ -757,10 +830,37 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 <Download className="size-3.5" />
                 下载 HTML
               </Button>
+              {/* v2.51：报告 LLM 原地重跑（内嵌报告工具条主入口 — 正常路径恒可见） */}
+              {canRegen && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRegenOpen(true)}
+                  disabled={regenerating}
+                  title="沿用本作业既有数据（结构/同源/文献/评分不重收集），仅 LLM 分析章节重新生成（通常 1-3 分钟）"
+                  className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                >
+                  <RefreshCw className={cn('size-3.5', regenerating && 'animate-spin')} aria-hidden />
+                  {regenerating ? '重新生成中…' : '重新生成报告'}
+                </Button>
+              )}
             </div>
           </div>
-          <ReportFrame jobId={job.id} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} reportHtml={inlineReportHtml} />
+          <ReportFrame jobId={job.id} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} reportHtml={inlineReportHtml} reloadNonce={reloadNonce} />
         </motion.section>
+      )}
+
+      {/* v2.51：重跑进行中横幅（分钟级 — 已等待时长 + 期间可继续查看当前版本；
+          独立于 embed/降级视图，两条展示路径下均可见） */}
+      {regenerating && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-primary/30 bg-primary/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-foreground/80">
+          <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin text-primary" aria-hidden />
+          <p>
+            正在原地重新生成 LLM 报告章节（沿用既有数据，通常 1-3 分钟）· 已等待 {' '}
+            <span className="font-mono tabular-nums">{Math.floor(regenElapsed / 60)}:{String(regenElapsed % 60).padStart(2, '0')}</span>。
+            期间可继续查看当前版本，完成后在线展示与下载文件自动更新。
+          </p>
+        </div>
       )}
 
       {/* 3-9 旧版 React 数据区块：仅 deferred（并入合并报告）或内嵌报告不可用时降级展示 */}
@@ -805,12 +905,12 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                     {llmA.applied && llmA.overall !== 0 ? `（总体 ${llmA.overall > 0 ? '+' : '−'}${Math.abs(llmA.overall)}）` : ''}
                   </span>
                   <span className="flex flex-wrap items-center gap-1.5">
-                    <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                    <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                     <AdjChip label="X-ray" v={llmA.xray} />
                     <AdjChip label="Cryo-EM" v={llmA.cryoem} />
                     <AdjChip label="NMR" v={llmA.nmr} />
                   </span>
-                  <span className="font-mono text-[11px] text-muted-foreground/70">
+                  <span className="font-mono text-[11px] text-muted-foreground/85">
                     置信度 {llmA.confidence === 'high' ? '高' : llmA.confidence === 'medium' ? '中' : '低'}
                     {llmA.engine ? ` · ${llmA.engine}` : ''} · {(llmA.durationMs / 1000).toFixed(1)}s
                   </span>
@@ -843,10 +943,10 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                       {oligo.stoichiometry}
                     </span>
                   )}
-                  <span className="font-mono text-[11px] text-muted-foreground/70">置信度 {oligoConfZh}</span>
+                  <span className="font-mono text-[11px] text-muted-foreground/85">置信度 {oligoConfZh}</span>
                   {adj && (
                     <span className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                       <AdjChip label="X-ray" v={adj.xray} />
                       <AdjChip label="Cryo-EM" v={adj.cryoem} />
                       <AdjChip label="NMR" v={adj.nmr} />
@@ -898,7 +998,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   </span>
                   {mwAdj && (
                     <span className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                       <AdjChip label="X-ray" v={mwAdj.xray} />
                       <AdjChip label="Cryo-EM" v={mwAdj.cryoem} />
                       <AdjChip label="NMR" v={mwAdj.nmr} />
@@ -953,7 +1053,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                                     </span>
                                   ))}
                                   <b className="ml-1 text-foreground">= 装配 ~{c.totalKda} kDa</b>
-                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/60">{c.note}</span>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/80">{c.note}</span>
                                 </span>
                               </li>
                             ))}
@@ -984,7 +1084,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                                   <b className="ml-1 text-foreground">
                                     = 同源装配 ~{h.totalKda} kDa → 靶点换算 ~{h.estimatedKda} kDa
                                   </b>
-                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/60">{h.note}</span>
+                                  <span className="mt-0.5 block font-mono text-[10.5px] text-muted-foreground/80">{h.note}</span>
                                 </span>
                               </li>
                             ))}
@@ -998,7 +1098,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                             {sizedPartners.slice(0, 8).map(p => (
                               <li key={`mwp-${p.accession}`} className="text-xs leading-6 text-foreground/80">
                                 <b className="text-foreground">{p.geneName ?? p.proteinName ?? p.accession}</b>
-                                <span className="mx-1.5 font-mono text-[10.5px] text-muted-foreground/70">{p.accession}</span>
+                                <span className="mx-1.5 font-mono text-[10.5px] text-muted-foreground/85">{p.accession}</span>
                                 <span className="mr-1.5 font-mono text-[11px]">{p.lengthAa} aa ~{p.kda} kDa</span>
                                 <span
                                   className={cn(
@@ -1013,7 +1113,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                                   {p.evidenceLevel === 'complex' ? '复合物结构' : p.evidenceLevel === 'homolog' ? '同源复合物结构' : '仅实验证据'}
                                 </span>
                                 {p.evidencePdbIds?.length
-                                  ? <span className="font-mono text-[10.5px] text-muted-foreground/70">证据：{p.evidencePdbIds.join('、')}</span>
+                                  ? <span className="font-mono text-[10.5px] text-muted-foreground/85">证据：{p.evidencePdbIds.join('、')}</span>
                                   : (p.evidenceLevel === 'complex' || p.evidenceLevel === 'homolog')
                                     ? null
                                     : <span className="text-amber-700 dark:text-amber-400">无结构证据支持，未计入装配估计 — 不可据此认定可用于 Cryo-EM 增重</span>}
@@ -1084,7 +1184,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   </span>
                   {itxAdj && (
                     <span className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/60">调整</span>
+                      <span className="font-mono text-[10px] tracking-wider text-muted-foreground/80">调整</span>
                       <AdjChip label="X-ray" v={itxAdj.xray} />
                       <AdjChip label="Cryo-EM" v={itxAdj.cryoem} />
                       <AdjChip label="NMR" v={itxAdj.nmr} />
@@ -1164,6 +1264,18 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <Download className="size-4" />
               下载 HTML
             </Button>
+            {canRegen && (
+              <Button
+                variant="outline"
+                onClick={() => setRegenOpen(true)}
+                disabled={regenerating}
+                title="沿用本作业既有数据（结构/同源/文献/评分不重收集），仅 LLM 分析章节重新生成（通常 1-3 分钟）"
+                className="h-10 gap-2 rounded-lg bg-card px-4"
+              >
+                <RefreshCw className={cn('size-4', regenerating && 'animate-spin')} aria-hidden />
+                {regenerating ? '重新生成中…' : '重新生成报告'}
+              </Button>
+            )}
           </div>
         )}
       </motion.section>
@@ -1187,7 +1299,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         {reportLlmFailed && (
           <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            LLM 报告生成失败或部分失败，以下可能仅包含成功生成的章节；结构化数据区块（评分 / PDB / 文献）不受影响，可重新评估以重试报告生成。
+            LLM 报告生成失败或部分失败{reportMissing > 0 ? `（${reportMissing} 个章节未生成）` : ''}，以下可能仅包含成功生成的章节；结构化数据区块（评分 / PDB / 文献）不受影响{canRegen ? '，可点击上方「重新生成报告」补齐缺失章节' : '，可重新评估以重试报告生成'}。
           </div>
         )}
         {reportDeferred ? (
@@ -1198,7 +1310,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 本靶点与批次内其他靶点经分析判定为<span className="font-semibold text-violet-600 dark:text-violet-400">关联靶点</span>，
                 已按单靶点流程生成完整独立评估报告，展示于合并报告的该靶点单独评估页（与单独评估同格式：评估分析 / 可行性评分 / PDB 结构与文献全量展开 / 同源 / 客户实验数据）
               </p>
-              <p className="text-xs text-muted-foreground/70">
+              <p className="text-xs text-muted-foreground/85">
                 下方数据区块（评分 / PDB / BLAST / 文献）为该靶点的独立数据；合并报告可经上方切换栏查看
               </p>
             </CardContent>
@@ -1206,7 +1318,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         ) : reportMd ? (
           <Card className="rounded-xl border-border bg-card shadow-none">
             <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
-              <div className="mb-4 flex items-center gap-2 text-muted-foreground/70">
+              <div className="mb-4 flex items-center gap-2 text-muted-foreground/85">
                 <BookOpenText className="size-3.5" aria-hidden />
                 <span className="lin-eyebrow">Analysis · 由大语言模型基于下方结构化数据生成，结论供参考</span>
               </div>
@@ -1222,7 +1334,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <p className="text-sm text-muted-foreground">
                 该作业未内联保存报告文本（历史版本作业）
               </p>
-              <p className="text-xs text-muted-foreground/70">
+              <p className="text-xs text-muted-foreground/85">
                 可点击上方「在线预览报告」或「下载 HTML」查看完整报告
               </p>
             </CardContent>
@@ -1349,14 +1461,14 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   </div>
                   <LigandPropsRow d={l.detail} />
                   {(l.detail?.iupacName ?? l.pubchem?.iupacName) && (
-                    <p className="text-[11px] leading-relaxed break-all text-muted-foreground/70">
+                    <p className="text-[11px] leading-relaxed break-all text-muted-foreground/85">
                       IUPAC 名 <span className="font-mono">{l.detail?.iupacName ?? l.pubchem?.iupacName}</span>
                     </p>
                   )}
-                  <p className="text-xs text-muted-foreground/70">
+                  <p className="text-xs text-muted-foreground/85">
                     PDB 化学组分库无对应条目 — 已通过 PubChem 识别{ l.pubchem && <>，点击 <span className="font-mono">CID {l.pubchem.cid}</span> 查看化合物详情</> }
                   </p>
-                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
+                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/80">
                     输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}
                   </p>
                   </div>
@@ -1396,18 +1508,18 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                               : 'border-border bg-muted/60 text-foreground/80 hover:border-ring/60 hover:text-primary',
                           )}
                         >
-                          {s.pdbId}{s.resolution != null && <span className="ml-1.5 font-normal text-muted-foreground/70">{s.resolution.toFixed(1)}</span>}
+                          {s.pdbId}{s.resolution != null && <span className="ml-1.5 font-normal text-muted-foreground/85">{s.resolution.toFixed(1)}</span>}
                           {s.alsoTarget && <span className="ml-1 text-primary">★</span>}
                         </a>
                       ))}
                       {l.totalStructures > 12 && (
-                        <span className="inline-flex min-h-7 items-center px-1 font-mono text-[11px] text-muted-foreground/60">+{l.totalStructures - 12}</span>
+                        <span className="inline-flex min-h-7 items-center px-1 font-mono text-[11px] text-muted-foreground/80">+{l.totalStructures - 12}</span>
                       )}
                     </div>
                   ) : (
-                    <p className="text-xs text-muted-foreground/70">暂无含该配体的 PDB 结构记录</p>
+                    <p className="text-xs text-muted-foreground/85">暂无含该配体的 PDB 结构记录</p>
                   )}
-                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/60">
+                  <p className="border-t border-dashed border-border pt-2.5 font-mono text-[10px] tracking-wide text-muted-foreground/80">
                     输入「{l.raw.length > 30 ? l.raw.slice(0, 29) + '…' : l.raw}」· 归一 {l.strategy || '—'}{l.source === 'eval-table' ? ' · 评估表识别' : l.source === 'file' ? ` · 文件 ${l.fileName ?? ''}` : ''}{l.detail?.inchiKey ? ` · InChIKey ${l.detail.inchiKey}` : ''}
                   </p>
                   </div>
@@ -1509,7 +1621,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-[-0.01em]">
                 评估报告 · {u.proteinName || u.uniprotId}{u.nspLabel ? ` ${u.nspLabel}` : ''}
               </DialogTitle>
-              <DialogDescription className="font-mono text-[11px] text-muted-foreground/70">
+              <DialogDescription className="font-mono text-[11px] text-muted-foreground/85">
                 完整 HTML 报告 · 可直接打印
               </DialogDescription>
             </div>
@@ -1565,17 +1677,53 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                     </div>
                   </div>
                 ) : (
-                  <p className="font-mono text-xs text-muted-foreground/70">报告加载中…</p>
+                  <p className="font-mono text-xs text-muted-foreground/85">报告加载中…</p>
                 )}
               </div>
             )}
             <iframe
               ref={iframeRef}
-              src={`/api/jobs/${job.id}/report`}
+              src={`/api/jobs/${job.id}/report${reloadNonce ? `?_r=${reloadNonce}` : ''}`}
               title="评估报告预览"
               onLoad={() => setPreviewLoaded(true)}
               className="h-full w-full bg-white"
             />
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v2.51：报告原地重跑确认弹窗（沿用既有数据 — 仅 LLM 章节重新生成） */}
+      <Dialog open={regenOpen} onOpenChange={setRegenOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RefreshCw className="size-4 text-primary" aria-hidden />
+              重新生成报告
+            </DialogTitle>
+            <DialogDescription>
+              沿用本作业既有数据（结构 / 同源 / 文献 / 评分不重收集），仅 LLM 分析章节（10 章）重新生成，通常 1-3 分钟。
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/40 px-3.5 py-3 text-xs leading-relaxed text-muted-foreground">
+            <li>· 适合补齐缺失章节、换引擎后重写分析、或对结论不满意时重新生成</li>
+            <li>· 成功后在线展示与下载文件同步更新为新一版（同一作业原地覆盖）</li>
+            <li>· 全部章节生成失败时保留当前版本内容（不影响现有报告）</li>
+            <li>· v2.51 之前完成的旧报告缺少数据快照，无法原地重跑（会明确提示）</li>
+          </ul>
+          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+            LLM 引擎使用当前配置（顶栏引擎徽标所示）；可在顶栏「引擎设置」中切换后再重新生成。评分与结构化数据区块保持原值。
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setRegenOpen(false)} className="h-9 rounded-lg px-4 text-xs">
+              取消
+            </Button>
+            <Button
+              onClick={() => void runRegen()}
+              className="h-9 gap-1.5 rounded-lg bg-primary px-4 text-xs font-medium text-primary-foreground"
+            >
+              <RefreshCw className="size-3.5" />
+              开始重新生成
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

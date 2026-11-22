@@ -32,14 +32,14 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
-import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
-import { describeRelationType, describeBlastStatus, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
+import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, TABLE_FILTER_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
+import { describeRelationType, describeBlastStatus, type AfDomainRange, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
 import { augmentTargetsForSharedPdbCoverage } from './rcsb'
 import { synthesizeScoreRationale } from './score'
-import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs, afToolbarJs } from './alphafold'
 import { loadCachedEsmfoldModel } from './esmfold'
 import { splitQaChapter, parseInsightQa, QA_CHAPTER_TITLE } from './qa-chapter'
 
@@ -102,6 +102,13 @@ export interface MergedTargetData {
   entryName?: string
   /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 单独评估页题目/刊头消费） */
   targetIdentity?: TargetIdentityInfo | null
+  /** v2.45：序列靶点原始提交标签头（报告导入精确匹配 — meta 标记携带；历史作业缺省） */
+  sequenceHeader?: string
+  /** v2.45：提交序列 SHA-256 前 16 hex（报告导入 SHA 精确匹配；历史作业缺省） */
+  seqSha?: string
+  /** v2.46：UniProt DOMAIN 结构域区间（各靶点单独评估页预测结构视图「按域着色」用；
+   *  仅 AFDB 引擎靶点有值；历史作业/无 DOMAIN 注释缺省 → 选项禁用） */
+  afDomains?: AfDomainRange[]
 }
 
 /** 前端展示用的轻量靶点数据（合并报告响应携带 — PDB/BLAST/文献列表带 UniProt 归属）
@@ -211,6 +218,11 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       rangeSource?: string
       rangeOutsidePdbs?: PdbEntry[]
       rangeOutsideBlastHits?: BlastHit[]
+      /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex（报告导入匹配用） */
+      sequenceHeader?: string
+      seqSha?: string
+      /** v2.46：UniProt DOMAIN 结构域区间（预测结构视图「按域着色」用） */
+      afDomains?: AfDomainRange[]
     } | null = null
     let pdbs: PdbEntry[] = []
     let blastHits: BlastHit[] = []
@@ -278,6 +290,11 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       entryName: summary.uniprot?.entryName,
       // v2.16：序列靶点身份识别链（题目/刊头不再「未知靶点」）
       targetIdentity: summary.targetIdentity ?? null,
+      // v2.45：序列靶点导入匹配证据（原始标签头 + 序列 SHA — meta 标记携带）
+      sequenceHeader: summary.sequenceHeader,
+      seqSha: summary.seqSha,
+      // v2.46：UniProt DOMAIN 区间（单独评估页预测结构「按域着色」）
+      afDomains: summary.afDomains,
     })
   }
   return targets
@@ -919,6 +936,22 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // PDB 结构与文献全量展开（expandAll）；AF 视图走公共 MODELS 池，图片走首页池。
   const targetKeyOf = (t: MergedTargetData) => (t.uniprotId ?? t.label).replace(/[^A-Za-z0-9]/g, '')
 
+  // v2.48.1：重复靶点（同 UniProt/同 label 二次评估合并）key 唯一化 — 视图 id /
+  // data-goto 卡片导航 / #view-target- 深链 / 内嵌 section id 前缀（含表格筛选分组
+  // 作用域）全部引用同一 key；此前重复 key 致两靶点视图与章节锚点全部冲突（筛选
+  // 控制器跨靶点并组、卡片恒进第一视图）。后缀 -2/-3… 与纯字母数字基 key 不碰撞。
+  const keyByTarget = new Map<MergedTargetData, string>()
+  {
+    const seen = new Map<string, number>()
+    for (const t of targets) {
+      const base = targetKeyOf(t)
+      const n = (seen.get(base) ?? 0) + 1
+      seen.set(base, n)
+      keyByTarget.set(t, n === 1 ? base : `${base}-${n}`)
+    }
+  }
+  const keyOf = (t: MergedTargetData) => keyByTarget.get(t) ?? targetKeyOf(t)
+
   // 3Dmol bundle 一次内嵌 + 多视图初始化（所有 data-maf 阶段共用同一实现与 pLDDT 着色）
   // 无可内嵌模型（全部靶点无预测/超预算）时整段省略 — 报告不携带死脚本
   // MODELS 映射为 UniProt → 模型 PDB 文本（纯字符串 — plddtStyleApplyJs 直接消费）
@@ -933,6 +966,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const afModelsJson = JSON.stringify(Object.fromEntries(afModelEntries)).replace(/<\//g, '<\\/')
   const mtrViewerJs = afViews.size > 0 || esmViews.size > 0 ? `
     ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+    <script>${afToolbarJs()}</script>
     <script>
     (function () {
       var MODELS = ${afModelsJson};
@@ -961,6 +995,17 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
             var uri = viewer.pngURI ? viewer.pngURI() : null;
             if (uri && poster) poster.src = uri;
           } catch (e) { /* 打印海报生成失败不影响交互 */ }
+          // v2.46：挂载「下载 PDB + 着色切换」工具条（域区间从 stage data-domains
+          // 读 — renderSingleReportBody 序列化；AFDB 模型才携带，ESMFold 编号不对齐不带）
+          try {
+            if (window.__afTb && window.__afTb.mount) {
+              var afn = stage.getAttribute('data-afn') || 'model.pdb';
+              var domAttr = stage.getAttribute('data-domains');
+              var doms = null;
+              if (domAttr) { try { doms = JSON.parse(domAttr); } catch (er) { doms = null; } }
+              window.__afTb.mount(stage, viewer, pdb, { fileName: afn, domains: doms });
+            }
+          } catch (e) { /* 工具条失败不影响视图 */ }
         } catch (e) { stage.className = 'af-stage af-fail'; try { stage.setAttribute('data-maf-err', String((e && e.message) || e).slice(0, 200)); } catch (er) { /* ignore */ } }
       }
       function visibleStages() {
@@ -1047,7 +1092,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   const SHARED_PDB_COLGROUP = `<colgroup>
     <col style="width:74px"><col style="width:62px"><col style="width:64px"><col style="width:172px"><col><col style="width:86px"><col style="width:72px">
   </colgroup>`
-  // v1.24：全部展示（移除前 60 截断）
+  // v1.24：全部展示（移除前 60 截断）；v2.53 行携带 data-m/-res/-date/-id +
+  // 表标 data-tbl="shared"（TABLE_FILTER_JS 消费 — pdb 类排序：分辨率/日期/PDB ID + 方法/阈值筛选）
   const sharedRows = sharedStructures.map(s => {
     const covChips = s.coverage.map(c =>
       `<span class="cov-chip" title="${esc(c.proteinName)}">${esc(c.uniprotId)}${c.chainRanges ? `<span class="cov-rng">${esc(c.chainRanges)}</span>` : ''}</span>`,
@@ -1055,8 +1101,9 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const lit = s.pubmedId
       ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${s.pubmedId}/" target="_blank" rel="noopener">${s.pubmedId}</a>`
       : '—'
+    const mKey = s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'
     return `
-    <tr>
+    <tr data-m="${mKey}" data-res="${s.resolution ?? ''}" data-date="${esc(s.releaseDate.slice(0, 10))}" data-id="${s.pdbId}">
       <td class="td-id"><a href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener">${s.pdbId}</a></td>
       <td><span class="mth mth-${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}">${s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : esc(s.method.slice(0, 8))}</span></td>
       <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
@@ -1126,7 +1173,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       ${sharedCovSumChips ? `<div class="sh-cov-sum">${sharedCovSumChips}</div>` : ''}
     </div>
     <p class="note">按覆盖靶点数降序、分辨率升序排列；「覆盖靶点」列按输入顺序列出该 PDB 引用的各 UniProt 及其链范围（UniProt 残基编号），×N 为覆盖靶点数。各靶点单独报告页中的同一 PDB 亦带 ◈ 徽标，可互相印证。</p>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="shared">
       ${SHARED_PDB_COLGROUP}
       <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>覆盖靶点</th><th>标题</th><th class="num">释放日期</th><th>文献</th></tr></thead>
       <tbody>${sharedRows}</tbody>
@@ -1170,7 +1217,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const o = t.oligomer
     const ms = t.methodStats
     return `
-    <div class="tgt-card" data-goto="target-${targetKeyOf(t)}" title="查看 ${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
+    <div class="tgt-card" data-goto="target-${keyOf(t)}" title="查看 ${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)} 的单独报告页（综述 / 基本信息 / 预测结构 / PDB / 同源 / 文献）">
       <div class="tgt-name">${esc(t.nspLabel ? `${t.proteinName} ${t.nspLabel}` : t.proteinName)}${t.uniprotId ? ` <a href="https://www.uniprot.org/uniprotkb/${t.uniprotId}" target="_blank" rel="noopener">${t.uniprotId}</a>` : t.targetIdentity ? ` <span class="tgt-idsrc" title="${esc(t.targetIdentity.note ?? t.targetIdentity.sourceLabel)}">${esc(t.targetIdentity.sourceLabel)}${t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}</span>` : ''}</div>
       <div class="tgt-meta">${esc(t.geneNames.slice(0, 3).join('/') || '—')} · ${esc(t.organism || '—')} · ${t.sequenceLength} aa</div>
       ${o ? `<div class="tgt-oligo"><span class="oligo-badge" style="background:${oligoBadgeOf(o.category)}">${esc(oligoCatOf(o.category))}</span>${o.stoichiometry ? `<span class="oligo-stoich">${esc(o.stoichiometry)}</span>` : ''}<span class="tgt-oligo-conf">置信度${esc(describeOligoConfidence(o.confidence))}</span></div>` : ''}
@@ -1395,7 +1442,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
   // 用户需求「主页只显示受体的评估页面」）；G 蛋白伴侣保留独立视图（chips 卡片进入）。
   // 受体导航 chip 指向 home（报告首页即受体页）。
   const targetViewList = await Promise.all(targets.map(async (t, i) => {
-    const key = targetKeyOf(t)
+    const key = keyOf(t)
     const prev = i > 0 ? targets[i - 1] : null
     const next = i < targets.length - 1 ? targets[i + 1] : null
     const isReceptor = !!gpcrBatch && t === gpcrBatch.receptor
@@ -1407,7 +1454,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const esmView = t.esmfold?.cacheKey ? esmViews.get(t.esmfold.cacheKey) : undefined
     const afSummary = (t.alphafold?.available ? t.alphafold : (t.uniprotId ? afMetaFill.get(t.uniprotId) : undefined)) ?? t.alphafold
     const afPooled = view && t.uniprotId
-      ? { mafKey: t.uniprotId, modelId: view.modelId, version: view.version, globalPlddt: view.globalPlddt, fracVeryHigh: view.fracVeryHigh, pdbKb: Math.max(1, Math.round(view.pdbText.length / 1024)) }
+      ? { mafKey: t.uniprotId, modelId: view.modelId, version: view.version, globalPlddt: view.globalPlddt, fracVeryHigh: view.fracVeryHigh, pdbKb: Math.max(1, Math.round(view.pdbText.length / 1024)), domains: t.afDomains }
       : afSummary?.available && t.uniprotId
         ? { mafKey: t.uniprotId, modelId: afSummary.modelId ?? 'AF 模型', version: afSummary.version ?? 1, globalPlddt: afSummary.globalPlddt ?? null, fracVeryHigh: afSummary.fracVeryHigh ?? null, pdbKb: 0, metaOnly: true }
         : esmView && t.esmfold?.available && t.esmfold.cacheKey
@@ -1481,7 +1528,7 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
     const navChip = (tgt: MergedTargetData | null, dir: 'prev' | 'next') => tgt
       ? (gpcrBatch && tgt === gpcrBatch.receptor
           ? `<a class="tgt-nav-chip" data-goto="home" href="#top" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）— 报告首页即该受体的完整评估报告">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}（首页）${dir === 'next' ? ' →' : ''}</a>`
-          : `<a class="tgt-nav-chip" data-goto="target-${targetKeyOf(tgt)}" href="#view-target-${targetKeyOf(tgt)}" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}${dir === 'next' ? ' →' : ''}</a>`)
+          : `<a class="tgt-nav-chip" data-goto="target-${keyOf(tgt)}" href="#view-target-${keyOf(tgt)}" title="${esc(tgt.proteinName)}（${esc(tgt.uniprotId ?? tgt.label)}）">${dir === 'prev' ? '← ' : ''}${esc(tgt.uniprotId ?? tgt.label)}${dir === 'next' ? ' →' : ''}</a>`)
       : ''
     if (isReceptor) {
       // v2.26：受体完整评估报告直接作为报告首页主体 — 不再包独立视图（避免双份大体积）
@@ -1553,7 +1600,7 @@ ${body}
       ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${s.pubmedId}/" target="_blank" rel="noopener">${s.pubmedId}</a>`
       : '—'
     return `
-    <tr>
+    <tr data-m="${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}" data-res="${s.resolution ?? ''}" data-date="${esc(s.releaseDate.slice(0, 10))}" data-id="${s.pdbId}">
       <td class="td-id"><a href="https://www.rcsb.org/structure/${s.pdbId}" target="_blank" rel="noopener">${s.pdbId}</a></td>
       <td><span class="mth mth-${s.isXray ? 'xray' : s.isCryoem ? 'cryoem' : s.isNmr ? 'nmr' : 'other'}">${s.isXray ? 'X-ray' : s.isCryoem ? 'Cryo-EM' : s.isNmr ? 'NMR' : esc(s.method.slice(0, 8))}</span></td>
       <td class="num">${s.resolution != null ? s.resolution.toFixed(2) : '—'}</td>
@@ -1572,7 +1619,7 @@ ${body}
       <div class="sh-cov-sum">${gpcrBatch.receptor.uniprotId ? `<span class="sh-cov-chip">${esc(gpcrBatch.receptor.uniprotId)}<i>${receptorGComplex.length}</i></span>` : ''}${gpcrBatch.gproteins.map(g => g.uniprotId ? `<span class="sh-cov-chip" title="${esc(g.proteinName)} — G 蛋白伴侣">${esc(g.uniprotId)}<i>${receptorGComplex.filter(s => s.coverage.some(c => c.uniprotId === g.uniprotId)).length}</i></span>` : '').join('')}</div>
     </div>
     <p class="note">这些条目证实「${esc(receptorShort(gpcrBatch.receptor))}–G 蛋白复合物」已有直接解析先例：共表达 / 体外组装路线可借鉴其组分构成与化学计量（覆盖列 ×N 为该 PDB 覆盖的输入靶点数，深绿底为受体、浅底为 G 蛋白伴侣实体）；复合物的有效分子量与 Cryo-EM 适用性应结合下方受体的完整评估综合判断。全部批内共有结构（含仅覆盖 G 蛋白组分之间的条目）见页底「批次级补充分析」折叠。</p>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="shared">
       ${SHARED_PDB_COLGROUP}
       <thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>覆盖组分</th><th>标题</th><th class="num">释放日期</th><th>文献</th></tr></thead>
       <tbody>${rxCxRows}</tbody>
@@ -1669,6 +1716,15 @@ ${body}
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <title>${esc(reportTitle)} · ${esc(targets.map(t => t.label).join(' + '))}</title>
+<!-- v2.45 机器可读靶点标记（报告导入精确匹配用 — uniprot/range/seqLength/header/seqSha/label） -->
+<meta name="targeteval:targets" content="${esc(JSON.stringify(targets.map(t => ({
+  uniprot: t.uniprotId,
+  range: t.range,
+  seqLength: t.sequenceLength || undefined,
+  header: t.sequenceHeader,
+  seqSha: t.seqSha,
+  label: t.label,
+}))))}">
 <style>
 ${SINGLE_REPORT_CSS}
 
@@ -1835,7 +1891,7 @@ ${receptorBodyHtml}
     </ol>
     <div class="toc-targets">
       <b>靶点单独报告 · ${targets.length}</b>
-      ${targets.map(t => `<a data-goto="target-${targetKeyOf(t)}" href="#view-target-${targetKeyOf(t)}" title="${esc(t.proteinName)} — PDB ${t.directPdbs.length} · 总体 ${t.scores.overall.score}/10 · 完整单独评估报告（与单靶点评估同格式）">${esc(t.uniprotId ?? t.label)}</a>`).join('')}
+      ${targets.map(t => `<a data-goto="target-${keyOf(t)}" href="#view-target-${keyOf(t)}" title="${esc(t.proteinName)} — PDB ${t.directPdbs.length} · 总体 ${t.scores.overall.score}/10 · 完整单独评估报告（与单靶点评估同格式）">${esc(t.uniprotId ?? t.label)}</a>`).join('')}
     </div>
   </nav>
 
@@ -1905,6 +1961,7 @@ ${receptorBodyHtml}
 ${mtrViewerJs}
 ${viewSwitchJs}
 ${UX_PAGE_JS}
+${TABLE_FILTER_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`

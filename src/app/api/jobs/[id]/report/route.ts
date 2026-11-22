@@ -6,8 +6,9 @@
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
 import { db } from '@/lib/db'
-import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
-import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
+import { getOwner, isOwnedBy } from '@/lib/eval/request-guard'
+import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -16,16 +17,19 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const { id } = await params
   const owner = getOwner(req)
   const job = await db.evaluationJob.findUnique({ where: { id }, select: { reportPath: true, status: true, uniprotId: true, title: true, ownerKey: true, ownerMask: true } })
-  if (!job) return notFound()
-  if (!isOwnedBy(job, owner)) return notFound()
+  // v2.57：本链接带被 window.open 直开 / 嵌入 iframe（历史记录、HT 运行记录、离线看板内链）—
+  // 404 改返友好 HTML 页（保持 404 状态码；fetch 自动下载按 res.ok 判断不受影响）。
+  // 「不存在 / 非本人」同一文案 — 不泄露资源存在性。
+  if (!job) return reportNotFoundResponse()
+  if (!isOwnedBy(job, owner)) return reportNotFoundResponse()
   if (!job.reportPath || job.status !== 'done') {
-    return NextResponse.json({ error: '报告尚未生成（作业未完成）' }, { status: 404 })
+    return reportNotFoundResponse({ reason: '报告尚未生成（作业未完成）' })
   }
   let html: string
   try {
     html = await fs.readFile(job.reportPath, 'utf-8')
   } catch {
-    return NextResponse.json({ error: '报告文件已丢失' }, { status: 404 })
+    return reportNotFoundResponse({ reason: '报告文件已丢失（磁盘数据已被清理或重置）' })
   }
   // v2.7.3：旧报告（无响应式版心标记）注入覆盖 CSS —— 历史作业同样宽屏自适应/移动端自适配；幂等
   html = applyResponsiveOverride(html)
@@ -33,6 +37,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   html = applyZoomUpgrade(html)
   // v2.7.6：旧报告（无 UX 标记）注入 A4 打印分页 + InChIKey/SMILES 复制 + 表格横滚指示；幂等
   html = applyUxUpgrade(html)
+  // v2.53：旧报告（无/旧表筛选标记）注入或升级 PDB/BLAST 列表筛选排序；幂等
+  html = applyTableFilterUpgrade(html)
   const url = new URL(req.url)
   const download = url.searchParams.get('download') === '1'
   const headers: Record<string, string> = {

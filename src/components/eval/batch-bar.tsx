@@ -54,7 +54,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
         <span className="font-medium text-foreground">
           {running ? '批量评估进行中' : '批量评估完成'}
         </span>
-        <span className="font-mono tabular-nums text-muted-foreground/70">
+        <span className="font-mono tabular-nums text-muted-foreground/85">
           {doneCount}/{batch.total} 完成{failCount > 0 ? ` · ${failCount} 失败` : ''}
           {running && runningCount > 1 ? ` · ${runningCount} 个并行执行中` : ''}
         </span>
@@ -66,7 +66,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
               style={{ width: `${Math.round((batch.items.length / batch.total) * 100)}%` }}
             />
           </span>
-          <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">{Math.round((batch.items.length / batch.total) * 100)}%</span>
+          <span className="font-mono text-[10px] tabular-nums text-muted-foreground/85">{Math.round((batch.items.length / batch.total) * 100)}%</span>
         </span>
       </div>
 
@@ -94,7 +94,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
                 : 'border-border bg-muted/50 text-foreground/80'
           )}
         >
-          <Link2 className={cn('size-3.5 shrink-0', rel.relationType === 'homologous' ? 'text-teal-600 dark:text-teal-400' : rel.related ? 'text-violet-600 dark:text-violet-400' : 'text-muted-foreground/60')} aria-hidden />
+          <Link2 className={cn('size-3.5 shrink-0', rel.relationType === 'homologous' ? 'text-teal-600 dark:text-teal-400' : rel.related ? 'text-violet-600 dark:text-violet-400' : 'text-muted-foreground/80')} aria-hidden />
           {rel.relationType === 'homologous' ? (
             <>
               <span className="font-medium">同源蛋白家族 · {batch.total} 个靶点</span>
@@ -123,7 +123,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
           )}
           {rel.rationale && (
             <span
-              className="hidden max-w-full truncate text-muted-foreground/60 md:inline"
+              className="hidden max-w-full truncate text-muted-foreground/80 md:inline"
               title={rel.rationale}
             >
               — {rel.rationale}
@@ -154,7 +154,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
             <span className="lin-eyebrow text-teal-600 dark:text-teal-400">序列归属</span>
             <span>{constructs.length} 条构建序列已并入对应靶点评估</span>
             {homologs.length > 0 && <span className="text-muted-foreground">· {homologs.length} 条同源序列在合并报告中标注</span>}
-            <span className="text-muted-foreground/70">详见合并报告「评估表序列归属」</span>
+            <span className="text-muted-foreground/85">详见合并报告「评估表序列归属」</span>
           </div>
         )
       })()}
@@ -164,7 +164,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
           <MousePointerClick className="size-3.5 shrink-0 text-primary" aria-hidden />
           <span className="text-xs font-semibold text-foreground">切换靶点</span>
-          <span className="text-[11px] text-muted-foreground/70">共 {batch.total} 个 · 点击编号查看对应评估结果</span>
+          <span className="text-[11px] text-muted-foreground/85">共 {batch.total} 个 · 点击编号查看对应评估结果</span>
           {/* 当前查看标识：同蛋白家族（如多个 GP 变体）场景下避免“看不出切换了” */}
           {!running && !mergedActive && currentJobLabel && (
             <span
@@ -218,7 +218,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
                   ? 'border-primary bg-primary font-bold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_0_0_1px_rgb(94_106_210/0.25)]'
                   : clickable
                     ? 'border-border bg-card font-semibold text-foreground/80 hover:border-ring/60 hover:text-primary'
-                    : 'border-border bg-muted/60 text-muted-foreground/60'
+                    : 'border-border bg-muted/60 text-muted-foreground/80'
               )}
             >
               {item.status === 'done' ? (

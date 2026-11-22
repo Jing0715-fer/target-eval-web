@@ -34,7 +34,7 @@ export function Ligand2dFigure({ src, cid, name }: { src: string; cid?: number; 
           放大
         </span>
       </button>
-      <figcaption className="mt-1 font-mono text-[9px] text-muted-foreground/60">
+      <figcaption className="mt-1 font-mono text-[9px] text-muted-foreground/80">
         2D 结构式 · PubChem{cid ? ` · CID ${cid}` : ''}
       </figcaption>
 
@@ -44,7 +44,7 @@ export function Ligand2dFigure({ src, cid, name }: { src: string; cid?: number; 
             <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-[-0.01em]">
               <FlaskConical className="size-4 text-primary" />
               {name}
-              {cid && <span className="font-mono text-xs font-normal text-muted-foreground/70">CID {cid}</span>}
+              {cid && <span className="font-mono text-xs font-normal text-muted-foreground/85">CID {cid}</span>}
             </DialogTitle>
             <DialogDescription className="sr-only">配体 2D 化学结构式放大预览</DialogDescription>
           </DialogHeader>
@@ -57,7 +57,7 @@ export function Ligand2dFigure({ src, cid, name }: { src: string; cid?: number; 
             }}
             className="mx-auto max-h-[68vh] w-auto max-w-full rounded-xl border border-border bg-white object-contain p-2"
           />
-          <p className="text-center font-mono text-[10px] tracking-wide text-muted-foreground/70">
+          <p className="text-center font-mono text-[10px] tracking-wide text-muted-foreground/85">
             2D 结构式 · PubChem{cid ? ` · CID ${cid}` : ''}{dim ? ` · 原始分辨率 ${dim}` : ''}
           </p>
         </DialogContent>

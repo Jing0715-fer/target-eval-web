@@ -256,6 +256,8 @@ export interface BatchReportInfo {
   status?: 'running' | 'done' | 'error'
   /** 生成失败原因（status = error 时） */
   error?: string | null
+  /** v2.37：本报告来自浏览器本地缓存副本（服务端实例已回收，仅回看兜底） */
+  fromCache?: boolean
 }
 
 /** 合并报告历史列表项（v1.13：批量评估历史记录） */
@@ -715,6 +717,8 @@ export interface JobSummary {
   /** v2.15：ESMFold 公共 API 兜底预测信息（AFDB 无收录/纯序列输入时） */
   esmfold?: EsmfoldSummaryInfo
   reportLlmOk?: boolean
+  /** v2.41：LLM 报告未完整生成的章节数（缺省或 0 = 完整）— 高通量据此标记可重跑 */
+  reportLlmMissing?: number
   /** 报告已延迟：数据并入合并评估报告，无独立报告（v1.8+） */
   reportDeferred?: boolean
   /** 批次关系说明（v1.8+ 非关联批量） */
@@ -902,7 +906,7 @@ export interface JobDetail {
   reportHtml?: string | null
   /** v2.4：本作业由无状态同步评估产生（前端历史/下载走内联数据） */
   stateless?: boolean
-  /** v2.36：本详情来自浏览器本地缓存副本（服务端实例已回收，仅回看兑底） */
+  /** v2.36：本详情来自浏览器本地缓存副本（服务端实例已回收，仅回看兜底） */
   fromCache?: boolean
   error: string | null
 }
@@ -930,7 +934,8 @@ export interface HtSeqTarget {
   header: string
   seq: string
   length: number
-  /** v2.27：行内构建区间（UniProt 编号；作业 options.range — 仅保留链范围重叠的结构） */
+  /** v2.27 行内构建区间 · v2.37 起序列靶点不再填充（接口兼容保留）：序列靶点的
+   *  评估区间由管线在 BLAST 归属后推导（构建比对 / BLAST nr HSP），不从 Excel 行文本配对 */
   range?: [number, number]
 }
 
@@ -949,9 +954,16 @@ export interface HTGroupItemState {
   /** v2.23.1 序列靶点：构建标签头（评估表/Excel 序列命名证据） */
   sequenceHeader?: string
   jobId?: string
-  /** pending = 尚未提交作业（未进入并发窗口）；running = 已提交未终态 */
-  status: 'pending' | 'running' | 'done' | 'error' | 'canceled'
+  /** pending = 尚未提交作业（未进入并发窗口）；running = 已提交未终态；
+   *  skipped = v2.38 用户选择跳过 / zip 导入既有报告（不评估，计入已处理） */
+  status: 'pending' | 'running' | 'done' | 'error' | 'canceled' | 'skipped'
   error?: string
+  /** v2.38：跳过原因备注（如「已导入 xxx.zip 的既有报告」；手动跳过时缺省） */
+  skipNote?: string
+  /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
+  reportIncomplete?: boolean
+  /** v2.41：报告不完整说明（缺章数/失败摘要 — chip tooltip 与重跑确认展示） */
+  reportMissingNote?: string
 }
 
 /** 高通量运行的一组（组分隔符「;」切出的单元）：组内按复合物批量评估，单独出报告 */
@@ -963,7 +975,8 @@ export interface HTGroupState {
   /** v2.23.1 序列兜底组的序列靶点（恢复运行时重新提交未启动项所需） */
   seqTargets?: HtSeqTarget[]
   items: HTGroupItemState[]
-  /** pending → judging → evaluating → merging → done；paused = 组间暂停标记 */
+  /** pending → judging → evaluating → merging → done；paused = 组间暂停标记；
+   *  canceled = v2.38 手动停止时未开始的组（可恢复 — resume 重置为 pending） */
   status: 'pending' | 'judging' | 'evaluating' | 'merging' | 'done' | 'paused' | 'canceled'
   relation?: RelationJudgment | null
   relationError?: string
@@ -974,7 +987,7 @@ export interface HTGroupState {
   finishedAt?: number
 }
 
-export type HTRunStatus = 'running' | 'paused' | 'done' | 'interrupted'
+export type HTRunStatus = 'running' | 'paused' | 'done' | 'interrupted' | 'stopped'
 
 /** 一次高通量运行（持久化到 localStorage te_ht_runs_v1，保留多份历史） */
 export interface HTRunState {
@@ -1001,6 +1014,8 @@ export interface HTRunState {
   dashboardPending?: boolean
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；导入时留存） */
   excelRows?: Array<{ label: string; text: string }>
+  /** v2.38：zip 导入备注（导入了几份报告、跳过了几个靶点 — 结果页提示用） */
+  importedNote?: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
@@ -1015,6 +1030,9 @@ export interface HTStartPayload {
   seqGroups?: HtSeqTarget[][]
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；label+折叠文本） */
   excelRows?: Array<{ label: string; text: string }>
+  /** v2.38：启动时的靶点选择（true = 跳过不评估；与 groups/seqGroups 逐组逐位对齐。
+   *  未选中项仍入运行记录（status=skipped，可恢复评估），便于事后勾选补跑） */
+  skipFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

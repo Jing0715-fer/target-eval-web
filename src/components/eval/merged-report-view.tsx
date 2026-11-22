@@ -18,15 +18,20 @@ import {
   Loader2,
   ChevronDown,
   Printer,
+  RefreshCw,
   SearchX,
   ShieldCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Textarea } from '@/components/ui/textarea'
+import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { describeRelationType } from './types'
 import { mdComponents } from './result-view'
+import { regenerateBatchReport } from './api'
+import { cacheBatchReport } from './job-cache'
 import { BlastTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { PdbTable } from './pdb-table'
@@ -38,6 +43,8 @@ export interface MergedReportViewProps {
   /** 参与批次的靶点展示标签（chips 用） */
   targetLabels: string[]
   onNewEvaluation: () => void
+  /** 需求B：重新生成成功后回调（父级同步 flow 状态，切靶点再切回仍显示新版） */
+  onRegenerated?: (report: BatchReportInfo) => void
 }
 
 /* ---------------- v2.10 ③：内嵌完整 HTML 合并报告（与下载同一份文件） ---------------- */
@@ -172,10 +179,10 @@ function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }
           {t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}
         </span>
       )}
-      <span className="truncate font-mono text-[11px] text-muted-foreground/70" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
+      <span className="truncate font-mono text-[11px] text-muted-foreground/85" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
         {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'}
       </span>
-      {right && <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/70">{right}</span>}
+      {right && <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground/85">{right}</span>}
     </div>
   )
 }
@@ -253,7 +260,7 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
           <span className="rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">无 UniProt</span>
         )}
         <span
-          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
+          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/85"
           title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}
         >
           {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'} · {t.sequenceLength} aa
@@ -338,7 +345,10 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
  * 报告文件丢失时降级为旧版 React 数据区块（合并分析全文 / 各靶点数据列表）。
  * v1.11：新增各靶点 PDB / 同源结构 / 文献三组数据列表（带 UniProt 归属分组头）
  */
-export function MergedReportView({ report, targetLabels, onNewEvaluation }: MergedReportViewProps) {
+export function MergedReportView({ report: reportProp, targetLabels, onNewEvaluation, onRegenerated }: MergedReportViewProps) {
+  // 需求B：重新生成成功后的本地覆盖（同 id）— 父级未接 onRegenerated 时视图也能自刷新
+  const [override, setOverride] = useState<BatchReportInfo | null>(null)
+  const report = override && override.id === reportProp.id ? override : reportProp
   const rel = report.relation
   const tone = relationTone(rel.relationType)
   const md = report.markdown?.trim() || ''
@@ -362,8 +372,67 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
   const [previewSlow, setPreviewSlow] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   /** v2.10 ③：内嵌完整报告加载失败（文件丢失/未生成）→ 降级旧版 React 数据区块 */
-  const [embedFailed, setEmbedFailed] = useState(false)
+  const [embedLoadFailed, setEmbedLoadFailed] = useState(false)
+  /** v2.37：本地缓存副本（服务端实例已回收）→ 直接走 React 数据区块，
+   *  不再请求注定 404 的 iframe（markdown 已在本地，降级视图完整可用） */
+  const embedFailed = embedLoadFailed || report.fromCache === true
   const reportFrameRef = useRef<HTMLIFrameElement>(null)
+
+  // ── 需求B：手动重新生成合并报告 ──────────────────────────────────────
+  const [regenOpen, setRegenOpen] = useState(false)
+  const [regenGoal, setRegenGoal] = useState('')
+  const [regenerating, setRegenerating] = useState(false)
+  const [regenElapsed, setRegenElapsed] = useState(0)
+  /** 重新生成完成后 +1 → inlineUrl 追加 cache-bust 参数强制 iframe 重拉新 HTML */
+  const [reloadNonce, setReloadNonce] = useState(0)
+  const regenStartRef = useRef(0)
+
+  // 重新生成进行中计时（分钟级 — 展示已等待时长，避免误认为卡死；
+  // 起点与归零在 runRegenerate 内完成 — effect 仅订阅定时器，避免同步 setState）
+  useEffect(() => {
+    if (!regenerating) return
+    const t = setInterval(() => {
+      setRegenElapsed(Math.floor((Date.now() - regenStartRef.current) / 1000))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [regenerating])
+
+  const runRegenerate = async () => {
+    if (regenerating) return
+    setRegenOpen(false)
+    regenStartRef.current = Date.now()
+    setRegenElapsed(0)
+    setRegenerating(true)
+    try {
+      const fresh = await regenerateBatchReport({ id: report.id, goal: regenGoal.trim() || undefined })
+      // 成功：本地覆盖 + 父级同步 + 刷新本地缓存副本 + 强制 iframe 重载
+      setOverride(fresh)
+      setReloadNonce(n => n + 1)
+      setEmbedLoadFailed(false)
+      cacheBatchReport(fresh)
+      onRegenerated?.(fresh)
+      if (fresh.error) {
+        toast({
+          title: '重新生成完成，但 LLM 部分失败',
+          description: fresh.error,
+          variant: 'destructive',
+        })
+      } else {
+        toast({
+          title: '合并报告已重新生成',
+          description: 'LLM 分析已按既有作业数据重跑，在线展示与下载文件均已更新。',
+        })
+      }
+    } catch (e) {
+      toast({
+        title: '合并报告重新生成失败',
+        description: e instanceof Error ? e.message : '请稍后重试（当前版本内容未受影响）',
+        variant: 'destructive',
+      })
+    } finally {
+      setRegenerating(false)
+    }
+  }
 
   const openPreview = () => {
     setPreviewLoaded(false)
@@ -382,7 +451,8 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
     window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&download=1`, '_blank')
   }
 
-  const inlineUrl = `/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&inline=1`
+  // reloadNonce > 0 时追加 cache-bust（同 id 重新生成后强制 iframe 重拉新 HTML，避免命中旧内容）
+  const inlineUrl = `/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&inline=1${reloadNonce ? `&_r=${reloadNonce}` : ''}`
 
   const confidenceText = rel.confidence === 'high' ? '高' : rel.confidence === 'medium' ? '中' : '低'
 
@@ -398,10 +468,21 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           <ArrowLeft className="size-3.5" />
           新建评估
         </Button>
-        <span className="font-mono text-[11px] text-muted-foreground/70">
+        <span className="font-mono text-[11px] text-muted-foreground/85">
           合并报告 {report.id.slice(0, 8)} · {targetLabels.length} 个关联靶点
         </span>
       </div>
+
+      {/* v2.37：本地缓存副本来源横幅（服务端实例已回收，数据来自浏览器留存副本） */}
+      {report.fromCache && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span>
+            服务端数据已随部署实例回收，当前展示的是浏览器本地留存的副本（生成完成时自动存入）。
+            完整版 HTML 报告已在该组完成时自动下载到本机下载目录。
+          </span>
+        </div>
+      )}
 
       {/* 1. 刊头 */}
       <motion.header
@@ -443,7 +524,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
           {/* v1.10 同源证据：系统比对一致性徽标行 */}
           {homologPairs.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-              <span className="lin-eyebrow text-muted-foreground/70">序列一致性（系统比对）</span>
+              <span className="lin-eyebrow text-muted-foreground/85">序列一致性（系统比对）</span>
               {homologPairs.map(p => (
                 <span
                   key={`${p.a}-${p.b}`}
@@ -464,9 +545,9 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
 
         {/* 参与靶点 chips */}
         <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-muted-foreground">
-          <span className="lin-eyebrow text-muted-foreground/70">批次靶点</span>
-          {targetLabels.map(l => (
-            <span key={l} className="rounded-md border border-border px-1.5 py-0.5">
+          <span className="lin-eyebrow text-muted-foreground/85">批次靶点</span>
+          {targetLabels.map((l, i) => (
+            <span key={`${l}-${i}`} className="rounded-md border border-border px-1.5 py-0.5">
               {l}
             </span>
           ))}
@@ -480,6 +561,25 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         transition={{ duration: 0.35, delay: 0.14, ease: 'easeOut' }}
         className="flex flex-col gap-4"
       >
+        {regenerating ? (
+          /* 需求B：重新生成进行中 — 分钟级 LLM 三段式重跑，期间下方仍展示上一版内容 */
+          <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/[0.05] px-5 py-4 sm:flex-row sm:items-center">
+            <div className="flex items-center gap-3">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <RefreshCw className="size-4.5 animate-spin" aria-hidden />
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-foreground">正在重新生成合并报告…</div>
+                <div className="font-mono text-[11px] text-muted-foreground">
+                  LLM 三段式重跑 · 已等待 {Math.floor(regenElapsed / 60)}:{String(regenElapsed % 60).padStart(2, '0')} · 完成前下方仍为上一版内容，生成后自动更新
+                </div>
+              </div>
+            </div>
+            <div className="font-mono text-[11px] text-muted-foreground/80 sm:ml-auto">
+              靶点数据不重跑（直接复用 {report.jobIds.length} 个既有作业）
+            </div>
+          </div>
+        ) : (
         <div
           className={cn(
             'flex flex-col gap-4 rounded-xl border px-5 py-4 sm:flex-row sm:items-center',
@@ -529,14 +629,29 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                 打印
               </Button>
             )}
+            {/* 需求B：手动重新生成（fromCache 副本无服务端记录 — 不提供） */}
+            {!report.fromCache && report.status !== 'running' && (
+              <Button
+                onClick={() => setRegenOpen(true)}
+                variant="outline"
+                title="LLM 分析重新生成（靶点结构/同源/文献数据不重跑）"
+                className="h-10 gap-2 rounded-lg border-border bg-card px-4 font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <RefreshCw className="size-4" />
+                重新生成
+              </Button>
+            )}
           </div>
         </div>
+        )}
         {!embedFailed ? (
-          <MergedReportFrame url={inlineUrl} iframeRef={reportFrameRef} onFail={() => setEmbedFailed(true)} />
+          <MergedReportFrame url={inlineUrl} iframeRef={reportFrameRef} onFail={() => setEmbedLoadFailed(true)} />
         ) : (
           <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            完整 HTML 报告加载失败（文件可能已被服务器清理）— 已切换为在线数据视图；可尝试「大窗预览 / 下载 HTML」或重新发起评估。
+            {report.fromCache
+              ? '当前展示为浏览器本地缓存副本（服务端实例已回收）— 完整版 HTML 报告已在完成时自动下载到本机下载目录，可从那里查看。'
+              : '完整 HTML 报告加载失败（文件可能已被服务器清理）— 已切换为在线数据视图；可尝试「大窗预览 / 下载 HTML」或重新发起评估。'}
           </div>
         )}
       </motion.section>
@@ -578,7 +693,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                     }[a.kind]
                     return (
                       <tr key={a.index} className="border-b border-border/60 last:border-0" title={a.note}>
-                        <td className="px-3 py-2 font-mono text-muted-foreground/60">{i + 1}</td>
+                        <td className="px-3 py-2 font-mono text-muted-foreground/80">{i + 1}</td>
                         <td className="max-w-56 truncate px-3 py-2 text-foreground/80" title={a.header}>
                           {a.header || '（未命名序列）'}
                         </td>
@@ -626,7 +741,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         })()}
         <Card className="rounded-xl border-border bg-card shadow-none">
           <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
-            <div className="mb-4 flex items-center gap-2 text-muted-foreground/70">
+            <div className="mb-4 flex items-center gap-2 text-muted-foreground/85">
               <BookOpenText className="size-3.5" aria-hidden />
               <span className="lin-eyebrow">Analysis · 由大语言模型基于批次结构化数据生成，结论供参考</span>
             </div>
@@ -696,7 +811,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
         >
           <details className="group overflow-hidden rounded-xl border border-border bg-card">
             <summary className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1.5 px-5 py-3.5 list-none [&::-webkit-details-marker]:hidden">
-              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/60 transition-transform duration-200 group-open:rotate-180" aria-hidden />
+              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/80 transition-transform duration-200 group-open:rotate-180" aria-hidden />
               <span id="sec-merged-oligomer" className="lin-eyebrow text-muted-foreground">
                 Oligomeric State · 聚集形式判定（{oligoTargets.length} 个靶点 · 已计入各靶点评分）
               </span>
@@ -732,7 +847,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                     <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-sm font-semibold text-foreground">
                         {t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}
-                        {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground/70">{t.uniprotId}</span>}
+                        {t.uniprotId && <span className="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground/85">{t.uniprotId}</span>}
                       </span>
                       <span className={cn('inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-semibold', badgeCls)}>{catZh}</span>
                       {o.stoichiometry && (
@@ -740,7 +855,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                           {o.stoichiometry}
                         </span>
                       )}
-                      <span className="ml-auto font-mono text-[10.5px] text-muted-foreground/60">置信度 {confZh}</span>
+                      <span className="ml-auto font-mono text-[10.5px] text-muted-foreground/80">置信度 {confZh}</span>
                     </div>
                     <p className="text-[13px] leading-6 text-foreground/80">{o.summary}</p>
                     {t.mwAugment?.applicable && (
@@ -770,7 +885,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                   </div>
                 )
               })}
-              <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+              <p className="text-[11px] leading-relaxed text-muted-foreground/85">
                 聚集形式由系统按证据优先级判定（已有结构 → 同源结构 → UniProt interaction → 文献）；判定与调整已计入各靶点评分，分析已融入上方合并分析全文，完整明细见下载的 HTML 报告。
               </p>
             </div>
@@ -881,7 +996,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
               <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-[-0.01em]">
                 合并评估报告 · {report.id.slice(0, 8)}
               </DialogTitle>
-              <DialogDescription className="font-mono text-[11px] text-muted-foreground/70">
+              <DialogDescription className="font-mono text-[11px] text-muted-foreground/85">
                 完整 HTML 报告 · 可直接打印
               </DialogDescription>
             </div>
@@ -937,7 +1052,7 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
                     </div>
                   </div>
                 ) : (
-                  <p className="font-mono text-xs text-muted-foreground/70">报告加载中…</p>
+                  <p className="font-mono text-xs text-muted-foreground/85">报告加载中…</p>
                 )}
               </div>
             )}
@@ -949,6 +1064,56 @@ export function MergedReportView({ report, targetLabels, onNewEvaluation }: Merg
               className="h-full w-full bg-white"
             />
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 需求B：重新生成确认弹窗（原地重跑 LLM 三段式 — 靶点数据不重评估） */}
+      <Dialog open={regenOpen} onOpenChange={setRegenOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RefreshCw className="size-4 text-primary" aria-hidden />
+              重新生成合并报告
+            </DialogTitle>
+            <DialogDescription>
+              沿用本报告 {report.jobIds.length} 个既有评估作业的数据（结构 / 同源 / 文献不重跑），仅 LLM 三段式分析重新生成（通常 1-3 分钟）。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <ul className="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/40 px-3.5 py-3 text-xs leading-relaxed text-muted-foreground">
+              <li>· 生成成功后在线展示与下载文件同步更新为新一版</li>
+              <li>· 生成失败时保留当前版本内容（不影响现有报告）</li>
+              <li>· 历史靶点作业已被服务器清理（超 30 天）时无法重生成</li>
+            </ul>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="regen-goal" className="text-xs font-medium text-foreground">
+                研究目标（可选）
+              </label>
+              <Textarea
+                id="regen-goal"
+                value={regenGoal}
+                onChange={(e) => setRegenGoal(e.target.value)}
+                rows={3}
+                placeholder="如：评估 Cryo-EM 结构解析可行性 — 作为本次生成的上下文；留空则不带目标生成"
+                className="resize-none rounded-lg text-xs"
+              />
+              <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+                LLM 引擎使用当前配置（顶栏引擎徽标所示）；可在顶栏「引擎设置」中切换后再重新生成。
+              </p>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setRegenOpen(false)} className="h-9 rounded-lg px-4 text-xs">
+              取消
+            </Button>
+            <Button
+              onClick={() => void runRegenerate()}
+              className="h-9 gap-1.5 rounded-lg bg-primary px-4 text-xs font-medium text-primary-foreground"
+            >
+              <RefreshCw className="size-3.5" />
+              开始重新生成
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

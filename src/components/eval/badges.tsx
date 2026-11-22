@@ -82,7 +82,7 @@ export function StatusBadge({ status, className }: { status: JobStatus; classNam
     running: { label: '运行中', cls: 'border-primary/30 bg-primary/[0.08] text-primary', pulse: true },
     pending: { label: '排队中', cls: 'border-border bg-muted text-muted-foreground' },
     error: { label: '失败', cls: 'border-red-500/30 bg-red-500/[0.08] text-red-600 dark:text-red-400' },
-    canceled: { label: '已取消', cls: 'border-border bg-muted/60 text-muted-foreground/70' },
+    canceled: { label: '已取消', cls: 'border-border bg-muted/60 text-muted-foreground/85' },
   }
   const item = map[status] ?? map.pending
   return (

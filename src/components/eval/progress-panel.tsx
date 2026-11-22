@@ -171,17 +171,17 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
           {/* 元数据条（旧版计时/百分比重复两处，收敛到此一行） */}
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-border/70 pt-3 font-mono text-[11px] tabular-nums text-muted-foreground">
             <span className="inline-flex items-center gap-1.5">
-              <span className="lin-eyebrow text-muted-foreground/60">已用时</span>
+              <span className="lin-eyebrow text-muted-foreground/80">已用时</span>
               <span className="font-medium text-foreground/80">{formatDuration(elapsedSec)}</span>
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <span className="lin-eyebrow text-muted-foreground/60">阶段</span>
+              <span className="lin-eyebrow text-muted-foreground/80">阶段</span>
               <span className="font-medium text-foreground/80">{doneStages}/{stages.length}</span>
-              <span className="text-muted-foreground/60">· {activeLabel}</span>
+              <span className="text-muted-foreground/80">· {activeLabel}</span>
             </span>
             {batchRunning && (
               <span className="inline-flex items-center gap-1.5">
-                <span className="lin-eyebrow text-muted-foreground/60">批量</span>
+                <span className="lin-eyebrow text-muted-foreground/80">批量</span>
                 <span className="font-medium text-foreground/80">
                   {batch.items.filter(x => x.status === 'done').length}/{batch.total} 完成
                 </span>
@@ -233,7 +233,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
           <CardContent className="flex flex-col gap-3 px-5 py-4">
             <div className="flex items-center justify-between">
               <h3 className="lin-eyebrow text-muted-foreground">评估阶段 · Stages</h3>
-              <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
+              <span className="font-mono text-[10px] tabular-nums text-muted-foreground/85">
                 {doneStages}/{stages.length} 完成
               </span>
             </div>
@@ -273,7 +273,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
                         'min-w-0 truncate text-sm',
                         s.state === 'done' && 'text-muted-foreground',
                         s.state === 'active' && 'font-medium text-foreground',
-                        s.state === 'pending' && 'text-muted-foreground/60',
+                        s.state === 'pending' && 'text-muted-foreground/80',
                       )}
                     >
                       {s.label}
@@ -295,7 +295,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
 
       {/* ── 底部操作 ── */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs text-muted-foreground/70">
+        <p className="text-xs text-muted-foreground/85">
           完整评估通常需要 1–3 分钟 · 页面可保持打开，完成后自动展示结果
         </p>
         <Button

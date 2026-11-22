@@ -1,6 +1,9 @@
 /**
  * GET    /api/jobs/[id] — 作业详情（运行中：内存快照实时进度；终态：DB 重建）
  * DELETE /api/jobs/[id] — 取消运行中作业 / 删除作业（含磁盘资产与报告）
+ * DELETE /api/jobs/[id]?mode=cancel — 仅取消（v2.42）：中止运行中作业但保留 DB 行与日志
+ *   （停止运行后「运行日志」仍可回看「作业已取消」的完整过程；已终态作业不受影响 —
+ *   修复：旧实现取消的同时删行，日志丢失 + 停止动作与作业完成竞态时会误删已完成报告）
  * 公网加固：仅创建者（ownerKey 匹配）可访问；他人访问返回 404（不暴露存在性）。
  * pending 作业附带 queuePosition（前方排队数）供前端展示等待状态。
  */
@@ -101,6 +104,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const owner = getOwner(req)
+  const cancelOnly = new URL(req.url).searchParams.get('mode') === 'cancel'
   const job = await db.evaluationJob.findUnique({ where: { id } })
   if (!job) return NextResponse.json({ ok: true, deleted: true })
   if (!isOwnedBy(job, owner)) return notFound()
@@ -110,6 +114,13 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   if (snap && (snap.status === 'running' || snap.status === 'pending')) {
     snap.abort.abort()
     markStatus(id, 'canceled')
+    // v2.42 取消模式：中止但保留 DB 行 — 管线 catch 块随即把终态（canceled）
+    // 与完整日志写回本行（「运行日志」可回看取消前的全过程）；报告目录不动
+    if (cancelOnly) return NextResponse.json({ ok: true, canceled: true })
+  } else if (cancelOnly) {
+    // v2.42：已终态作业的取消请求 = 无操作（不删行不删报告 — 停止动作与
+    // 作业完成竞态时保住已产出的结果）
+    return NextResponse.json({ ok: true, canceled: false })
   }
 
   // 只删除本作业自己的报告目录（db/reports/{jobId}：report.html 等）+ DB 记录（级联删 assets 行）。

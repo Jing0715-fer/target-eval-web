@@ -1,43 +1,75 @@
 'use client'
 
 /**
- * 高通量评估编排（v2.22）。
+ * 高通量评估编排（v2.22 → v2.39 并行化重设计）。
  *
  * 输入契约：「;」分隔组，组内「,」分隔靶点 ——
- *  - 组内多个靶点 = 按现有复合物批量评估链路（关系判断 → 2 并发窗口 → ≥2 成功出合并报告）
+ *  - 组内多个靶点 = 按现有复合物批量评估链路（关系判断 → 并发评估 → ≥2 成功出合并报告）
  *  - 组内仅一个靶点 = 单作业独立评估
- *  - 每组单独出报告；组间严格串行（贴合服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=2）
+ *  - v2.39：组间并行推进（原严格串行）— 全部组同时开动，共享跨组全局并发窗口
+ *    HT_WINDOW（=6，与服务端作业执行池 EVAL_JOB_CONCURRENCY=6 对齐；
+ *    每 IP 准入上限 v2.40 起 = 8，留出旧运行遗留作业/断点重挂余量）。
+ *    用户核心诉求：「有些 BLAST 结果很久返不回结果，轮询期间可以先进行其他评估」—
+ *    慢 BLAST 只占用自己的窗口槽位，不阻塞其他组/靶点推进
+ *  - v2.39：启动/恢复时 BLAST 预热（blast-warmup）— 全部待评估序列一次性发服务端
+ *    限速预提交 NCBI（先把 BLAST 都提交起来），作业排队期间 NCBI 已在计算
  *
  * 限流自动暂停（用户核心诉求）：
- *  - 检测点覆盖：作业创建 429（系统配额）、作业终态 error 的限流指纹、
+ *  - 检测点覆盖：作业创建 429（系统配额；瞬时「同时最多/排队较多」型先有界退避重试，
+ *    重试耗尽才判限流暂停）、作业终态 error 的限流指纹、
  *    作业完成但报告 LLM 全部失败（reportLlmOk !== true，常见于供应商限流/额度耗尽）、
  *    关系判断 / 合并报告生成失败的限流指纹
- *  - 暂停 = 不再提交新作业、不开下一组；已在跑的作业让其在服务器自然跑完（数据不浪费），
- *    结果照常记入组状态
+ *  - 暂停 = 不再提交新作业；已在跑的作业让其在服务器自然跑完（数据不浪费），
+ *    结果照常记入组状态。v2.40：退出 HT 视图同理（暂停语义）— 在飞作业继续
+ *    收尾并记录，项保持 running；恢复时直接接上，不产生重复提交/僵尸占坑。
+ *    服务端 v2.40 同靶点去重（dedup-attach）兜底：同归属对完全相同的评估输入
+ *    重复提交时直接接上仍在执行的既有作业（不新建、不占并发配额）
  *  - 配额恢复后由用户「重新开始运行」：从断点续跑 —— 已完成/已终态的靶点不重复评估，
  *    未提交的继续提交，未开始的组继续开
  *
  * 持久化：运行结构（组清单 + 每组作业 id + 报告 id + 断点）落 localStorage（te_ht_runs_v1，
  * 保留最近 5 份运行历史）；页面刷新后标记 interrupted，可从断点恢复或回看。
  * 报告本体（HTML/作业 logs）持久化在服务端 DB（30 天 TTL），回看按需拉取。
+ *
+ * v2.38 可控运行（用户诉求：手动终止/暂停后可恢复；可选靶点跳过；失败可重跑；
+ * 新建时可选择评估范围；zip 导入既有报告直接跳过）：
+ *  - 手动暂停 pauseRun：不删服务器作业（跑完照常记结果），恢复从断点继续；
+ *  - 手动停止 cancelRun：取消服务器活跃作业，运行标 stopped（非 done）—
+ *    「继续运行」把 canceled 项重置为 pending 重新提交；
+ *  - 靶点级操作（非 running）：跳过/恢复（skipped 状态 — 不评估但保留在记录里，
+ *    可随时恢复评估）、单项重跑、组级重跑失败/跳过未开始、全局重跑失败；
+ *  - 启动时选择：HTStartPayload.skipFlags — 未勾选的靶点以 skipped 入运行记录；
+ *  - zip 导入 importArchive：解析既有报告包（manifest 精确 / 文件名+题目兜底），
+ *    匹配到的未评估靶点标 skipped（报告已在用户手里的 zip 中，不重复评估）。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
-import { cacheJobDetail, getCachedJobDetail } from './job-cache'
+import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
+import { parseHtImportFiles, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
 
-export type HTPhase = 'idle' | 'running' | 'paused' | 'done'
+export type HTPhase = 'idle' | 'running' | 'paused' | 'stopped' | 'done'
 
 const POLL_INTERVAL_MS = 2000
 /** 连续轮询失败达到该值 → 网络异常提示（继续重试） */
 const MAX_CONSECUTIVE_FAILURES = 3
-/** 组内并发窗口（与服务端每 IP 并发上限 EVAL_MAX_ACTIVE_PER_IP=2 对齐） */
-const HT_WINDOW = 2
+/** v2.39 跨组全局并发窗口（原组内窗口 2 → 全局 6 — 与服务端作业执行池
+ *  EVAL_JOB_CONCURRENCY=6 对齐；每 IP 准入上限 v2.40 起 = 8，客户端仍自限 6
+ *  保证进度反馈紧凑，服务端余量 2 坑容忍旧运行遗留/断点重挂的作业占坑）：
+ *  组间并行推进，全部组的待评估项共享这 6 个槽位 — 慢 BLAST 只占自己的槽，
+ *  其余靶点照常推进（用户核心诉求） */
+const HT_WINDOW = 6
+/** v2.39：作业创建遇到「同时最多/排队较多」型瞬时 429 的有界退避重试
+ *  （窗口释放即可提交成功；耗尽才按限流暂停处理）。
+ *  v2.40：8 → 40 次（15s 退避 ≈ 最长 10 分钟）— 旧运行遗留的慢 BLAST 作业
+ *  短期占坑时，新提交退避等待窗口释放，而不是把整场运行暂停等人工干预 */
+const CREATE_JOB_QUOTA_RETRIES = 40
+const CREATE_JOB_QUOTA_RETRY_MS = 15_000
 
 /** v2.25 目录段安全化：非法字符折叠为空格并限长 */
 function safeDir(s: string, max = 60): string {
@@ -64,9 +96,133 @@ export function isRateLimitError(text: string | null | undefined): boolean {
   return /\b429\b|too many requests|rate ?limit|rate_limit|限流|频率过高|配额|quota|每日上限|近 24 小时内已创建|同时最多|排队评估较多/i.test(text)
 }
 
-/** 组级进度可复用 ProgressPanel（BatchState 形状）所需要的数据源（视图层组装，此处只给状态） */
+/** 组状态 → 图标 + 文案（组状态与靶点状态在视图层组装，此处只给状态） */
 function cloneRun(run: HTRunState): HTRunState {
   return JSON.parse(JSON.stringify(run)) as HTRunState
+}
+
+/** v2.38：靶点有变动待评估 → 组回可执行态 + 汇总看板作废（下次自然完成重生成） */
+function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
+  if (g.status === 'done' || g.status === 'canceled') {
+    g.status = 'pending'
+    g.finishedAt = undefined
+  }
+  if (r.dashboardId || r.dashboardError || r.dashboardPending) {
+    r.dashboardId = undefined
+    r.dashboardError = undefined
+    r.dashboardPending = false
+  }
+}
+
+/** v2.38：停止/中断恢复前的重置 — canceled 项/组回 pending（清除已死作业引用，
+ *  恢复时重新提交）；running+jobId 项保留（接上仍在执行的服务器作业） */
+function resetCanceledForResume(r: HTRunState): void {
+  for (const g of r.groups) {
+    if (g.status === 'canceled') {
+      g.status = 'pending'
+      g.finishedAt = undefined
+    }
+    for (const it of g.items) {
+      if (it.status === 'canceled') {
+        it.status = 'pending'
+        it.jobId = undefined
+        it.error = undefined
+      }
+    }
+  }
+}
+
+/** v2.38：全局重跑失败项（error/canceled → pending）— 返回重置数；组回可执行态 + 看板作废
+ *  v2.41：①done 但报告不完整（部分章节失败）的靶点也纳入重跑；
+ *  ②修复：重置时同步清 jobId — 旧作业已终态，pending+jobId 既不在 unstarted
+ *  也不在 reattach 集合里，重跑会被静默吞掉（历史 bug） */
+function resetFailedForRetry(r: HTRunState): number {
+  let n = 0
+  for (const g of r.groups) {
+    for (const it of g.items) {
+      if (it.status === 'error' || it.status === 'canceled' || (it.status === 'done' && it.reportIncomplete)) {
+        it.status = 'pending'
+        it.error = undefined
+        it.reportIncomplete = undefined
+        it.reportMissingNote = undefined
+        it.jobId = undefined // v2.41 修复：清旧作业引用（重置为重新提交）
+        n++
+      }
+    }
+    if (g.items.some((it) => it.status === 'pending')) touchGroupForRerun(g, r)
+  }
+  return n
+}
+
+/** v2.41：从终态作业详情推导「LLM 报告未完整生成」的备注（完整时 undefined）。
+ *  新作业读 summary.reportLlmMissing；旧版本作业（无该字段）从终态日志快照
+ *  推导（管线日志行「LLM 报告章节 X「…」 失败: …」）— 存量运行同样能标可重跑 */
+function reportIncompleteNote(job: JobDetail | null | undefined): string | undefined {
+  if (!job) return undefined
+  const missing = job.summary?.reportLlmMissing ?? 0
+  if (missing > 0) return `报告不完整（${missing} 个章节未生成 — 常见于供应商限流或超时，可重跑补齐）`
+  const failLine = (job.logs ?? []).find((l) => l.includes('LLM 报告章节') && l.includes('失败'))
+  if (failLine) {
+    const label = failLine.match(/LLM 报告章节\s*\S+「([^」]+)」/)?.[1]
+    return `报告不完整（${label ? `章节「${label}」等未生成` : '部分章节未生成'} — 可重跑补齐）`
+  }
+  return undefined
+}
+
+/** v2.49 applyArchiveSkips 结果：匹配数 + 未命中文件诊断（导入 toast 展示） */
+interface ArchiveSkipResult {
+  matched: number
+  /** 未命中文件的人话原因（逐文件一行，已截断） */
+  missLines: string[]
+  /** 仅命中已完成/进行中靶点的文件数（报告有效但对应靶点已完成，无需导入） */
+  doneOnlyCount: number
+}
+
+/** v2.38→v2.45 导入既有报告匹配 — 用 planArchiveSkips 统一严格规则 + v2.45 组号通道：
+ *  单靶点 job 报告：序列靶点 SHA 精确等值 / 标签+长度严格相等且无歧义才标 skipped
+ *  （用户反馈：旧包含式匹配把无报告的靶点也误跳了）；合并报告（文件名携带
+ *  G{NN} 组号）：总组数对齐 + 组内靶点数一致 → 整组跳过（用户诉求「文件名中
+ *  G73 之类的数字应该就能匹配」）。v2.49：未命中文件附带逐文件原因。 */
+function applyArchiveSkips(
+  r: HTRunState,
+  reports: HtArchiveReport[],
+  shaByKey: Map<string, string | undefined>,
+  fileName: string,
+): ArchiveSkipResult {
+  const matchable: HtMatchTarget[] = []
+  const all: HtMatchTarget[] = []
+  for (const g of r.groups) {
+    for (const it of g.items) {
+      const t: HtMatchTarget = {
+        key: it.key,
+        acc: it.sequence ? undefined : it.label,
+        range: it.range,
+        header: it.sequenceHeader,
+        label: it.label,
+        length: it.sequence?.length,
+        seqSha: shaByKey.get(it.key),
+        seq: it.sequence,
+        groupIndex: g.index,
+      }
+      all.push(t)
+      if (it.status !== 'done' && it.status !== 'running') matchable.push(t)
+    }
+  }
+  const matchedKeys = planArchiveSkips(reports, matchable, { totalGroups: r.groups.length })
+  for (const it of r.groups.flatMap((g) => g.items)) {
+    if (matchedKeys.has(it.key)) {
+      it.status = 'skipped'
+      it.error = undefined
+      it.skipNote = `已导入 ${fileName.slice(0, 40)} 的既有报告`
+    }
+  }
+  // v2.49 逐文件诊断（含已完成靶点提示 — 避免误报「不在清单」）
+  const diag = diagnoseArchiveImport(reports, matchable, { totalGroups: r.groups.length }, all)
+  return {
+    matched: matchedKeys.size,
+    missLines: diag.filter((d) => !d.matched && !d.doneOnly).map((d) => `${d.file}：${d.reason}`),
+    doneOnlyCount: diag.filter((d) => d.doneOnly).length,
+  }
 }
 
 /**
@@ -104,6 +260,16 @@ export function useHighThroughputFlow() {
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const activeMsRef = useRef(0)
   const lastTickRef = useRef(0)
+  /** v2.39 跨组全局并发窗口状态（active = 占用槽位数；waiters = 排队等待者）。
+ *  组间并行后由全部组共享 — 慢 BLAST 只占自己的槽位，不阻塞其他组/靶点 */
+  const windowRef = useRef<{ active: number; waiters: Array<() => void> }>({ active: 0, waiters: [] })
+  /** v2.40 编排链代际（epoch）：startRun / resumeRun 每次启动新链时 +1；
+ *  旧链（退出视图后仍在收尾的在飞作业链）在关键推进点检测到代际过时即让位，
+ *  防止新旧双链同时推进同一组（重复生成合并报告 / 重复标记完成） */
+  const orchestrateEpochRef = useRef(0)
+  /** v2.39 关系判断串行链（并行组下多组同时打 LLM 关系判断易触发限流；
+ *  判断很快不构成瓶颈 — 单靶点组无判断不受影响） */
+  const judgeChainRef = useRef<Promise<unknown>>(Promise.resolve())
 
   const refreshRecentRuns = useCallback(() => setRecentRuns(listHTRuns()), [])
 
@@ -121,6 +287,10 @@ export function useHighThroughputFlow() {
   useEffect(() => {
     const hit = markInterruptedOnLoad()
     refreshRecentRuns()
+    // v2.37：挂载即后台补缓存（6h 节流）— 本地 HT 运行 + 服务端历史列表中
+    // 已终态但浏览器尚无副本的作业/合并报告，趁实例存活静默留档；
+    // 实例回收后组日志/结果/合并报告仍可离线回看
+    void backfillCacheOnMount()
     if (hit) {
       toast({
         title: '检测到未完成的高通量运行',
@@ -142,35 +312,80 @@ export function useHighThroughputFlow() {
     }, 1000)
   }, [stopTick])
 
-  /** 运行状态 → localStorage + 视图（组状态关键节点调用） */
+  /** 运行状态 → localStorage + 视图（组状态关键节点调用）。
+ *  v2.39：running 中 currentIndex 指向首个未完成组（并行组视图「当前组」面板/高亮） */
   const snapshot = useCallback(() => {
     const r = runRef.current
     if (!r) return
+    if (r.status === 'running') {
+      const firstActive = r.groups.find((g) => g.status !== 'done' && g.status !== 'canceled')
+      if (firstActive) r.currentIndex = firstActive.index
+    }
     saveHTRun(r)
     setRun(cloneRun(r))
   }, [])
 
-  /** 创建一个评估作业（POST /api/evaluate，本地引擎内联携带 — 与单次评估同路径） */
+  // ── v2.39 全局并发窗口槽位（跨组共享）────────────────────────────────
+
+  /** 获取一个窗口槽位：窗口满则排队等待；暂停/取消时（含等待中被唤醒）直接放弃 */
+  const acquireWindowSlot = useCallback(async (): Promise<boolean> => {
+    const w = windowRef.current
+    if (pausedRef.current || cancelRef.current) return false
+    if (w.active < HT_WINDOW) {
+      w.active++
+      return true
+    }
+    await new Promise<void>((resolve) => {
+      w.waiters.push(resolve)
+    })
+    // 被唤醒：要么槽位已让出（唤醒方保证可用），要么暂停/取消（直接放弃不占槽）
+    if (pausedRef.current || cancelRef.current) return false
+    w.active++
+    return true
+  }, [])
+
+  /** 释放窗口槽位：非停状态下按 FIFO 唤醒一个等待者；暂停/取消时唤醒全部（让其退出） */
+  const releaseWindowSlot = useCallback(() => {
+    const w = windowRef.current
+    w.active = Math.max(0, w.active - 1)
+    if (pausedRef.current || cancelRef.current) {
+      while (w.waiters.length > 0) w.waiters.shift()?.()
+    } else if (w.active < HT_WINDOW && w.waiters.length > 0) {
+      w.waiters.shift()?.()
+    }
+  }, [])
+
+  /** 创建一个评估作业（POST /api/evaluate，本地引擎内联携带 — 与单次评估同路径）。
+ *  v2.39：遇到「同时最多/排队较多」型瞬时 429（并行窗口释放间隙的竞态）时
+ *  有界退避重试（窗口释放即可成功），耗尽才按限流处理交给上层暂停 */
   const createJob = async (request: EvaluateRequest): Promise<{ jobId?: string; error?: string }> => {
-    try {
-      const llm = getLlmEngineOverride()
-      const res = await fetch('/api/evaluate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(llm ? { ...request, llm } : request),
-      })
-      let data: { ok?: boolean; jobId?: string; error?: string } | null = null
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+    for (let attempt = 0; ; attempt++) {
+      if (cancelRef.current || pausedRef.current) return { error: '运行已暂停/停止，不再提交新作业' }
       try {
-        data = (await res.json()) as { ok?: boolean; jobId?: string; error?: string }
-      } catch {
-        data = null
-      }
-      if (!res.ok || !data || !data.jobId) {
+        const llm = getLlmEngineOverride()
+        const res = await fetch('/api/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(llm ? { ...request, llm } : request),
+        })
+        let data: { ok?: boolean; jobId?: string; error?: string; retryAfter?: number } | null = null
+        try {
+          data = (await res.json()) as { ok?: boolean; jobId?: string; error?: string; retryAfter?: number }
+        } catch {
+          data = null
+        }
+        if (res.ok && data?.jobId) return { jobId: data.jobId }
+        // v2.39：瞬时配额 429（并发窗口竞态 / 全局队列瞬时满）— 退避重试而非立即暂停
+        if (res.status === 429 && attempt < CREATE_JOB_QUOTA_RETRIES && /同时最多|排队评估较多/.test(data?.error ?? '')) {
+          const wait = Math.min(data?.retryAfter ?? CREATE_JOB_QUOTA_RETRY_MS, 30_000)
+          await sleep(Math.max(3_000, wait))
+          continue
+        }
         return { error: data?.error ?? `评估服务暂不可用（HTTP ${res.status}）` }
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : '创建评估作业失败，请稍后重试' }
       }
-      return { jobId: data.jobId }
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : '创建评估作业失败，请稍后重试' }
     }
   }
 
@@ -217,7 +432,7 @@ export function useHighThroughputFlow() {
           fails = 0
           setNetworkIssue(false)
           if (data.id === displayJobIdRef.current) setDisplayJob(data)
-          // v2.36：终态瞬间存入浏览器本地缓存（Serverless 实例回收后回看的唯一兑底）
+          // v2.36：终态瞬间存入浏览器本地缓存（Serverless 实例回收后回看的唯一兜底）
           if (data.status === 'done' || data.status === 'error') cacheJobDetail(data)
           if (data.status === 'done') finish('done')
           else if (data.status === 'error') finish('error')
@@ -260,9 +475,15 @@ export function useHighThroughputFlow() {
         if (r.job?.summary && r.job.summary.reportLlmOk !== true) {
           item.status = 'error'
           item.error = '数据收集完成，但报告生成 LLM 全部失败（常见于供应商限流或额度耗尽）'
+          item.reportIncomplete = undefined
+          item.reportMissingNote = undefined
           pauseWithReason(`第 ${groupNo} 组靶点 ${label} 报告生成失败（LLM 全章节未产出，常见于供应商限流或额度耗尽）。`)
         } else {
           item.status = 'done'
+          // v2.41：部分章节失败的「报告不完整」标记（不阻塞流程，但可一键重跑补齐）
+          const note = reportIncompleteNote(r.job)
+          item.reportIncomplete = note ? true : undefined
+          item.reportMissingNote = note
           // 非关联批次 — 各靶点独立报告，完成即自动下载（关联批次 deferred 无独立 HTML）
           // v2.25：目录前缀 = 运行文件夹 + 组号段（G01_…），同次运行集中在一个新文件夹
           if (!related && item.jobId) {
@@ -277,11 +498,15 @@ export function useHighThroughputFlow() {
       } else if (r.status === 'error') {
         item.status = 'error'
         item.error = r.job?.error ?? '评估失败（详见该作业日志）'
+        item.reportIncomplete = undefined
+        item.reportMissingNote = undefined
         if (isRateLimitError(r.job?.error)) {
           pauseWithReason(`靶点 ${label} 作业执行失败（限流/配额）：${(r.job?.error ?? '').slice(0, 120)}`)
         }
       } else {
         item.status = 'canceled'
+        item.reportIncomplete = undefined
+        item.reportMissingNote = undefined
       }
     },
     [pauseWithReason],
@@ -289,22 +514,42 @@ export function useHighThroughputFlow() {
 
   /**
    * 执行一组（可重入 — 恢复运行时从组内 items 状态续）：
-   *  judging（多靶点）→ 2 并发窗口 evaluating → merging（≥2 成功）→ done
+   *  judging（多靶点）→ 全局窗口 evaluating → merging（≥2 成功）→ done
    * 暂停/取消：正在跑的作业收尾后组标 paused/canceled，循环不再推进。
+   * v2.38：skipped 靶点不参与评估（关系判断/并发窗口只看非 skipped 项；
+   * 全部跳过的组直接标 done）。
+   * v2.39：组间并行 — 本组的待评估项通过全局窗口（windowRef）跨组共享
+   * HT_WINDOW 个槽位，慢 BLAST 只占自己的槽，不阻塞其他组/靶点。
    */
-  const runGroup = async (g: HTGroupState): Promise<void> => {
+  const runGroup = async (g: HTGroupState, epoch: number): Promise<void> => {
     const runState = runRef.current
     if (!runState) return
-    const single = g.targets.length === 1
+    // v2.38：skipped = 已处理（用户选择不评估 / zip 导入既有报告）— 全部跳过的组直接完成
+    const activeItems = g.items.filter((it) => it.status !== 'skipped')
+    const activeUniprotTargets = activeItems.filter((it) => !it.sequence).map((it) => it.label)
+    const single = g.targets.length === 0 ? activeItems.length <= 1 : activeUniprotTargets.length <= 1
     g.startedAt = g.startedAt ?? Date.now()
+    if (activeItems.length === 0) {
+      g.status = 'done'
+      g.finishedAt = Date.now()
+      snapshot()
+      return
+    }
 
-    // ── ① 关系判断（多靶点组；重入时已有 relation 则跳过）──────────────
+    // ── ① 关系判断（多靶点组；重入时已有 relation 则跳过；v2.38 只判非 skipped 靶点）──
+    // v2.39：跨组串行链（并行组下多组同时打 LLM 关系判断易触发限流；判断很快
+    // 不构成瓶颈 — 单靶点组无判断不受影响）
     if (!single && !g.relation) {
       g.status = 'judging'
       snapshot()
+      const judge = async (): Promise<RelationJudgment> => {
+        const rel = await judgeTargetRelation({ uniprots: activeUniprotTargets, goal: runState.goal })
+        return rel.judgment
+      }
+      const chained = judgeChainRef.current.then(judge, judge)
+      judgeChainRef.current = chained.catch(() => undefined)
       try {
-        const rel = await judgeTargetRelation({ uniprots: g.targets, goal: runState.goal })
-        g.relation = rel.judgment
+        g.relation = await chained
       } catch (e) {
         const msg = e instanceof Error ? e.message : '关系判断服务暂不可用'
         if (isRateLimitError(msg)) {
@@ -324,11 +569,17 @@ export function useHighThroughputFlow() {
     }
     if (!single && !g.relation) g.relation = fallbackIndependentJudgment()
     const related = g.relation?.related === true
-    const batchNote = !related && g.relation ? buildBatchNote(g.relation, g.targets.length) : undefined
+    const batchNote = !related && g.relation ? buildBatchNote(g.relation, activeUniprotTargets.length) : undefined
     // v1.11 ≥90% 高一致组委托：组内首个提交 BLAST 的作业为家族代表，其余共享结果
     const blastGroups = g.relation?.blastGroups ?? []
 
-    // ── ② 2 并发滑动窗口（重入：已终态跳过；running+jobId 接上等待；未提交的重新提交）──
+    // v2.40：旧链让位 — 恢复/重开已启动新编排链时，本组推进权交给新链
+    // （在飞作业的结果记录不受影响，由 launchOne/finishItem 独立完成）
+    if (epoch !== orchestrateEpochRef.current) return
+
+    // ── ② 全局并发窗口（v2.39：跨组共享 HT_WINDOW 个槽位；重入：已终态跳过；
+    //    running+jobId 接上等待；未提交的重新提交。窗口满则排队等槽位释放，
+    //    暂停/取消时等待者被唤醒直接放弃，不再提交新作业）──
     g.status = 'evaluating'
     snapshot()
 
@@ -363,7 +614,27 @@ export function useHighThroughputFlow() {
           }
       const created = await createJob(req)
       if (cancelRef.current || pausedRef.current) {
-        item.status = 'canceled'
+        // v2.40 提交-暂停/停止竞态收尾：刚创建成功的服务器作业不能被丢弃成
+        // 无人轮询的僵尸（占并发坑位 + 结果浪费）：
+        //  - 停止（cancel）：主动撤销服务器作业（cancelRun 的 DELETE 批次可能已错过它）；
+        //  - 暂停（paused）：记录 jobId 并照常轮询到终态（暂停语义 — 结果记入组
+        //    状态；恢复运行时该项已是 running+jobId，直接接上不重复提交）
+        if (created.jobId && cancelRef.current) {
+          // v2.42：取消模式（保留日志与结果 — 停止与完成竞态时不误删已产出报告）
+          void fetch(`/api/jobs/${created.jobId}?mode=cancel`, { method: 'DELETE' }).catch(() => undefined)
+          item.status = 'canceled'
+        } else if (created.jobId && pausedRef.current) {
+          item.jobId = created.jobId
+          item.status = 'running'
+          activeJobIdsRef.current.add(created.jobId)
+          snapshot()
+          const r = await waitForJobTerminal(created.jobId)
+          finishItem(item, label, related, g.index + 1, r)
+          snapshot()
+          return
+        } else {
+          item.status = 'canceled'
+        }
         snapshot()
         return
       }
@@ -380,6 +651,7 @@ export function useHighThroughputFlow() {
       item.status = 'running'
       activeJobIdsRef.current.add(created.jobId)
       displayJobIdRef.current = created.jobId // 进度面板跟随最新创建的作业
+      snapshot() // v2.40：提交成功即时持久化 — 刷新窗口内 jobId 不丢失（恢复时直接接上而非重复提交）
       const r = await waitForJobTerminal(created.jobId)
       finishItem(item, label, related, g.index + 1, r)
       snapshot()
@@ -394,29 +666,31 @@ export function useHighThroughputFlow() {
       snapshot()
     }
 
-    let next = 0
-    const activePromises: Array<Promise<void>> = []
-    // 恢复场景：先接上服务器侧仍在执行的作业（同组至多 HT_WINDOW 个）
-    for (const item of reattach.slice(0, HT_WINDOW)) {
-      const p = reattachOne(item).finally(() => {
-        const idx = activePromises.indexOf(p)
-        if (idx >= 0) activePromises.splice(idx, 1)
-      })
-      activePromises.push(p)
+    // v2.39：占全局窗口槽位执行（满则排队；暂停/取消时放弃不提交）
+    const runWithSlot = async (fn: () => Promise<void>): Promise<void> => {
+      if (!(await acquireWindowSlot())) return
+      try {
+        await fn()
+      } finally {
+        releaseWindowSlot()
+      }
     }
 
-    while ((next < unstarted.length && !pausedRef.current && !cancelRef.current) || activePromises.length > 0) {
-      while (next < unstarted.length && !pausedRef.current && !cancelRef.current && activePromises.length < HT_WINDOW) {
-        const p = launchOne(unstarted[next]).finally(() => {
-          const idx = activePromises.indexOf(p)
-          if (idx >= 0) activePromises.splice(idx, 1)
-        })
-        activePromises.push(p)
-        next++
-      }
-      if (activePromises.length === 0) break
-      await Promise.race(activePromises)
+    const activePromises: Array<Promise<void>> = []
+    // 恢复场景：接上服务器侧仍在执行的作业（全局窗口统一限流，不设组内截断）
+    for (const item of reattach) {
+      activePromises.push(runWithSlot(() => reattachOne(item)))
     }
+    // 待提交项全部入队 — 实际提交节奏由全局窗口控制（≤ HT_WINDOW 个在飞）
+    for (const item of unstarted) {
+      activePromises.push(runWithSlot(() => launchOne(item)))
+    }
+
+    // 等待本组全部项收尾（暂停时已在跑的作业照常收尾；等待槽位的项被唤醒后放弃）
+    if (activePromises.length > 0) await Promise.all(activePromises)
+
+    // v2.40：旧链让位 — 新链已接管本组（避免双链重复推进合并报告/完成标记）
+    if (epoch !== orchestrateEpochRef.current) return
 
     // 窗口收尾（暂停时后台作业可能仍在跑 — orchestrate 已退出循环，这里的 promise 由自身驱动收尾）
     if (pausedRef.current) {
@@ -449,6 +723,9 @@ export function useHighThroughputFlow() {
           goal: runState.goal,
         })
         g.mergedReportId = merged.id
+        // v2.37：合并报告生成完成（markdown 完整）→ 立即留入浏览器本地缓存
+        // （实例回收后「打开合并报告」仍可从本地副本回看）
+        cacheBatchReport(merged)
         autoDownloadHtmlReport(
           `/api/evaluate/batch-report?id=${encodeURIComponent(merged.id)}&download=1`,
           `batch:${merged.id}`,
@@ -478,27 +755,43 @@ export function useHighThroughputFlow() {
     snapshot()
   }
 
-  /** 组循环：串行推进（暂停/取消即停；done 组跳过 — 恢复语义） */
+  /**
+   * v2.39 组编排：全部未完成组并行推进（共享全局 HT_WINDOW 槽位）—
+   * 慢 BLAST 只占自己的窗口槽位，其余组/靶点照常推进（用户核心诉求）。
+   * 暂停/取消：已在跑的作业照常收尾后各组标 paused/canceled；done/canceled 组跳过（恢复语义）。
+   */
   const orchestrate = async (): Promise<void> => {
     const runState = runRef.current
     if (!runState) return
-    for (let gi = 0; gi < runState.groups.length; gi++) {
-      if (pausedRef.current || cancelRef.current) break
-      const g = runState.groups[gi]
-      if (g.status === 'done' || g.status === 'canceled') continue
-      runState.currentIndex = gi
+    // v2.40：启动新编排链（代际 +1）— 旧链在关键推进点检测到过时即让位
+    const epoch = ++orchestrateEpochRef.current
+    const runnable = runState.groups.filter((g) => g.status !== 'done' && g.status !== 'canceled')
+    if (runnable.length > 0) {
       snapshot()
-      await runGroup(g)
-      if (pausedRef.current || cancelRef.current) break
+      await Promise.all(runnable.map((g) => runGroup(g, epoch)))
     }
+    // v2.40：旧链让位 — 新链已接管运行（避免双链重复收尾/生成看板）
+    if (epoch !== orchestrateEpochRef.current) return
     if (pausedRef.current) return // runGroup/pauseWithReason 已置状态；后台作业继续收尾
-    // 手动停止：未开始的组标 canceled
+    // v2.38 手动停止：未开始的组标 canceled，运行标 stopped（可恢复 — 继续运行时
+    // canceled 项/组重置为 pending 重新提交）；不生成汇总看板（那是自然完成的收尾）
     if (cancelRef.current) {
       for (const g of runState.groups) {
         if (g.status === 'pending' || g.status === 'judging' || g.status === 'evaluating' || g.status === 'merging') {
           g.status = 'canceled'
         }
       }
+      runState.status = 'stopped'
+      setPhase('stopped')
+      stopTick()
+      snapshot()
+      const doneTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'done').length
+      const skippedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'skipped').length
+      toast({
+        title: '高通量评估已停止',
+        description: `已完成的 ${doneTargets} 个靶点结果保留${skippedTargets > 0 ? `（另跳过 ${skippedTargets} 个）` : ''}；可「继续运行」从断点恢复，或在组卡片中跳过/重跑指定靶点后再继续。`,
+      })
+      return
     }
     runState.status = 'done'
     runState.finishedAt = Date.now()
@@ -510,9 +803,14 @@ export function useHighThroughputFlow() {
     void finalizeHtDashboard()
     const doneGroups = runState.groups.filter((g) => g.status === 'done').length
     const reports = runState.groups.filter((g) => g.mergedReportId || g.items.some((it) => it.status === 'done')).length
+    const skippedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'skipped').length
+    // v2.42：完成提示诚实化 — 如实报告未成功靶点数（作业被取消/失败不再被「完成」掩盖）
+    const failedTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'error' || it.status === 'canceled').length
+    const incompleteTargets = runState.groups.flatMap((g) => g.items).filter((it) => it.status === 'done' && it.reportIncomplete).length
+    const unfinished = failedTargets + incompleteTargets
     toast({
-      title: '高通量评估完成',
-      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
+      title: unfinished > 0 ? `高通量评估完成（${unfinished} 个靶点未成功）` : '高通量评估完成',
+      description: `${runState.groups.length} 组中 ${doneGroups} 组完成，${reports} 组产出了可查看的报告${skippedTargets > 0 ? `（跳过 ${skippedTargets} 个靶点）` : ''}${unfinished > 0 ? `；${failedTargets > 0 ? `${failedTargets} 个失败/被取消` : ''}${failedTargets > 0 && incompleteTargets > 0 ? '、' : ''}${incompleteTargets > 0 ? `${incompleteTargets} 个报告不完整` : ''}，可「重跑失败/不完整项」补齐` : ''}；汇总报告（统计看板 + 全靶点总表 + AI 整体可行性报告，单文件）正在生成，完成后自动下载。运行日志可在每组卡片中回看。`,
     })
   }
 
@@ -537,6 +835,12 @@ export function useHighThroughputFlow() {
       runState.dashboardError = '__done__'
       saveHTRun(runState)
       setRun(cloneRun(runState))
+      // v2.42：明确提示（此前静默写入哨兵值，横幅只显示「__done__」原始文本）
+      toast({
+        title: '未生成汇总报告',
+        description: '本次运行没有成功完成的靶点（全部失败/被取消/被跳过），无可统计的评估结果。可「重跑失败/不完整项」补齐后自动重新生成。',
+        variant: 'destructive',
+      })
       return
     }
     // v2.36：生成中标记（横幅立即可见，终态后接替）
@@ -585,6 +889,43 @@ export function useHighThroughputFlow() {
     finalizeHtDashboardRef.current = finalizeHtDashboard
   })
 
+  /**
+   * v2.39 BLAST 预热（用户诉求「先把 BLAST 都提交起来，加快进度」）：
+   * 启动/恢复运行时把全部待评估靶点（序列 / UniProt ID）一次性发服务端 —
+   * 服务端按全局节拍（~15s/发）限速预提交 NCBI，作业还在排队时 NCBI 已在计算；
+   * 管线 blast-submit 阶段按序列哈希命中预提交 RID 直接收集。
+   * fire-and-forget：失败静默（管线回退常规提交，预热永不阻塞主流程）。
+   */
+  const warmupBlast = useCallback((r: HTRunState): void => {
+    if (r.options?.skipBlast) return
+    const uniprots = [...new Set(
+      r.groups.flatMap((g) => g.items.filter((it) => !it.sequence && it.status === 'pending' && !it.jobId).map((it) => it.label)),
+    )]
+    const sequences = [...new Set(
+      r.groups.flatMap((g) => g.items.filter((it) => it.sequence && it.status === 'pending' && !it.jobId).map((it) => it.sequence as string)),
+    )]
+    if (uniprots.length + sequences.length === 0) return
+    void (async () => {
+      try {
+        const res = await fetch('/api/evaluate/blast-warmup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sequences, uniprots, forceBlast: r.options?.forceBlast === true }),
+        })
+        if (!res.ok) return
+        const data = (await res.json()) as { ok?: boolean; submitted?: number }
+        if (data.ok && data.submitted && data.submitted > 0) {
+          toast({
+            title: 'BLAST 预热已启动',
+            description: `${data.submitted} 条序列已进入限速预提交队列（~15s/发）— 作业排队期间 NCBI 已在计算，开始评估时自动命中结果。`,
+          })
+        }
+      } catch {
+        /* 预热失败静默 — 管线会常规提交 */
+      }
+    })()
+  }, [])
+
   /** 启动一次高通量运行（HT Tab → 开始高通量评估） */
   const startRun = async (payload: HTStartPayload): Promise<StartResult> => {
     if (isStatelessEnv()) {
@@ -614,7 +955,8 @@ export function useHighThroughputFlow() {
             range: payload.groupRanges?.[i]?.[j],
             // v2.29：结构域名提示（Excel 域名 / 手输「:域名」后缀）— 提交时随 options.rangeHint
             domainHint: payload.groupDomainHints?.[i]?.[j],
-            status: 'pending' as const,
+            // v2.38：启动时未勾选的靶点直接跳过（保留在记录里 — 可随时恢复评估）
+            status: (payload.skipFlags?.groups?.[i]?.[j] ? 'skipped' : 'pending') as 'skipped' | 'pending',
           })),
           status: 'pending' as const,
         })),
@@ -631,7 +973,8 @@ export function useHighThroughputFlow() {
             range: s.range,
             sequence: s.seq,
             sequenceHeader: s.header || undefined,
-            status: 'pending' as const,
+            // v2.38：同上 — 启动时未勾选的序列靶点跳过（可恢复）
+            status: (payload.skipFlags?.seqGroups?.[k]?.[j] ? 'skipped' : 'pending') as 'skipped' | 'pending',
           })),
           status: 'pending' as const,
         })),
@@ -650,6 +993,13 @@ export function useHighThroughputFlow() {
         // v2.36：原始 Excel 行快照（汇总报告「原表内容」列）
         excelRows: payload.excelRows,
       }
+      const skippedAtStart = groupStates.reduce((n, g) => n + g.items.filter((it) => it.status === 'skipped').length, 0)
+      const toEvaluate = newRun.totalTargetCount - skippedAtStart
+      if (toEvaluate <= 0) {
+        const msg = '所有靶点都被跳过了 — 请至少勾选一个要评估的靶点（或移除跳过标记）'
+        toast({ title: '无法开始高通量评估', description: msg, variant: 'destructive' })
+        return { ok: false, error: msg }
+      }
       runRef.current = newRun
       runFolderRef.current = safeDir(`TargetEval_HT_${new Date(now).toISOString().slice(0, 10)}_${groupStates.length}g`)
       pausedRef.current = false
@@ -665,20 +1015,34 @@ export function useHighThroughputFlow() {
       refreshRecentRuns()
       setPhase('running')
       startTick()
+      warmupBlast(newRun)
       void orchestrate()
+      if (skippedAtStart > 0) {
+        toast({
+          title: '高通量评估已开始',
+          description: `将评估 ${toEvaluate} 个靶点（另跳过 ${skippedAtStart} 个 — 可在运行中随时恢复评估）。`,
+        })
+      }
       return { ok: true }
     } finally {
       setStarting(false)
     }
   }
 
-  /** 配额恢复后手动重新开始（从断点续跑；已完成组不重复评估） */
+  /**
+   * 配额恢复后手动重新开始（从断点续跑；已完成组不重复评估）。
+   * v2.38：stopped/中断恢复 — canceled 项重置为 pending 重新提交（手动停止时
+   * 服务器作业已被取消，无结果可接）；running+jobId 项仍接上等待（中断时服务器
+   * 侧可能仍在执行，结果不浪费）。
+   */
   const resumeRun = useCallback(async (): Promise<StartResult> => {
     const r = runRef.current
-    if (!r || r.status === 'done') return { ok: false, error: '没有可恢复的运行' }
+    if (!r || r.status === 'running') return { ok: false, error: '没有可恢复的运行' }
     if (!runFolderRef.current) {
       runFolderRef.current = safeDir(`TargetEval_HT_${new Date(r.createdAt).toISOString().slice(0, 10)}_${r.groups.length}g`)
     }
+    // v2.38：canceled → pending（组与项；清除已死作业引用 — 恢复时重新提交）
+    resetCanceledForResume(r)
     pausedRef.current = false
     cancelRef.current = false
     r.status = 'running'
@@ -689,9 +1053,189 @@ export function useHighThroughputFlow() {
     refreshRecentRuns()
     setPhase('running')
     startTick()
+    warmupBlast(r) // v2.39：恢复时对尚未评估的靶点再预热（幂等 — 已预提交的序列自动去重）
     void orchestrate()
     return { ok: true }
-  }, [refreshRecentRuns, startTick])
+  }, [refreshRecentRuns, startTick, warmupBlast])
+
+  /** v2.38 手动暂停：不取消服务器作业（跑完照常记结果），不再开新组/新作业 */
+  const pauseRun = useCallback((): void => {
+    const r = runRef.current
+    if (!r || r.status !== 'running') return
+    pausedRef.current = true
+    r.status = 'paused'
+    r.pausedReason = '用户手动暂停 — 服务器上正在执行的作业会继续跑完并记录结果'
+    r.pausedAt = Date.now()
+    saveHTRun(r)
+    setRun(cloneRun(r))
+    refreshRecentRuns()
+    setPhase('paused')
+    stopTick()
+    toast({
+      title: '已手动暂停',
+      description: '正在执行的作业会继续跑完并记录结果；可随时「继续运行」从断点恢复，或先跳过/重跑指定靶点。',
+    })
+  }, [refreshRecentRuns, stopTick])
+
+  /** v2.38：靶点级/组级编辑守卫 — 仅非 running 阶段可改（运行中编排独占状态） */
+  const ensureEditable = useCallback((): boolean => {
+    const r = runRef.current
+    if (!r) return false
+    if (r.status === 'running') {
+      toast({ title: '运行进行中', description: '请先暂停或停止运行，再调整靶点的评估/跳过选择。', variant: 'destructive' })
+      return false
+    }
+    return true
+  }, [])
+
+  /** v2.38：靶点有变动待评估 → 组回可执行态 + 汇总看板作废（见模块级 touchGroupForRerun） */
+
+  /** v2.38：跳过/恢复一个靶点（pending/error/canceled ↔ skipped） */
+  const toggleSkipItem = useCallback((groupIndex: number, key: string): void => {
+    if (!ensureEditable()) return
+    const r = runRef.current
+    const g = r?.groups.find((x) => x.index === groupIndex)
+    const it = g?.items.find((x) => x.key === key)
+    if (!r || !g || !it) return
+    if (it.status === 'skipped') {
+      it.status = 'pending'
+      it.skipNote = undefined
+      touchGroupForRerun(g, r)
+    } else if (it.status !== 'done' && it.status !== 'running') {
+      it.status = 'skipped'
+      it.skipNote = '手动跳过（不评估）'
+    }
+    snapshot()
+  }, [ensureEditable, snapshot])
+
+  /** v2.38：重跑一个靶点（error/canceled/skipped → pending）；
+ *  v2.41：done 但报告不完整（部分章节失败）也可重跑；重置时清旧 jobId
+ *  （旧作业已终态 — pending+jobId 不会被重新提交，历史 bug） */
+  const retryItem = useCallback((groupIndex: number, key: string): void => {
+    if (!ensureEditable()) return
+    const r = runRef.current
+    const g = r?.groups.find((x) => x.index === groupIndex)
+    const it = g?.items.find((x) => x.key === key)
+    if (!r || !g || !it) return
+    if (it.status === 'error' || it.status === 'canceled' || it.status === 'skipped' || (it.status === 'done' && it.reportIncomplete)) {
+      it.status = 'pending'
+      it.error = undefined
+      it.skipNote = undefined
+      it.reportIncomplete = undefined
+      it.reportMissingNote = undefined
+      it.jobId = undefined // v2.41 修复：清旧作业引用（重置为重新提交）
+      touchGroupForRerun(g, r)
+      snapshot()
+    }
+  }, [ensureEditable, snapshot])
+
+  /** v2.38：组级 — 重跑本组全部失败/中断项（error/canceled → pending）；
+ *  v2.41：报告不完整的 done 项也纳入（含清 jobId 修复） */
+  const retryGroupFailures = useCallback((groupIndex: number): void => {
+    if (!ensureEditable()) return
+    const r = runRef.current
+    const g = r?.groups.find((x) => x.index === groupIndex)
+    if (!r || !g) return
+    let n = 0
+    for (const it of g.items) {
+      if (it.status === 'error' || it.status === 'canceled' || (it.status === 'done' && it.reportIncomplete)) {
+        it.status = 'pending'
+        it.error = undefined
+        it.reportIncomplete = undefined
+        it.reportMissingNote = undefined
+        it.jobId = undefined // v2.41 修复：清旧作业引用
+        n++
+      }
+    }
+    if (n > 0) {
+      touchGroupForRerun(g, r)
+      snapshot()
+      toast({ title: `第 ${groupIndex + 1} 组已重置 ${n} 个失败/报告不完整靶点`, description: '点击「继续运行」开始重跑。' })
+    }
+  }, [ensureEditable, snapshot])
+
+  /** v2.38：组级 — 跳过本组全部未开始项（pending → skipped） */
+  const skipGroupPending = useCallback((groupIndex: number): void => {
+    if (!ensureEditable()) return
+    const r = runRef.current
+    const g = r?.groups.find((x) => x.index === groupIndex)
+    if (!r || !g) return
+    let n = 0
+    for (const it of g.items) {
+      if (it.status === 'pending') {
+        it.status = 'skipped'
+        it.skipNote = '组级跳过（不评估）'
+        n++
+      }
+    }
+    if (n > 0) snapshot()
+  }, [ensureEditable, snapshot])
+
+  /**
+   * v2.38：全局重跑失败项（error/canceled → pending）并自动继续运行。
+   * 从 done/stopped/paused 均可调用；汇总看板作废（下次自然完成时重新生成）。
+   */
+  const retryFailed = useCallback(async (): Promise<StartResult> => {
+    if (!ensureEditable()) return { ok: false, error: '运行进行中' }
+    const r = runRef.current
+    if (!r) return { ok: false, error: '没有打开的运行' }
+    const n = resetFailedForRetry(r)
+    if (n === 0) {
+      toast({ title: '没有可重跑的失败靶点', description: '全部靶点均已成功或已跳过。' })
+      return { ok: false, error: '没有失败靶点' }
+    }
+    toast({ title: `已重置 ${n} 个失败靶点`, description: '正在继续运行…' })
+    return resumeRun()
+  }, [ensureEditable, resumeRun])
+
+  /**
+   * v2.38→v2.44 导入既有报告（zip 归档 / 单独 HTML 文件，可多选批量）— 匹配到的
+   * 未评估靶点标 skipped（报告已在用户手里，不重复评估、不占配额）。返回匹配数
+   * + 未命中诊断（v2.49）；失败抛错。匹配循环在模块级 applyArchiveSkips
+   * （react-hooks/immutability：直接在 useCallback 内改 runRef 会被 React 编译器拦，
+   * 模块函数不受限）。
+   */
+  const importArchive = useCallback(async (files: File | File[]): Promise<ArchiveSkipResult> => {
+    if (!ensureEditable()) throw new Error('运行进行中，请先暂停或停止')
+    const r = runRef.current
+    if (!r) throw new Error('没有打开的运行')
+    const list = (Array.isArray(files) ? files : [files]).filter(Boolean)
+    if (list.length === 0) throw new Error('未选择要导入的报告文件')
+    const reports = await parseHtImportFiles(list)
+    if (reports.length === 0) throw new Error('所选文件中没有可识别的报告（支持 zip 归档与报告 HTML）')
+    // 序列靶点预先算好 SHA（清单通道精确匹配）
+    const shaByKey = new Map<string, string | undefined>()
+    for (const g of r.groups) {
+      for (const it of g.items) {
+        if (it.sequence) shaByKey.set(it.key, await sha256Hex16(it.sequence))
+      }
+    }
+    const displayName = list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`
+    const result = applyArchiveSkips(r, reports, shaByKey, displayName)
+    r.importedNote = result.matched > 0 ? `已从 ${displayName.slice(0, 40)} 导入 ${result.matched} 个靶点的既有报告（跳过评估）` : undefined
+    snapshot()
+    return result
+  }, [ensureEditable, snapshot])
+
+  /** v2.44：手动重新生成「高通量评估汇总报告」（回看已完成运行时 — 首次生成失败 /
+   * 旧报告已过期 / 重跑后想刷新时）。清除旧结果标记后走 finalizeHtDashboard 同一
+   * 生成链路（评分统计 + 全靶点总表 + AI 整体可行性；完成后自动下载新 HTML）。 */
+  const regenerateDashboard = useCallback(async (): Promise<void> => {
+    const r = runRef.current
+    if (!r) { toast({ title: '没有打开的运行' }) ; return }
+    if (r.status === 'running' || r.dashboardPending) {
+      toast({ title: '汇总报告生成中', description: '请等待当前生成完成后重试。' })
+      return
+    }
+    if (!r.groups.some((g) => g.items.some((it) => it.status === 'done' && it.jobId))) {
+      toast({ title: '无法生成汇总报告', description: '该运行没有成功完成的靶点（全部失败/被取消/被跳过）— 可「重跑失败/不完整项」补齐后自动重新生成。', variant: 'destructive' })
+      return
+    }
+    r.dashboardId = undefined
+    r.dashboardError = undefined
+    snapshot()
+    await finalizeHtDashboardRef.current?.()
+  }, [snapshot])
 
   /** 打开一份历史运行（done = 回看；paused/interrupted = 提供恢复入口） */
   const openRunById = useCallback(
@@ -708,7 +1252,37 @@ export function useHighThroughputFlow() {
       displayJobIdRef.current = null
       setNetworkIssue(false)
       if (r.status === 'running') r.status = 'interrupted'
-      setPhase(r.status === 'done' ? 'done' : 'paused')
+      // v2.38：stopped 独立阶段（可恢复 — 与限流自动暂停区分文案与操作集）
+      setPhase(r.status === 'done' ? 'done' : r.status === 'stopped' ? 'stopped' : 'paused')
+      // v2.37：打开历史运行 → 趁服务实例仍存活，后台补齐该运行全部终态作业与
+      // 各组合并报告的本地副本（组日志弹窗/报告入口此后不再依赖服务端存活）
+      const jobIds = r.groups.flatMap((g) =>
+        g.items
+          .filter((it) => (it.status === 'done' || it.status === 'error') && it.jobId)
+          .map((it) => it.jobId as string),
+      )
+      const reportIds = r.groups.flatMap((g) => (g.mergedReportId ? [g.mergedReportId] : []))
+      // v2.41：补档完成后回扫 done 靶点 — 从终态详情（含旧版本作业的日志快照）
+      // 推导「报告不完整」标记（新作业在 finishItem 已实时标记）；补挂后可一键重跑
+      void backfillJobCache(jobIds).then(() => {
+        const cur = runRef.current
+        if (!cur || cur.id !== id) return
+        let changed = false
+        for (const g of cur.groups) {
+          for (const it of g.items) {
+            if (it.status === 'done' && it.jobId && !it.reportIncomplete) {
+              const note = reportIncompleteNote(getCachedJobDetail(it.jobId))
+              if (note) {
+                it.reportIncomplete = true
+                it.reportMissingNote = note
+                changed = true
+              }
+            }
+          }
+        }
+        if (changed) snapshot()
+      })
+      void backfillBatchReportCache(reportIds)
       // v2.36：打开时发现汇总报告生成被刷新中断（done + pending 且无结果）→ 自动续生成
       if (r.status === 'done' && r.dashboardPending && !r.dashboardId) void finalizeHtDashboardRef.current?.()
       if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
@@ -742,11 +1316,24 @@ export function useHighThroughputFlow() {
     }
     // 归档条目：组内成功靶点的独立报告 + 组合并报告（组号→zip 子文件夹）
     // v2.28：统计看板（若有）作为根级 00_ 文件一并打包 — 内含离线链接指向本包各报告
+    // v2.38：条目携带靶点元数据（uniprot/range/seqSha…）→ 包内 _TargetEval_manifest.json
+    //  （新建运行导入该 zip 时精确匹配已完成的靶点直接跳过）
     const entries: HtArchiveEntry[] = []
     for (const g of r.groups) {
       if (groupIndex != null && g.index !== groupIndex) continue
       for (const it of g.items) {
-        if (it.status === 'done' && it.jobId) entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
+        if (it.status === 'done' && it.jobId) {
+          entries.push({
+            jobId: it.jobId,
+            group: g.index + 1,
+            label: it.label,
+            uniprot: it.sequence ? undefined : it.label,
+            range: it.range,
+            seqSha: it.sequence ? await sha256Hex16(it.sequence) : undefined,
+            seqLength: it.sequence?.length,
+            sequenceHeader: it.sequenceHeader,
+          })
+        }
       }
       if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
     }
@@ -781,7 +1368,9 @@ export function useHighThroughputFlow() {
     if (ids.length > 0) {
       setCanceling(true)
       try {
-        await Promise.allSettled(ids.map((id) => fetch(`/api/jobs/${id}`, { method: 'DELETE' })))
+        // v2.42：取消模式 — 中止运行中作业但保留日志与已产出结果（与历史页的
+        // 删除语义分开；停止与作业完成竞态时不再误删已完成报告）
+        await Promise.allSettled(ids.map((id) => fetch(`/api/jobs/${id}?mode=cancel`, { method: 'DELETE' })))
       } catch {
         // 忽略取消请求失败（作业可能已结束）
       } finally {
@@ -791,13 +1380,17 @@ export function useHighThroughputFlow() {
     }
   }, [stopTick])
 
-  /** 退出高通量视图回输入页（运行记录保留在本地与 HT Tab；running 时视为中断保存） */
+  /** 退出高通量视图回输入页（运行记录保留在本地与 HT Tab）。
+   * v2.40：运行中退出 = 暂停语义（原为 cancel 语义 — 在飞作业被标 canceled 但
+   * 服务器侧照跑，成为无人轮询的僵尸：占并发坑位 + 恢复时被重复提交，双重浪费）。
+   * 改为与手动暂停一致：在飞作业继续执行并记录结果，项保持 running —
+   * 回到 HT 标签页「继续运行」时直接接上（reattach），不重复提交、不虚占坑位；
+   * 尚未提交的项（等槽位/退避中）被唤醒后放弃，恢复时重新提交（无服务器作业，无浪费）。 */
   const exitToIdle = useCallback((): void => {
     const r = runRef.current
     if (r && r.status === 'running') {
       r.status = 'interrupted'
       pausedRef.current = true
-      cancelRef.current = true
       saveHTRun(r)
     }
     stopTick()
@@ -825,5 +1418,21 @@ export function useHighThroughputFlow() {
     archiveRun,
     cancelRun,
     exitToIdle,
+    /** v2.38 手动暂停（不取消服务器作业 — 跑完照常记结果） */
+    pauseRun,
+    /** v2.38 跳过/恢复一个靶点（非 running 阶段） */
+    toggleSkipItem,
+    /** v2.38 重跑一个靶点（error/canceled/skipped → pending） */
+    retryItem,
+    /** v2.38 组级：重跑本组全部失败/中断项 */
+    retryGroupFailures,
+    /** v2.38 组级：跳过本组全部未开始项 */
+    skipGroupPending,
+    /** v2.38 全局重跑失败项并自动继续运行 */
+    retryFailed,
+    /** v2.38 导入既有报告（zip / 单独 HTML，可多选；匹配到的未评估靶点标 skipped） */
+    importArchive,
+    /** v2.44 手动重新生成汇总报告（回看已完成运行时） */
+    regenerateDashboard,
   }
 }

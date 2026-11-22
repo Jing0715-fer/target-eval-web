@@ -9,7 +9,7 @@ export function AppFooter({ engineSummary }: { engineSummary?: string }) {
           <span className="size-1.5 rounded-[2px] bg-primary" aria-hidden />
           TargetEval
           <span className="font-normal text-muted-foreground/50" aria-hidden>·</span>
-          <span className="font-mono text-[10px] font-normal text-muted-foreground/70">v2.14.0</span>
+          <span className="font-mono text-[10px] font-normal text-muted-foreground/85">v2.57.0</span>
         </span>
         <span className="hidden h-3 w-px bg-border sm:block" aria-hidden />
         <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -22,9 +22,9 @@ export function AppFooter({ engineSummary }: { engineSummary?: string }) {
           )}
         </p>
         <span className="hidden h-3 w-px bg-border sm:block" aria-hidden />
-        <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
+        <p className="flex items-center gap-1 text-[11px] text-muted-foreground" title="服务器端评估记录与报告为运行数据：按保留策略定期清理（约 30 天），运行环境重置时会被一并清空；报告生成完成时会自动下载 HTML 到本机下载目录">
           <ShieldCheck className="size-3 text-emerald-600/80 dark:text-emerald-500/80" aria-hidden />
-          记录按网络隔离，仅本人可见，保留 7 天
+          记录仅本人可见 · 服务器数据保留约 30 天（环境重置后清空），重要报告请及时下载到本机
         </p>
       </div>
     </footer>

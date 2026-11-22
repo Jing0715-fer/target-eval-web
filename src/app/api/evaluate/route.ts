@@ -4,13 +4,15 @@
  * 每 IP 活跃与日配额）、上传目录归属校验、触发终态作业 TTL 清理。
  */
 import { NextResponse } from 'next/server'
+import { createHash } from 'node:crypto'
 import { db } from '@/lib/db'
-import { createJobSnapshot, enqueueJob, getJobSnapshot, makeReporter, setJobRunning, markStatus, reapOrphanJobs } from '@/lib/eval/job-manager'
+import { createJobSnapshot, enqueueJob, getJobSnapshot, makeReporter, setJobRunning, markStatus, reapOrphanJobs, rememberDedup, findActiveByFingerprint } from '@/lib/eval/job-manager'
 import { runPipeline } from '@/lib/eval/pipeline'
 import { getOwner } from '@/lib/eval/request-guard'
 import { runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
 import { checkJobQuota, quotaResponse, scheduleJobTtlCleanup, QuotaError } from '@/lib/eval/gatekeeper'
 import { isUploadId, uploadOwnedBy } from '@/lib/eval/upload-owner'
+import { isYearSpan } from '@/lib/eval/construct-range'
 import { MAX_PDB_UNLIMITED, type BlastGroup, type EvaluationOptions, type InputMode } from '@/lib/eval/types'
 
 export const runtime = 'nodejs'
@@ -95,12 +97,15 @@ export async function POST(req: Request) {
   }
 
   // v1.23 评估范围限定（UniProt 残基编号，1-based 闭区间）：仅 UniProt 单靶点无伴随序列时有效
+  // v2.37 年份区间守卫：两端均在 1900-2099 且跨度 ≤60（如 2022-2024 流行年份）→ 忽略，
+  // 评估区间改由管线在 BLAST 归属后推导（构建比对 / BLAST nr HSP）
   const rawRange = body.options?.range
   let range: [number, number] | undefined
   if (Array.isArray(rawRange) && rawRange.length === 2) {
     const s = Number(rawRange[0]), e = Number(rawRange[1])
     if (Number.isFinite(s) && Number.isFinite(e) && s >= 1 && e >= s && e <= 100000) {
-      range = [Math.round(s), Math.round(e)]
+      const rs = Math.round(s), re = Math.round(e)
+      if (!isYearSpan(rs, re)) range = [rs, re]
     }
   }
 
@@ -140,6 +145,29 @@ export async function POST(req: Request) {
     ? { groupKey: hb.groupKey, members: hb.members, minIdentity: hb.minIdentity }
     : undefined
 
+  // ── v2.40 同靶点活跃作业接续（dedup-attach，防重复占坑）──
+  // 用户事故：恢复运行时同一靶点被重复提交（旧作业仍在执行但客户端已放弃），
+  // 旧僵尸耗尽并发坑位 → 新提交 429 → 整场运行被限流暂停。
+  // 同一归属对「完全相同的评估输入」（靶点/序列/区间/目标/配体/引擎全部一致）
+  // 重复提交时直接接上仍在执行的既有作业：不新建、不占配额；输入有任何
+  // 差异（如不同 goal / 不同构建区间 / 不同引擎）指纹不同 → 照常新建。
+  const dedupFp = createHash('sha256').update(JSON.stringify([
+    mode,
+    uniprot?.toUpperCase() ?? null,
+    sequence ?? null,
+    uploadId ?? null,
+    body.goal?.slice(0, 2000) ?? null,
+    batchNote ?? null,
+    homologBlast?.groupKey ?? null,
+    ligands,
+    options,
+    llmOverride ? [llmOverride.providerKey, llmOverride.baseUrl ?? null, llmOverride.model, llmOverride.apiKey ?? null] : null,
+  ])).digest('hex').slice(0, 40)
+  const attachedId = findActiveByFingerprint(owner.key, dedupFp)
+  if (attachedId) {
+    return NextResponse.json({ ok: true, jobId: attachedId, attached: true })
+  }
+
   // 创建 DB 记录（pending）— 记录归属（哈希键 + 掩码）
   // v2.34：序列靶点标题用 sequenceHeader（结构交付行 = 「文件名·链N」）— 百行级
   // 高通量运行中全部叫「序列靶点」无法区分；无标签时退回长度描述
@@ -163,6 +191,9 @@ export async function POST(req: Request) {
 
   // 惰性触发终态作业 TTL 清理（fire-and-forget）
   scheduleJobTtlCleanup()
+
+  // v2.40：登记指纹 → 本作业活跃期间同靶点重复提交直接接上
+  rememberDedup(owner.key, dedupFp, job.id)
 
   // 内存快照 + 串行队列
   createJobSnapshot(job.id)

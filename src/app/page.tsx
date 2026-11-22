@@ -350,6 +350,7 @@ export default function Home() {
                       report={flow.batch.mergedReport}
                       targetLabels={flow.batch.items.map(x => x.label)}
                       onNewEvaluation={handleNewEvaluation}
+                      onRegenerated={flow.updateMergedReport}
                     />
                   ) : (
                     <ResultView job={flow.job} onNewEvaluation={handleNewEvaluation} />

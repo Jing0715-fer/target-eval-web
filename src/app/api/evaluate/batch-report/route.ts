@@ -12,9 +12,10 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound, ownerListFilter } from '@/lib/eval/request-guard'
+import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
-import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
 import { propagateFamilyBlast } from '@/lib/eval/blast-family'
 import { augmentTargetsForSharedPdbCoverage } from '@/lib/eval/rcsb'
 import { getEngineSummary, runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
@@ -33,6 +34,8 @@ interface BatchReportBody {
   uploadId?: string
   relation?: RelationJudgment
   goal?: string
+  /** 需求B：手动重新生成 — 已有合并报告 id（沿用其 jobIds/relation/uploadId 原地重跑 LLM） */
+  regenerateOf?: string
   /** v2.19：用户本地引擎配置（localStorage → 请求内联携带；服务端不落盘） */
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
 }
@@ -61,10 +64,25 @@ async function recomputeAttribution(
   }
 }
 
+/** v2.48.1：relationType 枚举校验 — 此前仅 typeof string，任意自定义字符串透传到
+ *  describeRelationType 无匹配 → undefined → esc(undefined) 渲染崩溃（HTML 落盘失败）；
+ *  strategy 接口上 required 但历史/外部调用可能缺省，守卫放宽后由 normalizeRelation 补齐 */
+const RELATION_TYPES = new Set(['complex', 'antibody-antigen', 'fusion', 'homologous', 'pathway', 'independent', 'other'])
+
 function isRelationJudgment(v: unknown): v is RelationJudgment {
   if (!v || typeof v !== 'object') return false
   const j = v as Partial<RelationJudgment>
-  return typeof j.related === 'boolean' && typeof j.relationType === 'string' && typeof j.rationale === 'string'
+  return typeof j.related === 'boolean'
+    && typeof j.relationType === 'string' && RELATION_TYPES.has(j.relationType)
+    && typeof j.rationale === 'string'
+    && (j.strategy === undefined || typeof j.strategy === 'string')
+}
+
+/** strategy 缺省补空串（渲染层 esc() 不再收 undefined；入参可能为 undefined —
+ *  展开为空对象后交由 isRelationJudgment 拒绝，不在此处抛错） */
+function normalizeRelation(j: RelationJudgment | undefined): RelationJudgment {
+  if (j && typeof j.strategy === 'string') return j
+  return { ...j, strategy: '' } as RelationJudgment
 }
 
 // ── v2.13 旧版合并报告自动升级（格式重渲染）────────────────────────────
@@ -76,6 +94,8 @@ function isRelationJudgment(v: unknown): v is RelationJudgment {
 // 调用方继续服务旧 HTML（叠加既有 CSS/UX 升级注入）。
 // 并发去重：同 id 在途请求共享同一 Promise（iframe 预览 + 下载同时到达只渲染一次）。
 const upgradeInflight = new Map<string, Promise<string | null>>()
+/** 需求B：同 id 重新生成在途去重（进程内；DB status=running 为跨请求二道保险） */
+const regenInflight = new Set<string>()
 const MERGED_FMT_MARKER = 'mrg-fmt-v2.26'  // v2.26：共有结构全量交集补齐 + 受体–G 蛋白批次受体主导首页（旧报告重渲染即修复）
 
 async function upgradeLegacyHtml(record: BatchReport): Promise<string | null> {
@@ -85,6 +105,7 @@ async function upgradeLegacyHtml(record: BatchReport): Promise<string | null> {
   let relation: RelationJudgment | null = null
   try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
   if (!isRelationJudgment(relation)) return null
+  relation = normalizeRelation(relation) // v2.48.1：strategy 缺省补空串
 
   // 作业可能已被 TTL 清理 — 数据不可完整重建时保留旧 HTML
   let targets: Awaited<ReturnType<typeof loadMergedTargets>> = []
@@ -170,10 +191,72 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '请求体不是合法 JSON' }, { status: 400 })
   }
 
+  // ── 需求B：手动重新生成既有合并报告（原地重跑 LLM 三段式，靶点数据不重评估）──
+  // 沿用原记录 id / jobIds / relation / uploadId；成功覆盖 markdown+HTML，
+  // 失败保留上一版内容（fail() 内处理）；同 id 在途去重（进程内 Set + DB status 双保险）
+  if (body.regenerateOf) {
+    const id = body.regenerateOf.trim()
+    const record = await db.batchReport.findUnique({ where: { id } })
+    if (!record) return notFound()
+    // 归属校验（与 GET 同口径：ownerKey 两层回退）
+    if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) {
+      return notFound()
+    }
+    if (record.status === 'running' || regenInflight.has(id)) {
+      return NextResponse.json({ ok: false, error: '该报告正在生成/重新生成中，请等待完成后再试' }, { status: 409 })
+    }
+    let jobIds: string[] = []
+    try { jobIds = JSON.parse(record.jobIds) } catch { /* ignore */ }
+    if (jobIds.length < 2) {
+      return NextResponse.json({ ok: false, error: '原报告缺少有效的作业清单（jobIds < 2），无法重新生成' }, { status: 400 })
+    }
+    let relation: RelationJudgment | null = null
+    try { relation = JSON.parse(record.relation) } catch { /* ignore */ }
+    if (!isRelationJudgment(relation)) {
+      return NextResponse.json({ ok: false, error: '原报告的关系判定数据已损坏（relation 字段不合法），无法重新生成' }, { status: 400 })
+    }
+    relation = normalizeRelation(relation)
+    const uploadId = record.uploadId ?? undefined
+    if (uploadId && (!isUploadId(uploadId) || !(await uploadOwnedBy(uploadId, owner)))) {
+      return NextResponse.json({ ok: false, error: '无权使用原报告关联的上传（仅上传者本人可用）' }, { status: 403 })
+    }
+    // 置 running 并清空 markdown：GET 的旧版兼容分支会把「running + 有 markdown」
+    // 判为 done（v1.12 遗留口径）— 保留 markdown 会让前端轮询立即假成功；
+    // 清空后 running 态无歧义，旧内容仅在内存（ctx.prevMarkdown）与磁盘 HTML 保留，
+    // 失败时由 fail() 写回 DB（进程崩溃则按普通 running 超时口径处理，旧 HTML 仍可下载）
+    await db.batchReport.update({
+      where: { id },
+      data: { status: 'running', error: null, markdown: null, updatedAt: new Date() },
+    })
+    regenInflight.add(id)
+    const llmOverride = sanitizeLlmOverride(body.llm)
+    const prevMarkdown = record.markdown ?? ''
+    void runWithLlmOverride(llmOverride, () => runBatchReportGeneration({
+      batchReportId: id,
+      jobIds,
+      uploadId,
+      relation,
+      goal: body.goal,
+      prevMarkdown,
+    })).finally(() => { regenInflight.delete(id) })
+    return NextResponse.json({
+      ok: true,
+      batchReport: {
+        id,
+        jobIds,
+        relation,
+        status: 'running',
+        markdown: '',
+        sequenceAttribution: [],
+        createdAt: record.createdAt.toISOString(),
+      },
+    })
+  }
+
   // v2.8：取消 6 作业截断 → 全量合并；防御性上限（与关系判断路由/前端一致）超限明确告知
   const MAX_BATCH_JOBS = 30
   const jobIds = (body.jobIds ?? []).filter(Boolean)
-  const relation = body.relation
+  const relation = normalizeRelation(body.relation) // v2.48.1：strategy 缺省补空串
   if (jobIds.length < 2) {
     return NextResponse.json({ ok: false, error: '合并报告至少需要 2 个评估作业' }, { status: 400 })
   }
@@ -181,7 +264,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: `一次最多合并 ${MAX_BATCH_JOBS} 个评估作业` }, { status: 400 })
   }
   if (!isRelationJudgment(relation)) {
-    return NextResponse.json({ ok: false, error: '缺少有效的关系判定结果（relation）' }, { status: 400 })
+    return NextResponse.json({ ok: false, error: '缺少有效的关系判定结果（relation — relationType 须为七种已知类型之一）' }, { status: 400 })
   }
 
   // 归属校验：全部作业须为本人创建
@@ -240,21 +323,32 @@ export async function POST(req: Request) {
   })
 }
 
-/** 后台生成合并报告：传播同源检索 → 聚合上传数据 → LLM 三段式 → markdown/HTML 落库 → 更新终态 */
+/** 后台生成合并报告：传播同源检索 → 聚合上传数据 → LLM 三段式 → markdown/HTML 落库 → 更新终态
+ *  需求B：ctx.prevMarkdown 非空 = 重新生成既有报告 — 失败时保留上一版内容（status 回 done
+ *  + error 附「已保留上一版」说明，旧 markdown/HTML 不受影响）而非置 error 终态 */
 async function runBatchReportGeneration(ctx: {
   batchReportId: string
   jobIds: string[]
   uploadId?: string
   relation: RelationJudgment
   goal?: string
+  prevMarkdown?: string
 }): Promise<void> {
   const { batchReportId, jobIds, uploadId, relation } = ctx
   const startedAt = Date.now()
   const fail = async (msg: string) => {
     console.error(`[batch-report] 合并报告生成失败（${batchReportId}）：${msg}`)
+    // 重新生成且已有上一版内容 → 旧 markdown 写回 DB（开始时已清空防假成功）
+    // + status 回 done + error 附说明：旧 markdown/HTML 不受影响，GET/前端照常展示旧版
+    const keepPrev = (ctx.prevMarkdown ?? '').length > 0
     await db.batchReport.update({
       where: { id: batchReportId },
-      data: { status: 'error', error: msg.slice(0, 500), updatedAt: new Date() },
+      data: {
+        status: keepPrev ? 'done' : 'error',
+        ...(keepPrev ? { markdown: ctx.prevMarkdown } : {}),
+        error: (keepPrev ? `重新生成失败（已保留上一版内容）：${msg}` : msg).slice(0, 500),
+        updatedAt: new Date(),
+      },
     }).catch(() => undefined)
   }
   try {
@@ -390,23 +484,26 @@ export async function GET(req: Request) {
   }
 
   const record = await db.batchReport.findUnique({ where: { id } })
-  if (!record) return notFound()
+  // v2.57：inline 预览（iframe/新窗口直开）的 404 返友好 HTML 页；
+  // 无 inline 的 JSON 状态轮询保持 JSON（前端 fetch 消费）。
+  const inlineView = url.searchParams.get('inline') === '1'
+  if (!record) return inlineView ? reportNotFoundResponse({ kind: 'merged' }) : notFound()
   // 归属校验（v2.5：与 request-guard.isOwnedBy 统一两层回退，移除同 IP 段掩码分支 ——
   // 代理重写 XFF 的部署下该分支会让「知道 ID 者皆可访问」）
   if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) {
-    return notFound()
+    return inlineView ? reportNotFoundResponse({ kind: 'merged' }) : notFound()
   }
 
   // inline 预览模式 — 返回 HTML（允许 iframe 嵌入，用于报告预览 Dialog）
   if (url.searchParams.get('inline') === '1') {
-    if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
+    if (!record.htmlPath) return reportNotFoundResponse({ kind: 'merged', reason: '该报告无 HTML 文件（生成失败或未落盘）' })
     try {
       let html = await fs.readFile(record.htmlPath, 'utf-8')
       // v2.13：旧版报告自动升级重渲染（首页同单独评估字体版式 + 每靶点完整单独评估页）
       if (!html.includes(MERGED_FMT_MARKER)) {
         html = (await upgradedMergedHtml(record)) ?? html
       }
-      html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
+      html = applyTableFilterUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html))))
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
@@ -415,7 +512,7 @@ export async function GET(req: Request) {
         },
       })
     } catch {
-      return NextResponse.json({ ok: false, error: '报告文件已过期清理' }, { status: 404 })
+      return reportNotFoundResponse({ kind: 'merged', reason: '报告文件已过期清理（磁盘数据已被回收或重置）' })
     }
   }
 
@@ -428,7 +525,7 @@ export async function GET(req: Request) {
       if (!html.includes(MERGED_FMT_MARKER)) {
         html = (await upgradedMergedHtml(record)) ?? html
       }
-      html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
+      html = applyTableFilterUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html))))
       // v2.10 ①：文件名改用报告题目（LLM 生成的描述性标题，如「BTN-TCR 复合物结构解析可行性评估」）
       // — 清洗文件系统非法字符并限长；RFC 5987 filename* 携带中文原题（现代浏览器优先采用），
       // ASCII 回退名仅供不支持 filename* 的旧解析器（前端自动下载已同步优先解析 filename*）

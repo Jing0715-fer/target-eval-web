@@ -644,6 +644,26 @@ export async function fetchBatchReport(id: string): Promise<BatchReportInfo> {
   return data.batchReport
 }
 
+/** POST /api/evaluate/batch-report { regenerateOf } — 手动重新生成合并报告（需求B）
+ *  原地重生成：沿用同一记录 id 与既有作业数据（jobIds / relation / uploadId），
+ *  LLM 三段式重跑；成功覆盖 markdown / HTML，失败保留上一版内容。
+ *  v2.19 口径同 generateBatchReport：本地引擎配置随请求内联携带。 */
+export async function regenerateBatchReport(input: { id: string; goal?: string }): Promise<BatchReportInfo> {
+  const llm = getLlmEngineOverride()
+  const res = await fetch('/api/evaluate/batch-report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ regenerateOf: input.id, goal: input.goal, ...(llm ? { llm } : {}) }),
+  })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; batchReport?: BatchReportInfo; error?: string } | null
+  if (!res.ok || !data?.ok || !data.batchReport) {
+    throw new Error(data?.error ?? `重新生成请求失败（HTTP ${res.status}）`)
+  }
+  const started = data.batchReport
+  if (started.status !== 'running') return started // 兼容即时完成的响应
+  return waitForBatchReport(started.id)
+}
+
 /** GET /api/evaluate/batch-report（无 id）— 当前用户的合并报告列表（v1.13 批量评估历史） */
 export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
   const res = await fetch('/api/evaluate/batch-report', { cache: 'no-store' })
@@ -652,6 +672,52 @@ export async function fetchBatchReportList(): Promise<BatchReportListItem[]> {
     throw new Error(data?.error ?? `合并报告列表读取失败（HTTP ${res.status}）`)
   }
   return data.items
+}
+
+// ─── v2.51 单靶点报告 LLM 原地重跑 ───────────────────────────────
+
+/** GET /api/jobs/{id}/regenerate-report 状态（idle = 从未重跑 / 进程重启后遗留终态） */
+export interface JobRegenStatus {
+  ok?: boolean
+  state?: 'idle' | 'running' | 'done' | 'error'
+  error?: string
+  /** 缺章数（部分失败时 >0 — 可再次重跑补齐） */
+  missing?: number
+  okChapters?: number
+}
+
+/**
+ * POST /api/jobs/{id}/regenerate-report — 单靶点报告 LLM 原地重跑（v2.51）。
+ * 沿用作业既有数据（结构/同源/文献/评分不重收集）仅重跑 10 个 LLM 章节并重渲染
+ * HTML；启动后轮询 GET 至终态（章节逐章生成，分钟级）；全部章节失败时服务端
+ * 保留上一版内容并返回 error。引擎口径同评估：本地引擎配置随请求内联携带。
+ */
+export async function regenerateJobReport(id: string): Promise<{ missing: number }> {
+  const llm = getLlmEngineOverride()
+  const res = await fetch(`/api/jobs/${encodeURIComponent(id)}/regenerate-report`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...(llm ? { llm } : {}) }),
+  })
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error ?? `重新生成请求失败（HTTP ${res.status}）`)
+  }
+  // 轮询状态（瞬时网络错误继续轮询，15 分钟超时兜底）
+  const deadline = Date.now() + 15 * 60 * 1000
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000))
+    let st: JobRegenStatus | null = null
+    try {
+      const r = await fetch(`/api/jobs/${encodeURIComponent(id)}/regenerate-report`, { cache: 'no-store' })
+      st = (await r.json().catch(() => null)) as JobRegenStatus | null
+    } catch { continue }
+    if (st?.state === 'error') {
+      throw new Error(st.error || 'LLM 章节生成失败（当前版本内容未受影响）')
+    }
+    if (st?.state === 'done') return { missing: st.missing ?? 0 }
+  }
+  throw new Error('重新生成超时（15 分钟）— 生成可能仍在后台进行，请稍后刷新结果页查看')
 }
 
 // ─── 高通量批量下载（v2.25）──────────────────────────────────────
@@ -665,6 +731,14 @@ export interface HtArchiveEntry {
   /** 1-based 组序号（省略 → zip 根目录平铺） */
   group?: number
   label?: string
+  /** v2.38：以下元数据写入 zip 内 _TargetEval_manifest.json — 新建运行导入该
+   *  zip 时据此精确匹配靶点（已有报告的直接跳过，不重复评估） */
+  uniprot?: string
+  range?: [number, number]
+  /** 序列靶点：提交序列的 SHA-256 前 16 hex（精确匹配） */
+  seqSha?: string
+  seqLength?: number
+  sequenceHeader?: string
 }
 
 // ─── 高通量统计看板（v2.28）──────────────────────────────────────

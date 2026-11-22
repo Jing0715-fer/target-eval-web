@@ -23,11 +23,13 @@
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import { createHash } from 'node:crypto'
 import { db } from '@/lib/db'
 import { fetchUniprotInfo, identifyUniprotBySequence, normalizeSequenceInput, matchProcessingSegments } from './uniprot'
 import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges, restrictCoverageToRange, uncoveredRangesWithin } from './pdbe'
-import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, type BlastPollState, type BlastNrHit } from './blast'
+import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, takePresubmittedBlast, type BlastPollState, type BlastNrHit } from './blast'
+import { submitUniprotSequenceBlast, collectUniprotSequenceBlast, type UniprotBlastJob } from './uniprot-blast'
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
 import { computeScores } from './score'
@@ -40,11 +42,12 @@ import { renderReportHtml } from './report-html'
 import { compareSequences, describeComparison } from './seq-compare'
 import { detectAntibody } from './antibody'
 import { getEngineSummary } from './llm-provider'
+import { hasOtherActiveJobs } from './job-manager'
 import { splitPdbsByRange, splitBlastByRange, type ResidueRange } from './range-filter'
 import { matchDomainHint } from './domain-range'
 import { extractLigandsFromText, extractLigandCandidatesFromText, fetchLigandStructures, normalizeLigandRaw, resolveLigandInput, enrichLigandDetail, type LigandInput, type LigandResolution } from './ligand'
 import { isBiologicMention, isLikelyCloneNumber } from './ligand-parse'
-import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor } from './alphafold'
+import { alphafoldStructureFor, alphafoldFigureCached, alphafoldMetaFor, extractAfDomains } from './alphafold'
 import { cleanEsmfoldSequence, esmfoldStructureFor, esmfoldFailNote, loadCachedEsmfoldModel, ESMFOLD_MAX_AA, ESMFOLD_EMBED_MAX_BYTES } from './esmfold'
 import { isValidUniprotId, MAX_PDB_UNLIMITED, describeTargetIdentitySource, type BlastGroup, type BlastHit, type BlastStatusInfo, type EvaluationOptions, type FormInsights, type InputMode, type InteractionAnalysis, type JobSummary, type LiteratureItem, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type SequenceComparison, type TargetIdentityInfo, type UniprotInfo } from './types'
 
@@ -159,6 +162,14 @@ interface PipelineState {
   nrHits: BlastNrHit[] | null
   /** v2.16：nr 身份处理完成（回填/近似记录已落 targetIdentity — 重入守卫） */
   nrIdentityDone: boolean
+  /** v2.44：UniProt 序列匹配（EBI BLAST 直查 UniProtKB）提交的作业（跨段保留） */
+  upBlast: UniprotBlastJob | null
+  /** v2.44：UniProt 序列匹配检索完成（命中已存 upHits；jobId 不再轮询） */
+  upBlastDone: boolean
+  /** v2.44：UniProt 序列匹配收集的命中（随 checkpoint 续跑；供身份处理重入） */
+  upHits: BlastNrHit[] | null
+  /** v2.44：UniProt 序列匹配身份处理完成（回填/近似记录已落 — 重入守卫） */
+  upIdentityDone: boolean
   // ── RCSB PDB ──
   totalPdbFound: number
   directPdbs: PdbEntry[]
@@ -261,6 +272,10 @@ function freshState(): PipelineState {
     nrBlastDone: false,
     nrHits: null,
     nrIdentityDone: false,
+    upBlast: null,
+    upBlastDone: false,
+    upHits: null,
+    upIdentityDone: false,
     totalPdbFound: 0,
     directPdbs: [],
     pdbCompletedIds: [],
@@ -425,6 +440,21 @@ function buildHomologIdentity(best: BlastHit): TargetIdentityInfo {
     sourceLabel: describeTargetIdentitySource('blast-homolog'),
     identity: best.identity,
     note: `PDB 同源结构 ${best.pdbId}（一致性 ${best.identity}%）描述推断 — 未达 UniProt 回填阈值（85%）`,
+  }
+}
+
+/** v2.44：UniProt 序列匹配命中 → 靶点身份（命名优先级同 nr 识别 — 覆盖全蛋白空间） */
+function buildUniprotBlastIdentity(best: BlastNrHit): TargetIdentityInfo {
+  return {
+    name: best.description.slice(0, 100),
+    source: 'uniprot-blast',
+    sourceLabel: describeTargetIdentitySource('uniprot-blast'),
+    identity: best.identity,
+    uniprotId: best.db === 'other' ? undefined : best.accession,
+    uniprotEntry: best.entryName,
+    organism: best.organism,
+    geneName: best.geneName,
+    note: `UniProt 库序列匹配最佳命中${best.db !== 'other' ? `（UniProt ${best.accession}${best.entryName ? ` ${best.entryName}` : ''}）` : ''}，一致性 ${best.identity}%`,
   }
 }
 
@@ -1122,13 +1152,24 @@ class SegmentRunner {
         this.log(`本靶点担任同源组（一致性 ≥${hb.minIdentity}%，${hb.members.length} 成员）的 BLAST 家族代表 — 结果将共享给其他成员`)
       }
       try {
-        this.report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
-        // v2.6.3：提交绑定段截止 — in-flight 尝试不越过段边界（checkpoint 不迟到）；
-        // 切断不算 NCBI 真实失败，交还下一段重试提交。
-        const submitSignal = this.deadlineSignal()
-        const submitted = await submitBlastPdb(st.sequence, msg => this.log(msg), submitSignal)
-        st.blastSubmitted = { rid: submitted.rid, rtoe: submitted.rtoe }
-        this.log(`BLAST 提前提交完成（RID=${submitted.rid}，预计 ${submitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
+        // v2.39 预提交命中：高通量启动时 blast-warmup 已按序列哈希提前提交 NCBI
+        //（作业排队期间 NCBI 已在计算）— 命中即跳过提交直接收集；等待有界，
+        // 排队过深则放弃改当场提交（预提交标记 bypassed 防重复）
+        const bl = budgetLeft(this.cb)
+        const graceMs = bl === Infinity ? 20_000 : Math.max(2_000, Math.min(20_000, bl - 5_000))
+        const pre = await takePresubmittedBlast(st.sequence, graceMs, this.deadlineSignal())
+        if (pre) {
+          st.blastSubmitted = { rid: pre.rid, rtoe: pre.rtoe }
+          this.log(`BLAST 预提交命中（RID=${pre.rid}）— 队列排队期间 NCBI 已在计算，跳过提交直接进入收集`)
+        } else {
+          this.report('uniprot', 'BLAST 已提前提交，等待期间先进行其他数据检索…', 1)
+          // v2.6.3：提交绑定段截止 — in-flight 尝试不越过段边界（checkpoint 不迟到）；
+          // 切断不算 NCBI 真实失败，交还下一段重试提交。
+          const submitSignal = this.deadlineSignal()
+          const submitted = await submitBlastPdb(st.sequence, msg => this.log(msg), submitSignal)
+          st.blastSubmitted = { rid: submitted.rid, rtoe: submitted.rtoe }
+          this.log(`BLAST 提前提交完成（RID=${submitted.rid}，预计 ${submitted.rtoe}s）— 文献/结构检索与 NCBI 计算并行进行`)
+        }
       } catch (e) {
         if (this.signal.aborted) throw e
         const msg = e instanceof Error ? e.message : String(e)
@@ -1459,7 +1500,13 @@ class SegmentRunner {
           msg => this.report('blast', msg, 0.5),
           this.signal,
           {},
-          { deadline: this.cb.deadline, resume: st.blastPoll ?? undefined },
+          {
+            deadline: this.cb.deadline,
+            resume: st.blastPoll ?? undefined,
+            // v2.39：全场还有其他作业在跑 → 慢 BLAST 不判超时（等全场收尾后
+            // 再给 30 分钟终局窗口 — 见 blast.ts 软僵尸保险）
+            othersActive: () => hasOtherActiveJobs(this.input.jobId),
+          },
         )
         if ('stillRunning' in outcome) {
           // v2.6：预算到点 — 保存轮询状态，下一段继续轮询同一 RID
@@ -1487,76 +1534,6 @@ class SegmentRunner {
         )
       }
 
-      // 序列模式且尚未识别 UniProt：从最佳命中回填（blastBackfillDone 重入守卫）
-      if (!st.uniprotInfo && st.blastHits.length > 0 && !st.blastBackfillDone) {
-        // v2.6.3：闸门随段预算伸缩（原绝对 20s 在小段下永远交还会死锁）
-        const backfillGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.5))
-        if (budgetLeft(this.cb) < backfillGateMs) {
-          return this.handoff() // 回填是多步网络调用 — 预算不足时下一段再做
-        }
-        // v2.32 覆盖度加权的靶点识别：按 score = identity × 查询覆盖率 选最佳命中，
-        // 且覆盖率 ≥40% 才可作身份归属依据 — 短片段 100% 巧合匹配（如信号肽样
-        // 21 aa 全同命中大蛋白局部）不具靶点语义，曾把 ADSL 截短构建错绑到
-        // P0DTD1；覆盖不足时不绑定，交由 BLAST nr 全库序列再识别。
-        const bestCov = bestCoverageHit(st.blastHits, st.sequence.length)
-        const best = bestCov?.hit
-        if (best && best.identity >= 85 && bestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
-          // v2.16：RCSB 提供方命中用命中实体序号定位 UniProt（复合物结构中实体 1 可能是
-          //  伙伴链 — 曾实测 p53 片段命中复合物被归属到 MDM2 的教训）；NCBI pdbaa 命中
-          //  描述无实体信息，仍取主实体
-          const acc = (st.blastStatus.provider ?? 'ncbi') === 'rcsb'
-            ? await fetchUniprotForEntryEntity(best.pdbId, best.entityId ?? 1)
-            : uniprotFromBlastDesc(best.description)
-          if (acc) {
-            this.log(`从同源命中识别 UniProt ${acc}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 100)}% — 覆盖度加权最佳命中 ${best.pdbId}），回填元数据…`)
-            const info = await fetchUniprotInfo(acc)
-            if (info) {
-              st.uniprotInfo = info
-              await this.rebuildStructureDataAfterBackfill(info)
-            }
-          }
-        } else if (best) {
-          // 覆盖/一致性不足 — 不据同源命中绑定靶点（错绑比无归属更糟：报告会按
-          // 无关蛋白的全长口径展开）；保持无归属，本阶段末尾的 BLAST nr 级联接手
-          const maxId = st.blastHits.reduce((m, h) => Math.max(m, h.identity), 0)
-          this.log(
-            `同源命中不足以确定靶点身份：覆盖度加权最佳 ${best.pdbId}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 1000) / 10}%，未达「一致性 85% + 覆盖 40%」归属阈值；单命中最高一致性 ${maxId}% 但覆盖均不足）— 不据此绑定 UniProt，交由 BLAST nr 识别`,
-            'warn',
-          )
-        }
-        st.blastBackfillDone = true
-      }
-
-      // ── v2.28：BLAST 同源命中的主引文并入文献列表（用户反馈文献列表不全 —
-      // 同源命中经 RCSB GraphQL enrich 已携带 PMID，此前未纳入；结构解析文献块
-      // 按年份降序与直接结构引文合并，重入守卫 blastLitMerged）──
-      if (st.blastHits.length > 0 && !st.blastLitMerged) {
-        st.blastLitMerged = true
-        const seen = new Set(st.literature.map(l => String(l.pmid)))
-        const blastPmids: string[] = []
-        for (const h of st.blastHits) {
-          const pid = (h.pubmedId ?? '').trim()
-          if (pid && !seen.has(pid)) {
-            seen.add(pid)
-            blastPmids.push(pid)
-          }
-          if (blastPmids.length >= 40) break
-        }
-        if (blastPmids.length > 0) {
-          try {
-            const blastLits = (await fetchPubmedByPmids(blastPmids))
-              .map(l => ({ ...l, fromPdb: true as const }))
-              .filter(l => !st.literature.some(x => String(x.pmid) === String(l.pmid)))
-            if (blastLits.length) {
-              // 结构解析文献块（fromPdb）按年份降序置前，检索文献块在后 — 与既有排序口径一致
-              const pdbBlock = [...st.literature.filter(l => l.fromPdb), ...blastLits]
-                .sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
-              st.literature = [...pdbBlock, ...st.literature.filter(l => !l.fromPdb)]
-              this.log(`同源结构主引文并入：${blastLits.length} 篇（文献列表合计 ${st.literature.length} 篇）`)
-            }
-          } catch { /* 增量并入失败不影响主链路 */ }
-        }
-      }
       this.report('blast', `BLAST 完成（${st.blastHits.length} 个同源结构）`, 1)
     } else if (st.blastStatus.status === 'failed' && st.sequence.length >= 30 && !st.blastRescueDone) {
       // 提交阶段失败（网络/NCBI 拒收）→ 直接 RCSB 序列检索兜底（v1.9）
@@ -1586,11 +1563,102 @@ class SegmentRunner {
         this.report('blast', '同源检索不可用（已跳过）', 1)
       }
       st.blastRescueDone = true
-    } else {
+    } else if (!st.blastCollected) {
       // 序列过短（<30 aa）未提交等剩余情形
       if (st.blastStatus.status === 'ok') st.blastStatus = { status: 'skipped-covered', note: '序列过短（<30 aa），未提交同源检索' }
       this.report('blast', '未运行同源检索', 1)
       this.log(`BLAST 阶段跳过：${st.blastStatus.note ?? '未提交'}`)
+    } else {
+      // v2.43：重入收尾 — 本段之前已收集完成（NCBI 或 RCSB 兜底），段预算在
+      // 回填/引文并入处切断后重入不再重复收集，也不覆盖已成功的检索状态
+      // （原实现重入会误入「未运行同源检索」分支，把 RCSB 兜底成功态改写成
+      // 「序列过短」并丢失 provider 标注）
+      this.report('blast', `BLAST 完成（${st.blastHits.length} 个同源结构）`, 1)
+    }
+
+    // ── v2.43：UniProt 回填 + 同源主引文并入 — 两条同源检索路径共享 ──────────
+    //  原实现把这两步嵌在「NCBI 提交成功」分支内；NCBI 提交失败直接走 RCSB 兜底
+    //  的路径（上面的 else-if failed 分支）完全没有它们 — 用户实测（J53 序列靶点）：
+    //  NCBI 全停时提交失败 → RCSB mmseqs2 拿到 60 个命中（含 8XXQ 100%/499aa 全长
+    //  命中）→ 但报告仍以序列标签命名、无 UniProt 归属、无直接结构、文献列表为空。
+    //  两条路径收集完成后都置 blastCollected=true，以此作为共享闸门（未收集/无命中
+    //  的跳过路径不受影响）。
+
+    // a) 序列模式且尚未识别 UniProt：从最佳命中回填（blastBackfillDone 重入守卫）
+    if (st.blastCollected && !st.uniprotInfo && st.blastHits.length > 0 && !st.blastBackfillDone) {
+      // v2.6.3：闸门随段预算伸缩（原绝对 20s 在小段下永远交还会死锁）
+      const backfillGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.5))
+      if (budgetLeft(this.cb) < backfillGateMs) {
+        return this.handoff() // 回填是多步网络调用 — 预算不足时下一段再做
+      }
+      // v2.32 覆盖度加权的靶点识别：按 score = identity × 查询覆盖率 选最佳命中，
+      // 且覆盖率 ≥40% 才可作身份归属依据 — 短片段 100% 巧合匹配（如信号肽样
+      // 21 aa 全同命中大蛋白局部）不具靶点语义，曾把 ADSL 截短构建错绑到
+      // P0DTD1；覆盖不足时不绑定，交由 BLAST nr 全库序列再识别。
+      const bestCov = bestCoverageHit(st.blastHits, st.sequence.length)
+      const best = bestCov?.hit
+      if (best && best.identity >= 85 && bestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
+        // v2.16：RCSB 提供方命中用命中实体序号定位 UniProt（复合物结构中实体 1 可能是
+        //  伙伴链 — 曾实测 p53 片段命中复合物被归属到 MDM2 的教训）；NCBI pdbaa 命中
+        //  描述无实体信息，仍取主实体
+        const acc = (st.blastStatus.provider ?? 'ncbi') === 'rcsb'
+          ? await fetchUniprotForEntryEntity(best.pdbId, best.entityId ?? 1)
+          : uniprotFromBlastDesc(best.description)
+        if (acc) {
+          this.log(`从同源命中识别 UniProt ${acc}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 100)}% — 覆盖度加权最佳命中 ${best.pdbId}），回填元数据…`)
+          const info = await fetchUniprotInfo(acc)
+          if (info) {
+            st.uniprotInfo = info
+            await this.rebuildStructureDataAfterBackfill(info)
+          } else {
+            // v2.43：回填链条的静默缺口补日志（此前 acc/info 获取失败均无痕跳过 —
+            // 报告退回序列标签命名且无从排查）
+            this.log(`UniProt ${acc} 元数据获取失败（网络）— 本次不回填，身份交由 BLAST nr 识别`, 'warn')
+          }
+        } else {
+          this.log(`同源最佳命中 ${best.pdbId} 未取得 UniProt 映射（${(st.blastStatus.provider ?? 'ncbi') === 'rcsb' ? 'RCSB data API 实体无 uniprot_ids 或请求失败' : 'pdbaa 描述无 sp/tr accession'}）— 不绑定，交由 BLAST nr 识别`, 'warn')
+        }
+      } else if (best) {
+        // 覆盖/一致性不足 — 不据同源命中绑定靶点（错绑比无归属更糟：报告会按
+        // 无关蛋白的全长口径展开）；保持无归属，本阶段末尾的 BLAST nr 级联接手
+        const maxId = st.blastHits.reduce((m, h) => Math.max(m, h.identity), 0)
+        this.log(
+          `同源命中不足以确定靶点身份：覆盖度加权最佳 ${best.pdbId}（一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(bestCov.covFrac * 1000) / 10}%，未达「一致性 85% + 覆盖 40%」归属阈值；单命中最高一致性 ${maxId}% 但覆盖均不足）— 不据此绑定 UniProt，交由 BLAST nr 识别`,
+          'warn',
+        )
+      }
+      st.blastBackfillDone = true
+    }
+
+    // b) BLAST 同源命中的主引文并入文献列表（v2.28：用户反馈文献列表不全 —
+    //    同源命中经 RCSB GraphQL enrich 已携带 PMID，此前未纳入；结构解析文献块
+    //    按年份降序与直接结构引文合并，重入守卫 blastLitMerged）
+    if (st.blastCollected && st.blastHits.length > 0 && !st.blastLitMerged) {
+      st.blastLitMerged = true
+      const seen = new Set(st.literature.map(l => String(l.pmid)))
+      const blastPmids: string[] = []
+      for (const h of st.blastHits) {
+        const pid = (h.pubmedId ?? '').trim()
+        if (pid && !seen.has(pid)) {
+          seen.add(pid)
+          blastPmids.push(pid)
+        }
+        if (blastPmids.length >= 40) break
+      }
+      if (blastPmids.length > 0) {
+        try {
+          const blastLits = (await fetchPubmedByPmids(blastPmids))
+            .map(l => ({ ...l, fromPdb: true as const }))
+            .filter(l => !st.literature.some(x => String(x.pmid) === String(l.pmid)))
+          if (blastLits.length) {
+            // 结构解析文献块（fromPdb）按年份降序置前，检索文献块在后 — 与既有排序口径一致
+            const pdbBlock = [...st.literature.filter(l => l.fromPdb), ...blastLits]
+              .sort((a, b) => Number(b.year || 0) - Number(a.year || 0))
+            st.literature = [...pdbBlock, ...st.literature.filter(l => !l.fromPdb)]
+            this.log(`同源结构主引文并入：${blastLits.length} 篇（文献列表合计 ${st.literature.length} 篇）`)
+          }
+        } catch { /* 增量并入失败不影响主链路 */ }
+      }
     }
 
     // ── v2.16 靶点身份识别级联（纯序列输入且尚无 UniProt 归属时）──────────
@@ -1724,6 +1792,106 @@ class SegmentRunner {
         }
         st.nrIdentityDone = true
       }
+    }
+
+    // ── v2.44：UniProt 序列匹配兜底（用户诉求「报告没回填 UniProt ID 时直接用
+    //    UniProt 库以序列匹配，取同源度最高的，并显示同源度」）──
+    //    级联至此仍未归属（NCBI 提交失败走 RCSB 兜底且实体映射落空 / nr 检索失败
+    //    或无命中 / 命中未达回填阈值 — 用户实测 J53 即此类）时，经 EBI BLAST
+    //    服务直查 UniProtKB（Swiss-Prot，秒级）定位真实蛋白身份。
+    //    注：blastStatus='failed'（NCBI+RCSB 双亡）时**仍执行** — 这正是本兜底的
+    //    核心价值场景；仅用户显式关闭 BLAST / 抗体序列跳过。
+    if (!st.uniprotInfo && st.sequence.length >= 30 && !st.upBlastDone
+      && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody') {
+      const upGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
+      if (budgetLeft(this.cb) < upGateMs) {
+        return this.handoff()
+      }
+      try {
+        this.report('blast', st.upBlast
+          ? 'UniProt 库序列匹配检索中（等待结果）…'
+          : '靶点身份尚未确定 — 提交序列到 UniProt 库序列匹配…', 0.95)
+        if (!st.upBlast) {
+          st.upBlast = await submitUniprotSequenceBlast(st.sequence, this.deadlineSignal())
+        }
+        const outcome = await collectUniprotSequenceBlast(st.upBlast, {
+          deadline: this.cb.deadline,
+          resume: { attempts: st.upBlast.attempts, startedAt: st.upBlast.startedAt },
+          signal: this.signal,
+          onProgress: msg => this.report('blast', msg, 0.95),
+        })
+        if ('stillRunning' in outcome) {
+          // 段预算到点 — 保存轮询进度，下一段继续轮询同一 jobId
+          st.upBlast = outcome.job
+          return this.handoff()
+        }
+        st.upBlastDone = true
+        st.upHits = outcome.hits
+        this.log(outcome.hits.length
+          ? `UniProt 库序列匹配完成：${outcome.hits.length} 个命中，最佳一致性 ${Math.max(...outcome.hits.map(h => h.identity))}%`
+          : 'UniProt 库序列匹配完成 — 无命中（全新/人工构建序列）')
+      } catch (e) {
+        if (this.signal.aborted) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        const deadlineCut = this.cb.deadline != null && this.cb.deadline > 0 && Date.now() >= this.cb.deadline - 2_000
+        if (deadlineCut) {
+          // 段预算切断提交/轮询（非服务拒绝）— 不置 done：下一段重新提交或继续轮询
+          // （与 nr 提交的 blastSubmitCuts 同语义；墙钟由 collectUniprotSequenceBlast 控制）
+          this.log(`UniProt 序列匹配被段预算切断（${msg.slice(0, 80)}）— 下一段继续`, 'warn')
+          return this.handoff()
+        }
+        this.log(`UniProt 序列匹配失败（${msg.slice(0, 120)}）— 靶点身份保持现有证据，评估继续`, 'warn')
+        st.upBlastDone = true
+      }
+    }
+
+    // v2.44：UniProt 序列匹配的身份处理（与 nr 级联同口径 — 覆盖度加权最佳 +
+    // 「85% 一致性 + 40% 覆盖」回填阈值；未达阈值时作近似身份，题目显示同源度）
+    if (!st.uniprotInfo && st.upHits && !st.upIdentityDone) {
+      const idGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
+      if (budgetLeft(this.cb) < idGateMs) {
+        return this.handoff()
+      }
+      const uniHits = st.upHits.filter(h => h.db !== 'other')
+      const upBestCov = bestCoverageHit(uniHits.length ? uniHits : st.upHits, st.sequence.length)
+      const best = upBestCov?.hit
+      if (best && best.identity >= 85 && best.db !== 'other' && upBestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
+        this.log(`UniProt 序列匹配命中 UniProt ${best.accession}（${best.description.slice(0, 60)}，一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(upBestCov.covFrac * 100)}%）— 回填元数据…`)
+        const info = await fetchUniprotInfo(best.accession)
+        if (info) {
+          st.uniprotInfo = info
+          st.targetIdentity = {
+            ...buildUniprotBlastIdentity(best),
+            note: `UniProt 序列匹配（一致性 ${best.identity}%）→ 已归属 UniProt ${best.accession}`,
+          }
+          // HSP 比对坐标 → 提交序列在 UniProt 条目内的覆盖区间（与 nr 回填同口径 —
+          // 构建比对未产出区间时采用；非全长按截短口径分流）
+          if (best.hitFrom != null && best.hitTo != null && best.hitFrom > 0 && best.hitTo >= best.hitFrom) {
+            const s = Math.max(1, best.hitFrom)
+            const e = Math.min(info.sequenceLength, best.hitTo)
+            if (e >= s && !st.blastRange) {
+              st.blastRange = { start: s, end: e, queryFrom: best.queryFrom, hitFrom: best.hitFrom }
+              this.log(`UniProt 序列匹配比对坐标：提交序列 ↔ ${best.accession} 主体 ${best.hitFrom}-${best.hitTo} → 评估区间 ${s}-${e}（构建比对未产出区间时采用；非全长按截短口径分流）`)
+            }
+          }
+          await this.rebuildStructureDataAfterBackfill(info)
+        } else {
+          st.targetIdentity = st.targetIdentity?.source === 'eval-table' ? st.targetIdentity : buildUniprotBlastIdentity(best)
+          this.log(`UniProt 序列匹配到 ${best.accession}，但元数据获取失败（网络）— 记录近似身份（${best.description.slice(0, 60)}，${best.identity}%）`, 'warn')
+        }
+      } else if (best && best.identity >= 40) {
+        // 未达回填阈值 — 近似身份（题目用 UniProt 匹配名 + 显示同源度）
+        // 命名优先级：评估表 > nr 识别 ≈ UniProt 匹配 > PDB 同源推断
+        if (!st.targetIdentity || st.targetIdentity.source === 'blast-homolog') {
+          st.targetIdentity = buildUniprotBlastIdentity(best)
+          this.log(`UniProt 序列匹配最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（${best.accession}，一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）— 未达「85% 一致性 + 40% 覆盖」回填阈值，记录为近似身份（题目采用 UniProt 匹配名并显示同源度）`)
+        } else {
+          this.log(`UniProt 序列匹配最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）— 未达回填阈值；既有命名优先保留`, 'info')
+        }
+      } else if (best) {
+        this.log(`UniProt 序列匹配完成 — 最佳命中（一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）低于阈值 — 全新/人工构建序列或短片段巧合匹配，靶点身份保持现有证据`, 'warn')
+      }
+      st.upIdentityDone = true
     }
     this.advance('gate')
     return null
@@ -2260,6 +2428,9 @@ class SegmentRunner {
         alphafoldFigure: st.afFigure ?? undefined,
         alphafoldStructure,
         esmfoldStructure,
+        // v2.46：AFDB 模型的 UniProt DOMAIN 区间（视图「按域着色」选项；
+        // ESMFold 模型残基编号不对齐不传 → 选项禁用）
+        afDomains: alphafoldStructure ? extractAfDomains(st.uniprotInfo?.features, st.uniprotInfo?.sequenceLength) : undefined,
         resolveImagePath: (meta) => {
           const ext = meta.mime.includes('png') ? 'png' : meta.mime.includes('gif') ? 'gif' : meta.mime.includes('webp') ? 'webp' : 'jpg'
           // turbopackIgnore：st.assetDir 为运行时上传目录（db/reports/<id>/assets），
@@ -2272,6 +2443,24 @@ class SegmentRunner {
       st.reportPath = path.join(reportDir, 'report.html')
       await fs.writeFile(st.reportPath, html, 'utf-8')
       st.reportMarkdown = generatedFullMarkdown || null
+      // v2.51：LLM 数据上下文快照（reportContext + 渲染元数据）落盘 — 供
+      // POST /api/jobs/{id}/regenerate-report 原地重跑 LLM 章节（不重收集数据）。
+      // 仅单靶点报告模式（deferred 并入合并报告，HT 有整靶点重跑通道）；失败不
+      // 阻塞评估（旧作业无快照 → 重跑接口明确提示重新评估）。
+      if (!deferReport) {
+        try {
+          const snapshot = {
+            v: 1 as const,
+            ctx: this.reportContext(),
+            methodStats: st.scores!.methodStats,
+            afFigure: st.afFigure,
+            totalPdbFound: st.totalPdbFound,
+            durationMs: Date.now() - st.t0,
+            assetDir: st.assetDir,
+          }
+          await fs.writeFile(path.join(reportDir, 'llm-ctx.json'), JSON.stringify(snapshot), 'utf-8')
+        } catch { /* 快照失败不阻塞报告 */ }
+      }
     }
     const reportPath = st.reportPath
 
@@ -2344,10 +2533,19 @@ class SegmentRunner {
       mwAugment: st.mwAugment!,
       /** v2.13：deferred 批次同样生成完整独立报告 — 状态如实记录（合并报告各靶点页引用） */
       reportLlmOk: st.reportParts.some(p => p.llmOk) || undefined,
+      /** v2.41：未完整生成的章节数（部分章节失败/放弃重试）— 高通量据此标记可重跑 */
+      reportLlmMissing: st.reportParts.filter(p => !p.llmOk).length || undefined,
       reportDeferred: deferReport || undefined,
       batchNote: this.input.batchNote,
       /** v2.16：靶点身份识别证据链（识别来源/一致性/近似 UniProt — 合并报告与前端展示） */
       targetIdentity: st.targetIdentity ?? undefined,
+      /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex
+       *  （合并报告 meta 标记携带 → 单独 HTML 报告导入时 SHA/标签精确匹配） */
+      sequenceHeader: st.sequenceHeader || undefined,
+      seqSha: st.sequence ? createHash('sha256').update(st.sequence).digest('hex').slice(0, 16) : undefined,
+      /** v2.46：UniProt DOMAIN 结构域区间（AFDB 引擎时落库 — 合并报告重渲染时
+       *  预测结构视图「按域着色」用；无 DOMAIN 注释/ESMFold 引擎缺省） */
+      afDomains: st.afSummary?.available ? extractAfDomains(st.uniprotInfo?.features, st.uniprotInfo?.sequenceLength) : undefined,
       construct: st.comparison
         ? {
             providedLength: st.comparison.providedLength,

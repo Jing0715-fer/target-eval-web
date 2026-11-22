@@ -19,17 +19,42 @@
  *    不再被顶栏遮挡）；⑪父页滚动锁（灯箱/AF 全屏开启期间锁父页 body overflow，
  *    滚轮落在 iframe 外不再派生滚动）。marker 升 rpt-zoom-v3，v1/v2 baked 旧报告
  *    serve 注入 v3 时自动清理旧根与旧句柄。
+ *  - v2.47：AF 3D 放大视图随 canvas 迁入「下载 PDB / 着色切换」工具条（v2.46 小窗
+ *    拥挤 → 小窗一律隐藏，仅放大后可见；图例双处同步 — 内嵌 af-legend + 全屏条
+ *    af-full-legend，重开全屏对齐当前已选着色）。
+ *  - v2.48：PDB / BLAST 列表筛选排序（TABLE_FILTER_JS — 方法 chips + 排序下拉 +
+ *    计数；PDB 主表与折叠表同组跨表作用于全量行，激活时折叠区暂避、默认态归位）。
+ *  - v2.53：① 方法 chips 之外新增分辨率阈值快捷筛选（≤2Å/≤3Å toggle chips —
+ *    TABLE_FILTER_JS 内 RES_KEYS，无分辨率数据的表不渲染）；② .tbl-ctl 样式抽离
+ *    TABLE_FILTER_CSS 单源（SINGLE_REPORT_CSS 内嵌 + 服务端注入共用）；③ 旧报告
+ *    回填 — applyTableFilterUpgrade 三路径（v2 原样 / v1 摘旧脚本换新版 / 无标记
+ *    全量注入），TBL_BOOTSTRAP_JS 从单元格文本提取 data-* 并标组（幂等回填缺失
+ *    属性，v1 报告 BLAST 行缺 data-id 在此补齐）；④ 合并报告共有结构与受体×G
+ *    蛋白表接入 data-tbl="shared"（report-merged.ts，pdb 类排序 + 方法/阈值筛选）。
+ *  - v2.54：列表导出 CSV —— 工具条新增「导出 CSV」按钮（tc-chip tc-x — 复用基类
+ *    样式，v1/v2 历史报告零 CSS 注入即可用），导出当前筛选+排序状态下可见行
+ *    （BOM + CRLF，Excel 中文零乱码；表头取首表 thead，行内 .rng-outside-chip /
+ *    .lig-more 装饰性片段剔除；文件名 = 标题 slug + 组名 + 筛选状态）。marker 升
+ *    rpt-tbl-v3：applyTableFilterUpgrade 对 v1/v2 摘旧脚本外补注入最新
+ *    TABLE_FILTER_CSS（tc-x 悬停等新增样式全路径生效；同规则重复注入无害）。
+ *  - v2.56：报告排版审查修复（fixture 渲染 + VLM 审查 + DOM 核实三重）：
+ *    ① PDB 表「文献」列 72→84px（8 位 PMID + lit-dot 圆点实测溢出 5px 贴边截断）；
+ *    ② .lig-id-pc PubChem 徽章 #4c5fd7 靛蓝 → 青绿 #0f766e（全页唯一紫色破坏
+ *    语义色统一，且违反项目禁用 indigo 规则）；③ 配体卡 2+1 布局末卡占满整行
+ *    （.lig-grid > :last-child:nth-child(odd) span — 右列不再留洞）。
  * 图片预算：单图 ≤2MB（解析时已限），内嵌总数 ≤8 张、总预算 ≤6MB，gel/sec 优先。
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { BlastHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats, UniprotInfo } from './types'
-import { describeBlastStatus, targetIdentityTitleSuffix } from './types'
+import { describeBlastStatus, targetIdentityTitleSuffix, type AfDomainRange } from './types'
 import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb } from './types'
 import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
-import { ensure3DmolBundle, plddtStyleApplyJs } from './alphafold'
+import { ensure3DmolBundle, plddtStyleApplyJs, afToolbarJs } from './alphafold'
 import { matchProcessingSegments, type ProcessingSegmentMatch } from './uniprot'
+// v2.45：报告内嵌机器可读标记（targeteval:target）— 提交序列 SHA-256（服务端专用模块）
+import { createHash } from 'node:crypto'
 
 // ─── v2.31 聚合蛋白加工归属（PTM/Processing）────────────────────────────────
 
@@ -164,6 +189,13 @@ export const LIGHTBOX_CSS = `  /* ${ZOOM_PAGE_MARKER} 图片点击放大（配�
   .af-fullclose:hover { background:rgba(23,21,19,.88); }
   .af-fullslot { flex:1 1 auto; position:relative; margin:14px auto; width:min(96%,1400px); background:#fff; border-radius:10px; overflow:hidden; box-shadow:0 10px 44px rgba(0,0,0,.5); }
   @media (max-width:640px){ .af-fullslot{margin:8px auto;width:calc(100% - 16px);border-radius:8px} .af-fullttl span{display:none} .af-full-legend{margin-left:0} }
+  /* v2.47：AF 工具条（下载 PDB / 着色切换）仅放大视图显示 — 小窗拥挤一律隐藏（.af-stage .af-tb 见 SINGLE_REPORT_CSS）；canvas+工具条迁入全屏槽后可见，控件随全屏尺寸放大触控友好 */
+  .af-fullslot .af-tb { top:12px; left:12px; gap:8px; }
+  .af-fullslot .af-tb-btn { padding:5px 12px; font-size:10.5px; border-radius:6px; box-shadow:0 2px 8px rgba(28,25,23,.2); }
+  .af-fullslot .af-tb-sel { padding:5px 8px; font-size:10.5px; max-width:200px; border-radius:6px; box-shadow:0 2px 8px rgba(28,25,23,.2); }
+  /* 全屏条图例：域条目多时限高滚动 + 深底上渐变条边框可见 */
+  .af-full-legend.af-lgd-scroll { max-height:76px; overflow-y:auto; }
+  .af-full-legend .af-lgd-rb-bar { border-color:rgba(255,255,255,.35); }
   @media print { .rpt-zoom-badge, .af-expand, .af-fullwrap { display:none !important; } .rpt-zoom { display:none !important; } }
 `
 
@@ -503,7 +535,7 @@ export const LIGHTBOX_JS = `<script>
     wrap.setAttribute('aria-label', ttl + '放大视图');
     wrap.innerHTML =
       '<div class="af-fullbar">' +
-        '<div class="af-fullttl"><b>' + ttl + '</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合</span></div>' +
+        '<div class="af-fullttl"><b>' + ttl + '</b><span>拖拽旋转 · 滚轮缩放 · 双指捏合 · 左上工具条可下载 PDB / 切换着色</span></div>' +
         LEGEND_AF +
         '<button type="button" class="af-fullclose" aria-label="退出放大视图">×</button>' +
       '</div>';
@@ -514,6 +546,13 @@ export const LIGHTBOX_JS = `<script>
     wrap.addEventListener('wheel', function (e) { e.preventDefault(); }, { passive: false });
     wrap.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
     slot.appendChild(cv); // canvas 迁移（3Dmol ResizeObserver → 全屏尺寸重渲染）
+    // v2.47：工具条（下载 PDB / 着色切换）随 canvas 迁入全屏 — 小窗拥挤仅放大后
+    // 可见；__afSync 把全屏条图例对齐当前已选着色（重开不再回显默认 pLDDT 图例）
+    var tbEl = stageEl.querySelector('.af-tb');
+    if (tbEl) {
+      slot.appendChild(tbEl);
+      if (tbEl.__afSync) { try { tbEl.__afSync(); } catch (e) { /* ignore */ } }
+    }
     stageEl.classList.add('af-expanded');
     document.body.appendChild(wrap);
     EMB.pin(wrap); // 嵌入形态 → 可视切片（含吸顶栏避让）
@@ -525,6 +564,7 @@ export const LIGHTBOX_JS = `<script>
       unwatchAf();
       EMB.unlock(); // v2.7.8 ⑪：父页滚动解锁
       stageEl.appendChild(cv); // 归位（viewer 随容器尺寸自动缩回）
+      if (tbEl) stageEl.appendChild(tbEl); // v2.47：工具条归位（小窗 CSS 隐藏）
       stageEl.classList.remove('af-expanded');
       wrap.remove();
       document.removeEventListener('keydown', onKey, true);
@@ -547,8 +587,8 @@ export const LIGHTBOX_JS = `<script>
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'af-expand';
-    btn.title = '放大交互 3D 视图';
-    btn.setAttribute('aria-label', '放大交互 3D 视图');
+    btn.title = '放大交互 3D 视图（放大后可下载 PDB / 切换着色）';
+    btn.setAttribute('aria-label', '放大交互 3D 视图（放大后可下载 PDB / 切换着色）');
     btn.innerHTML = ICON_EXPAND + '<span>放大</span>';
     btn.addEventListener('click', function (e) { e.stopPropagation(); afFullscreen(stageEl); });
     stageEl.appendChild(btn);
@@ -594,6 +634,11 @@ export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.
     .lig-ident, .cov-fig, blockquote { break-inside: avoid-page; }
     thead { display: table-header-group; }
     .tbl-wrap { overflow: visible; }
+    /* v2.56：打印时解除 colgroup 固定列宽 — A4 内容宽 ~718px 而固定列总和 ~706px，
+       标题列被挤成单词竖排窄条；改为按内容自动分配（标题列吸收余量） */
+    .tbl-wrap col { width: auto !important; }
+    /* v2.56：打印恢复全文（行高截断仅为屏显优化） */
+    .t-clamp { display:block; overflow:visible; }
     table { table-layout: auto !important; min-width: 0 !important; font-size: 9.5px; }
     th { white-space: normal; overflow: visible; text-overflow: clip; }
     th, td { padding: 4px 6px; }
@@ -734,6 +779,326 @@ export const UX_PAGE_JS = `<script>
 })();
 </script>`
 
+// ─── v2.48 PDB / BLAST 列表筛选 + 排序（报告内嵌，纯客户端零依赖）──────────────
+//  表格行携带 data-m（方法归类）/data-res/data-date/data-id/data-ident/data-e/data-cov，
+//  table[data-tbl] 标组（pdb 主表+折叠表同组 — 控制器跨表作用于全量行；pdb-out /
+//  blast / blast-out 各自独立成组）。分组作用域 = 最近 section（合并报告多靶点
+//  各自的 section id 唯一 — 不串组）。激活筛选/排序时全部可见行并入首表、折叠区
+//  暂避；恢复默认则按 __home 归位原分布（预览 20 + 折叠余量的结构不变）。
+//  v2.53：① 方法 chips 之外新增分辨率阈值快捷筛选（≤2Å / ≤3Å toggle，无分辨率
+//  数据的表不渲染）；② marker 升 rpt-tbl-v2 — v1 报告（v2.48-v2.52 生成）由
+//  applyTableFilterUpgrade 在服务端摘旧脚本注入新版，历史无标记报告注入自举。
+//  v2.54：③ 「导出 CSV」按钮 —— 导出当前筛选+排序状态下的可见行（curVis 与
+//  render() 同步；thead 表头 + 单元格文本，装饰性片段剔除；BOM+CRLF Excel 友好）。
+const TABLE_FILTER_MARKER = 'rpt-tbl-v3'
+
+export const TABLE_FILTER_JS = `<script>
+/* ${TABLE_FILTER_MARKER} PDB/BLAST 列表筛选排序（v2.48；v2.53 分辨率阈值；v2.54 CSV 导出）*/
+(function () {
+  var M_LABEL = { xray: 'X-ray', cryoem: 'Cryo-EM', nmr: 'NMR', other: '其他' };
+  var M_ORDER = ['xray', 'cryoem', 'nmr', 'other'];
+  var RES_KEYS = [2, 3]; // v2.53 分辨率阈值（Å）
+  var SORTS = {
+    pdb: [
+      ['default', '默认（分辨率 ↑）'],
+      ['res-asc', '分辨率 ↑'], ['res-desc', '分辨率 ↓'],
+      ['date-desc', '日期 新→旧'], ['date-asc', '日期 旧→新'],
+      ['id-asc', 'PDB ID A→Z']
+    ],
+    blast: [
+      ['default', '默认（Identity ↓）'],
+      ['ident-desc', 'Identity 高→低'], ['ident-asc', 'Identity 低→高'],
+      ['e-asc', 'E-value 小→大'], ['cov-desc', '覆盖 大→小'], ['res-asc', '分辨率 小→大'],
+      ['id-asc', 'PDB ID A→Z']
+    ]
+  };
+  function numAttr(el, k) { var v = parseFloat(el.getAttribute(k)); return Number.isFinite(v) ? v : null; }
+  function strAttr(el, k) { var v = (el.getAttribute(k) || '').trim(); return v || null; }
+  function cmp(av, bv, dir) { // 缺失值恒排末尾（不因方向翻转漂到头部）
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  }
+  var ACCESS = {
+    res: function (r) { return numAttr(r, 'data-res'); },
+    date: function (r) { return strAttr(r, 'data-date'); },
+    id: function (r) { return strAttr(r, 'data-id'); },
+    ident: function (r) { return numAttr(r, 'data-ident'); },
+    e: function (r) { return numAttr(r, 'data-e'); },
+    cov: function (r) { return numAttr(r, 'data-cov'); }
+  };
+  function sortKey(v) { var i = v.lastIndexOf('-'); return i < 0 ? null : { k: v.slice(0, i), dir: v.slice(i + 1) === 'desc' ? -1 : 1 }; }
+  var groups = {};
+  Array.prototype.forEach.call(document.querySelectorAll('table[data-tbl]'), function (t) {
+    var g = t.getAttribute('data-tbl');
+    var scope = t.closest ? (t.closest('section') || t.closest('.rpt-view') || document.body) : document.body;
+    var key = (scope.id || '') + '|' + g;
+    (groups[key] = groups[key] || { kind: g, tables: [] }).tables.push(t);
+  });
+  Object.keys(groups).forEach(function (key) {
+    var grp = groups[key];
+    var kind = grp.kind.indexOf('blast') === 0 ? 'blast' : 'pdb';
+    var rows = [];
+    grp.tables.forEach(function (t) {
+      var tb = t.tBodies[0];
+      if (!tb) return;
+      Array.prototype.forEach.call(tb.rows, function (tr) { tr.__home = tb; rows.push(tr); });
+    });
+    if (rows.length < 4) return; // 极小表无筛选价值
+    var mCounts = {};
+    rows.forEach(function (r) { var m = r.getAttribute('data-m') || 'other'; mCounts[m] = (mCounts[m] || 0) + 1; });
+    var mKeys = M_ORDER.filter(function (k) { return mCounts[k]; });
+    var resCounts = {}; // v2.53 阈值命中计数（无分辨率数据 → 不渲染该组）
+    var hasRes = false;
+    rows.forEach(function (r) {
+      var v = numAttr(r, 'data-res');
+      if (v != null) { hasRes = true; RES_KEYS.forEach(function (k) { if (v <= k) resCounts[k] = (resCounts[k] || 0) + 1; }); }
+    });
+    var sorts = SORTS[kind];
+    var firstWrap = grp.tables[0].closest ? (grp.tables[0].closest('.tbl-wrap') || grp.tables[0]) : grp.tables[0];
+    var ctl = document.createElement('div');
+    ctl.className = 'tbl-ctl';
+    ctl.setAttribute('role', 'group');
+    ctl.setAttribute('aria-label', '列表筛选与排序');
+    var html = '';
+    if (mKeys.length > 1) {
+      html += '<span class="tc-lbl">方法</span>';
+      html += '<button type="button" class="tc-chip tc-on" data-m="all" aria-pressed="true">全部 ' + rows.length + '</button>';
+      mKeys.forEach(function (k) {
+        html += '<button type="button" class="tc-chip" data-m="' + k + '" aria-pressed="false">' + (M_LABEL[k] || k) + ' ' + mCounts[k] + '</button>';
+      });
+    }
+    if (hasRes) {
+      html += '<span class="tc-lbl">分辨率</span>';
+      RES_KEYS.forEach(function (k) {
+        if (resCounts[k]) html += '<button type="button" class="tc-chip tc-res" data-res="' + k + '" aria-pressed="false" title="仅显示分辨率 ≤' + k + 'Å 的条目，再次点击取消">≤' + k + 'Å ' + resCounts[k] + '</button>';
+      });
+    }
+    html += '<span class="tc-lbl">排序</span><select class="tc-sel" aria-label="排序方式">';
+    sorts.forEach(function (s) { html += '<option value="' + s[0] + '">' + s[1] + '</option>'; });
+    html += '</select><span class="tc-count"></span>';
+    html += '<button type="button" class="tc-chip tc-x" title="导出当前列表（含筛选与排序状态）为 CSV 文件，可直接用 Excel / WPS 打开">导出 CSV</button>';
+    ctl.innerHTML = html;
+    firstWrap.parentNode.insertBefore(ctl, firstWrap);
+    var state = { m: 'all', res: 0, sort: 'default' };
+    var curVis = rows; // v2.54：当前筛选+排序状态下的可见行（render 同步 — CSV 导出用）
+    var countEl = ctl.querySelector('.tc-count');
+    var selEl = ctl.querySelector('.tc-sel');
+    var hides = []; // 激活期间暂避的次表宿主（details 折叠区 / .tbl-wrap）
+    grp.tables.slice(1).forEach(function (t) {
+      var host = t.closest ? (t.closest('details') || t.closest('.tbl-wrap')) : null;
+      if (host) hides.push(host);
+    });
+    // v2.54：CSV 导出（当前可见行 = curVis；表头取首表 thead）
+    function csvCell(s) {
+      s = String(s || '').replace(/\\s+/g, ' ').trim();
+      return /[",\\r\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    function cellText(td) {
+      var c = td.cloneNode(true);
+      // 装饰性片段不入 CSV：范围外 chip / 配体「等N」后缀 / 复制按钮
+      if (c.querySelectorAll) {
+        Array.prototype.forEach.call(c.querySelectorAll('.rng-outside-chip,.lig-more,.copy-btn'), function (n) { n.remove(); });
+      }
+      return csvCell(c.textContent || '');
+    }
+    function exportCsv() {
+      var lines = [];
+      var hr = grp.tables[0].tHead && grp.tables[0].tHead.rows[0];
+      if (hr) {
+        var head = [];
+        Array.prototype.forEach.call(hr.cells, function (c) { head.push(csvCell(c.textContent)); });
+        lines.push(head.join(','));
+      }
+      curVis.forEach(function (r) {
+        var cells = [];
+        Array.prototype.forEach.call(r.cells, function (c) { cells.push(cellText(c)); });
+        lines.push(cells.join(','));
+      });
+      var st = ''; // 筛选/排序状态入文件名，多次导出可区分
+      if (state.m !== 'all') st += '-' + state.m;
+      if (state.res > 0) st += '-le' + state.res + 'A';
+      if (state.sort !== 'default') st += '-' + state.sort;
+      var base = (document.title || 'report').replace(/[\\\\/:*?"<>|\\s—·（）()]+/g, '').slice(0, 24) || 'report';
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob(['\\ufeff' + lines.join('\\r\\n')], { type: 'text/csv;charset=utf-8' }));
+      a.download = base + '-' + grp.kind + st + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+    }
+    function render() {
+      var active = state.m !== 'all' || state.res > 0 || state.sort !== 'default';
+      var vis = rows.filter(function (r) {
+        if (state.m !== 'all' && (r.getAttribute('data-m') || 'other') !== state.m) return false;
+        if (state.res > 0) { var rv = numAttr(r, 'data-res'); if (rv == null || rv > state.res) return false; }
+        return true;
+      });
+      var sk = sortKey(state.sort);
+      if (sk && ACCESS[sk.k]) vis.sort(function (a, b) { return cmp(ACCESS[sk.k](a), ACCESS[sk.k](b), sk.dir); });
+      curVis = vis; // v2.54：与渲染态同步（CSV 导出取当前可见行）
+      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip.tc-res'), function (c) {
+        var on = parseInt(c.getAttribute('data-res'), 10) === state.res;
+        c.classList.toggle('tc-on', on);
+        if (c.setAttribute) c.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      var first = grp.tables[0].tBodies[0];
+      if (!first) return;
+      if (active) {
+        vis.forEach(function (r) { first.appendChild(r); });
+        rows.forEach(function (r) { if (vis.indexOf(r) < 0) r.remove(); });
+        hides.forEach(function (h) { h.style.display = 'none'; });
+      } else {
+        rows.forEach(function (r) { r.__home.appendChild(r); });
+        hides.forEach(function (h) { h.style.display = ''; });
+      }
+      if (countEl) {
+        countEl.textContent = '显示 ' + vis.length + ' / ' + rows.length;
+        countEl.classList.toggle('tc-filtered', vis.length < rows.length);
+      }
+    }
+    ctl.addEventListener('click', function (e) {
+      var chip = e.target && e.target.closest ? e.target.closest('.tc-chip') : null;
+      if (!chip || !ctl.contains(chip)) return;
+      if (chip.classList.contains('tc-x')) { exportCsv(); return; } // v2.54
+      if (chip.classList.contains('tc-res')) { // v2.53 阈值 toggle（再次点击取消）
+        var rv = parseInt(chip.getAttribute('data-res'), 10);
+        state.res = state.res === rv ? 0 : rv;
+        render();
+        return;
+      }
+      state.m = chip.getAttribute('data-m') || 'all';
+      Array.prototype.forEach.call(ctl.querySelectorAll('.tc-chip:not(.tc-res):not(.tc-x)'), function (c) {
+        var on = c === chip;
+        c.classList.toggle('tc-on', on);
+        if (c.setAttribute) c.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      render();
+    });
+    if (selEl) selEl.addEventListener('change', function () { state.sort = selEl.value; render(); });
+    render();
+  });
+})();
+</script>`
+
+/** v2.53：.tbl-ctl 工具条样式单源（SINGLE_REPORT_CSS 内嵌 + 旧报告服务端注入共用）
+ *  — 从 v2.48 的 SINGLE_REPORT_CSS 块抽离；所需变量（--mono/--line/--accent 等）
+ *  在 v2.48 之前的旧报告 :root 同样定义（实测核对），注入即可用 */
+export const TABLE_FILTER_CSS = `  /* v2.48/v2.53/v2.54 PDB/BLAST 列表筛选排序工具条（TABLE_FILTER_JS 挂载 — chips + 阈值 + 排序下拉 + 计数 + CSV 导出） */
+  .tbl-ctl { display:flex; flex-wrap:wrap; align-items:center; gap:5px 8px; margin:2px 0 10px; font-family:var(--mono); }
+  .tc-lbl { font-size:9px; color:var(--faint); letter-spacing:1.2px; margin-left:2px; }
+  .tbl-ctl .tc-lbl:first-child { margin-left:0; }
+  .tc-chip { padding:2px 10px; border-radius:10px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; letter-spacing:.4px; line-height:1.7; cursor:pointer; transition:border-color .12s, color .12s; }
+  .tc-chip:hover { border-color:#c7ece0; color:var(--accent-2); }
+  .tc-chip.tc-on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .tc-chip:focus-visible, .tc-sel:focus-visible { outline:2px solid #10b981; outline-offset:1px; }
+  .tc-sel { padding:2.5px 6px; border-radius:5px; border:1px solid var(--line); background:#fff; color:var(--sub); font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9.5px; font-weight:600; cursor:pointer; }
+  .tc-count { margin-left:auto; font-size:9.5px; color:var(--faint); white-space:nowrap; }
+  .tc-count.tc-filtered { color:#b45309; font-weight:700; }
+  .tc-x { margin-left:6px; color:var(--accent-2,#047857); border-color:#c7ece0; background:#f0fdf7; }
+  .tc-x:hover { border-color:var(--accent-2,#047857); background:#d9f5e8; }
+  @media print { .tbl-ctl { display:none !important; } }
+`
+
+// ─── v2.53 旧报告表筛选自举（服务端按需注入 — 无/旧标记的 report.html）──────
+//  自举在注入的 TABLE_FILTER_JS 之前运行（脚本顺序保证）：
+//  ① 未标组表格：按表头识别种类（含 Identity → blast；含分辨率 → pdb），折叠区
+//    class fold-outside → {kind}-out 独立组，其余 fold 与主表同组；互作复合物
+//    卡片（.cx-card）内表格跳过 — 多卡片同 section 会跨表串行；
+//  ② 行属性回填：从单元格文本提取 data-id/data-m/data-res/data-date/
+//    data-ident/data-e/data-cov（仅填缺失 — v1 报告 BLAST 行缺 data-id 在此补齐，
+//    方法列兼容 mth 色块 class 与纯文本两种历史形态）。
+export const TBL_BOOTSTRAP_JS = `<script>
+/* rpt-tblboot-v1 旧报告表格筛选自举（v2.53）*/
+(function () {
+  function mkey(td) {
+    var chip = td.querySelector('.mth');
+    var cls = chip ? chip.className : '';
+    if (/mth-xray/.test(cls)) return 'xray';
+    if (/mth-cryoem/.test(cls)) return 'cryoem';
+    if (/mth-nmr/.test(cls)) return 'nmr';
+    if (chip) return 'other';
+    var t = (td.textContent || '').toUpperCase();
+    if (t.indexOf('X-RAY') >= 0 || t.indexOf('XRAY') >= 0) return 'xray';
+    if (t.indexOf('ELECTRON MICROSCOPY') >= 0 || t.indexOf('CRYO') >= 0) return 'cryoem';
+    if (t.indexOf('NMR') >= 0) return 'nmr';
+    return 'other';
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('table.tbl-data'), function (t) {
+    if (t.closest && t.closest('.cx-card')) return; // 互作复合物卡片表：多卡片同节不并入
+    var head = t.tHead && t.tHead.rows[0];
+    if (!head) return;
+    var ths = [];
+    Array.prototype.forEach.call(head.cells, function (c) { ths.push((c.textContent || '').trim()); });
+    var colOf = function (re) { for (var i = 0; i < ths.length; i++) if (re.test(ths[i])) return i; return -1; };
+    var isBlast = ths.some(function (h) { return h.indexOf('Identity') >= 0; });
+    var isPdb = !isBlast && ths.some(function (h) { return h.indexOf('分辨率') >= 0; });
+    if (!isBlast && !isPdb) return;
+    if (!t.getAttribute('data-tbl')) {
+      var kind = isBlast ? 'blast' : 'pdb';
+      var group = kind;
+      var det = t.closest ? t.closest('details') : null;
+      if (det && det.className.indexOf('fold-outside') >= 0) group = kind + '-out';
+      t.setAttribute('data-tbl', group);
+    }
+    var cId = colOf(/^PDB/), cM = colOf(/方法/), cRes = colOf(/分辨率/), cDate = colOf(/日期/);
+    var cIdent = colOf(/Identity/), cE = colOf(/E-value/i), cCov = colOf(/覆盖/);
+    var tb = t.tBodies[0];
+    if (!tb) return;
+    Array.prototype.forEach.call(tb.rows, function (tr) {
+      var cells = tr.cells;
+      var cell = function (i) { return i >= 0 && cells[i] ? cells[i] : null; };
+      var idc = cell(cId);
+      if (idc && !tr.hasAttribute('data-id')) {
+        var mm = (idc.textContent || '').trim().match(/\\b[0-9A-Z]{4}\\b/);
+        tr.setAttribute('data-id', mm ? mm[0] : '');
+      }
+      var mc = cell(cM);
+      if (mc && !tr.hasAttribute('data-m')) tr.setAttribute('data-m', mkey(mc));
+      var rc = cell(cRes);
+      if (rc && !tr.hasAttribute('data-res')) { var rv = parseFloat(rc.textContent); tr.setAttribute('data-res', isFinite(rv) ? String(rv) : ''); }
+      var dc = cell(cDate);
+      if (dc && !tr.hasAttribute('data-date')) { var dm = (dc.textContent || '').match(/\\d{4}-\\d{2}-\\d{2}/); tr.setAttribute('data-date', dm ? dm[0] : ''); }
+      var ic = cell(cIdent);
+      if (ic && !tr.hasAttribute('data-ident')) { var iv = parseFloat(ic.textContent); tr.setAttribute('data-ident', isFinite(iv) ? String(iv) : ''); }
+      var ec = cell(cE);
+      if (ec && !tr.hasAttribute('data-e')) { var ev = parseFloat(ec.textContent); tr.setAttribute('data-e', isFinite(ev) ? String(ev) : ''); }
+      var cc = cell(cCov);
+      if (cc && !tr.hasAttribute('data-cov')) {
+        var ct = (cc.textContent || '').trim();
+        var cm = ct.match(/(\\d+)\\s*[-\\u2013\\u2014~]\\s*(\\d+)/);
+        var span = cm ? (parseInt(cm[2], 10) - parseInt(cm[1], 10) + 1) : (parseInt(ct, 10) || '');
+        tr.setAttribute('data-cov', span);
+      }
+    });
+  });
+})();
+</script>`
+
+const TBL_OLD_RE = /<script>\s*\/\* rpt-tbl-v[12][\s\S]*?<\/script>/
+
+/** v2.53/v2.54：报告服务端表筛选升级（幂等，三类路径）：
+ *  - 已含 rpt-tbl-v3（当前版本生成）→ 原样返回；
+ *  - 含 rpt-tbl-v1/v2（v2.48-v2.53 生成）→ 摘除旧脚本 → 注入自举 + 新版
+ *    TABLE_FILTER_JS（行为随服务端代码演进）；
+ *  - 无标记（v2.48 之前的历史报告）→ 同上全量注入。
+ *  v2.54：CSS 注入不再按路径区分 —— v1/v2 旧版内嵌 CSS 缺 tc-x 等新增规则
+ *  （v2.53 曾因 tc-res 复用 tc-chip 基类而免注入侥幸无恙），统一补注入
+ *  TABLE_FILTER_CSS（同规则重复声明无害，新增规则全路径生效）。 */
+export function applyTableFilterUpgrade(html: string): string {
+  if (html.includes(TABLE_FILTER_MARKER)) return html
+  let out = html
+  if (TBL_OLD_RE.test(out)) out = out.replace(TBL_OLD_RE, '')
+  const h = out.indexOf('</head>')
+  if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-tbl-ctl">${TABLE_FILTER_CSS}</style>\n${out.slice(h)}`
+  const b = out.lastIndexOf('</body>')
+  if (b >= 0) out = `${out.slice(0, b)}${TBL_BOOTSTRAP_JS}\n${TABLE_FILTER_JS}\n${out.slice(b)}`
+  return out
+}
+
 /** 旧报告兼容：无 UX 标记的历史 report.html，注入打印版式 + 复制/横滚 CSS+JS（幂等，已有则原样返回） */
 export function applyUxUpgrade(html: string): string {
   if (html.includes(UX_PAGE_MARKER)) return html
@@ -747,8 +1112,10 @@ export function applyUxUpgrade(html: string): string {
 
 // ─── Markdown 子集 → HTML ─────────────────────────────────────────────────────
 
-export function esc(s: string): string {
-  return s
+export function esc(s: string | null | undefined): string {
+  // v2.48.1：null/undefined 容错 — 关系字段等外部输入可能缺省，此前直接 .replace 崩溃
+  // （合并报告 HTML 落盘失败曾由 esc(relation.strategy) 触发）
+  return (s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -982,18 +1349,21 @@ export function coverageFigureHtml(
 }
 
 /** PDB 表格行（配体截断悬停全名；PMID 悬停显示关联文献标题；
- *  v2.29 outside=true → 范围外行（灰色 + chip — 与评估区间无链范围重叠）） */
+ *  v2.29 outside=true → 范围外行（灰色 + chip — 与评估区间无链范围重叠）；
+ *  v2.48 行携带 data-m/-res/-date/-id — 表格筛选排序控制器（TABLE_FILTER_JS）消费） */
 function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, LiteratureItem>, outside = false): string {
   return pdbs.slice(0, max).map(p => {
     const lit = p.pubmedId ? litByPmid.get(p.pubmedId) : undefined
     const ligShow = p.ligands.slice(0, 2).map(l => shortLigand(l)).join('; ')
+    const mKey = p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'
+    const dateSort = (p.releaseDate || '').slice(0, 10)
     return `
-    <tr${outside ? ' class="tr-outside"' : ''}>
+    <tr${outside ? ' class="tr-outside"' : ''} data-m="${mKey}" data-res="${p.resolution ?? ''}" data-date="${esc(dateSort)}" data-id="${p.pdbId}">
       <td class="td-id"><a href="https://www.rcsb.org/structure/${p.pdbId}" target="_blank" rel="noopener">${p.pdbId}</a></td>
       <td><span class="mth mth-${p.isXray ? 'xray' : p.isCryoem ? 'cryoem' : p.isNmr ? 'nmr' : 'other'}">${esc(methodLabel(p))}</span></td>
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
       <td class="t-rng"${p.chainRanges ? ` title="${esc(p.chainRanges)}（UniProt 残基编号范围）"` : ''}>${esc(p.chainRanges || '—')}${outside ? '<span class="rng-outside-chip">范围外</span>' : ''}</td>
-      <td class="t-title">${esc(p.title)}</td>
+      <td class="t-title" title="${esc(p.title)}"><span class="t-clamp">${esc(p.title)}</span></td>
       <td class="num">${esc(p.releaseDate || '—')}</td>
       <td class="t-lig" title="${esc(p.ligands.slice(0, 5).join('; '))}">${ligShow ? esc(ligShow) : '—'}${p.ligands.length > 2 ? `<span class="lig-more"> 等${p.ligands.length}</span>` : ''}</td>
       <td class="t-journal">${esc(p.journal || '—')}</td>
@@ -1007,19 +1377,20 @@ function pdbRowsHtml(pdbs: PdbEntry[], max: number, litByPmid: Map<string, Liter
 /** PDB 数据表 colgroup（固定列宽，杜绝长内容挤压/重叠；窄屏由 .tbl-wrap 横向滚动） */
 const PDB_COLGROUP = `<colgroup>
   <col style="width:74px"><col style="width:62px"><col style="width:64px"><col style="width:96px"><col>
-  <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:72px">
+  <col style="width:86px"><col style="width:146px"><col style="width:106px"><col style="width:84px">
 </colgroup>`
 
 /** PDB 表头（v2.29 提为模块级常量 — 主表/范围外折叠表共用） */
 const PDB_TABLE_THEAD = '<thead><tr><th>PDB ID</th><th>方法</th><th class="num">分辨率 (Å)</th><th>范围</th><th>标题</th><th class="num">释放日期</th><th>主要配体</th><th>期刊</th><th>文献</th></tr></thead>'
 
-/** PDB 表格：前 preview 条直出，剩余放入 details 折叠；expandAll=true 全量直出（v2.13 单独评估页要求） */
+/** PDB 表格：前 preview 条直出，剩余放入 details 折叠；expandAll=true 全量直出（v2.13 单独评估页要求）。
+ *  v2.48 主表/折叠表同标 data-tbl="pdb"（同组 — 筛选排序控制器跨表作用于全量行） */
 function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid: Map<string, LiteratureItem>, expandAll = false): string {
   const shown = pdbs.slice(0, max)
   const PDB_THEAD = PDB_TABLE_THEAD
   if (expandAll) {
     return `
-  <div class="tbl-wrap"><table class="tbl-data">
+  <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb">
     ${PDB_COLGROUP}
     ${PDB_THEAD}
     <tbody>${pdbRowsHtml(shown, max, litByPmid)}</tbody>
@@ -1028,7 +1399,7 @@ function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid:
   const head = shown.slice(0, preview)
   const rest = shown.slice(preview)
   const headHtml = `
-  <div class="tbl-wrap"><table class="tbl-data">
+  <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb">
     ${PDB_COLGROUP}
     ${PDB_THEAD}
     <tbody>${pdbRowsHtml(head, preview, litByPmid)}</tbody>
@@ -1037,7 +1408,7 @@ function pdbTableHtml(pdbs: PdbEntry[], preview: number, max: number, litByPmid:
   return `${headHtml}
   <details class="fold">
     <summary>展开其余 ${rest.length} 条结构（共 ${shown.length} 条，打印时自动展开）</summary>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb">
       ${PDB_COLGROUP}
       ${PDB_THEAD}
       <tbody>${pdbRowsHtml(rest, rest.length, litByPmid)}</tbody>
@@ -1089,7 +1460,7 @@ function pdbOutsideFoldHtml(pdbs: PdbEntry[], litByPmid: Map<string, LiteratureI
   return `
   <details class="fold fold-outside">
     <summary>范围外结构 ${pdbs.length} 条（与评估区间 ${range[0]}-${range[1]} 无链范围重叠 — 折叠保留，灰色行${pdbs.length > 150 ? `，展示前 150 条` : ''}）</summary>
-    <div class="tbl-wrap"><table class="tbl-data">
+    <div class="tbl-wrap"><table class="tbl-data" data-tbl="pdb-out">
       ${PDB_COLGROUP}
       ${PDB_TABLE_THEAD}
       <tbody>${pdbRowsHtml(shown, 150, litByPmid, true)}</tbody>
@@ -1158,7 +1529,7 @@ function soloRowHtml(p: PdbEntry): string {
       <td class="td-id"><a href="https://www.rcsb.org/structure/${esc(p.pdbId)}" target="_blank" rel="noopener">${esc(p.pdbId)}</a></td>
       <td>${sharedMethodBadge(p)}</td>
       <td class="num">${p.resolution != null ? p.resolution.toFixed(2) : '—'}</td>
-      <td class="t-title">${esc(p.title)}</td>
+      <td class="t-title" title="${esc(p.title)}"><span class="t-clamp">${esc(p.title)}</span></td>
       <td class="num">${esc(p.releaseDate || '—')}</td>
       <td class="t-journal">${esc(p.journal || '—')}</td>
       <td class="td-id">${pmidLink(p.pubmedId)}</td>
@@ -1296,18 +1667,46 @@ function blastRowsHtml(hits: BlastHit[], outside = false): string {
     const range = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
       ? `${h.queryFrom}-${h.queryTo}`
       : (h.queryCoverage != null && h.queryCoverage > 0 ? `${h.queryCoverage} aa` : '—')
+    const covSpan = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo >= h.queryFrom
+      ? h.queryTo - h.queryFrom + 1
+      : (h.queryCoverage != null && h.queryCoverage > 0 ? h.queryCoverage : '')
     return `
-    <tr${outside ? ' class="tr-outside"' : ''}>
+    <tr${outside ? ' class="tr-outside"' : ''} data-m="${blastMethodKey(h.method)}" data-ident="${h.identity}" data-res="${h.resolution ?? ''}" data-cov="${covSpan}" data-e="${Number.isFinite(h.evalue) ? h.evalue : ''}" data-id="${h.pdbId ?? ''}">
       <td class="td-id">${h.pdbId ? `<a href="https://www.rcsb.org/structure/${h.pdbId}" target="_blank" rel="noopener">${h.pdbId}</a>` : '—'}</td>
-      <td class="t-desc">${esc(h.description)}</td>
+      <td class="t-desc" title="${esc(h.description)}"><span class="t-clamp">${esc(h.description)}</span></td>
       <td class="num">${h.identity.toFixed(1)}%</td>
       <td class="num">${esc(h.evalueRaw)}</td>
       <td class="num">${esc(range)}${outside ? '<span class="rng-outside-chip">范围外</span>' : ''}</td>
-      <td class="t-nowrap">${esc(h.method || '—')}</td>
+      <td>${blastMethodChip(h.method)}</td>
       <td class="num">${h.resolution != null ? h.resolution.toFixed(2) : '—'}</td>
       <td class="td-id">${pmidLink(h.pubmedId)}</td>
     </tr>`
   }).join('')
+}
+
+/** v2.44：BLAST 表方法列短标签（用户反馈：RCSB 原始方法名如 ELECTRON MICROSCOPY
+ *  过长，与右侧分辨率列重叠）— 与 PDB 表同款 mth 色块：X-ray / Cryo-EM / NMR /
+ *  其他（限长 14 字符，完整名悬停 title 可见） */
+function blastMethodChip(method: string): string {
+  const m = (method || '').trim()
+  if (!m) return '<span class="mth mth-other">—</span>'
+  const up = m.toUpperCase()
+  if (up.includes('X-RAY') || up.includes('XRAY')) return '<span class="mth mth-xray">X-ray</span>'
+  if (up.includes('ELECTRON MICROSCOPY') || up.includes('CRYO-EM') || up.includes('CRYOEM') || up.includes('ELECTRON CRYSTALLOGRAPHY')) return '<span class="mth mth-cryoem">Cryo-EM</span>'
+  if (up.includes('NMR')) return '<span class="mth mth-nmr">NMR</span>'
+  if (m.length <= 14) return `<span class="mth mth-other" title="${esc(m)}">${esc(m)}</span>`
+  return `<span class="mth mth-other" title="${esc(m)}">${esc(m.slice(0, 13))}…</span>`
+}
+
+/** v2.48：BLAST 行方法归类键（与 blastMethodChip 同口径 — 筛选 chips / data-m 属性用） */
+function blastMethodKey(method: string): string {
+  const m = (method || '').trim()
+  if (!m) return 'other'
+  const up = m.toUpperCase()
+  if (up.includes('X-RAY') || up.includes('XRAY')) return 'xray'
+  if (up.includes('ELECTRON MICROSCOPY') || up.includes('CRYO-EM') || up.includes('CRYOEM') || up.includes('ELECTRON CRYSTALLOGRAPHY')) return 'cryoem'
+  if (up.includes('NMR')) return 'nmr'
+  return 'other'
 }
 
 /** 范围外 BLAST 同源命中折叠区（灰色行 + 范围外 chip — v2.29） */
@@ -1317,7 +1716,7 @@ function blastOutsideFoldHtml(hits: BlastHit[], range: [number, number] | undefi
   return `
   <details class="fold fold-outside">
     <summary>范围外同源结构 ${hits.length} 条（查询覆盖区间与评估区间 ${range[0]}-${range[1]} 无重叠 — 折叠保留，灰色行${hits.length > 100 ? '，展示前 100 条' : ''}）</summary>
-    <div class="tbl-wrap"><table class="tbl-data tbl-blast">
+    <div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast-out">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
@@ -1449,6 +1848,10 @@ export interface ReportRenderInput {
     fracVeryHigh: number | null
     sequenceLength: number
   }
+  /** v2.46：UniProt DOMAIN 结构域区间（预测结构视图「按域着色」选项数据源；
+   *  仅 AFDB 模型传（残基编号 = UniProt 坐标直接映射）；无 DOMAIN 注释时缺省
+   *  → 工具条「UniProt 域」选项禁用置灰） */
+  afDomains?: AfDomainRange[]
   resolveImagePath: (meta: ParsedImage) => string
 }
 
@@ -1485,6 +1888,10 @@ export interface SingleBodyEmbedOptions {
     engine?: 'esmfold'
     /** v2.15：ESMFold 预测序列长度（engine='esmfold' 时展示） */
     sequenceLength?: number
+    /** v2.46：UniProt DOMAIN 结构域区间（公共 MODELS 池视图「按域着色」用 —
+     *  renderSingleReportBody 序列化进 stage data-domains，mtrViewerJs 初始化后
+     *  随工具条挂载；仅 AFDB 引擎视图传，ESMFold 编号不对齐不传） */
+    domains?: AfDomainRange[]
   }
   /** 客户实验数据图片走首页池复用（img 不带 src，由合并报告水合脚本从首页拷贝） */
   pooledImages?: boolean
@@ -1505,6 +1912,8 @@ export interface SingleReportBodyInput {
   alphafoldFigure?: ReportRenderInput['alphafoldFigure']
   alphafoldStructure?: ReportRenderInput['alphafoldStructure']
   esmfoldStructure?: ReportRenderInput['esmfoldStructure']
+  /** v2.46：UniProt DOMAIN 区间（AF 视图「按域着色」；仅 AFDB 模型有值） */
+  afDomains?: AfDomainRange[]
   /** 3Dmol bundle（单靶点报告外壳预取传入；合并嵌入模式无需 — 公共池脚本负责初始化） */
   af3dBundle?: string | null
   resolveImagePath?: (meta: ParsedImage) => string
@@ -1528,12 +1937,18 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   // v2.16：序列靶点有身份识别（评估表名/nr 识别/同源推断）时题目用识别名 —
   // 不再笼统写「序列靶点评估」；后缀注明识别来源与一致性（评估表来源无后缀）
   const ti = ctx.targetIdentity
+  // v2.44：已归属 UniProt 但经序列匹配（UniProt 匹配 / nr 识别）定位且非全同时，
+  // 题目标注同源度（用户诉求「显示同源度，避免非标准名称作题目」— 全同 100% 不注）
+  const identityTitleSuffix = u && ti && ti.identity != null && ti.identity < 99.95
+    && (ti.source === 'uniprot-blast' || ti.source === 'blast-nr')
+    ? ` · ${ti.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(ti.identity)}%`
+    : ''
   // v2.31：聚合蛋白截短题目标注（P0DTD1 不同截短均为「Replicase polyprotein 1ab」—
   // 从 PTM/Processing 加工条目归属 nsp，题目区分同名截短靶点）
   const nspSuffix = nspTitleSuffix(u, ctx.range)
   const procMatch = u ? matchProcessingSegments(ctx.range, u.processingChains, u.sequenceLength) : null
   const proteinTitle = u
-    ? `${u.proteinName}${nspSuffix}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspSuffix}（${u.uniprotId}${identityTitleSuffix}${rangeSuffix}）`
     : ti
       ? `${ti.name}（序列靶点${targetIdentityTitleSuffix(ti)}${rangeSuffix}）`
       : (ctx.range ? `序列靶点评估 · 残基 ${ctx.range[0]}-${ctx.range[1]}` : '序列靶点评估')
@@ -1943,6 +2358,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const afP = emb?.afPooled
   /** v2.15：池化引擎为 ESMFold — 卡片标注/外链切换为 ESM Atlas 口径 */
   const efP = afP?.engine === 'esmfold' ? afP : undefined
+  // v2.46：下载文件名 + 域着色数据（脚本安全转义 — JSON 内 < 转为 \u003c 防 </script 逃逸）
+  const fnSafe = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, '_')
+  const afPooledFn = afP ? (efP ? 'ESMFold_prediction.pdb' : fnSafe(`${afP.modelId}-model_v${afP.version}.pdb`)) : ''
+  const afPooledDomainsAttr = afP && !efP && afP.domains?.length ? ` data-domains="${esc(JSON.stringify(afP.domains))}"` : ''
+  const afFileName = af ? fnSafe(`${af.modelId}-model_v${af.version}.pdb`) : ''
+  const afDomainsJs = JSON.stringify(input.afDomains ?? null).replace(/</g, '\\u003c')
   // v2.13：合并报告嵌入 — AF 视图走公共 MODELS 池（data-maf stage 由合并报告统一
   // 初始化）；无可内嵌模型时降级统计卡（mtr-af-stat — 合并报告附加样式）。
   const afBlockHtml = afP ? `
@@ -1953,7 +2374,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <div class="mtr-af-stat-note">${efP ? 'ESMFold 模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 ESM Atlas（下方链接）' : '模型体积超出内嵌预算或本次获取失败 — 交互视图请前往 AlphaFold DB（下方链接）'}</div>
           <a class="mtr-af-link" href="${efP ? 'https://esmatlas.com/resources?action=fold' : `https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}`}" target="_blank" rel="noopener">${efP ? 'esmatlas.com' : 'alphafold.ebi.ac.uk'} →</a>
         </div>`
-        : `<div class="af-stage" data-maf="${esc(afP.mafKey)}">
+        : `<div class="af-stage" data-maf="${esc(afP.mafKey)}" data-afn="${esc(afPooledFn)}"${afPooledDomainsAttr}>
           <div class="af-canvas"></div>
           <img class="af-poster" alt="${efP ? 'ESMFold' : 'AlphaFold'} 预测结构（pLDDT 着色）">
         </div>
@@ -1963,7 +2384,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FFDB13"></i>50–70</span>
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>`}
-        <figcaption>${efP ? `<b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(afP.modelId)}（ESM Atlas 公共 API）· ${efP.sequenceLength ?? '—'} aa · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）· <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a>` : `<b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>`}</figcaption>
+        <figcaption>${efP ? `<b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹着色、下载 PDB 模型<br>${esc(afP.modelId)}（ESM Atlas 公共 API）· ${efP.sequenceLength ?? '—'} aa · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）· <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a>` : `<b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹 / UniProt 域着色、下载 PDB 模型<br>${esc(afP.modelId)} · v${afP.version} · 平均 pLDDT ${afP.globalPlddt ?? '—'} · ${afP.pdbKb}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(afP.mafKey)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a>`}</figcaption>
       </figure>` : af ? `
       <figure class="af-fig">
         <div class="af-stage" id="af-stage">
@@ -1977,6 +2398,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>
         ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+        <script>${afToolbarJs()}</script>
         <script>
         (function () {
           var stage = document.getElementById('af-stage');
@@ -2001,6 +2423,10 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
                 var uri = viewer.pngURI ? viewer.pngURI() : null;
                 if (uri && poster) poster.src = uri;
               } catch (e) { /* 打印海报生成失败不影响交互 */ }
+              // v2.46：挂载「下载 PDB + 着色切换」工具条（域着色仅 AFDB 模型 — 残基编号 = UniProt 坐标）
+              try {
+                if (window.__afTb && window.__afTb.mount) window.__afTb.mount(stage, viewer, pdb, { fileName: ${JSON.stringify(afFileName)}, domains: ${afDomainsJs} });
+              } catch (e) { /* 工具条失败不影响视图 */ }
             } catch (e) { fail(); }
           }
           if (window.$3Dmol) init();
@@ -2012,7 +2438,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           }
         })();
         </script>
-        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
+        <figcaption><b>AlphaFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹 / UniProt 域着色、下载 PDB 模型<br>${esc(af.modelId)} · v${af.version} · 平均 pLDDT ${af.globalPlddt ?? '—'} · ${Math.round(af.pdbText.length / 1024)}KB 内嵌模型<br><a href="https://alphafold.ebi.ac.uk/entry/${esc(af.uniprotId)}" target="_blank" rel="noopener">alphafold.ebi.ac.uk →</a></figcaption>
       </figure>`
     : (input.alphafoldFigure ? `
       <figure class="af-fig">
@@ -2038,6 +2464,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           <span><i style="background:#FF7D45"></i>&lt; 50</span>
         </div>
         ${af3dBundle ? `<script>${af3dBundle.replace(/<\/script/gi, '<\\/script')}</script>` : ''}
+        <script>${afToolbarJs()}</script>
         <script>
         (function () {
           var stage = document.getElementById('${idOf('ef-stage')}');
@@ -2062,6 +2489,11 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
                 var uri = viewer.pngURI ? viewer.pngURI() : null;
                 if (uri && poster) poster.src = uri;
               } catch (e) { /* 打印海报生成失败不影响交互 */ }
+              // v2.46：挂载工具条（ESMFold 残基编号自 1 起与 UniProt 坐标不保证
+              // 对齐 → 不传 domains，域着色选项禁用置灰）
+              try {
+                if (window.__afTb && window.__afTb.mount) window.__afTb.mount(stage, viewer, pdb, { fileName: 'ESMFold_prediction.pdb' });
+              } catch (e) { /* 工具条失败不影响视图 */ }
             } catch (e) { fail(); }
           }
           if (window.$3Dmol) init();
@@ -2073,7 +2505,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
           }
         })();
         </script>
-        <figcaption><b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · 可全屏放大 · pLDDT 置信着色<br>${esc(ef.modelId)}（ESM Atlas 公共 API · 免登录）· ${ef.sequenceLength} aa · 平均 pLDDT ${ef.globalPlddt ?? '—'}${ef.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''} · ${Math.round(ef.pdbText.length / 1024)}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）；引用须注明计算预测而非实验结构 · <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a></figcaption>
+        <figcaption><b>ESMFold 预测结构</b> · 拖拽旋转 · 滚轮缩放 · pLDDT 置信着色 · 点击放大后可切换彩虹着色、下载 PDB 模型<br>${esc(ef.modelId)}（ESM Atlas 公共 API · 免登录）· ${ef.sequenceLength} aa · 平均 pLDDT ${ef.globalPlddt ?? '—'}${ef.fracVeryHigh != null ? ` · pLDDT ≥90 区段 ${Math.round(ef.fracVeryHigh * 100)}%` : ''} · ${Math.round(ef.pdbText.length / 1024)}KB 内嵌模型<br>该靶点在 AlphaFold DB 无收录 — 由 ESM-2 语言模型单序列预测（无 MSA，可信度低于 AF2）；引用须注明计算预测而非实验结构 · <a href="https://esmatlas.com/resources?action=fold" target="_blank" rel="noopener">esmatlas.com →</a></figcaption>
       </figure>` : ''
 
   // ─── 报告主体组装（header → glance → 目录 → 章节 → footer；不含外壳）──────
@@ -2087,7 +2519,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <h1 class="rpt-title">${esc(proteinTitle)}</h1>
     <div class="rpt-subtitle">蛋白靶点结构解析可行性评估报告</div>
     <div class="meta-grid">
-      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
+      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）${identityTitleSuffix ? `<span class="id-src">${esc(identityTitleSuffix.trim())} — 序列靶点经同源匹配归属</span>` : ''}` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
       <div><b>蛋白名称</b> ${esc(u?.proteinName ?? ctx.targetIdentity?.name ?? '—')}</div>
       ${procMatch ? processingRowHtml(procMatch) : ''}
       <div><b>基因</b> ${esc(geneStr)}</div>
@@ -2167,7 +2599,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <h2>${secHead(pdbsNo, 'PDB 结构清单', ctx.directPdbs.length ? `Structures · ${ctx.directPdbs.length}${(ctx.rangeOutsidePdbs?.length ?? 0) > 0 ? ` · 范围外 ${(ctx.rangeOutsidePdbs?.length ?? 0)}` : ''}` : (ctx.interaction?.hasEvidence ? 'Structures · 互作组分证据' : 'Structures · 0'))}</h2>
     ${rangeBannerHtml(ctx.range, ctx.rangeSource, ctx.rangeOutsidePdbs?.length ?? 0, ctx.rangeOutsideBlastHits?.length ?? 0)}
     ${covFigHtml}
-    ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。${expandAll ? '本页为单独评估页 — 全量结构默认展开。' : ''}${ctx.range ? ' 本表仅含链范围与评估区间重叠（或范围未知）的结构。' : ''}</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid, expandAll)}` +
+    ${ctx.directPdbs.length ? `<p class="note">按分辨率升序排列；点击 PDB ID 跳转 RCSB 查看详情；「文献」列带绿点表示与本页文献章节互链。表头下方可按方法筛选、切换排序。${expandAll ? '本页为单独评估页 — 全量结构默认展开。' : ''}${ctx.range ? ' 本表仅含链范围与评估区间重叠（或范围未知）的结构。' : ''}</p>${pdbTableHtml(ctx.directPdbs, PDB_PREVIEW, 150, litByPmid, expandAll)}` +
       (input.totalPdbFound > 150 ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示前 150 个（按分辨率排序）。</p>`
       : (input.totalPdbFound > ctx.directPdbs.length ? `<p class="note">共检索命中 ${input.totalPdbFound} 个结构，表中展示详情完整的前 ${ctx.directPdbs.length} 个。</p>` : '')) +
       pdbOutsideFoldHtml(ctx.rangeOutsidePdbs ?? [], litByPmid, ctx.range)
@@ -2179,7 +2611,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   ${showBlastSec ? `
   <section class="sec" id="${idOf('blast')}">
     <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}`)}</h2>
-    ${ctx.blastHits.length ? `<p class="note">按 identity 降序排列（已排除直接结构重复项）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast">
+    ${ctx.blastHits.length ? `<p class="note">按 identity 降序排列（已排除直接结构重复项）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。表头下方可按方法筛选、切换排序。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
@@ -2343,6 +2775,10 @@ export const SINGLE_REPORT_CSS = `  :root {
   td.td-id a, .t-nowrap { white-space:nowrap; }
   td.td-id { font-family:var(--mono); }
   .t-title, .t-desc { font-family:var(--serif); overflow-wrap:break-word; }
+  /* v2.56：长标题 3 行截断（全文字在 td title 悬停可见；打印恢复全文、CSV 导出
+    不受影响 — textContent 保留全文，-webkit-box 仅视觉折叠）— 长表行高归一，
+    斑马纹恢复行定位价值 */
+  .t-clamp { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
   .t-lig { font-size:11px; overflow-wrap:anywhere; }
   .t-journal { font-size:11px; }
   .t-rng { font-family:var(--mono); font-size:11px; color:var(--sub); overflow-wrap:anywhere; }
@@ -2558,7 +2994,21 @@ export const SINGLE_REPORT_CSS = `  :root {
   .af-legend { display:flex; gap:10px; margin-top:6px; font-size:9.5px; font-family:var(--mono); color:var(--sub); justify-content:center; flex-wrap:wrap; }
   .af-legend span { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
   .af-legend i { display:inline-block; width:10px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); }
-  @media print { .af-stage .af-canvas { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } }
+  /* v2.46 预测结构视图工具条（下载 PDB + 着色切换 — 池化/独立视图共用）；v2.47 小窗拥挤 → 仅放大视图显示（迁入 .af-fullslot 后由 LIGHTBOX_CSS 恢复 flex） */
+  .af-tb { position:absolute; top:8px; left:8px; z-index:6; display:flex; gap:6px; align-items:center; }
+  .af-tb-btn { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); }
+  .af-tb-btn:hover { background:#fff; color:#1c1917; }
+  .af-tb-btn svg { flex:none; }
+  .af-tb-sel { padding:3px 5px; border-radius:5px; border:1px solid rgba(28,25,23,.2); background:rgba(255,255,255,.94); color:#57534e; font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:9px; font-weight:600; letter-spacing:.5px; line-height:1.5; cursor:pointer; box-shadow:0 1px 3px rgba(28,25,23,.14); max-width:132px; }
+  .af-tb-btn:focus-visible, .af-tb-sel:focus-visible { outline:2px solid #10b981; outline-offset:1px; }
+  .af-stage .af-tb { display:none; } /* v2.47：小窗一律隐藏（仅全屏槽内可见） */
+  /* 域着色图例（条目多时滚动）与彩虹图例渐变条 */
+  .af-legend.af-lgd-scroll { max-height:76px; overflow-y:auto; justify-content:flex-start; }
+  .af-lgd-item { max-width:170px; overflow:hidden; text-overflow:ellipsis; }
+  .af-lgd-rb-bar { display:inline-block; width:56px; height:10px; border-radius:2px; border:1px solid rgba(28,25,23,.15); background:linear-gradient(90deg,#4363D8,#46F0F0,#3CB44B,#FFE119,#F58231,#E6194B); }
+  /* v2.53：PDB/BLAST 列表筛选排序工具条样式抽离单源（TABLE_FILTER_CSS — 与旧报告服务端注入共用） */
+  ${TABLE_FILTER_CSS}
+  @media print { .af-stage .af-canvas, .af-stage .af-tb { display:none; } .af-stage .af-poster, .af-stage.af-live .af-poster { display:block; } }
   .af-fig figcaption { margin-top:8px; font-size:10.5px; line-height:1.75; color:var(--sub); font-family:var(--mono); }
   .af-fig figcaption b { color:var(--ink); font-weight:600; }
   .af-fig figcaption a { color:var(--accent-2); text-decoration:none; border-bottom:1px solid #c7ece0; }
@@ -2566,6 +3016,8 @@ export const SINGLE_REPORT_CSS = `  :root {
 
   /* ── 配体卡（v2.0；v2.7 + 2D 结构式与计算性质双栏卡）── */
   .lig-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr)); gap:14px; margin-top:8px; }
+  /* v2.56：奇数末卡占满整行 — 2+1 布局不再右列留洞 */
+  .lig-grid > .lig-card:last-child:nth-child(odd) { grid-column:1 / -1; }
   .lig-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:14px 18px; break-inside:avoid; }
   .lig-fail { border-style:dashed; opacity:.78; }
   .lig-main { display:flex; gap:14px; align-items:flex-start; }
@@ -2576,7 +3028,7 @@ export const SINGLE_REPORT_CSS = `  :root {
   .lig-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
   .lig-id { font-family:var(--mono); font-size:14.5px; font-weight:700; color:#065f46; background:var(--accent-bg); border:1px solid #b8e6d2; border-radius:4px; padding:1px 10px; letter-spacing:.5px; }
   .lig-id-fail { color:#92400e; background:#fffbeb; border-color:#fde68a; }
-  .lig-id-pc { color:#4c5fd7; background:#eef0fd; border-color:#c6cdf6; }
+  .lig-id-pc { color:#0f766e; background:#f0fdfa; border-color:#99f6e4; }
   .lig-iupac { margin-top:7px; font-size:10.5px; line-height:1.65; color:var(--faint); overflow-wrap:anywhere; }
   .lig-name { font-size:13px; font-weight:600; color:var(--ink); overflow-wrap:anywhere; min-width:120px; }
   .lig-src { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--faint); letter-spacing:.4px; }
@@ -2610,11 +3062,39 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const body = await renderSingleReportBody({ ...input, af3dBundle })
   const u = input.ctx.uniprot
   const rangeSuffix = input.ctx.range ? ` · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : ''
+  // v2.44：序列匹配（UniProt 匹配 / nr 识别）归属且非全同时 <title> 同步标注同源度
+  //  （与 renderSingleReportBody 内 h1 同口径 — 单独报告导入匹配也从 <title> 提取）
+  const outTi = input.ctx.targetIdentity
+  const outIdentitySuffix = u && outTi && outTi.identity != null && outTi.identity < 99.95
+    && (outTi.source === 'uniprot-blast' || outTi.source === 'blast-nr')
+    ? ` · ${outTi.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(outTi.identity)}%`
+    : ''
   const proteinTitle = u
-    ? `${u.proteinName}${nspTitleSuffix(u, input.ctx.range)}（${u.uniprotId}${rangeSuffix}）`
+    ? `${u.proteinName}${nspTitleSuffix(u, input.ctx.range)}（${u.uniprotId}${outIdentitySuffix}${rangeSuffix}）`
     : input.ctx.targetIdentity
       ? `${input.ctx.targetIdentity.name}（序列靶点${targetIdentityTitleSuffix(input.ctx.targetIdentity)}${rangeSuffix}）`
       : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')
+  // v2.45 机器可读靶点标记：报告导入精确匹配用（uniprot/range/seqLength/header/seqSha/label）。
+  //  - uniprot 仅真 UniProt 靶点携带（序列靶点的同源命中不冒充 accession — 避免误匹配
+  //    到同源 UniProt 靶点）；
+  //  - seqSha = 提交序列 SHA-256 前 16 hex（与运行侧 sha256Hex16 同口径）；
+  //  - label = 运行侧序列靶点标签同公式（头22…尾7 截断 + 「· Naa」— 旧标签通道兼容）。
+  const metaTarget = (() => {
+    const seq = input.ctx.sequence || ''
+    const header = input.ctx.sequenceHeader?.trim() || undefined
+    const seqSha = seq ? createHash('sha256').update(seq).digest('hex').slice(0, 16) : undefined
+    const label = header && seq
+      ? `${header.length > 30 ? `${header.slice(0, 22)}…${header.slice(-7)}` : header} · ${seq.length}aa`
+      : undefined
+    return {
+      uniprot: u?.uniprotId,
+      range: u ? input.ctx.range : undefined,
+      seqLength: seq ? seq.length : (u?.sequenceLength || undefined),
+      header,
+      seqSha,
+      label,
+    }
+  })()
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2624,6 +3104,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <title>靶点结构解析可行性评估报告 — ${esc(proteinTitle)}</title>
+<meta name="targeteval:target" content="${esc(JSON.stringify(metaTarget))}">
 <style>
 ${SINGLE_REPORT_CSS}${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 </head>
@@ -2654,6 +3135,7 @@ ${body}
 })();
 </script>
 ${UX_PAGE_JS}
+${TABLE_FILTER_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`

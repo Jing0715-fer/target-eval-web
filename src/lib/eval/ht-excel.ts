@@ -61,6 +61,16 @@
  *  - 实测 179 行清单：176 可评估行 → 91 行为重复交付（并入），85 个去重组；
  *    WT/Delta 棘突家族（96.5%）合并，Omicron 家族（与 Delta 91.8% <95）独立；
  *  - 统计与 note 携带跨行合并数与并入明细（行号 + 标签 → 代表组）。
+ *
+ * v2.37 序列靶点区间改由 BLAST 后推导（用户实测：很多序列被错误附上「2022-2024」
+ *  评估区间 — 行内年份写法「2022-2024 流行株」被数字-数字形态扫成残基区间，
+ *  又按 v2.27 的「行内区间数 = 序列数时 1:1 配对」附到序列靶点，作为最高优先级
+ *  的「手动区间」压过了管线内构建比对/BLAST nr 推导，作业按 3 残基截短分流）：
+ *  - 序列兜底靶点不再携带 Excel 行文本扫描出的区间（1:1 配对逻辑移除）—
+ *    区间一律由作业管线在 UniProt 归属/BLAST 后推导（构建比对种子链锚定 →
+ *    BLAST nr HSP 比对坐标，见 pipeline effectiveRange 层级）；
+ *  - construct-range.ts 同步增加年份区间守卫（两端均在 1900-2099 且跨度 ≤60 的
+ *    纯数字区间不作为残基区间 — UniProt 注释/构建列各层一并设防）。
  */
 import * as XLSX from 'xlsx'
 import { llmChat } from './llm'
@@ -239,7 +249,9 @@ export interface HtSeqTarget {
   /** 清洗后的氨基酸序列（大写、去非字母） */
   seq: string
   length: number
-  /** v2.27：行内构建区间（UniProt 编号；序列靶点 UniProt 归属后用于结构范围过滤） */
+  /** v2.27 行内构建区间 · v2.37 起不再填充（前端/接口兼容保留字段）：序列靶点的
+   *  评估区间改由管线在 BLAST 归属后推导（构建比对 / BLAST nr HSP），不从
+   *  Excel 行文本扫描配对 — 年份等噪音数字不再误入 options.range */
   range?: ResidueRange
 }
 
@@ -641,7 +653,8 @@ function scanSheetInstances(sheets: HtSheetRows[]): HtRowTarget[] {
  *  - v2.23.1 序列兜底 → v2.34 行级语义：行内无 UniProt 但有可评估序列 → 该行归入
  *    seqGroups（每行一组；组内 = 非抗体、同源合并后的靶点链，逐序列独立评估；
  *    v2.35 起跨行完全同源（所有链 ≥95%）的行并入代表组，不再重复成组）
- *  - v2.27：去重键 accession|区间；行内区间数与序列数一致时 1:1 附到序列靶点
+ *  - v2.27：去重键 accession|区间；v2.37：序列靶点不再从行文本配对区间（改由管线
+ *    BLAST 归属后推导 — 见文件头 v2.37 说明）
  */
 export function fallbackHtGroups(sheets: HtSheetRows[]): {
   groups: string[][]
@@ -724,10 +737,10 @@ export function fallbackHtGroups(sheets: HtSheetRows[]): {
       //  链级收集 + 抗体链忽略 + 行内同源合并（同源多聚体只计 1 条）+ 行标签命名。
       const rowLabel = deriveRowLabel(scanRow)
       const seqs = extractRowSeqTargets(scanRow, rowLabel, seqInfo)
-      // v2.27：行内构建区间与序列数一致时 1:1 附到序列靶点（UniProt 归属后区间过滤）
-      if (seqs.length > 0 && scan.seqRanges.length === seqs.length) {
-        for (let i = 0; i < seqs.length; i++) seqs[i].range = scan.seqRanges[i]
-      }
+      // v2.37：不再把行文本扫描出的数字区间配给序列靶点（原「区间数 = 序列数时
+      //  1:1 附 range」— 年份写法「2022-2024 流行株」等被当成残基区间，作为最高
+      //  优先级「手动区间」压过 BLAST 推导）。序列靶点的评估区间一律由作业管线在
+      //  UniProt 归属/BLAST 后推导（构建比对种子链锚定 → BLAST nr HSP 比对坐标）。
       if (seqs.length > 0) {
         if (seqGroups.length < MAX_GROUPS) {
           const budget = MAX_SEQ_TOTAL_CHARS - seqChars
