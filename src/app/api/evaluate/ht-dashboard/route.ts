@@ -236,7 +236,8 @@ export async function POST(req: Request) {
   })
 }
 
-/** 后台生成：行加载（v2.60 含缓存快照回退；v2.61 含序列回填）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
+/** 后台生成：行加载（v2.60 含缓存快照回退；v2.61 含序列回填；v2.63 含单独报告
+ *  文件原文读取）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
 async function runDashboardGeneration(ctx: {
   dashboardId: string
   entries: HtDashboardEntry[]
