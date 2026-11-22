@@ -66,6 +66,10 @@ export interface HighThroughputPanelProps {
   /** v2.38：启动时跳过的靶点键（`g:${组}:${项}` / `sq:${组}:${项}` — 未勾选项） */
   skipKeys: string[]
   onSkipKeysChange: (keys: string[]) => void
+  /** v2.66：因「导入报告」而取消勾选的靶点键（skipKeys 的子集）— 启动时这类靶点以
+   *  imported=true 入运行记录，进度统计计入「载入」完成口径（区别于手动跳过） */
+  importedKeys: string[]
+  onImportedKeysChange: (keys: string[]) => void
 }
 
 const inputBase =
@@ -113,17 +117,24 @@ function runStatusPill(run: HTRunState): { label: string; cls: string } {
   }
 }
 
-export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, excelRows, onExcelRowsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving, skipKeys, onSkipKeysChange }: HighThroughputPanelProps) {
+export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, excelRows, onExcelRowsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving, skipKeys, onSkipKeysChange, importedKeys, onImportedKeysChange }: HighThroughputPanelProps) {
   const totalTargets = parsed.groups.reduce((n, g) => n + g.length, 0)
   const seqTargetTotal = seqGroups.reduce((n, g) => n + g.length, 0)
   const groupTotal = parsed.groups.length + seqGroups.length
 
   // ── v2.38 靶点选择（启动前勾选；未勾选 = 跳过） ──
   const skipSet = new Set(skipKeys)
+  /** v2.66：导入报告而取消勾选的键集合（skipKeys 子集 — 启动时以 imported=true 入运行记录） */
+  const importedSet = new Set(importedKeys)
   const toggleSkip = (key: string) => {
     const next = new Set(skipSet)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
+    if (next.has(key)) {
+      next.delete(key)
+      // v2.66：恢复勾选 → 脱离「导入载入」口径（此后再手动取消勾选算手动跳过）
+      if (importedSet.has(key)) onImportedKeysChange(importedKeys.filter((k) => k !== key))
+    } else {
+      next.add(key)
+    }
     onSkipKeysChange([...next])
   }
   const toggleGroupSkip = (kind: 'g' | 'sq', gi: number, count: number) => {
@@ -135,6 +146,10 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       else next.add(k)
     }
     onSkipKeysChange([...next])
+    // v2.66：恢复全组 → 清除组内键的「导入」标记
+    if (allSkipped && keys.some((k) => importedSet.has(k))) {
+      onImportedKeysChange(importedKeys.filter((k) => !keys.includes(k)))
+    }
   }
   const selectedCount = totalTargets + seqTargetTotal - [...skipSet].filter((k) => {
     const [kind, gi, ti] = k.split(':')
@@ -180,6 +195,14 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         }
       }
       onSkipKeysChange([...next])
+      // v2.66：记录「因导入而跳过」的键（含重复导入 — 报告确实匹配即算载入）。
+      //  启动时这些靶点以 imported=true 入运行记录 → 进度统计计入「载入」完成口径
+      // （修复：此前只取消勾选，运行后组数涨而靶点完成数恒 0）
+      if (matchedKeys.size > 0) {
+        const nextImported = new Set(importedKeys)
+        for (const key of matchedKeys) nextImported.add(key)
+        onImportedKeysChange([...nextImported])
+      }
       setZipMeta({ name: list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`, reports: reports.length, matched })
       // v2.49 逐文件诊断：未命中文件给出人话原因（用户此前只能看到「未命中」三个字）
       const missLines = diagnoseArchiveImport(reports, targets, { totalGroups: groupTotal })
@@ -193,7 +216,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           title: `已匹配 ${matched} 个已有报告的靶点`,
           description: (
             <div className="whitespace-pre-line">
-              {`这些靶点已取消勾选（启动时跳过，不重复评估）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告携带的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。${missTail}`}
+              {`这些靶点已取消勾选（启动时跳过不重复评估，进度计入「载入」完成口径）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告携带的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。${missTail}`}
             </div>
           ),
         })
@@ -494,7 +517,10 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         {skipKeys.length > 0 && groupTotal > 0 && (
           <button
             type="button"
-            onClick={() => onSkipKeysChange([])}
+            onClick={() => {
+              onSkipKeysChange([])
+              onImportedKeysChange([]) // v2.66：全选同时清空「导入载入」标记
+            }}
             className="ml-auto inline-flex h-6 items-center gap-1 rounded-md px-1.5 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             title="恢复勾选全部靶点（清除所有跳过标记）"
           >
@@ -511,7 +537,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             {zipMeta.name}
           </span>
           <span className="font-mono text-[11px] text-sky-700 dark:text-sky-400">
-            识别 {zipMeta.reports} 条报告记录 · 匹配 {zipMeta.matched} 个已完成靶点（已取消勾选，启动时跳过）
+            识别 {zipMeta.reports} 条报告记录 · 匹配 {zipMeta.matched} 个已有报告的靶点（已取消勾选；启动后计入「载入」，不重复评估）
           </span>
         </div>
       )}
@@ -534,17 +560,25 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                 const rr = parsed.groupRanges?.[i]?.[ti]
                 const dh = parsed.groupDomainHints?.[i]?.[ti]
                 const skipped = skipSet.has(`g:${i}:${ti}`)
+                // v2.66：导入匹配而跳过 — emerald 样式（计入「载入」完成，不似手动跳过的删除线）
+                const imported = skipped && importedSet.has(`g:${i}:${ti}`)
                 return (
                   <span
                     key={t}
                     className={cn(
                       'inline-flex items-center gap-1 rounded-md border bg-card px-1.5 py-0.5 font-mono text-[11px]',
-                      skipped ? 'border-sky-500/30 text-sky-700/60 line-through decoration-sky-500/40 dark:text-sky-400/60' : 'border-border text-foreground/90',
+                      skipped
+                        ? imported
+                          ? 'border-emerald-500/40 bg-emerald-500/[0.05] text-emerald-700/90 dark:text-emerald-400/90'
+                          : 'border-sky-500/30 text-sky-700/60 line-through decoration-sky-500/40 dark:text-sky-400/60'
+                        : 'border-border text-foreground/90',
                     )}
                     title={
-                      skipped
-                        ? '已跳过（启动时不评估；运行中可恢复）'
-                        : rr
+                      imported
+                        ? '已有报告（导入匹配）— 启动时跳过不评估，进度计入「载入」完成口径'
+                        : skipped
+                          ? '已跳过（启动时不评估；运行中可恢复）'
+                          : rr
                           ? `评估区间 ${rr[0]}-${rr[1]}（范围重叠结构优先展示，无重叠折叠保留）`
                           : dh
                             ? `结构域名提示「${dh}」— 管线内与 UniProt domain 划分匹配推导区间，优先展示该区段结构`
@@ -590,14 +624,20 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
               </button>
               {g.map((s, si) => {
                 const skipped = skipSet.has(`sq:${gi}:${si}`)
+                // v2.66：导入匹配而跳过 — emerald 样式（同 UniProt 靶点 chip）
+                const imported = skipped && importedSet.has(`sq:${gi}:${si}`)
                 return (
                   <span
                     key={`${s.header}-${si}`}
                     className={cn(
                       'inline-flex max-w-64 items-center gap-1 truncate rounded-md border bg-card px-1.5 py-0.5 font-mono text-[11px]',
-                      skipped ? 'border-sky-500/30 text-sky-700/60 line-through decoration-sky-500/40 dark:text-sky-400/60' : 'border-border text-foreground/90',
+                      skipped
+                        ? imported
+                          ? 'border-emerald-500/40 bg-emerald-500/[0.05] text-emerald-700/90 dark:text-emerald-400/90'
+                          : 'border-sky-500/30 text-sky-700/60 line-through decoration-sky-500/40 dark:text-sky-400/60'
+                        : 'border-border text-foreground/90',
                     )}
-                    title={`${s.header || '裸序列'}（${s.length} aa）${skipped ? ' · 已跳过（启动时不评估；运行中可恢复）' : ''}`}
+                    title={`${s.header || '裸序列'}（${s.length} aa）${imported ? ' · 已有报告（导入匹配，进度计入「载入」）' : skipped ? ' · 已跳过（启动时不评估；运行中可恢复）' : ''}`}
                   >
                     <Checkbox
                       checked={!skipped}
