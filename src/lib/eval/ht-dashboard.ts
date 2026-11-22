@@ -34,6 +34,14 @@
  *    筛选控件触控目标 ≥42px + 搜索框占满整行；⑭ note/计数对比度提升；
  *    ⑮ 弹出页 meta 长值截断、序列块 10 残基分组 + 行号（复制改读
  *    data-seq 不受分组影响）。
+ *    v2.65：弹出报告 = 单独评估报告原文 + 表格去序列 + 逐靶点下载 —
+ *    ⑯ 修复 v2.62 引入的脚本语法错误（new Blob(tml] 缺 «[html» — 整段
+ *    脚本解析失败，排序/筛选/弹出/复制全部失灵）；⑰ 主表移除「序列」列，
+ *    原表行快照中的序列文本一并折叠（表格不再显示序列）；⑱ 报告列新增
+ *    「下载」按钮（内嵌原文/重建页一键存盘 — 命名与单独报告下载同源）；
+ *    ⑲ 页宽回归单独评估报告版心阶梯（920→1088→1224→1360→1480→1600，
+ *    字号随版心微升 — 去 100% 全宽）；⑳ 内嵌原文预算放宽（单份 ≤32MB /
+ *    批次 ≤192MB — 74 靶点 × ~1.2MB 全量内嵌不再触顶回退重建页）。
  *
  * 离线链接语义：zip 相对路径与 ht-archive 打包命名同源（planArchiveNames 共享
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
@@ -217,10 +225,11 @@ function buildDashboardRow(src: RowSource): HtDashboardRow | null {
   }
 }
 
-/** v2.63：内嵌单独报告的体积护栏 — 单份 ≤12MB / 批次总量 ≤64MB（正常报告
- *  远小于此；超出仅丢失「完全一致」内嵌，回退 markdown 重建页，不影响统计） */
-const REPORT_HTML_MAX_BYTES = 12_000_000
-const REPORT_HTML_TOTAL_BUDGET = 64_000_000
+/** v2.63：内嵌单独报告的体积护栏 — v2.65 放宽为单份 ≤32MB / 批次总量 ≤192MB
+ *  （单独报告典型 ~1-1.5MB，74 靶点全量内嵌 ≈ 90-110MB 不再触顶；超出仅丢失
+ *  「完全一致」内嵌，回退 markdown 重建页，不影响统计） */
+const REPORT_HTML_MAX_BYTES = 32_000_000
+const REPORT_HTML_TOTAL_BUDGET = 192_000_000
 
 /** v2.63：读取单独报告文件原文（与下载的单独报告完全一致）— 文件丢失/超预算
  *  时返回 null，弹出页回退 markdown 重建页（统计不受影响）。 */
@@ -534,6 +543,22 @@ function scoreTone(n: number): string {
   return n >= 7 ? 'hi' : n >= 5 ? 'md' : 'lo'
 }
 
+/** v2.65：原表行快照序列折叠 — ≥30 连续大写氨基酸字符的串折叠为「[序列已折叠]」。
+ *  双保险：新快照在 ht-excel 提取端已折叠（[序列 N aa]），此处兜底折叠旧快照
+ *  （v2.65 前提取保留的 56 字符序列前缀）— 主表任何形态都不再显示序列文本。 */
+function collapseSeqText(t: string): string {
+  return /[ACDEFGHIKLMNPQRSTVWYBXZJU]{30,}/.test(t)
+    ? t.replace(/[ACDEFGHIKLMNPQRSTVWYBXZJU]{30,}/g, '[序列已折叠]')
+    : t
+}
+
+/** v2.65：单靶点报告下载文件名 — 与单独报告下载通道同源（TargetEval_{uniprot|label}_{date}.html） */
+function reportFileName(r: HtDashboardRow, generatedAt: string): string {
+  const base = (r.uniprotId || r.label || r.jobId)
+    .replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'target'
+  return `TargetEval_${base}_${generatedAt.slice(0, 10)}.html`
+}
+
 /** v2.62：单靶点完整报告页共享样式（「完整报告 ↗」弹出页内联 — 与汇总报告同源的
  *  期刊风；一份样式随载荷只内嵌一次，各靶点弹出页共用，避免逐靶点重复内联） */
 const HT_TARGET_REPORT_CSS = `:root{--ink:#1c1917;--sub:#57534e;--faint:#a8a29e;--line:#e7e5e4;--hairline:#efedeb;--accent:#065f46;--accent-2:#047857;--accent-bg:#f0fdf7;--bg:#fcfcfb;--paper:#fff;
@@ -553,6 +578,8 @@ h1.rpt-title{font-size:26px;line-height:1.4;margin-bottom:6px;font-weight:900;ov
 .rpt-subtitle{font-size:13px;color:var(--sub);font-style:italic;margin-bottom:18px}
 .meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:9px 22px;font-size:12.5px;color:var(--sub)}
 .meta-grid b{color:var(--ink);font-weight:600;margin-right:2px}
+/* v2.65：元信息值整体成块 — 空间不足时整值换行（不在词中断开，如 LLM（deepseek-chat）） */
+.meta-grid .mv{display:inline-block;max-width:100%;vertical-align:top;overflow-wrap:anywhere}
 .tg-range{color:var(--accent-2);font-family:var(--mono);font-size:11px}
 .score{display:inline-block;min-width:30px;text-align:center;border-radius:5px;padding:0 6px;font-family:var(--mono);font-size:11px;font-weight:700}
 .score.hi{color:#0f766e;background:#ccfbf1}.score.md{color:#a16207;background:#fef3c7}.score.lo{color:#b91c1c;background:#fee2e2}
@@ -591,7 +618,7 @@ article.tg{margin:0}
 .md th{background:#f9fafb;font-weight:600;font-family:var(--mono);font-size:11px}
 /* v2.64：md 表格窄屏横滚（JS 包裹 .md-tblwrap — 不挤压换行；右缘渐隐提示同主表） */
 .md-tblwrap{position:relative;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.md-tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:38px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.6) 40%,#fff 100%);pointer-events:none}
+.md-tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:42px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.78) 45%,#fff 100%);pointer-events:none}
 .md-tblwrap.at-end::after{display:none}
 .md-tblwrap>table{min-width:440px}
 .md blockquote{border-left:3px solid #b8e6d2;background:var(--accent-bg);padding:8px 14px;margin:10px 0;color:var(--sub)}
@@ -644,7 +671,8 @@ ${r.sequence ? `<div class="seqbox"><div class="seq-head"><b>提交序列</b> ·
  *  - h/a：重建页（服务端报告文件丢失/缓存快照恢复的靶点 — 由 markdown 与
  *    统计数据拼装，共享样式 c）。
  *  键名精简：c=共享样式 g=生成时间 m=母报告 e=引擎；r[]=tt 页标题 / j 作业 ID /
- *  html 报告原文 / h 刊头 HTML / a 正文块 HTML（动态文本均已在服务端 esc 转义）。
+ *  html 报告原文 / h 刊头 HTML / a 正文块 HTML / fn 下载文件名（动态文本均已在
+ *  服务端 esc 转义）。
  *  v2.64：g/m/e 超长截断（弹出页 meta 列值换行参差的根源）。 */
 function buildHtReportPayload(input: {
   title: string
@@ -653,7 +681,7 @@ function buildHtReportPayload(input: {
   generatedAt: string
   engineSummary: string
   origin: string
-}): { c?: string; g: string; m: string; e: string; r: Array<{ tt: string; j: string; html?: string; h?: string; a?: string }> } {
+}): { c?: string; g: string; m: string; e: string; r: Array<{ tt: string; j: string; fn: string; html?: string; h?: string; a?: string }> } {
   const verdictByJob = new Map(input.verdicts.map(v => [v.jobId, v]))
   const needFallbackCss = input.rows.some(r => !r.reportHtml)
   return {
@@ -663,15 +691,17 @@ function buildHtReportPayload(input: {
     m: esc(input.title.length > 46 ? input.title.slice(0, 46) + '…' : input.title),
     e: esc(input.engineSummary.length > 60 ? input.engineSummary.slice(0, 60) + '…' : input.engineSummary),
     r: input.rows.map(r => {
+      const fn = esc(reportFileName(r, input.generatedAt))
       if (r.reportHtml) {
         // 原文报告自带 <title>，tt 仅作 Blob 打不开时的索引提示
-        return { tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`), j: esc(r.jobId), html: r.reportHtml }
+        return { tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`), j: esc(r.jobId), fn, html: r.reportHtml }
       }
       const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
       return {
         tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`),
         h: `${esc(r.label)}${r.range ? `<span class="tg-range"> · 残基 ${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用，正文与统计完整保留">缓存恢复</span>' : ''}`,
         j: esc(r.jobId),
+        fn,
         a: renderTargetArticle(r, v, input.origin),
       }
     }),
@@ -690,9 +720,6 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   const rptPayload = anyBody
     ? buildHtReportPayload({ title: input.title, rows: sorted, verdicts, generatedAt: input.generatedAt, engineSummary, origin })
     : null
-  // v2.61：序列数据（jobId → 全文 — 主表「复制序列」按钮）
-  const seqByJob: Record<string, string> = {}
-  for (const r of rows) if (r.sequence) seqByJob[r.jobId] = r.sequence
 
   const body = renderMarkdown(markdown || '（AI 整体可行性报告未生成 — 见上方提示；统计与每靶点结论不受影响）', 0)
 
@@ -702,11 +729,11 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   const methodBar = (label: string, mean: number, count: number, total: number, color: string): string =>
     `<div class="mb-row"><div class="mb-cap"><span>${label}</span><span class="mb-sub">均分 ${mean}/10 · ${count}/${total} 靶点有结构</span></div><div class="mb-track"><div class="mb-fill" style="background:${color};width:${Math.round(mean * 10)}%"></div></div></div>`
 
-  // ── 主表行（v2.63：靶点 / UniProt / 序列三列分列 · X/C/N 分列 · 完整报告新标签弹出）──
+  // ── 主表行（v2.65：靶点 / UniProt 分列 · X/C/N 分列 · 完整报告弹出 + 逐靶点下载；序列列已移除）──
   const rowPairs = sorted.map((r, idx) => {
     const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
     const meta = VERDICT_META[v.verdict]
-    const search = esc([r.label, r.uniprotId ?? '', r.proteinName, r.organism, r.excelText ?? '', v.line, r.identifiedVia ?? ''].join(' ').toLowerCase())
+    const search = esc([r.label, r.uniprotId ?? '', r.proteinName, r.organism, r.excelText ? collapseSeqText(r.excelText) : '', v.line, r.identifiedVia ?? ''].join(' ').toLowerCase())
     const links: string[] = []
     if (r.zipHref) links.push(`<a href="${esc(r.zipHref)}">离线包</a>`)
     if (r.hasReport && origin) links.push(`<a href="${esc(origin)}/api/jobs/${esc(r.jobId)}/report?download=1">在线</a>`)
@@ -714,15 +741,17 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
     const uniBadge = r.uniprotId
       ? `<div class="tg-uni"><a class="uni-id" href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(r.uniprotId)}" target="_blank" rel="noopener"${r.identifiedVia ? ` title="回补的 UniProt ID（${esc(r.identifiedVia)}）— 点击打开 UniProt 条目"` : ' title="UniProt ID — 点击打开 UniProt 条目"'}>UniProt ${esc(r.uniprotId)}</a>${r.identifiedVia ? `<span class="uni-src" title="该 ID 为评估中由提交序列识别回补（${esc(r.identifiedVia)}）">回补 · ${esc(r.identifiedVia)}</span>` : ''}</div>`
       : '<span class="dim">—</span>'
-    // v2.63：序列独立列（一键复制全文 — 原表内容列为折叠快照，序列只保留识别前缀）
-    const seqCell = r.sequence
-      ? `<button type="button" class="seq-copy" data-job="${esc(r.jobId)}" title="一键复制该靶点的完整提交序列（${r.sequence.length} aa）">复制 · ${r.sequence.length}aa</button>`
-      : '<span class="dim">—</span>'
     const hasPopup = Boolean(r.reportHtml || r.reportMarkdown)
     const openBtn = anyBody && hasPopup
       ? `<button type="button" class="mt-open" data-i="${idx}"${r.reportHtml
-          ? ' title="新标签页弹出该靶点的完整评估报告（报告文件原文内嵌于本汇总报告 — 与下载的单独报告完全一致，含全部图表与脚本，离线可用）"'
+          ? ' title="新标签页弹出该靶点的单独评估报告原文（与下载的单独报告完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
           : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>完整报告 ↗</button>`
+      : ''
+    // v2.65：逐靶点下载按钮 — 内嵌的原文/重建页一键存盘（命名与单独报告下载同源）
+    const dlBtn = anyBody && hasPopup
+      ? `<button type="button" class="mt-dl" data-i="${idx}"${r.reportHtml
+          ? ' title="下载该靶点的单独评估报告 HTML 文件（与弹出页及单独报告下载完全一致 — 离线自包含）"'
+          : ' title="下载该靶点的重建报告页 HTML（服务端报告原文已回收 — 由缓存数据重建）"'}>下载 ⤓</button>`
       : ''
     return `<tr class="mt-row" data-job="${esc(r.jobId)}" data-overall="${r.overall}" data-xray="${r.xray}" data-cryoem="${r.cryoem}" data-nmr="${r.nmr}" data-pdb="${r.directPdbCount}" data-cov="${Math.round(r.coverage)}" data-verdict="${v.verdict}" data-uniprot="${esc(r.uniprotId ?? '')}" data-search="${search}">
 <td class="td-idx">${idx + 1}</td>
@@ -730,10 +759,9 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用；评估正文经「完整报告」弹出页提供">缓存恢复</span>' : ''}</div>
   ${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<div class="tg-sub" title="${esc(r.proteinName)}">${esc(r.proteinName)}</div>` : ''}
   ${r.organism ? `<div class="tg-sub" title="${esc(r.organism)}">${esc(r.organism)}</div>` : ''}
-  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已折叠 — 完整序列用「复制序列」按钮）">${esc(r.excelText)}</div>` : ''}
+  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已折叠 — 表格不显示序列，完整序列见该靶点的单独报告）">${esc(collapseSeqText(r.excelText))}</div>` : ''}
 </td>
 <td class="td-uni">${uniBadge}</td>
-<td class="td-seq">${seqCell}</td>
 <td class="td-num"><span class="score ${scoreTone(r.overall)}">${r.overall}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.xray)}" title="X-ray 方法评分">${r.xray}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.cryoem)}" title="Cryo-EM 方法评分">${r.cryoem}</span></td>
@@ -742,7 +770,7 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
 <td class="td-num mono">${Math.round(r.coverage)}%</td>
 <td class="td-verdict"><span class="vd vd-${v.verdict}">${meta.label}</span><div class="vd-line">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</div></td>
 <td class="td-act">
-  ${openBtn}
+  ${openBtn || dlBtn ? `<div class="mt-btns">${openBtn}${dlBtn}</div>` : ''}
   ${links.length ? `<div class="mt-links">${links.join(' · ')}</div>` : ''}
 </td>
 </tr>`
@@ -758,11 +786,16 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
 html{-webkit-print-color-adjust:exact;print-color-adjust:exact;scroll-behavior:smooth}
 body{font-family:var(--serif);color:var(--ink);background:var(--bg);line-height:1.92;font-size:15px;letter-spacing:.006em}
 .mono{font-family:var(--mono)}
-/* v2.63：页宽随浏览器动态调整（去固定 1224px 上限 — 宽屏不再两侧留白；
-   左右留白用 clamp 随视口收缩，窄屏自动收紧） */
-.page{width:100%;max-width:none;margin:0;padding:56px clamp(20px,4vw,72px) 72px;background:var(--paper);min-height:100vh;box-shadow:0 0 0 1px var(--hairline)}
-@media(max-width:1024px){.page{padding:40px 24px 56px}}
-@media(max-width:640px){.page{padding:26px 14px 64px}}
+/* v2.65：页宽回归单独评估报告同源版心 — 阶梯放宽 920→1088→1224→1360→1480→1600，
+   字号随版心微升保持行宽可读（与 report-html RESPONSIVE_PAGE_CSS 同一口径） */
+.page{max-width:920px;margin:0 auto;padding:56px 44px 72px;background:var(--paper);min-height:100vh;box-shadow:0 0 0 1px var(--hairline)}
+@media(max-width:1024px){.page{padding:40px 30px 56px}}
+@media(max-width:640px){.page{padding:26px 16px 38px}}
+@media(min-width:1280px){.page{max-width:1088px}}
+@media(min-width:1440px){.page{max-width:1224px}body{font-size:15.5px}}
+@media(min-width:1600px){.page{max-width:1360px}body{font-size:16px}}
+@media(min-width:1920px){.page{max-width:1480px}body{font-size:17px}}
+@media(min-width:2200px){.page{max-width:1600px}body{font-size:17.5px}}
 @media print{body{background:#fff}.page{padding:0;max-width:none;box-shadow:none}.no-print{display:none!important}}
 
 /* 报告封面头（期刊风双线 — 与单靶点报告同源） */
@@ -771,8 +804,10 @@ body{font-family:var(--serif);color:var(--ink);background:var(--bg);line-height:
 .rpt-eyebrow{font-family:var(--mono);color:var(--accent);font-weight:600;font-size:10.5px;letter-spacing:2.4px;text-transform:uppercase;margin-bottom:14px}
 h1.rpt-title{font-size:28px;line-height:1.4;margin-bottom:6px;font-weight:900}
 .rpt-subtitle{font-size:13px;color:var(--sub);font-style:italic;margin-bottom:18px}
-.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px 22px;font-size:12.5px;color:var(--sub)}
+.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:9px 22px;font-size:12.5px;color:var(--sub)}
 .meta-grid b{color:var(--ink);font-weight:600;margin-right:2px}
+/* v2.65：元信息值整体成块 — 空间不足时整值换行（不在词中断开） */
+.meta-grid .mv{display:inline-block;max-width:100%;vertical-align:top;overflow-wrap:anywhere}
 h2.sec{font-size:20px;margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:800}
 h2.sec .k{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:2px;margin-right:10px;font-weight:600;vertical-align:2px}
 /* v2.64：章节标题说明改为块级独立段（窄屏不再与标题 inline 混排断词） */
@@ -817,9 +852,9 @@ h2.sec .k{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spac
 }
 /* v2.64：表格右缘渐隐横滚指示（提示可横向滚动；滚动到底自动消失） */
 .tblwrap{position:relative;overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:#fff}
-.tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:46px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.6) 40%,#fff 100%);pointer-events:none}
+.tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:52px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.78) 45%,#fff 100%);pointer-events:none}
 .tblwrap.at-end::after{display:none}
-table.mt{width:100%;min-width:1320px;border-collapse:collapse;font-size:12.5px}
+table.mt{width:100%;min-width:1040px;border-collapse:collapse;font-size:12.5px}
 table.mt th{position:sticky;top:0;background:#f9fafb;color:var(--sub);font-weight:600;font-size:11px;padding:8px 9px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-family:var(--mono);letter-spacing:.3px}
 table.mt th.sortable{cursor:pointer;user-select:none}
 table.mt th.sortable:hover{color:var(--accent-2)}
@@ -832,20 +867,15 @@ tr.mt-row:hover td{background:#fbfdfc}
 .tg-range{color:var(--accent-2);font-family:var(--mono);font-size:11px}
 /* v2.64：蛋白名/种属最多两行（超长时悬浮看全文 title — 不再撑高行） */
 .tg-sub{font-size:10.5px;color:var(--sub);line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-/* v2.63 UniProt / 序列独立列 */
+/* v2.63 UniProt 独立列（v2.65 序列列移除 — 表格不再显示序列） */
 .td-uni{vertical-align:top;max-width:230px}
-.td-uni .dim,.td-seq .dim{font-family:var(--mono)}
-.td-seq{vertical-align:top;white-space:nowrap}
+.td-uni .dim{font-family:var(--mono)}
 /* v2.63 回补 UniProt 醒目徽标（独立列内 — 评估中由序列识别回补，可点开条目） */
 .tg-uni{display:flex;align-items:flex-start;flex-wrap:wrap;gap:5px}
 .tg-uni .uni-src{flex-basis:100%;margin-top:1px}
 .uni-id{display:inline-block;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent);background:var(--accent-bg);border:1.5px solid #6ee7c7;border-radius:6px;padding:1px 9px;text-decoration:none;letter-spacing:.2px;line-height:1.7;white-space:nowrap}
 .uni-id:hover{background:#d1fae5;border-color:var(--accent-2)}
 .uni-src{font-family:var(--mono);font-size:9.5px;color:#0f766e;background:#ecfdf5;border:1px dashed #6ee7c7;border-radius:4px;padding:0 6px;line-height:1.9;display:inline-block}
-/* v2.63 序列列一键复制按钮 */
-.seq-copy{font-family:var(--mono);font-size:10px;font-weight:600;padding:2px 10px;border-radius:5px;border:1px solid #b8e6d2;background:#fff;color:var(--accent);cursor:pointer;white-space:nowrap}
-.seq-copy:hover{background:var(--accent-bg)}
-.seq-copy.ok{background:var(--accent);color:#fff;border-color:var(--accent)}
 .tg-excel{margin-top:4px;padding:4px 8px;border-left:2px solid #b8e6d2;background:var(--accent-bg);font-size:10.5px;color:var(--sub);line-height:1.6;overflow-wrap:anywhere;border-radius:0 4px 4px 0}
 .tg-cache{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #fde68a;background:#fffbeb;color:#a16207;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
 .score{display:inline-block;min-width:34px;text-align:center;border-radius:5px;padding:1px 7px;font-family:var(--mono);font-size:12px;font-weight:700}
@@ -863,6 +893,10 @@ tr.mt-row:hover td{background:#fbfdfc}
 .vd-line{font-size:11px;color:var(--ink);line-height:1.65;margin-top:3px;max-width:420px}
 .mt-open{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid var(--accent-2);background:var(--accent);color:#fff;cursor:pointer;white-space:nowrap}
 .mt-open:hover{background:var(--accent-2)}
+/* v2.65：报告列按钮组 — 完整报告（主）+ 下载（次）纵向排列 */
+.mt-btns{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+.mt-dl{font-family:var(--mono);font-size:10px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid #a7f3d0;background:#fff;color:var(--accent-2);cursor:pointer;white-space:nowrap}
+.mt-dl:hover{background:var(--accent-bg);border-color:var(--accent-2)}
 .mt-links{margin-top:4px;font-size:10px;font-family:var(--mono)}
 .mt-links a{color:var(--accent-2);text-decoration:none;border-bottom:1px solid #a7f3d0}
 
@@ -880,7 +914,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 .md th{background:#f9fafb;font-weight:600;font-family:var(--mono);font-size:11px}
 /* v2.64：md 表格窄屏横滚（JS 包裹 .md-tblwrap — 不再挤压换行；右缘渐隐提示同主表） */
 .md-tblwrap{position:relative;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.md-tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:38px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.6) 40%,#fff 100%);pointer-events:none}
+.md-tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:42px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.78) 45%,#fff 100%);pointer-events:none}
 .md-tblwrap.at-end::after{display:none}
 .md-tblwrap>table{min-width:440px}
 .md blockquote{border-left:3px solid #b8e6d2;background:var(--accent-bg);padding:8px 14px;margin:10px 0;color:var(--sub)}
@@ -901,7 +935,7 @@ tr.mt-row:hover td{background:#fbfdfc}
   <div class="meta-grid">
     <div><b>生成时间</b> ${esc(input.generatedAt)}</div>
     ${input.durationSec ? `<div><b>运行时长</b> ${Math.round(input.durationSec / 60)} 分钟</div>` : ''}
-    <div><b>评估引擎</b> ${esc(engineSummary)}</div>
+    <div><b>评估引擎</b> <span class="mv">${esc(engineSummary)}</span></div>
     <div><b>靶点规模</b> ${stats.totalTargets} 个（成功 ${stats.loadedTargets}${stats.failedTargets ? ` · 失败 ${stats.failedTargets}` : ''}）</div>
   </div>
 </div>
@@ -917,7 +951,7 @@ ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="gr
     ${tile('参与靶点', `${stats.totalTargets}`, `${stats.loadedTargets} 成功${stats.failedTargets ? ` · ${stats.failedTargets} 失败` : ''}`)}
     ${tile('总体均分', `${stats.overallMean}<span class="u">/10</span>`, `中位 ${stats.overallMedian} · 区间 ${stats.overallMin}-${stats.overallMax}`)}
     ${tile('建议推进', `${stats.verdictCounts.go}`, `谨慎 ${stats.verdictCounts.caution} · 不建议 ${stats.verdictCounts.no}`)}
-    ${tile('有结构靶点', `${stats.targetsWithStructures}/${stats.loadedTargets}`, `X-ray ${stats.targetsWithXray} · Cryo-EM ${stats.targetsWithCryoem} · NMR ${stats.targetsWithNmr}`)}
+    ${tile('有结构靶点', `${stats.targetsWithStructures}/${stats.loadedTargets}`, `X-ray&nbsp;${stats.targetsWithXray} · Cryo-EM&nbsp;${stats.targetsWithCryoem} · NMR&nbsp;${stats.targetsWithNmr}`)}
     ${tile('平均覆盖率', `${Math.round(stats.coverageMean)}%`, `≥50%：${stats.targetsCoverage50} 个 · 带区间 ${stats.rangeTargets} 个`)}
     ${tile('带配体证据', `${stats.targetsWithLigand}`, `PDB 复合物内配体`)}
   </div>
@@ -936,7 +970,7 @@ ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="gr
 ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.map(esc).join('；')}</div>` : ''}
 
 <h2 class="sec"><span class="k">02</span>全靶点结论总表</h2>
-<div class="sec-sub">靶点名称 / UniProt / 序列三列分列 · 总分与 X-ray / Cryo-EM / NMR 评分分列（列头点击各自排序）· 回补 UniProt 徽标可点开 · 「完整报告」弹出与下载的单独报告完全一致</div>
+<div class="sec-sub">靶点名称 / UniProt 分列 · 总分与 X-ray / Cryo-EM / NMR 评分分列（列头点击各自排序）· 回补 UniProt 徽标可点开 · 「完整报告」新标签弹出该靶点自己的单独评估报告原文，「下载」一键存盘同一份文件</div>
 <div class="mt-tools no-print">
   <input type="search" id="mt-q" placeholder="搜索靶点 / UniProt / 蛋白名…" aria-label="筛选搜索">
   <label>结论
@@ -951,9 +985,8 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 <table class="mt" id="mt-table">
 <thead><tr>
 <th>#</th>
-<th data-k="label" title="原始表靶点名称（含蛋白名 / 种属 / 原表行快照）">靶点（原始表名称）</th>
+<th data-k="label" title="原始表靶点名称（含蛋白名 / 种属 / 原表行快照 — 序列已折叠）">靶点（原始表名称）</th>
 <th class="sortable num" data-k="uniprot" title="UniProt ID（回补的以徽标展示）— 点击排序">UniProt<span class="arr"></span></th>
-<th title="提交序列（一键复制全文 — 原表内容列为折叠快照）">序列</th>
 <th class="sortable num" data-k="overall" title="综合可行性总分 — 点击排序">总分<span class="arr"></span></th>
 <th class="sortable num" data-k="xray" title="X-ray 方法评分 — 点击单独排序">X-ray<span class="arr"></span></th>
 <th class="sortable num" data-k="cryoem" title="Cryo-EM 方法评分 — 点击单独排序">Cryo-EM<span class="arr"></span></th>
@@ -963,10 +996,10 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 <th data-k="verdict">结论（一句话能否做）</th>
 <th data-k="act">报告</th>
 </tr></thead>
-<tbody>${rowPairs || '<tr><td colspan="12" style="padding:16px;color:var(--faint)">无成功靶点</td></tr>'}</tbody>
+<tbody>${rowPairs || '<tr><td colspan="11" style="padding:16px;color:var(--faint)">无成功靶点</td></tr>'}</tbody>
 </table>
 </div>
-<div class="note">「完整报告 ↗」新标签页弹出该靶点的完整评估报告 — 服务器数据保留期内的靶点弹出<b>报告文件原文（与「在线/离线包」下载的单独报告完全一致，含全部图表与脚本）</b>；缓存恢复的靶点（服务端文件已回收）弹出由 markdown 与统计数据重建的页面。「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。UniProt 列回补的 ID 以徽标展示（标注识别来源）；序列列「复制」一键复制该靶点的完整提交序列（原始表名称列内的原表行快照已折叠序列，只保留识别前缀）。</div>
+<div class="note">「完整报告 ↗」新标签页弹出该靶点自己的单独评估报告 — 服务器数据保留期内的靶点弹出<b>报告文件原文（与「在线/离线包」下载的单独报告完全一致，含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节）</b>；缓存恢复的靶点（服务端文件已回收）弹出由 markdown 与统计数据重建的页面。「下载 ⤓」把同一份报告一键存盘（文件名与单独报告下载同源）。「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。UniProt 列回补的 ID 以徽标展示（标注识别来源）；表格不显示序列 — 各靶点的完整序列见其单独报告（原表行快照中的序列文本已折叠）。</div>
 
 <h2 class="sec"><span class="k">03</span>AI 整体可行性报告</h2>
 <div class="panel md">${body}</div>
@@ -976,7 +1009,6 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 </div>
 
 ${rptPayload ? embedJsonScript('ht-rpt-data', rptPayload) : ''}
-${Object.keys(seqByJob).length ? embedJsonScript('ht-seq-data', seqByJob) : ''}
 
 <script>
 (function(){
@@ -1095,28 +1127,30 @@ ${Object.keys(seqByJob).length ? embedJsonScript('ht-seq-data', seqByJob) : ''}
   }
   var RPT_JS = '<scr' + 'ipt>(' + rptPageInit.toString() + ')();</scr' + 'ipt>';
   var rptUrl = null;
+  // v2.65：弹出与下载共用同一份 HTML 源 — 原文条目直接返回 r.html（与下载的
+  // 单独报告字节级一致）；重建页由 markdown + 统计数据拼装（共享样式 RP.c）
+  function buildReportHtml(r){
+    if (typeof r.html === 'string' && r.html) {
+      // v2.63：报告文件原文 — 与下载的单独报告完全一致（含全部图表与脚本）
+      return r.html;
+    }
+    // 重建页（服务端报告文件不可用/缓存恢复 — markdown + 统计数据拼装）
+    return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+      + '<title>' + r.tt + '</title><style>' + (RP.c || '') + '</style></head><body><div class="page" id="top">'
+      + '<div class="rpt-head"><div class="rpt-eyebrow">TargetEval · Target Full Report</div>'
+      + '<h1 class="rpt-title">' + r.h + '</h1>'
+      + '<div class="rpt-subtitle">单靶点完整评估报告（重建页）— 服务端报告文件不可用，由缓存数据重建 · 离线自包含</div>'
+      + '<div class="meta-grid"><div><b>生成时间</b> ' + RP.g + '</div><div><b>母报告</b> ' + RP.m + '</div><div><b>评估引擎</b> ' + RP.e + '</div>' + (r.j ? '<div><b>作业 ID</b> <span class="mono">' + r.j + '</span></div>' : '') + '</div></div>'
+      + r.a
+      + '<div class="note">本页为重建页（服务端报告文件已回收 — 原文报告不可内嵌时由缓存 markdown 与统计数据拼装）。序列块为该靶点的完整提交序列（一键复制）。</div>'
+      + '<button type="button" class="backtop no-print" id="backtop" aria-label="回到顶部" title="回到顶部">↑</button>'
+      + '</div>' + RPT_JS + '</body></html>';
+  }
   function openReport(i){
     if (!RP || !RP.r || !RP.r[i]) return;
-    var r = RP.r[i];
     try {
-      var html;
-      if (typeof r.html === 'string' && r.html) {
-        // v2.63：报告文件原文 — 与下载的单独报告完全一致（含全部图表与脚本）
-        html = r.html;
-      } else {
-        // 重建页（服务端报告文件不可用/缓存恢复 — markdown + 统计数据拼装）
-        html = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-          + '<title>' + r.tt + '</title><style>' + (RP.c || '') + '</style></head><body><div class="page" id="top">'
-          + '<div class="rpt-head"><div class="rpt-eyebrow">TargetEval · Target Full Report</div>'
-          + '<h1 class="rpt-title">' + r.h + '</h1>'
-          + '<div class="rpt-subtitle">单靶点完整评估报告（重建页）— 服务端报告文件不可用，由缓存数据重建 · 离线自包含</div>'
-          + '<div class="meta-grid"><div><b>生成时间</b> ' + RP.g + '</div><div><b>母报告</b> ' + RP.m + '</div><div><b>评估引擎</b> ' + RP.e + '</div>' + (r.j ? '<div><b>作业 ID</b> <span class="mono">' + r.j + '</span></div>' : '') + '</div></div>'
-          + r.a
-          + '<div class="note">本页为重建页（服务端报告文件已回收 — 原文报告不可内嵌时由缓存 markdown 与统计数据拼装）。序列块为该靶点的完整提交序列（一键复制）。</div>'
-          + '<button type="button" class="backtop no-print" id="backtop" aria-label="回到顶部" title="回到顶部">↑</button>'
-          + '</div>' + RPT_JS + '</body></html>';
-      }
-      var blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      // v2.65：修复 v2.62 引入的语法错误（new Blob(tml] — 整段脚本解析失败的根源）
+      var blob = new Blob([buildReportHtml(RP.r[i])], { type: 'text/html;charset=utf-8' });
       if (rptUrl) { try { URL.revokeObjectURL(rptUrl); } catch (e) {} }
       rptUrl = URL.createObjectURL(blob);
       var w = window.open(rptUrl, '_blank');
@@ -1125,46 +1159,36 @@ ${Object.keys(seqByJob).length ? embedJsonScript('ht-seq-data', seqByJob) : ''}
       window.alert('打开完整报告失败：' + (e && e.message ? e.message : e));
     }
   }
+  // v2.65：逐靶点下载 — 内嵌的原文/重建页一键存盘（命名与单独报告下载同源）
+  function downloadReport(i){
+    if (!RP || !RP.r || !RP.r[i]) return;
+    var r = RP.r[i];
+    try {
+      var blob = new Blob([buildReportHtml(r)], { type: 'text/html;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = r.fn || ('TargetEval_report_' + (i + 1) + '.html');
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function(){ try { URL.revokeObjectURL(url); } catch (e) {} if (a.parentNode) a.parentNode.removeChild(a); }, 5000);
+    } catch (e) {
+      window.alert('下载报告失败：' + (e && e.message ? e.message : e));
+    }
+  }
   document.querySelectorAll('button.mt-open').forEach(function(b){
     b.addEventListener('click', function(){
       var i = parseInt(b.getAttribute('data-i'), 10);
       if (!isNaN(i)) openReport(i);
     });
   });
-
-  // v2.61 序列一键复制（jobId → 全文 — 原表内容列为折叠快照，复制的是完整提交序列）
-  var seqEl = document.getElementById('ht-seq-data');
-  var seqs = null;
-  try { seqs = JSON.parse(seqEl ? seqEl.textContent : 'null'); } catch (e) {}
-  function copyText(t, btn){
-    var done = function(){
-      var old = btn.getAttribute('data-label') || btn.textContent;
-      btn.setAttribute('data-label', old);
-      btn.textContent = '已复制 ✓';
-      btn.classList.add('ok');
-      setTimeout(function(){ btn.textContent = old; btn.classList.remove('ok'); }, 1600);
-    };
-    var fallback = function(){
-      try {
-        var ta = document.createElement('textarea');
-        ta.value = t;
-        ta.style.position = 'fixed'; ta.style.opacity = '0';
-        document.body.appendChild(ta); ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-        done();
-      } catch (e) {}
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(t).then(done, fallback);
-    } else fallback();
-  }
-  document.querySelectorAll('button.seq-copy').forEach(function(b){
+  document.querySelectorAll('button.mt-dl').forEach(function(b){
     b.addEventListener('click', function(){
-      var s = seqs ? seqs[b.getAttribute('data-job')] : '';
-      if (s) copyText(s, b);
+      var i = parseInt(b.getAttribute('data-i'), 10);
+      if (!isNaN(i)) downloadReport(i);
     });
   });
+
 
   // v2.64：AI 报告 md 表格包裹横滚容器（窄屏不再挤压换行；右缘渐隐提示滚动到底消失）
   function fadeWatch(w){
