@@ -6,8 +6,9 @@
  * 覆盖形态：
  *  - 表内 UniProt（eval-table 来源）/ 序列回补 UniProt（BLAST nr 98%）/ 无 UniProt
  *  - 生效区间（nsp 截短构建）/ 缓存恢复行（fromArchive）/ 原文报告内嵌行（reportHtml）
- *  - 无序列行 / 超长名称与种属 / 低分不建议 / NMR 强势 / 原表行快照（excelText）
+ *  - 无序列行 / 超长名称与种属 / 低分不建议 / NMR 强势 / 原表行快照（excelText — v2.65 序列折叠）
  *  - go / caution / no × rule / llm 结论来源
+ *  - v2.65：内嵌一份真实单独报告原文（upload/Q8I246 · 1.1MB — 验证弹出与下载的字节级一致性）
  * 运行：bun scripts/render-ht-dashboard-fixture.ts
  */
 import * as fs from 'node:fs'
@@ -34,6 +35,19 @@ const md = (title: string, points: string[]): string =>
   `## 综合评估结论\n\n**${title}** 的结构生物学可行性综合评分见刊头。核心判断：\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\n## 结构证据明细\n\n| 方法 | 可用结构 | 最佳分辨率 | 覆盖率 | 评分 |\n| --- | --- | --- | --- | --- |\n| X-ray | 130 | 1.53 Å | 96% | 9/10 |\n| Cryo-EM | 8 | 3.1 Å | 88% | 7/10 |\n| NMR | 0 | — | 0% | 3/10 |\n\n## 风险与建议\n\n> 区间外柔性片段可能影响结晶；建议优先沿用已验证构建。\n\n同源建模可行（覆盖率 \`92%\`，序列一致性 > 40%）。`
 
 const rows: HtDashboardRow[] = [
+  {
+    // v2.65：真实单独报告原文（用户上传的 Q8I246 报告 · ~1.1MB）— 验证「完整报告」
+    // 弹出与「下载」的字节级一致性（含 PDB 列表 / BLAST / AlphaFold 预测结构与附件）
+    jobId: 'jobq8i24600000000000015', label: 'Q8I246', uniprotId: 'Q8I246',
+    proteinName: 'Phenylalanine--tRNA ligase alpha subunit', organism: 'Plasmodium falciparum (isolate 3D7)',
+    range: [294, 451], overall: 7, xray: 7, cryoem: 5, nmr: 3,
+    directPdbCount: 12, blastHitCount: 26, coverage: 88,
+    methodXrayCount: 10, methodCryoemCount: 2, methodNmrCount: 0,
+    bestResolution: 2.1, ligandCount: 3, literatureCount: 24,
+    reportLlmOk: true, durationMs: 240_000, zipHref: 'G02/Q8I246.html', hasReport: true,
+    reportHtml: fs.readFileSync('/home/z/my-project/upload/TargetEval_HT_2026-11-22_74g G02_TargetEval_Q8I246_2026-11-22.html', 'utf-8'),
+    sequence: seq(158),
+  },
   {
     jobId: 'jobegfr0000000000000001', label: 'P00533', uniprotId: 'P00533',
     proteinName: 'Epidermal growth factor receptor', organism: 'Homo sapiens (Human)',
@@ -192,15 +206,15 @@ const rows: HtDashboardRow[] = [
   },
 ]
 
-// 原始 Excel 行快照（attachExcelRows 匹配挂接）
+// 原始 Excel 行快照（attachExcelRows 匹配挂接；v2.65 序列格折叠 — 一行旧格式前缀验证渲染端兑底折叠）
 attachExcelRows(rows, [
-  { label: 'P00533', text: 'P00533 | EGFR | 激酶域构建 695-1022 | 优先级 A | 备注：共晶数据丰富（序列已折叠 MKTAYIAKQRQ…328aa）' },
-  { label: 'P42345', text: 'P42345 | mTOR | 全长 | 优先级 B | 备注：Cryo-EM 首选（序列已折叠 MKTAYIAKQRQ…2549aa）' },
-  { label: 'Q9H2K2', text: '序列提交行（无 ID） | STK25 同源 | MKTAYIAKQRQISFVKSHFSRQLEK…（已折叠） | 优先级 C' },
+  { label: 'P00533', text: 'P00533 | EGFR | 激酶域构建 695-1022 | 优先级 A | [序列 328 aa] | 备注：共晶数据丰富' },
+  { label: 'P42345', text: 'P42345 | mTOR | 全长 | 优先级 B | [序列 2549 aa] | 备注：Cryo-EM 首选' },
+  { label: 'Q9H2K2', text: '序列提交行（无 ID） | STK25 同源 | MKTAYIAKQRQISFVKSHFSRQLEKMFNTQATLEKSQWKVFQHGL（旧快照序列前缀形态） | 优先级 C' },
   { label: 'P04156', text: 'P04156 | PrP | C 端结构域 121-231 | 优先级 D | 备注：N 端无序勿送结晶' },
 ])
 
-const stats = computeHtStats(rows, 15)
+const stats = computeHtStats(rows, 16)
 
 // 结论：一半用规则推断（reportLlmOk=false），一半模拟 LLM 撰写
 const verdicts: HtVerdict[] = rows.map(r => {
@@ -216,7 +230,7 @@ const verdicts: HtVerdict[] = rows.map(r => {
 
 const markdown = `## 一、批次总体判断
 
-本批 **15** 个靶点（成功 14 · 失败 1）整体可行性**中等偏上**：总体均分 5.1/10，其中 4 个建议推进、5 个谨慎推进、5 个不建议直接立项。X-ray 证据链最完整（12/14 靶点有射线结构），NMR 仅个别小蛋白可用。
+本批 **16** 个靶点（成功 15 · 失败 1）整体可行性**中等偏上**：总体均分 5.1/10，其中 4 个建议推进、5 个谨慎推进、5 个不建议直接立项。X-ray 证据链最完整（12/15 靶点有射线结构），NMR 仅个别小蛋白可用。
 
 ## 二、方法维度分析
 
@@ -245,7 +259,7 @@ const markdown = `## 一、批次总体判断
 评分与统计为确定性数据；\`fromArchive\` 行（O15530）来自浏览器缓存快照恢复，评分、计数与结论完整可用，仅在线/离线报告链接失效。`
 
 const html = renderHtDashboardHtml({
-  title: '高通量评估汇总报告 · 15 靶点 · 2026-01-30（视觉审查 Fixture）',
+  title: '高通量评估汇总报告 · 16 靶点 · 2026-01-30（视觉审查 Fixture）',
   goal: '客户目标：从 15 个候选靶点中筛选结构生物学可行性最高的前 4-6 个进入结晶/Cryo-EM 交付管线，重点关注 X-ray 证据与共晶配体可用性；预算与周期约束下优先排除无序倾向与覆盖率不足的靶点。',
   rows,
   stats,

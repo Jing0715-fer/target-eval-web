@@ -122,12 +122,22 @@ const MAX_SEQ_TOTAL_CHARS = 400_000
 
 // ─── v2.36 原始表内容（汇总报告 master 表格的「原 Excel 行」列）────────────────
 
-/** 原始行的紧凑快照（序列折叠 — 只保留识别性前缀；标签 = 行首非序列单元格） */
+/** 原始行的紧凑快照（序列折叠为长度标记；标签 = 行首非序列单元格） */
 export interface HtExcelRowSnapshot {
   /** 行标签（与 deriveRowLabel 同源 — 结构交付表 = 文件名；用于与评估条目 label 前缀匹配） */
   label: string
-  /** 折叠后的行文本（非空单元格「|」连接；每格 ≤72 字符） */
+  /** 折叠后的行文本（非空单元格「|」连接；每格 ≤72 字符；序列格 → [序列 N aa]） */
   text: string
+}
+
+/** v2.65：序列样单元格判定 — 去空白后 ≥40 字符且 ≥95% 为氨基酸字母（含 U/X/B/Z）。
+ *  汇总报告主表不再显示序列文本 — 序列格在提取端折叠为「[序列 N aa]」长度标记。 */
+function isSequenceCell(t: string): boolean {
+  const s = t.replace(/\s+/g, '')
+  if (s.length < 40) return false
+  let aa = 0
+  for (let i = 0; i < s.length; i++) if ('ACDEFGHIKLMNPQRSTVWYBXZJU'.includes(s[i])) aa++
+  return aa / s.length >= 0.95
 }
 
 /** v2.36：全部数据行 → 紧凑快照（汇总报告展示原始表内容；≤600 行、每行 ≤400 字符） */
@@ -135,6 +145,8 @@ export function buildExcelRowSnapshots(sheets: HtSheetRows[]): HtExcelRowSnapsho
   const out: HtExcelRowSnapshot[] = []
   const snap = (cell: string): string => {
     const t = cell.trim()
+    // v2.65：序列单元格折叠为长度标记（主表不显示序列 — 渲染端另有旧快照兜底折叠）
+    if (isSequenceCell(t)) return `[序列 ${t.replace(/\s+/g, '').length} aa]`
     if (t.length <= 72) return t
     return `${t.slice(0, 56)}…[${t.length}]`
   }
