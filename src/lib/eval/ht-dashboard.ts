@@ -25,6 +25,15 @@
  *    下载的单独报告完全一致，含全部图表与脚本；服务端文件丢失时回退
  *    markdown 重建页）；⑥ 页宽随浏览器动态调整（去 1224px 固定上限）；
  *    ⑦ 总表靶点名称 / UniProt / 序列拆为三列（UniProt 列可排序）。
+ *    v2.64：视觉审查修复（agent-browser 多视口截图 + VLM 审查）——
+ *    ⑧ 直方图零值柱改为轨道灰（不再渲染彩色细线）+ 刻度/数值字号提升；
+ *    ⑨ 「结构」列重排（主值 + 绿色同源命中小胶囊 + 分辨率小注，消除
+ *    「130 +45」粘连误读）；⑩ 02 标题行说明改为块级 sec-sub（去 inline
+ *    混排断词）；⑪ 表格右缘渐隐横滚指示（滚动到底自动消失）；⑫ md 表格
+ *    JS 包裹横滚容器（窄屏不再挤压）；⑬ 移动端回顶钮缩小避让正文 +
+ *    筛选控件触控目标 ≥42px + 搜索框占满整行；⑭ note/计数对比度提升；
+ *    ⑮ 弹出页 meta 长值截断、序列块 10 残基分组 + 行号（复制改读
+ *    data-seq 不受分组影响）。
  *
  * 离线链接语义：zip 相对路径与 ht-archive 打包命名同源（planArchiveNames 共享
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
@@ -488,8 +497,9 @@ const VERDICT_META: Record<HtVerdict['verdict'], { label: string; color: string;
 function distBar(buckets: number[], total: number): string {
   const max = Math.max(1, ...buckets)
   return `<div class="dist">${buckets.map((c, i) => {
-    const h = total > 0 ? Math.max(c > 0 ? 6 : 2, Math.round((c / max) * 84)) : 2
-    const color = i >= 7 ? '#0d9488' : i >= 5 ? '#d97706' : '#dc2626'
+    // v2.64：零值桶渲染为 3px 石灰色矮座（可辨识的空档位 — 彩色细线像渲染残留）；有值柱最小 8px
+    const h = total > 0 && c > 0 ? Math.max(8, Math.round((c / max) * 80)) : 3
+    const color = c === 0 ? '#d6d3d1' : i >= 7 ? '#0d9488' : i >= 5 ? '#d97706' : '#dc2626'
     return `<div class="dist-col" title="${i}-${i + 1} 分：${c} 个"><span class="dist-n">${c || ''}</span><div class="dist-bar" style="background:${color};height:${h}px"></div><span class="dist-x">${i}</span></div>`
   }).join('')}</div>`
 }
@@ -541,7 +551,7 @@ body{font-family:var(--serif);color:var(--ink);background:var(--bg);line-height:
 .rpt-eyebrow{font-family:var(--mono);color:var(--accent);font-weight:600;font-size:10.5px;letter-spacing:2.4px;text-transform:uppercase;margin-bottom:14px}
 h1.rpt-title{font-size:26px;line-height:1.4;margin-bottom:6px;font-weight:900;overflow-wrap:anywhere}
 .rpt-subtitle{font-size:13px;color:var(--sub);font-style:italic;margin-bottom:18px}
-.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px 22px;font-size:12.5px;color:var(--sub)}
+.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:9px 22px;font-size:12.5px;color:var(--sub)}
 .meta-grid b{color:var(--ink);font-weight:600;margin-right:2px}
 .tg-range{color:var(--accent-2);font-family:var(--mono);font-size:11px}
 .score{display:inline-block;min-width:30px;text-align:center;border-radius:5px;padding:0 6px;font-family:var(--mono);font-size:11px;font-weight:700}
@@ -554,7 +564,7 @@ h1.rpt-title{font-size:26px;line-height:1.4;margin-bottom:6px;font-weight:900;ov
 article.tg{margin:0}
 .tg-head{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;background:linear-gradient(180deg,#ffffff,#f7fcf9);padding:13px 18px;margin-bottom:12px}
 .tg-cache{display:inline-block;margin-left:8px;padding:0 6px;border-radius:4px;border:1px solid #fde68a;background:#fffbeb;color:#a16207;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:2px}
-.tg-meta{display:flex;flex-wrap:wrap;align-items:center;gap:5px 14px;margin-top:6px;font-size:11.5px;color:var(--sub);font-family:var(--mono)}
+.tg-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin-top:6px;font-size:11.5px;color:var(--sub);font-family:var(--mono)}
 .tg-meta a{color:var(--accent-2)}
 .uni-id{display:inline-block;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent);background:var(--accent-bg);border:1.5px solid #6ee7c7;border-radius:6px;padding:1px 9px;text-decoration:none;letter-spacing:.2px}
 .uni-id:hover{background:#d1fae5;border-color:var(--accent-2)}
@@ -563,12 +573,13 @@ article.tg{margin:0}
 .tg-verdict .vl{margin-left:6px;color:var(--ink)}
 .seqbox{border:1px dashed #b8e6d2;background:var(--accent-bg);border-radius:8px;padding:10px 14px;margin-top:14px}
 .seq-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;font-size:11.5px;color:var(--sub)}
-.seq-pre{margin-top:8px;font-family:var(--mono);font-size:10.5px;line-height:1.75;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow-y:auto;background:#fff;border:1px solid var(--hairline);border-radius:6px;padding:10px 12px;color:var(--ink)}
+/* v2.64：序列块 10 残基分组 + 行号 — 长行不折断，窄屏横向滚动 */
+.seq-pre{margin-top:8px;font-family:var(--mono);font-size:10.5px;line-height:1.75;white-space:pre;overflow:auto;word-break:normal;max-height:260px;background:#fff;border:1px solid var(--hairline);border-radius:6px;padding:10px 12px;color:var(--ink)}
 .seq-copy{font-family:var(--mono);font-size:10px;font-weight:600;padding:2px 10px;border-radius:5px;border:1px solid #b8e6d2;background:#fff;color:var(--accent);cursor:pointer;white-space:nowrap}
 .seq-copy:hover{background:var(--accent-bg)}
 .seq-copy.ok{background:var(--accent);color:#fff;border-color:var(--accent)}
 .md{font-size:13px;line-height:1.85}
-.md h2{font-size:16px;margin:20px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--hairline);font-weight:800}
+.md h2{font-size:16px;margin:22px 0 10px;padding-bottom:5px;border-bottom:1px solid var(--hairline);font-weight:800}
 .md h3{font-size:13.5px;margin:14px 0 6px;font-weight:700}
 .md h4{font-size:12.5px;margin:12px 0 4px;font-weight:700}
 .md p{margin:8px 0}
@@ -578,16 +589,34 @@ article.tg{margin:0}
 .md table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12px}
 .md th,.md td{padding:6px 9px;border:1px solid var(--line);text-align:left}
 .md th{background:#f9fafb;font-weight:600;font-family:var(--mono);font-size:11px}
+/* v2.64：md 表格窄屏横滚（JS 包裹 .md-tblwrap — 不挤压换行；右缘渐隐提示同主表） */
+.md-tblwrap{position:relative;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.md-tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:38px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.6) 40%,#fff 100%);pointer-events:none}
+.md-tblwrap.at-end::after{display:none}
+.md-tblwrap>table{min-width:440px}
 .md blockquote{border-left:3px solid #b8e6d2;background:var(--accent-bg);padding:8px 14px;margin:10px 0;color:var(--sub)}
 .md a{color:var(--accent-2)}
-.note{color:var(--faint);font-size:11px;margin-top:14px;line-height:1.7}
+.note{color:var(--sub);font-size:11.5px;margin-top:14px;line-height:1.75}
 .backtop{position:fixed;right:18px;bottom:18px;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--sub);font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(28,25,23,.1);display:none;z-index:50}
 .backtop.show{display:block}
+/* v2.64：移动端回顶钮缩小避让正文（悬浮钮遮挡面积最小化） */
+@media(max-width:640px){.backtop{right:10px;bottom:10px;width:34px;height:34px;font-size:14px;background:rgba(255,255,255,.94)}}
 @media print{.backtop{display:none}}`
 
+/** v2.64：提交序列展示格式化 — 行号（5 位右对齐）+ 10 残基分组空格 + 每行 60 残基
+ *  （生物序列块惯例，便于目视比对；复制按钮读 data-seq 原文，不受分组影响） */
+function formatSeqDisplay(s: string): string {
+  const lines: string[] = []
+  for (let i = 0; i < s.length; i += 60) {
+    const groups = (s.slice(i, i + 60).match(/.{1,10}/g) ?? []).join(' ')
+    lines.push(String(i + 1).padStart(5, ' ') + '  ' + groups)
+  }
+  return lines.join('\n')
+}
+
 /** v2.62：单靶点报告正文块 — 刊头元信息（回补 UniProt 徽标 / 蛋白名 / 种属 / 评分 /
- *  一句话结论）+ renderMarkdown 渲染的评估正文 + 提交序列块（弹出页脚本从 <pre>
- *  文本读取序列完成一键复制，无需另行内嵌序列数据）。 */
+ *  一句话结论）+ renderMarkdown 渲染的评估正文 + 提交序列块（v2.64：序列 10 残基
+ *  分组 + 行号展示；原文存 data-seq，弹出页脚本读属性完成一键复制）。 */
 function renderTargetArticle(r: HtDashboardRow, v: HtVerdict, origin: string): string {
   const body = r.reportMarkdown
     ? renderMarkdown(r.reportMarkdown, 0)
@@ -599,11 +628,11 @@ function renderTargetArticle(r: HtDashboardRow, v: HtVerdict, origin: string): s
   return `<article class="tg">
 <div class="tg-head">
   <div class="tg-meta">${uniBadge}${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<span>${esc(r.proteinName)}</span>` : ''}${r.organism ? `<span>${esc(r.organism)}</span>` : ''}</div>
-  <div class="tg-meta"><span>总分 <b class="score ${scoreTone(r.overall)}">${r.overall}</b></span><span>X-ray ${r.xray} · Cryo-EM ${r.cryoem} · NMR ${r.nmr}</span><span>直接结构 ${r.directPdbCount}${r.blastHitCount ? ` +同源 ${r.blastHitCount}` : ''}${r.bestResolution != null ? ` · 最佳 ${r.bestResolution}Å` : ''}</span><span>覆盖 ${Math.round(r.coverage)}%</span>${online}</div>
+  <div class="tg-meta"><span>总分 <b class="score ${scoreTone(r.overall)}">${r.overall}</b></span><span>X-ray ${r.xray} · Cryo-EM ${r.cryoem} · NMR ${r.nmr}</span><span>直接结构 ${r.directPdbCount}${r.blastHitCount ? ` · 同源 ${r.blastHitCount}` : ''}</span>${r.bestResolution != null ? `<span>最佳 ${r.bestResolution}Å</span>` : ''}<span>覆盖 ${Math.round(r.coverage)}%</span>${online}</div>
   <div class="tg-verdict"><span class="vd vd-${v.verdict}">${VERDICT_META[v.verdict].label}</span><span class="vl">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</span></div>
 </div>
 <div class="md">${body}</div>
-${r.sequence ? `<div class="seqbox"><div class="seq-head"><b>提交序列</b> · ${r.sequence.length} aa · 完整序列一键复制<button type="button" class="seq-copy">复制序列</button></div><pre class="seq-pre">${esc(r.sequence)}</pre></div>` : ''}
+${r.sequence ? `<div class="seqbox"><div class="seq-head"><b>提交序列</b> · ${r.sequence.length} aa · 10 残基分组 · 完整序列一键复制<button type="button" class="seq-copy">复制序列</button></div><pre class="seq-pre" data-seq="${esc(r.sequence)}">${esc(formatSeqDisplay(r.sequence))}</pre></div>` : ''}
 </article>`
 }
 
@@ -615,7 +644,8 @@ ${r.sequence ? `<div class="seqbox"><div class="seq-head"><b>提交序列</b> ·
  *  - h/a：重建页（服务端报告文件丢失/缓存快照恢复的靶点 — 由 markdown 与
  *    统计数据拼装，共享样式 c）。
  *  键名精简：c=共享样式 g=生成时间 m=母报告 e=引擎；r[]=tt 页标题 / j 作业 ID /
- *  html 报告原文 / h 刊头 HTML / a 正文块 HTML（动态文本均已在服务端 esc 转义）。 */
+ *  html 报告原文 / h 刊头 HTML / a 正文块 HTML（动态文本均已在服务端 esc 转义）。
+ *  v2.64：g/m/e 超长截断（弹出页 meta 列值换行参差的根源）。 */
 function buildHtReportPayload(input: {
   title: string
   rows: HtDashboardRow[]
@@ -629,9 +659,9 @@ function buildHtReportPayload(input: {
   return {
     // 共享样式仅在有重建页条目时才内嵌（原文报告自带完整样式，无需共享）
     c: needFallbackCss ? HT_TARGET_REPORT_CSS : undefined,
-    g: esc(input.generatedAt),
-    m: esc(input.title),
-    e: esc(input.engineSummary),
+    g: esc(input.generatedAt.length > 48 ? input.generatedAt.slice(0, 48) + '…' : input.generatedAt),
+    m: esc(input.title.length > 46 ? input.title.slice(0, 46) + '…' : input.title),
+    e: esc(input.engineSummary.length > 60 ? input.engineSummary.slice(0, 60) + '…' : input.engineSummary),
     r: input.rows.map(r => {
       if (r.reportHtml) {
         // 原文报告自带 <title>，tt 仅作 Blob 打不开时的索引提示
@@ -698,8 +728,8 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
 <td class="td-idx">${idx + 1}</td>
 <td class="td-target">
   <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用；评估正文经「完整报告」弹出页提供">缓存恢复</span>' : ''}</div>
-  ${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<div class="tg-sub">${esc(r.proteinName)}</div>` : ''}
-  ${r.organism ? `<div class="tg-sub">${esc(r.organism)}</div>` : ''}
+  ${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<div class="tg-sub" title="${esc(r.proteinName)}">${esc(r.proteinName)}</div>` : ''}
+  ${r.organism ? `<div class="tg-sub" title="${esc(r.organism)}">${esc(r.organism)}</div>` : ''}
   ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已折叠 — 完整序列用「复制序列」按钮）">${esc(r.excelText)}</div>` : ''}
 </td>
 <td class="td-uni">${uniBadge}</td>
@@ -708,7 +738,7 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
 <td class="td-num"><span class="score mini ${scoreTone(r.xray)}" title="X-ray 方法评分">${r.xray}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.cryoem)}" title="Cryo-EM 方法评分">${r.cryoem}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.nmr)}" title="NMR 方法评分">${r.nmr}</span></td>
-<td class="td-num mono">${r.directPdbCount}${r.blastHitCount ? `<span class="dim"> +${r.blastHitCount}</span>` : ''}${r.bestResolution != null ? `<div class="dim">${r.bestResolution}Å</div>` : ''}</td>
+<td class="td-num">${r.directPdbCount > 0 || r.blastHitCount > 0 ? `<span class="pdb-n">${r.directPdbCount}</span>` : '<span class="pdb-n dim">0</span>'}${r.blastHitCount > 0 ? `<span class="pdb-blast" title="BLAST 同源命中 ${r.blastHitCount} 个（未计入直接结构数）">+${r.blastHitCount}</span>` : ''}${r.bestResolution != null ? `<div class="pdb-res" title="最佳分辨率">${r.bestResolution}Å</div>` : ''}</td>
 <td class="td-num mono">${Math.round(r.coverage)}%</td>
 <td class="td-verdict"><span class="vd vd-${v.verdict}">${meta.label}</span><div class="vd-line">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</div></td>
 <td class="td-act">
@@ -732,7 +762,7 @@ body{font-family:var(--serif);color:var(--ink);background:var(--bg);line-height:
    左右留白用 clamp 随视口收缩，窄屏自动收紧） */
 .page{width:100%;max-width:none;margin:0;padding:56px clamp(20px,4vw,72px) 72px;background:var(--paper);min-height:100vh;box-shadow:0 0 0 1px var(--hairline)}
 @media(max-width:1024px){.page{padding:40px 24px 56px}}
-@media(max-width:640px){.page{padding:26px 14px 38px}}
+@media(max-width:640px){.page{padding:26px 14px 64px}}
 @media print{body{background:#fff}.page{padding:0;max-width:none;box-shadow:none}.no-print{display:none!important}}
 
 /* 报告封面头（期刊风双线 — 与单靶点报告同源） */
@@ -745,6 +775,8 @@ h1.rpt-title{font-size:28px;line-height:1.4;margin-bottom:6px;font-weight:900}
 .meta-grid b{color:var(--ink);font-weight:600;margin-right:2px}
 h2.sec{font-size:20px;margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:800}
 h2.sec .k{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:2px;margin-right:10px;font-weight:600;vertical-align:2px}
+/* v2.64：章节标题说明改为块级独立段（窄屏不再与标题 inline 混排断词） */
+.sec-sub{font-size:12px;color:var(--sub);margin:-8px 0 16px;line-height:1.75}
 
 /* 统计速览（glance 瓦片 — 单靶点报告 At-a-Glance 同源） */
 .glance{border:1.5px solid var(--ink);border-radius:8px;margin:0 0 10px;background:#fff;overflow:hidden}
@@ -759,12 +791,12 @@ h2.sec .k{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spac
 /* 分布图 / 方法条 */
 .panel{background:#fff;border:1px solid var(--line);border-radius:8px;padding:16px 18px}
 .dist{display:flex;align-items:flex-end;gap:4px;height:96px}
-.dist-col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:2px}
-.dist-n{font-size:9px;color:var(--sub);font-family:var(--mono)}
+.dist-col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px}
+.dist-n{font-size:10px;color:var(--ink);font-family:var(--mono);font-weight:600}
 .dist-bar{width:100%;border-radius:3px 3px 0 0}
-.dist-x{font-size:8.5px;color:var(--faint);font-family:var(--mono)}
+.dist-x{font-size:9.5px;color:var(--sub);font-family:var(--mono)}
 .mb-row{margin-bottom:9px}
-.mb-cap{display:flex;justify-content:space-between;font-size:12px;color:var(--ink);margin-bottom:3px}
+.mb-cap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 10px;font-size:12px;color:var(--ink);margin-bottom:3px}
 .mb-sub{color:var(--sub);font-family:var(--mono);font-size:10.5px}
 .mb-track{height:9px;border-radius:5px;background:#f3f4f6}
 .mb-fill{height:9px;border-radius:5px}
@@ -775,8 +807,18 @@ h2.sec .k{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spac
 .mt-tools input[type=search]{min-width:220px;flex:1;max-width:360px}
 .mt-tools input[type=search]:focus,.mt-tools select:focus{border-color:var(--accent-2);box-shadow:0 0 0 3px rgba(4,120,87,.1)}
 .mt-tools label{font-size:11.5px;color:var(--sub);display:inline-flex;align-items:center;gap:5px}
-.mt-count{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}
-.tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:#fff}
+.mt-count{font-family:var(--mono);font-size:11px;color:var(--sub);margin-left:auto}
+/* v2.64：移动端筛选控件触控目标 ≥42px + 搜索框占满整行（不再被 220px 最小宽挤压） */
+@media(max-width:640px){
+  .mt-tools{gap:10px}
+  .mt-tools input[type=search],.mt-tools select{padding:10px 12px;min-height:42px;font-size:13px}
+  .mt-tools input[type=search]{min-width:0;max-width:none;flex-basis:100%}
+  .mt-tools label{min-height:42px;font-size:12.5px}
+}
+/* v2.64：表格右缘渐隐横滚指示（提示可横向滚动；滚动到底自动消失） */
+.tblwrap{position:relative;overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:#fff}
+.tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:46px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.6) 40%,#fff 100%);pointer-events:none}
+.tblwrap.at-end::after{display:none}
 table.mt{width:100%;min-width:1320px;border-collapse:collapse;font-size:12.5px}
 table.mt th{position:sticky;top:0;background:#f9fafb;color:var(--sub);font-weight:600;font-size:11px;padding:8px 9px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-family:var(--mono);letter-spacing:.3px}
 table.mt th.sortable{cursor:pointer;user-select:none}
@@ -788,14 +830,15 @@ tr.mt-row:hover td{background:#fbfdfc}
 .td-num{text-align:center;white-space:nowrap}
 .tg-label{font-weight:600;font-size:12.5px;line-height:1.6;overflow-wrap:anywhere}
 .tg-range{color:var(--accent-2);font-family:var(--mono);font-size:11px}
-.tg-sub{font-size:10.5px;color:var(--sub);line-height:1.6}
+/* v2.64：蛋白名/种属最多两行（超长时悬浮看全文 title — 不再撑高行） */
+.tg-sub{font-size:10.5px;color:var(--sub);line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 /* v2.63 UniProt / 序列独立列 */
 .td-uni{vertical-align:top;max-width:230px}
 .td-uni .dim,.td-seq .dim{font-family:var(--mono)}
 .td-seq{vertical-align:top;white-space:nowrap}
 /* v2.63 回补 UniProt 醒目徽标（独立列内 — 评估中由序列识别回补，可点开条目） */
-.tg-uni{display:flex;align-items:flex-start;flex-wrap:wrap;gap:4px}
-.tg-uni .uni-src{flex-basis:100%}
+.tg-uni{display:flex;align-items:flex-start;flex-wrap:wrap;gap:5px}
+.tg-uni .uni-src{flex-basis:100%;margin-top:1px}
 .uni-id{display:inline-block;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent);background:var(--accent-bg);border:1.5px solid #6ee7c7;border-radius:6px;padding:1px 9px;text-decoration:none;letter-spacing:.2px;line-height:1.7;white-space:nowrap}
 .uni-id:hover{background:#d1fae5;border-color:var(--accent-2)}
 .uni-src{font-family:var(--mono);font-size:9.5px;color:#0f766e;background:#ecfdf5;border:1px dashed #6ee7c7;border-radius:4px;padding:0 6px;line-height:1.9;display:inline-block}
@@ -808,6 +851,10 @@ tr.mt-row:hover td{background:#fbfdfc}
 .score{display:inline-block;min-width:34px;text-align:center;border-radius:5px;padding:1px 7px;font-family:var(--mono);font-size:12px;font-weight:700}
 .score.hi{color:#0f766e;background:#ccfbf1}.score.md{color:#a16207;background:#fef3c7}.score.lo{color:#b91c1c;background:#fee2e2}
 .score.mini{min-width:26px;padding:1px 4px;font-size:11px}
+/* v2.64：「结构」列重排 — 主值 + 绿色同源命中小胶囊 + 分辨率小注（消除「130 +45」粘连误读） */
+.pdb-n{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--ink)}
+.pdb-blast{display:inline-block;margin-left:4px;padding:0 5px;border-radius:4px;border:1px solid #a7f3d0;background:var(--accent-bg);color:var(--accent-2);font-family:var(--mono);font-size:10px;font-weight:700;line-height:1.6;vertical-align:1px}
+.pdb-res{font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:2px}
 .dim{color:var(--faint);font-size:10px}
 .vd{display:inline-block;border-radius:4px;padding:1px 8px;font-size:10.5px;font-weight:700;letter-spacing:.5px}
 .vd-go{color:#0f766e;background:#ccfbf1;border:1px solid #99e5d5}
@@ -821,7 +868,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 
 /* Markdown 正文（AI 报告 — 与单靶点报告 .md 风格同源；靶点正文在弹出页） */
 .md{font-size:13px;line-height:1.85}
-.md h2{font-size:16px;margin:20px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--hairline);font-weight:800}
+.md h2{font-size:16px;margin:22px 0 10px;padding-bottom:5px;border-bottom:1px solid var(--hairline);font-weight:800}
 .md h3{font-size:13.5px;margin:14px 0 6px;font-weight:700}
 .md h4{font-size:12.5px;margin:12px 0 4px;font-weight:700}
 .md p{margin:8px 0}
@@ -831,19 +878,26 @@ tr.mt-row:hover td{background:#fbfdfc}
 .md table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12px}
 .md th,.md td{padding:6px 9px;border:1px solid var(--line);text-align:left}
 .md th{background:#f9fafb;font-weight:600;font-family:var(--mono);font-size:11px}
+/* v2.64：md 表格窄屏横滚（JS 包裹 .md-tblwrap — 不再挤压换行；右缘渐隐提示同主表） */
+.md-tblwrap{position:relative;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.md-tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:38px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.6) 40%,#fff 100%);pointer-events:none}
+.md-tblwrap.at-end::after{display:none}
+.md-tblwrap>table{min-width:440px}
 .md blockquote{border-left:3px solid #b8e6d2;background:var(--accent-bg);padding:8px 14px;margin:10px 0;color:var(--sub)}
 .md a{color:var(--accent-2)}
 .warn{border:1px solid #fde68a;background:#fffbeb;color:#92400e;border-radius:8px;padding:8px 12px;font-size:12px;margin:10px 0}
-.note{color:var(--faint);font-size:11px;margin-top:14px;line-height:1.7}
+.note{color:var(--sub);font-size:11.5px;margin-top:14px;line-height:1.75}
 .backtop{position:fixed;right:18px;bottom:18px;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--sub);font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(28,25,23,.1);display:none;z-index:50}
 .backtop.show{display:block}
-@media print{.backtop{display:none}}
+/* v2.64：移动端回顶钮缩小避让正文（悬浮钮遮挡面积最小化） */
+@media(max-width:640px){.backtop{right:10px;bottom:10px;width:34px;height:34px;font-size:14px;background:rgba(255,255,255,.94)}}
+@media print{.backtop{display:none}.tblwrap::after{display:none}.md-tblwrap{overflow:visible}}
 </style></head><body><div class="page" id="top">
 
 <div class="rpt-head">
   <div class="rpt-eyebrow">TargetEval · High-Throughput Master Report</div>
   <h1 class="rpt-title">${esc(input.title)}</h1>
-  <div class="rpt-subtitle">高通量评估汇总报告 — 统计看板 · 全靶点结论总表（靶点 / UniProt / 序列分列 · X-ray/Cryo-EM/NMR 分列单独排序 · 「完整报告」弹出与下载版完全一致的单靶点报告）· AI 整体可行性分析，页宽随浏览器自适应 · 单文件离线自包含</div>
+  <div class="rpt-subtitle">高通量评估汇总报告 — 统计看板 · 全靶点结论总表 · AI 整体可行性分析 · 单文件离线自包含</div>
   <div class="meta-grid">
     <div><b>生成时间</b> ${esc(input.generatedAt)}</div>
     ${input.durationSec ? `<div><b>运行时长</b> ${Math.round(input.durationSec / 60)} 分钟</div>` : ''}
@@ -881,9 +935,10 @@ ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="gr
 
 ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.map(esc).join('；')}</div>` : ''}
 
-<h2 class="sec"><span class="k">02</span>全靶点结论总表<span style="font-size:12px;color:var(--faint);font-weight:400;margin-left:10px">靶点名称 / UniProt / 序列三列分列 · 总分与 X-ray / Cryo-EM / NMR 评分分列（列头点击各自排序）· 回补 UniProt 徽标可点开 · 「完整报告」弹出与下载的单独报告完全一致</span></h2>
+<h2 class="sec"><span class="k">02</span>全靶点结论总表</h2>
+<div class="sec-sub">靶点名称 / UniProt / 序列三列分列 · 总分与 X-ray / Cryo-EM / NMR 评分分列（列头点击各自排序）· 回补 UniProt 徽标可点开 · 「完整报告」弹出与下载的单独报告完全一致</div>
 <div class="mt-tools no-print">
-  <input type="search" id="mt-q" placeholder="搜索靶点 / UniProt / 蛋白名 / 原表内容…" aria-label="筛选搜索">
+  <input type="search" id="mt-q" placeholder="搜索靶点 / UniProt / 蛋白名…" aria-label="筛选搜索">
   <label>结论
     <select id="mt-verdict"><option value="all">全部</option><option value="go">建议推进</option><option value="caution">谨慎推进</option><option value="no">不建议</option></select>
   </label>
@@ -1004,11 +1059,32 @@ ${Object.keys(seqByJob).length ? embedJsonScript('ht-seq-data', seqByJob) : ''}
         navigator.clipboard.writeText(t).then(done, fallback);
       } else fallback();
     }
+    // v2.64：md 表格包裹横滚容器（窄屏不再挤压换行 — 与主页面同款处理；
+    // 右缘渐隐提示可精简重复，滚动/缩放到底自动消失）
+    function fadeWatch(w){
+      var upd = function(){ w.classList.toggle('at-end', w.scrollLeft + w.clientWidth >= w.scrollWidth - 6); };
+      w.addEventListener('scroll', upd, { passive: true });
+      window.addEventListener('resize', upd, { passive: true });
+      upd();
+    }
+    function wrapMdTables(){
+      document.querySelectorAll('.md table').forEach(function(t){
+        if (t.parentNode && t.parentNode.className === 'md-tblwrap') return;
+        var w = document.createElement('div');
+        w.className = 'md-tblwrap';
+        t.parentNode.insertBefore(w, t);
+        w.appendChild(t);
+        fadeWatch(w);
+      });
+    }
+    wrapMdTables();
     document.querySelectorAll('button.seq-copy').forEach(function(b){
       b.addEventListener('click', function(){
         var box = b.closest ? b.closest('.seqbox') : null;
         var pre = box ? box.querySelector('.seq-pre') : null;
-        if (pre) copyText(pre.textContent, b);
+        // v2.64：优先读 data-seq 原文（展示层为 10 残基分组 + 行号，直接取文本会带空白）
+        var s = pre ? (pre.getAttribute('data-seq') || pre.textContent) : '';
+        if (s) copyText(s, b);
       });
     });
     var bt = document.getElementById('backtop');
@@ -1089,6 +1165,34 @@ ${Object.keys(seqByJob).length ? embedJsonScript('ht-seq-data', seqByJob) : ''}
       if (s) copyText(s, b);
     });
   });
+
+  // v2.64：AI 报告 md 表格包裹横滚容器（窄屏不再挤压换行；右缘渐隐提示滚动到底消失）
+  function fadeWatch(w){
+    var upd = function(){ w.classList.toggle('at-end', w.scrollLeft + w.clientWidth >= w.scrollWidth - 6); };
+    w.addEventListener('scroll', upd, { passive: true });
+    window.addEventListener('resize', upd, { passive: true });
+    upd();
+  }
+  function wrapMdTables(){
+    document.querySelectorAll('.md table').forEach(function(t){
+      if (t.parentNode && t.parentNode.className === 'md-tblwrap') return;
+      var w = document.createElement('div');
+      w.className = 'md-tblwrap';
+      t.parentNode.insertBefore(w, t);
+      w.appendChild(t);
+      fadeWatch(w);
+    });
+  }
+  wrapMdTables();
+
+  // v2.64：主表右缘渐隐横滚指示（滚动到底自动消失 — 提示可横向滚动；视口变化时重算）
+  var tw = document.querySelector('.tblwrap');
+  if (tw) {
+    var twUpd = function(){ tw.classList.toggle('at-end', tw.scrollLeft + tw.clientWidth >= tw.scrollWidth - 6); };
+    tw.addEventListener('scroll', twUpd, { passive: true });
+    window.addEventListener('resize', twUpd, { passive: true });
+    twUpd();
+  }
 
   var bt = document.getElementById('backtop');
   window.addEventListener('scroll', function(){ bt.classList.toggle('show', window.scrollY > 600); }, { passive: true });
