@@ -128,6 +128,10 @@ export interface HtExcelRowSnapshot {
   label: string
   /** 折叠后的行文本（非空单元格「|」连接；每格 ≤72 字符；序列格 → [序列 N aa]） */
   text: string
+  /** v2.68：该行序列单元格的原文（去空白；与 text 中 [序列 N aa] 标记按出现顺序对应 —
+   *  汇总报告主表序列标记处的一键复制按钮数据源。text 末尾被 400 字符截断切掉的
+   *  序列格不收录（标记不存在则按钮不渲染，两端一致）；总预算耗尽后余下行为空） */
+  seqs?: string[]
 }
 
 /** v2.65：序列样单元格判定 — 去空白后 ≥40 字符且 ≥95% 为氨基酸字母（含 U/X/B/Z）。
@@ -140,16 +144,16 @@ function isSequenceCell(t: string): boolean {
   return aa / s.length >= 0.95
 }
 
-/** v2.36：全部数据行 → 紧凑快照（汇总报告展示原始表内容；≤600 行、每行 ≤400 字符） */
+/** v2.68：excelRows 序列原文总预算（随运行载荷入 localStorage 与汇总请求 — 与
+ *  MAX_SEQ_TOTAL_CHARS 分开记账：行快照序列仅在标记存活时收录，通常远小于提交序列总量） */
+const EXCEL_SNAPSHOT_SEQ_BUDGET = 400_000
+
+/** v2.36：全部数据行 → 紧凑快照（汇总报告展示原始表内容；≤600 行、每行 ≤400 字符）。
+ *  v2.68：序列单元格在折叠为「[序列 N aa]」的同时把原文收进 row.seqs（汇总主表
+ *  序列标记处一键复制用）— 快照文本 400 字符截断后存活的标记才对应 seqs 条目。 */
 export function buildExcelRowSnapshots(sheets: HtSheetRows[]): HtExcelRowSnapshot[] {
   const out: HtExcelRowSnapshot[] = []
-  const snap = (cell: string): string => {
-    const t = cell.trim()
-    // v2.65：序列单元格折叠为长度标记（主表不显示序列 — 渲染端另有旧快照兜底折叠）
-    if (isSequenceCell(t)) return `[序列 ${t.replace(/\s+/g, '').length} aa]`
-    if (t.length <= 72) return t
-    return `${t.slice(0, 56)}…[${t.length}]`
-  }
+  let seqBudget = EXCEL_SNAPSHOT_SEQ_BUDGET
   for (const sheet of sheets) {
     const rows = sheet.rows
     if (rows.length === 0) continue
@@ -161,8 +165,30 @@ export function buildExcelRowSnapshots(sheets: HtSheetRows[]): HtExcelRowSnapsho
       const row = rows[r]
       if (row.every((c) => !c)) continue
       const label = deriveRowLabel(row) || (row.find((c) => c) ?? '').slice(0, 40)
-      const text = row.filter((c) => c).map(snap).join(' | ').slice(0, 400)
-      if (text) out.push({ label, text })
+      const snap = (cell: string): { text: string; seq?: string } => {
+        const t = cell.trim()
+        // v2.65：序列单元格折叠为长度标记（主表不显示序列 — 渲染端另有旧快照兜底折叠）
+        if (isSequenceCell(t)) {
+          const seq = t.replace(/\s+/g, '')
+          return { text: `[序列 ${seq.length} aa]`, seq }
+        }
+        if (t.length <= 72) return { text: t }
+        return { text: `${t.slice(0, 56)}…[${t.length}]` }
+      }
+      const snapped = row.filter((c) => c).map(snap)
+      const text = snapped.map((x) => x.text).join(' | ').slice(0, 400)
+      // v2.68：只收录「完整出现在截断后 text 里」的标记对应序列（半截标记不匹配 —
+      // 按钮与标记一一对应；单行 ≤8 条、全局预算耗尽后不再收录，余下标记无按钮）
+      const aliveSeqs: string[] = []
+      const alive = (text.match(/\[序列 \d+ aa\]/g) ?? []).length
+      for (const x of snapped) {
+        if (aliveSeqs.length >= alive) break
+        if (!x.seq || aliveSeqs.length >= 8) continue
+        if (seqBudget < x.seq.length) continue
+        aliveSeqs.push(x.seq)
+        seqBudget -= x.seq.length
+      }
+      if (text) out.push(aliveSeqs.length ? { label, text, seqs: aliveSeqs } : { label, text })
       if (out.length >= 600) return out
     }
   }

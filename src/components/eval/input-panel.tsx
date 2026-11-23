@@ -41,7 +41,7 @@ import {
 import { fetchDocxInsights, isStatelessEnv, uploadEvaluateDocx, type UploadProgress } from './api'
 import { DocxUploadPanel, validateDocxFile } from './docx-upload-panel'
 import { HighThroughputPanel } from './high-throughput-panel'
-import type { EvaluateOptions, EvaluateRequest, FormInsights, HTRunState, HtSeqTarget, HTStartPayload, InputMode, UploadResponse } from './types'
+import type { EvaluateOptions, EvaluateRequest, FormInsights, HTRunState, HtImportedKeyEntry, HtSeqTarget, HTStartPayload, InputMode, UploadResponse } from './types'
 import { MAX_PDB_UNLIMITED } from './types'
 import type { StartResult } from './use-evaluation-flow'
 import { parseLigandFileText, isBiologicMention, isLikelyCloneNumber, type LigandFileParsed } from '@/lib/eval/ligand-parse'
@@ -183,23 +183,25 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   // v2.22 高通量分组输入（组间「;」组内「,」）；v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列）
   const [htText, setHtText] = useState('')
   const [htSeqGroups, setHtSeqGroups] = useState<HtSeqTarget[][]>([])
-  // v2.36：原始 Excel 行快照（导入时留存 → 运行状态 → 汇总报告「原表内容」列）
-  const [htExcelRows, setHtExcelRows] = useState<Array<{ label: string; text: string }>>([])
+  // v2.36：原始 Excel 行快照（导入时留存 → 运行状态 → 汇总报告「原表内容」列；
+  // v2.68 seqs = 行内序列格原文 — 汇总主表序列标记处一键复制按钮数据源）
+  const [htExcelRows, setHtExcelRows] = useState<Array<{ label: string; text: string; seqs?: string[] }>>([])
   // v2.38：靶点选择（启动前勾选；未勾选 = 跳过，入运行记录可恢复）— 键：`g:${组}:${项}` / `sq:${组}:${项}`
   // （输入变化时经包装 setter 重置 — 索引重排后旧键无意义）
   const [htSkipKeys, setHtSkipKeys] = useState<string[]>([])
-  // v2.66：因「导入报告」而取消勾选的键（skipKeys 子集 — 启动时以 imported=true 入
-  // 运行记录，进度统计计入「载入」完成口径；输入变化时与 skipKeys 一并重置）
-  const [htImportedKeys, setHtImportedKeys] = useState<string[]>([])
+  // v2.66→v2.68：因「导入报告」而取消勾选的靶点（skipKeys 子集 — 启动时以 imported=true
+  // 入运行记录，进度统计计入「载入」完成口径；v2.68 随键携带 jobId/fileName 供汇总
+  // 报告恢复服务端统计行；输入变化时与 skipKeys 一并重置）
+  const [htImportedEntries, setHtImportedEntries] = useState<HtImportedKeyEntry[]>([])
   const handleHtTextChange = useCallback((v: string) => {
     setHtText(v)
     setHtSkipKeys([])
-    setHtImportedKeys([])
+    setHtImportedEntries([])
   }, [])
   const handleHtSeqGroupsChange = useCallback((g: HtSeqTarget[][]) => {
     setHtSeqGroups(g)
     setHtSkipKeys([])
-    setHtImportedKeys([])
+    setHtImportedEntries([])
   }, [])
   const htParsed = useMemo(() => parseGroupedUniprotIds(htText), [htText])
   const htTargetTotal = htParsed.groups.reduce((n, g) => n + g.length, 0)
@@ -508,7 +510,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       const groupSkipFlags: boolean[][] = []
       // v2.66：导入匹配标记同构收集（skipFlags 子集 — 启动时以 imported=true 入运行记录）
       const groupImportedFlags: boolean[][] = []
-      const htImportedSet = new Set(htImportedKeys)
+      const htImportedSet = new Set(htImportedEntries.map((e) => e.key))
       for (let i = 0; i < htParsed.groups.length && groups.length < MAX_HT_GROUPS; i++) {
         const ids = htParsed.groups[i].slice(0, MAX_HT_TARGETS_PER_GROUP)
         if (ids.length === 0) continue
@@ -538,7 +540,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       // v2.38：启动时的靶点选择（未勾选 → skipped 入运行记录，可事后恢复评估）
       const skipFlags = { groups: groupSkipFlags, seqGroups: seqSkipFlags }
       const importedFlags = { groups: groupImportedFlags, seqGroups: seqImportedFlags }
-      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, skipFlags, importedFlags, excelRows: htExcelRows.length ? htExcelRows : undefined, goal: trimmedGoal, ligands, options }
+      // v2.68：导入匹配键的报告数据（jobId/fileName — 汇总报告恢复服务端统计行）
+      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, skipFlags, importedFlags, importedReports: htImportedEntries.length ? htImportedEntries : undefined, excelRows: htExcelRows.length ? htExcelRows : undefined, goal: trimmedGoal, ligands, options }
       await onStartHighThroughput(payload)
       return
     }
@@ -986,8 +989,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   archiving={htArchiving}
                   skipKeys={htSkipKeys}
                   onSkipKeysChange={setHtSkipKeys}
-                  importedKeys={htImportedKeys}
-                  onImportedKeysChange={setHtImportedKeys}
+                  importedEntries={htImportedEntries}
+                  onImportedEntriesChange={setHtImportedEntries}
                 />
                 {htOverLimit && (
                   <p className="mt-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">

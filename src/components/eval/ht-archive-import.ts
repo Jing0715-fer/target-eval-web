@@ -70,6 +70,10 @@ export interface HtArchiveReport {
   totalGroups?: number
   /** v2.45：合并报告覆盖的靶点数（靶点数 K 个 / 清单同组 job 条目数 / 题目尾标签数） */
   targetCount?: number
+  /** v2.68：报告对应的原评估作业 id（zip 清单 / 报告内嵌 targeteval:job meta）—
+   *  导入匹配后随靶点留存：汇总报告生成时发回服务端，DB 仍在保留期内则恢复
+   *  完整统计行（评分/结构/结论），过期则该靶点以「载入」降级行呈现 */
+  jobId?: string
   /** v2.45.1：全同比对区间跨度（题目「残基 X-Y」且无同源度后缀 — 跨度 = 提交序列
    *  长度；多靶点组内按长度唯一定位靶点用。例：O89342 残基 25-483 → 跨度 459 =
    *  提交的 459aa 构建链） */
@@ -659,6 +663,13 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
     }
   }
 
+  // ── v2.68 原作业标记（targeteval:job meta — v2.68 起单独报告内嵌；单文件导入时
+  //    汇总报告据此从服务端恢复完整统计行；旧报告无此标记 → 降级「载入」行）──
+  const jobMeta = parseMetaJson<{ jobId?: string | null }>(capped, 'targeteval:job')
+  const metaJobId = jobMeta && typeof jobMeta.jobId === 'string' && /^[a-z0-9]{20,40}$/i.test(jobMeta.jobId)
+    ? jobMeta.jobId
+    : undefined
+
   // ── v2.49 运行标记（targeteval:run meta — 下载时注入的组号/总组数，优先于文件名）。
   //    文件名证据天然脆弱：Firefox/Safari 按 W3C 规范丢弃 download 目录段、Chrome 建
   //    目录后从文件夹选文件 file.name 无 G 前缀、手工重命名 — 内容里的标记不受影响 ──
@@ -727,6 +738,7 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
         stem: e.label ?? e.uniprot ?? stem,
         group,
         totalGroups,
+        jobId: metaJobId,
       })
     }
   }
@@ -746,6 +758,7 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
         uniprot: accM ? accM[0].toUpperCase() : undefined,
         seqLength: lenM ? Number(lenM[1]) : undefined,
         stem: label,
+        jobId: metaJobId,
         // v2.45：非合并文件（题目尾形态不成立时不会进本分支 — 防御性保留）
       })
     }
@@ -795,9 +808,8 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
         // v2.45.1：全同比对（无同源度后缀）时的区间跨度 = 提交序列长度
         alignedSpan: range && !hasIdentitySuffix ? range[1] - range[0] + 1 : undefined,
         stem: name,
-        // v2.45：单靶点报告文件携带组号（组内仅 1 靶点时可判定归属；合并文件的
-        //  h1 条目不带组号 — 源组多靶点时无法证明归属谁）
-        ...(isMerged ? {} : { group, totalGroups }),
+        // v2.68：文件级作业标记（单靶点报告 = 该靶点的作业；合并文件不携带）
+        ...(isMerged ? {} : { jobId: metaJobId, group, totalGroups }),
       })
     } else if (seqShape) {
       seenEvidence.add(evidence)
@@ -808,7 +820,7 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
         range,
         seqLength,
         stem: seqLength != null ? `${name} · ${seqLength}aa` : name,
-        ...(isMerged ? {} : { group, totalGroups }),
+        ...(isMerged ? {} : { jobId: metaJobId, group, totalGroups }),
       })
     }
   }
@@ -858,6 +870,7 @@ export async function parseHtArchive(file: File): Promise<HtArchiveReport[]> {
         return entries.map((e) => ({
           kind: e.kind,
           path: e.path,
+          jobId: e.kind === 'job' && e.jobId && /^[a-z0-9]{20,40}$/i.test(e.jobId) ? e.jobId : undefined,
           uniprot: e.uniprot,
           range: Array.isArray(e.range) && e.range.length === 2 ? [Number(e.range[0]), Number(e.range[1])] : undefined,
           seqSha: e.seqSha,
@@ -893,6 +906,14 @@ export async function parseHtArchive(file: File): Promise<HtArchiveReport[]> {
     // 题目补充（「蛋白名（P0DTC2 · 残基 16-1273）」— 区间证据；文件名无 acc 时兜底）
     try {
       const head = (await zip.files[name].async('text')).slice(0, MAX_HTML_HEAD_CHARS)
+      // v2.68：报告内嵌的作业标记（新报告 — 汇总生成时恢复服务端统计）
+      const jm = /<meta\s+name="targeteval:job"\s+content="([^"]*)"/i.exec(head)
+      if (jm) {
+        try {
+          const j = JSON.parse(unescapeAttr(jm[1]!)) as { jobId?: unknown }
+          if (j && typeof j.jobId === 'string' && /^[a-z0-9]{20,40}$/i.test(j.jobId)) rep.jobId = j.jobId
+        } catch { /* 损坏标记忽略 */ }
+      }
       const titleM = /<title>([^<]*)<\/title>/i.exec(head)
       const title = titleM?.[1] ?? ''
       // v2.45：题目尾标签清单「标题 · A + B + C」→ 合并报告（kind 修正 + 靶点数）

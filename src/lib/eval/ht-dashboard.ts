@@ -100,6 +100,17 @@ export interface HtDashboardRow {
   /** v2.61：回补来源标注（序列靶点身份识别链 — 如「BLAST nr 识别 98%」「UniProt 精确匹配」；
   *  uniprotId 为评估中回补时的徽标提示） */
   identifiedVia?: string
+  /** v2.68：本行来自「导入既有报告」（原作业仍在 DB 保留期内 — 统计数据完整恢复；
+   *  行内「载入」徽标与本次评估行区分） */
+  imported?: boolean
+  /** v2.68：降级载入行（导入的旧版报告无作业标记 — 无评分/计数，仅主表呈现 +
+   *  完成口径；不参与分布/均值/结论统计） */
+  bare?: boolean
+  /** v2.68：导入来源文件名（降级行说明 — DB 命中行不携带） */
+  importedFile?: string
+  /** v2.68：匹配到的原表行内序列格原文（与 excelText 中 [序列 N aa] 标记按序对应 —
+   *  主表序列标记处一键复制按钮数据源；旧快照无 seqs 则标记无按钮） */
+  excelSeqs?: string[]
 }
 
 export interface HtVerdict {
@@ -117,6 +128,8 @@ export interface HtDashboardStats {
   /** 成功加载（参与统计）的靶点数；差值 = 失败/未完成 */
   loadedTargets: number
   failedTargets: number
+  /** v2.68：载入既有报告的靶点数（导入作业恢复行 + 降级行）— 完成口径「N 评估 + M 载入」 */
+  importedTargets: number
   overallMean: number
   overallMedian: number
   overallMin: number
@@ -142,6 +155,18 @@ export interface HtDashboardEntry {
   mergedId?: string
   group?: number
   label?: string
+}
+
+/** v2.68：导入既有报告但无作业标记的靶点（POST 载荷 — 降级「载入」行：
+ *  主表呈现 + 完成口径计数，不参与评分分布；sequence 供行内复制按钮用） */
+export interface HtImportedTarget {
+  label: string
+  /** 1-based 组序号（主表行 G 归属说明） */
+  group?: number
+  /** 序列靶点的提交序列（行内「载入」行复制序列按钮 + 弹出页序列块） */
+  sequence?: string
+  /** 导入来源文件名（行说明） */
+  fileName?: string
 }
 
 /** v2.60：浏览器本地缓存恢复的作业快照 — 服务端作业已过期（实例回收/起出保留期）
@@ -174,6 +199,8 @@ interface RowSource {
   sequence?: string | null
   /** v2.63：单独报告文件原文（与下载的单独报告完全一致 — 由加载层读文件回填） */
   reportHtml?: string | null
+  /** v2.68：本行来自导入报告（原作业恢复 — 行内「载入」徽标） */
+  imported?: boolean
 }
 
 /** 从评分摘要等素材构造统计行（summary 缺失 → null） */
@@ -222,6 +249,7 @@ function buildDashboardRow(src: RowSource): HtDashboardRow | null {
     sequence: src.sequence ?? undefined,
     reportHtml: src.reportHtml ?? undefined,
     identifiedVia,
+    imported: src.imported ? true : undefined,
   }
 }
 
@@ -248,8 +276,9 @@ async function readReportHtml(reportPath: string | null, budget: { total: number
 
 /** 从 DB 加载统计行（不校验归属 — 路由层负责）；v2.60：DB 无该作业时回退
  *  前端上传的缓存快照（archivedByJob）恢复统计行（行标 fromArchive）；
- *  v2.61：sequencesByJob 按 jobId 回填提交序列全文（汇总表复制按钮 + 弹出报告页展示）。 */
-export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedByJob?: Map<string, ArchivedJobSnapshot>, sequencesByJob?: Map<string, string>): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
+ *  v2.61：sequencesByJob 按 jobId 回填提交序列全文（汇总表复制按钮 + 弹出报告页展示）；
+ *  v2.68：importedJobIds 中的作业为「导入既有报告」的靶点 — 行标 imported（「载入」徽标）。 */
+export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedByJob?: Map<string, ArchivedJobSnapshot>, sequencesByJob?: Map<string, string>, importedJobIds?: Set<string>): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
   const rows: HtDashboardRow[] = []
   let jobCount = 0
   const reportBudget = { total: 0 }
@@ -278,6 +307,7 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
         sequence: sequencesByJob?.get(job.id) ?? null,
         // v2.63：报告文件原文（与下载的单独报告完全一致）— 丢失/超预算时回退 markdown 重建页
         reportHtml: await readReportHtml(job.reportPath, reportBudget),
+        imported: importedJobIds?.has(job.id) ? true : undefined,
       })
       if (row) rows.push(row)
     } else {
@@ -297,6 +327,7 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
         fromArchive: true,
         sequence: sequencesByJob?.get(snap.jobId) ?? null,
         reportHtml: null, // 快照仅存 markdown — 弹出页由重建页提供（无服务器文件可内嵌）
+        imported: importedJobIds?.has(snap.jobId) ? true : undefined,
       })
       if (row) rows.push(row)
     }
@@ -304,9 +335,42 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
   return { rows, jobCount }
 }
 
+/** v2.68：导入既有报告但无作业标记的靶点 → 降级「载入」行（bare = true）。
+ *  评分/计数全空（渲染层显示「—」），仅主表呈现 + 完成口径；不参与分布/均值/结论。
+ *  jobId 用伪 id（`imp-{n}` — 与 verdict/zipHref 索引不冲突，永不指向真实作业）。 */
+export function buildImportedBareRows(imported: HtImportedTarget[]): HtDashboardRow[] {
+  return imported.map((t, i) => ({
+    jobId: `imp-${i + 1}`,
+    label: t.label.slice(0, 60),
+    proteinName: t.label.slice(0, 60),
+    organism: '',
+    overall: 0,
+    xray: 0,
+    cryoem: 0,
+    nmr: 0,
+    directPdbCount: 0,
+    blastHitCount: 0,
+    coverage: 0,
+    methodXrayCount: 0,
+    methodCryoemCount: 0,
+    methodNmrCount: 0,
+    bestResolution: null,
+    ligandCount: 0,
+    literatureCount: 0,
+    reportLlmOk: false,
+    durationMs: 0,
+    hasReport: false,
+    imported: true,
+    bare: true,
+    importedFile: t.fileName,
+    sequence: t.sequence,
+  }))
+}
+
 /** v2.36：评估条目 ↔ 原始 Excel 行匹配（汇总报告「原表内容」列）。
  *  匹配优先级：label 前缀（结构交付行标签）> Excel 行文本含 label > uniprot 在行文本中。
- *  每条 Excel 行最多被引用一次后从候选池退位（多靶点同行的场景仍可重复命中 uniprot）。 */
+ *  每条 Excel 行最多被引用一次后从候选池退位（多靶点同行的场景仍可重复命中 uniprot）。
+ *  v2.68：行快照的 seqs（行内序列格原文）一并附着 — 主表序列标记处一键复制按钮。 */
 export function attachExcelRows(rows: HtDashboardRow[], excelRows: HtExcelRowSnapshot[]): void {
   if (!excelRows.length) return
   for (const r of rows) {
@@ -315,13 +379,16 @@ export function attachExcelRows(rows: HtDashboardRow[], excelRows: HtExcelRowSna
     if (!hit && r.uniprotId) {
       hit = excelRows.find((e) => e.text.toUpperCase().includes(String(r.uniprotId).toUpperCase()))
     }
-    if (hit) r.excelText = hit.text
+    if (hit) {
+      r.excelText = hit.text
+      if (hit.seqs?.length) r.excelSeqs = hit.seqs
+    }
   }
 }
 
 // ─── 统计 ─────────────────────────────────────────────────────────────────────
 
-export function computeHtStats(rows: HtDashboardRow[], jobCount: number): HtDashboardStats {
+export function computeHtStats(rows: HtDashboardRow[], jobCount: number, importedBareCount = 0): HtDashboardStats {
   const n = rows.length
   const overall = rows.map(r => r.overall).sort((a, b) => a - b)
   const mean = (xs: number[]): number => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : 0)
@@ -332,9 +399,10 @@ export function computeHtStats(rows: HtDashboardRow[], jobCount: number): HtDash
   }
   const verdicts = rows.map(r => ruleVerdict(r).verdict)
   return {
-    totalTargets: jobCount,
+    totalTargets: jobCount + importedBareCount,
     loadedTargets: n,
     failedTargets: Math.max(0, jobCount - n),
+    importedTargets: rows.filter(r => r.imported).length + importedBareCount,
     overallMean: mean(overall),
     overallMedian: n ? overall[Math.floor(n / 2)] : 0,
     overallMin: n ? overall[0] : 0,
@@ -528,8 +596,9 @@ export interface RenderHtDashboardInput {
   /** 运行时长（秒，可选展示） */
   durationSec?: number
   generatedAt: string
-  /** v2.36：原始 Excel 行快照（「原表内容」列；匹配逻辑见 attachExcelRows） */
-  excelRows?: Array<{ label: string; text: string }>
+  /** v2.36：原始 Excel 行快照（「原表内容」列；匹配逻辑见 attachExcelRows；
+   *  v2.68 seqs = 行内序列格原文 — 序列标记处一键复制按钮） */
+  excelRows?: Array<{ label: string; text: string; seqs?: string[] }>
 }
 
 /** v2.61：JSON 载荷内嵌为 <script type="application/json">（所有 `<` 转义为 \u003c —
@@ -591,6 +660,8 @@ h1.rpt-title{font-size:26px;line-height:1.4;margin-bottom:6px;font-weight:900;ov
 article.tg{margin:0}
 .tg-head{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;background:linear-gradient(180deg,#ffffff,#f7fcf9);padding:13px 18px;margin-bottom:12px}
 .tg-cache{display:inline-block;margin-left:8px;padding:0 6px;border-radius:4px;border:1px solid #fde68a;background:#fffbeb;color:#a16207;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:2px}
+/* v2.68：载入徽标（弹出页刊头 — 导入既有报告的靶点） */
+.tg-load{display:inline-block;padding:0 6px;border-radius:4px;border:1px solid #6ee7c7;background:#ecfdf5;color:#047857;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px}
 .tg-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin-top:6px;font-size:11.5px;color:var(--sub);font-family:var(--mono)}
 .tg-meta a{color:var(--accent-2)}
 .uni-id{display:inline-block;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent);background:var(--accent-bg);border:1.5px solid #6ee7c7;border-radius:6px;padding:1px 9px;text-decoration:none;letter-spacing:.2px}
@@ -645,6 +716,16 @@ function formatSeqDisplay(s: string): string {
  *  一句话结论）+ renderMarkdown 渲染的评估正文 + 提交序列块（v2.64：序列 10 残基
  *  分组 + 行号展示；原文存 data-seq，弹出页脚本读属性完成一键复制）。 */
 function renderTargetArticle(r: HtDashboardRow, v: HtVerdict, origin: string): string {
+  // v2.68：降级载入行（旧版报告无作业标记）— 无评分/正文，说明 + 序列块
+  if (r.bare) {
+    return `<article class="tg">
+<div class="tg-head">
+  <div class="tg-meta">${esc(r.label)}</div>
+  <div class="tg-meta"><span>已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估，该靶点的评分与结论见导入的报告文件</span></div>
+</div>
+${r.sequence ? `<div class="seqbox"><div class="seq-head"><b>提交序列</b> · ${r.sequence.length} aa · 10 残基分组 · 完整序列一键复制<button type="button" class="seq-copy">复制序列</button></div><pre class="seq-pre" data-seq="${esc(r.sequence)}">${esc(formatSeqDisplay(r.sequence))}</pre></div>` : ''}
+</article>`
+  }
   const body = r.reportMarkdown
     ? renderMarkdown(r.reportMarkdown, 0)
     : '<p style="color:var(--sub)">（该靶点无内嵌报告正文 — AI 报告未生成成功或未随缓存快照保留；评分、计数与结论不受影响，完整判定见汇总报告主表。）</p>'
@@ -654,7 +735,7 @@ function renderTargetArticle(r: HtDashboardRow, v: HtVerdict, origin: string): s
   const online = r.hasReport && origin ? `<span><a href="${esc(origin)}/api/jobs/${esc(r.jobId)}/report" target="_blank" rel="noopener">在线报告 ↗</a></span>` : ''
   return `<article class="tg">
 <div class="tg-head">
-  <div class="tg-meta">${uniBadge}${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<span>${esc(r.proteinName)}</span>` : ''}${r.organism ? `<span>${esc(r.organism)}</span>` : ''}</div>
+  <div class="tg-meta">${uniBadge}${r.imported ? '<span class="tg-load" title="该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端恢复">载入</span>' : ''}${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<span>${esc(r.proteinName)}</span>` : ''}${r.organism ? `<span>${esc(r.organism)}</span>` : ''}</div>
   <div class="tg-meta"><span>总分 <b class="score ${scoreTone(r.overall)}">${r.overall}</b></span><span>X-ray ${r.xray} · Cryo-EM ${r.cryoem} · NMR ${r.nmr}</span><span>直接结构 ${r.directPdbCount}${r.blastHitCount ? ` · 同源 ${r.blastHitCount}` : ''}</span>${r.bestResolution != null ? `<span>最佳 ${r.bestResolution}Å</span>` : ''}<span>覆盖 ${Math.round(r.coverage)}%</span>${online}</div>
   <div class="tg-verdict"><span class="vd vd-${v.verdict}">${VERDICT_META[v.verdict].label}</span><span class="vl">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</span></div>
 </div>
@@ -708,6 +789,20 @@ function buildHtReportPayload(input: {
   }
 }
 
+/** v2.68：原表内容单元格渲染 — [序列 N aa] 标记处替换为一键复制按钮（data-seq 携带
+ *  原文；seqs 缺失/耗尽时保留纯文本标记 — 旧快照无按钮，两端一致）。其余文本 esc。 */
+function renderExcelCell(text: string, seqs?: string[]): string {
+  const collapsed = collapseSeqText(text)
+  if (!seqs || seqs.length === 0) return esc(collapsed)
+  let i = 0
+  return esc(collapsed).replace(/\[序列 (\d+) aa\]/g, (mark, n) => {
+    const seq = seqs[i]
+    i++
+    if (!seq) return mark
+    return `<button type="button" class="xl-seq" data-seq="${esc(seq)}" title="复制该行原表的完整序列（${n} aa — 原文见原 Excel 序列列）">序列 ${n} aa ⧉</button>`
+  })
+}
+
 /** 汇总主表（可筛选 · 可排序 · X-ray/Cryo-EM/NMR 评分分列单独排序 · 「完整报告」弹出单靶点完整报告） */
 export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   const { rows, stats, verdicts, markdown, llmOk, llmErrors, engineSummary, origin } = input
@@ -715,8 +810,9 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   const sorted = [...rows].sort((a, b) => b.overall - a.overall)
   // v2.60：缓存恢复行（服务端作业已过期 — 由浏览器本地快照重建统计）头部提示 + 行内徽标
   const recoveredCount = rows.filter(r => r.fromArchive).length
-  // v2.63：单靶点完整报告内嵌载荷（原文报告或 markdown 正文任一存在才内嵌）
-  const anyBody = sorted.some(r => r.reportHtml || r.reportMarkdown)
+  // v2.63：单靶点完整报告内嵌载荷（原文报告或 markdown 正文任一存在才内嵌；
+  // v2.68：降级载入行（说明 + 提交序列）同样可弹出）
+  const anyBody = sorted.some(r => r.reportHtml || r.reportMarkdown || r.bare)
   const rptPayload = anyBody
     ? buildHtReportPayload({ title: input.title, rows: sorted, verdicts, generatedAt: input.generatedAt, engineSummary, origin })
     : null
@@ -729,11 +825,12 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   const methodBar = (label: string, mean: number, count: number, total: number, color: string): string =>
     `<div class="mb-row"><div class="mb-cap"><span>${label}</span><span class="mb-sub">均分 ${mean}/10 · ${count}/${total} 靶点有结构</span></div><div class="mb-track"><div class="mb-fill" style="background:${color};width:${Math.round(mean * 10)}%"></div></div></div>`
 
-  // ── 主表行（v2.65：靶点 / UniProt 分列 · X/C/N 分列 · 完整报告弹出 + 逐靶点下载；序列列已移除）──
+  // ── 主表行（v2.65：靶点 / UniProt 分列 · X/C/N 分列 · 完整报告弹出 + 逐靶点下载；序列列已移除；
+  //    v2.68：导入载入行徽标 + 降级行各列「—」）──
   const rowPairs = sorted.map((r, idx) => {
     const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
     const meta = VERDICT_META[v.verdict]
-    const search = esc([r.label, r.uniprotId ?? '', r.proteinName, r.organism, r.excelText ? collapseSeqText(r.excelText) : '', v.line, r.identifiedVia ?? ''].join(' ').toLowerCase())
+    const search = esc([r.label, r.uniprotId ?? '', r.proteinName, r.organism, r.excelText ? collapseSeqText(r.excelText) : '', r.bare ? '载入 已导入' : v.line, r.identifiedVia ?? ''].join(' ').toLowerCase())
     const links: string[] = []
     if (r.zipHref) links.push(`<a href="${esc(r.zipHref)}">离线包</a>`)
     if (r.hasReport && origin) links.push(`<a href="${esc(origin)}/api/jobs/${esc(r.jobId)}/report?download=1">在线</a>`)
@@ -741,11 +838,14 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
     const uniBadge = r.uniprotId
       ? `<div class="tg-uni"><a class="uni-id" href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(r.uniprotId)}" target="_blank" rel="noopener"${r.identifiedVia ? ` title="回补的 UniProt ID（${esc(r.identifiedVia)}）— 点击打开 UniProt 条目"` : ' title="UniProt ID — 点击打开 UniProt 条目"'}>UniProt ${esc(r.uniprotId)}</a>${r.identifiedVia ? `<span class="uni-src" title="该 ID 为评估中由提交序列识别回补（${esc(r.identifiedVia)}）">回补 · ${esc(r.identifiedVia)}</span>` : ''}</div>`
       : '<span class="dim">—</span>'
-    const hasPopup = Boolean(r.reportHtml || r.reportMarkdown)
+    // v2.68：bare 载入行同样可弹出（说明 + 提交序列的重建页）
+    const hasPopup = Boolean(r.reportHtml || r.reportMarkdown || r.bare)
     const openBtn = anyBody && hasPopup
       ? `<button type="button" class="mt-open" data-i="${idx}"${r.reportHtml
           ? ' title="新标签页弹出该靶点的单独评估报告原文（与下载的单独报告完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
-          : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>完整报告 ↗</button>`
+          : r.bare
+            ? ' title="新标签页弹出该靶点的载入说明与提交序列（旧版导入报告无作业标记 — 评分与结论见导入的报告文件）"'
+            : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>完整报告 ↗</button>`
       : ''
     // v2.65：逐靶点下载按钮 — 内嵌的原文/重建页一键存盘（命名与单独报告下载同源）
     const dlBtn = anyBody && hasPopup
@@ -753,22 +853,32 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
           ? ' title="下载该靶点的单独评估报告 HTML 文件（与弹出页及单独报告下载完全一致 — 离线自包含）"'
           : ' title="下载该靶点的重建报告页 HTML（服务端报告原文已回收 — 由缓存数据重建）"'}>下载 ⤓</button>`
       : ''
-    return `<tr class="mt-row" data-job="${esc(r.jobId)}" data-overall="${r.overall}" data-xray="${r.xray}" data-cryoem="${r.cryoem}" data-nmr="${r.nmr}" data-pdb="${r.directPdbCount}" data-cov="${Math.round(r.coverage)}" data-verdict="${v.verdict}" data-uniprot="${esc(r.uniprotId ?? '')}" data-search="${search}">
+    // v2.68：载入徽标（DB 命中行 = 统计已从服务端恢复；降级行 = 报告见导入文件）
+    const loadBadge = r.imported
+      ? `<span class="tg-load" title="${r.bare
+        ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；旧版报告无作业标记，评分与结论见导入的报告文件`
+        : '该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端原作业恢复，与本次评估同权'}">载入</span>`
+      : ''
+    return `<tr class="mt-row" data-job="${esc(r.jobId)}" data-overall="${r.bare ? -1 : r.overall}" data-xray="${r.bare ? -1 : r.xray}" data-cryoem="${r.bare ? -1 : r.cryoem}" data-nmr="${r.bare ? -1 : r.nmr}" data-pdb="${r.bare ? -1 : r.directPdbCount}" data-cov="${r.bare ? -1 : Math.round(r.coverage)}" data-verdict="${r.bare ? 'load' : v.verdict}"${r.imported && !r.bare ? ' data-imported="1"' : ''} data-uniprot="${esc(r.uniprotId ?? '')}" data-search="${search}">
 <td class="td-idx">${idx + 1}</td>
 <td class="td-target">
-  <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用；评估正文经「完整报告」弹出页提供">缓存恢复</span>' : ''}</div>
-  ${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<div class="tg-sub" title="${esc(r.proteinName)}">${esc(r.proteinName)}</div>` : ''}
-  ${r.organism ? `<div class="tg-sub" title="${esc(r.organism)}">${esc(r.organism)}</div>` : ''}
-  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已折叠 — 表格不显示序列，完整序列见该靶点的单独报告）">${esc(collapseSeqText(r.excelText))}</div>` : ''}
+  <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${loadBadge}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用；评估正文经「完整报告」弹出页提供">缓存恢复</span>' : ''}</div>
+  ${!r.bare && r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<div class="tg-sub" title="${esc(r.proteinName)}">${esc(r.proteinName)}</div>` : ''}
+  ${!r.bare && r.organism ? `<div class="tg-sub" title="${esc(r.organism)}">${esc(r.organism)}</div>` : ''}
+  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列标记处可一键复制原表完整序列 — 无按钮的标记为旧版快照）">${renderExcelCell(r.excelText, r.excelSeqs)}</div>` : ''}
 </td>
 <td class="td-uni">${uniBadge}</td>
-<td class="td-num"><span class="score ${scoreTone(r.overall)}">${r.overall}</span></td>
+${r.bare
+  ? '<td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num mono"><span class="dim">—</span></td>'
+  : `<td class="td-num"><span class="score ${scoreTone(r.overall)}">${r.overall}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.xray)}" title="X-ray 方法评分">${r.xray}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.cryoem)}" title="Cryo-EM 方法评分">${r.cryoem}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.nmr)}" title="NMR 方法评分">${r.nmr}</span></td>
 <td class="td-num">${r.directPdbCount > 0 || r.blastHitCount > 0 ? `<span class="pdb-n">${r.directPdbCount}</span>` : '<span class="pdb-n dim">0</span>'}${r.blastHitCount > 0 ? `<span class="pdb-blast" title="BLAST 同源命中 ${r.blastHitCount} 个（未计入直接结构数）">+${r.blastHitCount}</span>` : ''}${r.bestResolution != null ? `<div class="pdb-res" title="最佳分辨率">${r.bestResolution}Å</div>` : ''}</td>
-<td class="td-num mono">${Math.round(r.coverage)}%</td>
-<td class="td-verdict"><span class="vd vd-${v.verdict}">${meta.label}</span><div class="vd-line">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</div></td>
+<td class="td-num mono">${Math.round(r.coverage)}%</td>`}
+<td class="td-verdict">${r.bare
+  ? '<span class="vd vd-load">已载入</span><div class="vd-line">已有报告（导入匹配）— 本次运行未重复评估，评分与结论见导入的报告文件</div>'
+  : `<span class="vd vd-${v.verdict}">${meta.label}</span><div class="vd-line">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</div>`}</td>
 <td class="td-act">
   ${openBtn || dlBtn ? `<div class="mt-btns">${openBtn}${dlBtn}</div>` : ''}
   ${links.length ? `<div class="mt-links">${links.join(' · ')}</div>` : ''}
@@ -878,6 +988,14 @@ tr.mt-row:hover td{background:#fbfdfc}
 .uni-src{font-family:var(--mono);font-size:9.5px;color:#0f766e;background:#ecfdf5;border:1px dashed #6ee7c7;border-radius:4px;padding:0 6px;line-height:1.9;display:inline-block}
 .tg-excel{margin-top:4px;padding:4px 8px;border-left:2px solid #b8e6d2;background:var(--accent-bg);font-size:10.5px;color:var(--sub);line-height:1.6;overflow-wrap:anywhere;border-radius:0 4px 4px 0}
 .tg-cache{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #fde68a;background:#fffbeb;color:#a16207;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
+/* v2.68：载入徽标（导入既有报告的靶点 — emerald 调与「缓存恢复」区分） */
+.tg-load{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #6ee7c7;background:#ecfdf5;color:#047857;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
+/* v2.68：已载入结论徽标（降级行 — 不参与推进/不建议统计） */
+.vd-load{color:#0f766e;background:#f0fdfa;border:1px dashed #6ee7c7}
+/* v2.68：原表内容序列标记的复制按钮（⧉ — 点击复制原表该行完整序列） */
+.xl-seq{display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:600;padding:0 6px;border-radius:4px;border:1px solid #a7f3d0;background:#fff;color:var(--accent-2);cursor:pointer;letter-spacing:.3px;line-height:1.8;vertical-align:1px}
+.xl-seq:hover{background:var(--accent-bg);border-color:var(--accent-2)}
+.xl-seq.ok{background:var(--accent);color:#fff;border-color:var(--accent)}
 .score{display:inline-block;min-width:34px;text-align:center;border-radius:5px;padding:1px 7px;font-family:var(--mono);font-size:12px;font-weight:700}
 .score.hi{color:#0f766e;background:#ccfbf1}.score.md{color:#a16207;background:#fef3c7}.score.lo{color:#b91c1c;background:#fee2e2}
 .score.mini{min-width:26px;padding:1px 4px;font-size:11px}
@@ -936,11 +1054,12 @@ tr.mt-row:hover td{background:#fbfdfc}
     <div><b>生成时间</b> ${esc(input.generatedAt)}</div>
     ${input.durationSec ? `<div><b>运行时长</b> ${Math.round(input.durationSec / 60)} 分钟</div>` : ''}
     <div><b>评估引擎</b> <span class="mv">${esc(engineSummary)}</span></div>
-    <div><b>靶点规模</b> ${stats.totalTargets} 个（成功 ${stats.loadedTargets}${stats.failedTargets ? ` · 失败 ${stats.failedTargets}` : ''}）</div>
+    <div><b>靶点规模</b> ${stats.totalTargets} 个（成功 ${stats.loadedTargets}${stats.importedTargets ? ` · 载入 ${stats.importedTargets}` : ''}${stats.failedTargets ? ` · 失败 ${stats.failedTargets}` : ''}）</div>
   </div>
 </div>
 
-${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，评估正文经「完整报告」弹出页提供；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.length - recoveredCount} 个靶点数据完整来自服务器。</div>` : ''}
+${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，评估正文经「完整报告」弹出页提供；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.filter(r => !r.fromArchive).length} 个靶点数据完整来自服务器。</div>` : ''}
+${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个为旧版报告（无作业标记），以降级行呈现（评分列「—」，评分与结论见导入的报告文件）` : ''}。</div>` : ''}
 
 ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 
@@ -948,7 +1067,7 @@ ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="gr
 <div class="glance">
   <div class="glance-kicker">At a Glance · 批次画像</div>
   <div class="glance-tiles">
-    ${tile('参与靶点', `${stats.totalTargets}`, `${stats.loadedTargets} 成功${stats.failedTargets ? ` · ${stats.failedTargets} 失败` : ''}`)}
+    ${tile('参与靶点', `${stats.totalTargets}`, `${stats.loadedTargets} 成功${stats.importedTargets ? ` · ${stats.importedTargets} 载入` : ''}${stats.failedTargets ? ` · ${stats.failedTargets} 失败` : ''}`)}
     ${tile('总体均分', `${stats.overallMean}<span class="u">/10</span>`, `中位 ${stats.overallMedian} · 区间 ${stats.overallMin}-${stats.overallMax}`)}
     ${tile('建议推进', `${stats.verdictCounts.go}`, `谨慎 ${stats.verdictCounts.caution} · 不建议 ${stats.verdictCounts.no}`)}
     ${tile('有结构靶点', `${stats.targetsWithStructures}/${stats.loadedTargets}`, `X-ray&nbsp;${stats.targetsWithXray} · Cryo-EM&nbsp;${stats.targetsWithCryoem} · NMR&nbsp;${stats.targetsWithNmr}`)}
@@ -974,7 +1093,7 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 <div class="mt-tools no-print">
   <input type="search" id="mt-q" placeholder="搜索靶点 / UniProt / 蛋白名…" aria-label="筛选搜索">
   <label>结论
-    <select id="mt-verdict"><option value="all">全部</option><option value="go">建议推进</option><option value="caution">谨慎推进</option><option value="no">不建议</option></select>
+    <select id="mt-verdict"><option value="all">全部</option><option value="go">建议推进</option><option value="caution">谨慎推进</option><option value="no">不建议</option><option value="load">已载入（导入）</option></select>
   </label>
   <label>总分 ≥
     <select id="mt-min"><option value="0">0</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option></select>
@@ -999,7 +1118,7 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 <tbody>${rowPairs || '<tr><td colspan="11" style="padding:16px;color:var(--faint)">无成功靶点</td></tr>'}</tbody>
 </table>
 </div>
-<div class="note">「完整报告 ↗」新标签页弹出该靶点自己的单独评估报告 — 服务器数据保留期内的靶点弹出<b>报告文件原文（与「在线/离线包」下载的单独报告完全一致，含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节）</b>；缓存恢复的靶点（服务端文件已回收）弹出由 markdown 与统计数据重建的页面。「下载 ⤓」把同一份报告一键存盘（文件名与单独报告下载同源）。「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。UniProt 列回补的 ID 以徽标展示（标注识别来源）；表格不显示序列 — 各靶点的完整序列见其单独报告（原表行快照中的序列文本已折叠）。</div>
+<div class="note">「完整报告 ↗」新标签页弹出该靶点自己的单独评估报告 — 服务器数据保留期内的靶点弹出<b>报告文件原文（与「在线/离线包」下载的单独报告完全一致，含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节）</b>；缓存恢复的靶点（服务端文件已回收）弹出由 markdown 与统计数据重建的页面；载入的旧版报告靶点弹出载入说明与提交序列。「下载 ⤓」把同一份报告一键存盘（文件名与单独报告下载同源）。「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。UniProt 列回补的 ID 以徽标展示（标注识别来源）。原表内容中带 ⧉ 的序列标记可<b>一键复制该行原表的完整序列</b>（无按钮的标记为旧版快照）；各靶点的完整序列亦见其单独报告。</div>
 
 <h2 class="sec"><span class="k">03</span>AI 整体可行性报告</h2>
 <div class="panel md">${body}</div>
@@ -1019,8 +1138,16 @@ ${rptPayload ? embedJsonScript('ht-rpt-data', rptPayload) : ''}
   var selMin = document.getElementById('mt-min');
   var countEl = document.getElementById('mt-count');
   function visible(r){
-    if (selV.value !== 'all' && r.getAttribute('data-verdict') !== selV.value) return false;
-    if (parseInt(r.getAttribute('data-overall') || '0', 10) < parseInt(selMin.value, 10)) return false;
+    var vd = r.getAttribute('data-verdict');
+    if (selV.value !== 'all') {
+      // v2.68：「已载入」= 全部导入载入的靶点（降级行 + 服务端恢复行）；
+      //  其余选项按结论值精确匹配（恢复行的结论是真实评估结论，正常参与筛选）
+      if (selV.value === 'load') {
+        if (vd !== 'load' && r.getAttribute('data-imported') !== '1') return false;
+      } else if (vd !== selV.value) return false;
+    }
+    // v2.68：载入降级行（无评分，data-overall=-1 置底排序用）不参与总分门槛筛选
+    if (vd !== 'load' && parseInt(r.getAttribute('data-overall') || '0', 10) < parseInt(selMin.value, 10)) return false;
     var s = (q.value || '').trim().toLowerCase();
     if (s && (r.getAttribute('data-search') || '').indexOf(s) < 0) return false;
     return true;
@@ -1176,6 +1303,36 @@ ${rptPayload ? embedJsonScript('ht-rpt-data', rptPayload) : ''}
       window.alert('下载报告失败：' + (e && e.message ? e.message : e));
     }
   }
+  // v2.68：原表内容序列标记一键复制（data-seq 携带原表该行的完整序列原文）
+  function copySeqText(t, btn){
+    var done = function(){
+      var old = btn.getAttribute('data-label') || btn.textContent;
+      btn.setAttribute('data-label', old);
+      btn.textContent = '已复制 ✓';
+      btn.classList.add('ok');
+      setTimeout(function(){ btn.textContent = old; btn.classList.remove('ok'); }, 1600);
+    };
+    var fallback = function(){
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = t;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        done();
+      } catch (e) {}
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(done, fallback);
+    } else fallback();
+  }
+  document.querySelectorAll('button.xl-seq').forEach(function(b){
+    b.addEventListener('click', function(){
+      var t = b.getAttribute('data-seq') || '';
+      if (t) copySeqText(t, b);
+    });
+  });
   document.querySelectorAll('button.mt-open').forEach(function(b){
     b.addEventListener('click', function(){
       var i = parseInt(b.getAttribute('data-i'), 10);

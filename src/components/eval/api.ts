@@ -830,10 +830,16 @@ function buildSnapshotsForMissing(missingJobIds: string[]): HtArchivedSnapshotIn
 export async function generateHtDashboard(input: {
   entries: HtDashboardEntry[]
   goal?: string
-  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
-  excelRows?: Array<{ label: string; text: string }>
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；v2.68 seqs = 行内序列格原文 —
+   *  序列标记处一键复制按钮数据源） */
+  excelRows?: Array<{ label: string; text: string; seqs?: string[] }>
   /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 单靶点完整报告弹出页展示） */
   sequences?: Array<{ jobId: string; sequence: string }>
+  /** v2.68：导入既有报告但无作业标记的靶点（降级「载入」行 — 主表呈现 + 计入完成口径，
+   *  无评分参与统计分布；sequence 供该行复制序列按钮用） */
+  imported?: Array<{ label: string; group?: number; sequence?: string; fileName?: string }>
+  /** v2.68：导入报告携带的原作业 id（entries 中对应行标「载入」徽标 — 与本次评估行区分） */
+  importedJobIds?: string[]
 }): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
   const post = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>

@@ -993,6 +993,12 @@ export interface HTGroupItemState {
   /** v2.60：本靶点因「导入既有报告」而跳过（区别于手动跳过 — 进度统计计入已完成：
    *  「N 评估 + M 载入」；旧版 localStorage 运行无此字段，回退按 skipNote 前缀「已导入」识别） */
   imported?: boolean
+  /** v2.68：导入报告携带的原作业 id（zip 清单 / 报告内嵌 targeteval:job meta）—
+   *  汇总报告生成时作为 entries 发给服务端：DB 仍在保留期内则恢复完整统计行
+   *  （评分/结构/结论与本次评估同权，行标「载入」）；无此 id 的导入靶点走降级行 */
+  importedJobId?: string
+  /** v2.68：导入来源文件名（行内「载入」徽标 tooltip 与降级行说明用） */
+  importedFile?: string
   /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
   reportIncomplete?: boolean
   /** v2.41：报告不完整说明（缺章数/失败摘要 — chip tooltip 与重跑确认展示） */
@@ -1045,10 +1051,21 @@ export interface HTRunState {
   dashboardError?: string
   /** v2.36：汇总报告生成中（完成横幅的「生成中」态 — 终态后由 dashboardId/dashboardError 接替） */
   dashboardPending?: boolean
-  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；导入时留存） */
-  excelRows?: Array<{ label: string; text: string }>
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；导入时留存）。v2.68：seqs =
+   *  该行序列单元格的原文（与 text 中 [序列 N aa] 标记按出现顺序对应 — 汇总主表
+   *  序列标记处的一键复制按钮数据源；旧快照无此字段则不渲染按钮） */
+  excelRows?: Array<{ label: string; text: string; seqs?: string[] }>
   /** v2.38：zip 导入备注（导入了几份报告、跳过了几个靶点 — 结果页提示用） */
   importedNote?: string
+}
+
+/** v2.68：启动面板「导入报告」匹配到的靶点键 → 报告数据（skipKeys 的导入子集）。
+ *  jobId 存在时汇总报告从服务端恢复完整统计行；否则该靶点在汇总中以降级「载入」行呈现 */
+export interface HtImportedKeyEntry {
+  key: string
+  jobId?: string
+  /** 来源文件名（行内「载入」徽标说明 — zip 内相对路径取文件段） */
+  fileName: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
@@ -1061,8 +1078,8 @@ export interface HTStartPayload {
   groupDomainHints?: Array<Array<string | undefined>>
   /** v2.23.1 序列兜底组（Excel 行缺 UniProt 但有构建序列；每行一组，逐序列独立评估） */
   seqGroups?: HtSeqTarget[][]
-  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；label+折叠文本） */
-  excelRows?: Array<{ label: string; text: string }>
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；label+折叠文本；v2.68 seqs 同 HTRunState） */
+  excelRows?: Array<{ label: string; text: string; seqs?: string[] }>
   /** v2.38：启动时的靶点选择（true = 跳过不评估；与 groups/seqGroups 逐组逐位对齐。
    *  未选中项仍入运行记录（status=skipped，可恢复评估），便于事后勾选补跑） */
   skipFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
@@ -1070,6 +1087,9 @@ export interface HTStartPayload {
    *  与 groups/seqGroups 逐组逐位对齐）。这类靶点入运行记录时 imported=true + skipNote，
    *  进度统计计入「载入」完成口径（修复：启动面板导入后进度只涨组数、靶点数恒 0） */
   importedFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
+  /** v2.68：启动面板导入报告携带的靶点键→报告数据（importedFlags 对应键的补充 —
+   *  jobId 供汇总报告从服务端恢复完整统计行；fileName 为行内「载入」徽标说明） */
+  importedReports?: Array<{ key: string; jobId?: string; fileName: string }>
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

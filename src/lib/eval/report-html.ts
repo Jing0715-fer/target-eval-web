@@ -3185,6 +3185,8 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
       ? `${input.ctx.targetIdentity.name}（序列靶点${targetIdentityTitleSuffix(input.ctx.targetIdentity)}${rangeSuffix}）`
       : (input.ctx.range ? `序列靶点评估 · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : '序列靶点评估')
   // v2.45 机器可读靶点标记：报告导入精确匹配用（uniprot/range/seqLength/header/seqSha/label）。
+  // v2.68 另发 targeteval:job（本报告的评估作业 id）— 单文件导入既有报告后，
+  // 新运行的汇总报告据此 id 从服务端恢复该靶点的完整统计行（评分/结构/结论）。
   //  - uniprot 仅真 UniProt 靶点携带（序列靶点的同源命中不冒充 accession — 避免误匹配
   //    到同源 UniProt 靶点）；
   //  - seqSha = 提交序列 SHA-256 前 16 hex（与运行侧 sha256Hex16 同口径）；
@@ -3215,6 +3217,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <title>靶点结构解析可行性评估报告 — ${esc(proteinTitle)}</title>
 <meta name="targeteval:target" content="${esc(JSON.stringify(metaTarget))}">
+<meta name="targeteval:job" content="${esc(JSON.stringify({ jobId: input.jobId }))}">
 <style>
 ${SINGLE_REPORT_CSS}${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 </head>
