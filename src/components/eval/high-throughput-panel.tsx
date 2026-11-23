@@ -37,7 +37,7 @@ import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDateTime } from './format'
 import { extractHtTargetsFromExcel } from './api'
-import { parseHtImportFiles, planArchiveSkips, matchReportToTarget, sha256Hex16, diagnoseArchiveImport, type HtMatchTarget } from './ht-archive-import'
+import { parseHtImportFiles, planArchiveSkips, matchReportToTarget, sha256Hex16, diagnoseArchiveImport, enrichImportedReports, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
 import type { HTRunState, HtImportedKeyEntry, HtSeqTarget } from './types'
 
 export interface HighThroughputPanelProps {
@@ -171,7 +171,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
     if (list.length === 0 || importingZip) return
     setImportingZip(true)
     try {
-      const reports = await parseHtImportFiles(list)
+      const importParsed = await parseHtImportFiles(list)
+      const reports = importParsed.reports
       if (reports.length === 0) throw new Error('所选文件中没有可识别的报告（支持 zip 归档与报告 HTML）')
       // v2.42 严格匹配（planArchiveSkips）：只有单靶点 job 报告参与；序列靶点
       // SHA 精确等值 / 标签+长度严格相等且无歧义才跳 — 杜绝短标签包含式误跳
@@ -208,16 +209,39 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       if (matchedKeys.size > 0) {
         const fallbackName = list.length === 1 ? (list[0] as File).name.slice(0, 80) : `${list.length} 个报告文件`
         const jobReports = reports.filter((r) => r.kind === 'job')
+        const mergedReports = reports.filter((r) => r.kind === 'merged' && r.group != null)
         const nextImported = new Map(importedEntries.map((e) => [e.key, e]))
+        const enrichItems: ImportEnrichItem[] = []
+        const enrichKeys: string[] = []
         for (const t of targets) {
           if (!matchedKeys.has(t.key)) continue
-          const rep = jobReports.find((r) => r.jobId && matchReportToTarget(r, t))
+          // v2.69：胜出条目不限 jobId（旧版报告也定位）+ 合并报告组号通道兑底
+          let rep = jobReports.find((r) => matchReportToTarget(r, t))
+          if (!rep && t.groupIndex != null) rep = mergedReports.find((m) => m.group === t.groupIndex! + 1)
           const existing = nextImported.get(t.key)
           nextImported.set(t.key, {
             key: t.key,
             jobId: rep?.jobId ?? existing?.jobId,
-            fileName: rep ? (rep.path.split('::')[0] ?? rep.path).split('/').pop()!.slice(0, 80) : (existing?.fileName ?? fallbackName),
+            fileName: rep
+              ? (rep.path.split('::')[0] ?? rep.path).split('/').pop()?.slice(0, 80) ?? fallbackName
+              : (existing?.fileName ?? fallbackName),
           })
+          enrichItems.push({ acc: t.acc, range: t.range, length: t.length, rep })
+          enrichKeys.push(t.key)
+        }
+        // v2.69 enrich：解析匹配报告的统计快照 + 上传原文到服务端留存 —
+        //  stats 随启动载荷入运行记录（不依赖 DB 保留期，旧版报告也能整合进汇总
+        //  表格）；reportId 供汇总弹出页内嵌报告原文。任一失败独立降级，不阻塞导入
+        try {
+          const enriched = await enrichImportedReports(enrichItems, importParsed)
+          enriched.forEach((e, i) => {
+            const entry = nextImported.get(enrichKeys[i]!)
+            if (!entry) return
+            if (e.stats) entry.stats = e.stats
+            if (e.reportId) entry.reportId = e.reportId
+          })
+        } catch {
+          /* enrich 失败（网络/解析）→ 降级「载入」行，导入匹配本身不受影响 */
         }
         onImportedEntriesChange([...nextImported.values()].filter((e) => next.has(e.key)))
       }
@@ -234,7 +258,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           title: `已匹配 ${matched} 个已有报告的靶点`,
           description: (
             <div className="whitespace-pre-line">
-              {`这些靶点已取消勾选（启动时跳过不重复评估，进度计入「载入」完成口径）；报告见导入的文件。匹配依据：UniProt/序列/区间严格一致，或报告携带的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。${missTail}`}
+              {`这些靶点已取消勾选（启动时跳过不重复评估，进度计入「载入」完成口径）；报告的评分与结论已解析，将整合进本次运行的汇总报告表格（「完整报告」弹出页内嵌导入的报告原文）。匹配依据：UniProt/序列/区间严格一致，或报告携带的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。${missTail}`}
             </div>
           ),
         })

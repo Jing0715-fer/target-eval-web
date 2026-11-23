@@ -1101,3 +1101,39 @@ export const GOAL_LABEL_RE =
 /** 目标标签独占一行时，取后续行作值需要排除的「表单区段标题 / 无关字段」样式 */
 export const FORM_SECTION_HEADER_RE =
   /^(?:[一二三四五六七八九十]{1,3}\s*[、.．]\s*)?(?:基本信息|服务需求|样品信息|项目情况简述|项目预算|项目期望完成时间|其他项目|联系信息|审批|意见|签名|日期|预算|期望完成时间)\b|^[一二三四五六七八九十]{1,3}\s*[、.．]/
+
+/**
+ * v2.69：从导入的既有报告解析出的单靶点统计快照（客户端解析，随运行记录
+ * localStorage 持久化；汇总报告生成时随载荷发服务端 — 消毒后构建完整统计行，
+ * 与本次评估同权参与评分分布/均值，行内标「载入」徽标）。
+ * 字段与 HtDashboardRow 的统计列同构（评分/计数/覆盖/展示信息）。
+ */
+export interface ImportedReportStats {
+  /** 综合可行性总分（0-10） */
+  overall: number
+  xray: number
+  cryoem: number
+  nmr: number
+  /** 直接结构数（报告刊头「结构证据」行） */
+  pdbCount: number
+  /** BLAST 同源命中数 */
+  blastHitCount: number
+  literatureCount: number
+  methodXrayCount: number
+  methodCryoemCount: number
+  methodNmrCount: number
+  /** 最佳分辨率（Å；无结构证据时 null） */
+  bestResolution: number | null
+  /** 结构覆盖率（0-100） */
+  coverage: number
+  /** 蛋白名称（报告刊头） */
+  proteinName?: string
+  /** 物种（报告刊头） */
+  organism?: string
+  /** UniProt accession（仅真 UniProt 靶点的报告携带 — 序列靶点的同源命中不冒充） */
+  uniprotId?: string
+  /** 评估区间（报告题目「残基 X-Y」） */
+  range?: [number, number]
+  /** 序列长度 aa（报告刊头） */
+  seqLength?: number
+}

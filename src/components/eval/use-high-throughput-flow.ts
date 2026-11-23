@@ -48,7 +48,7 @@ import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
-import { parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
+import { enrichImportedReports, parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -176,6 +176,9 @@ interface ArchiveSkipResult {
   missLines: string[]
   /** 仅命中已完成/进行中靶点的文件数（报告有效但对应靶点已完成，无需导入） */
   doneOnlyCount: number
+  /** v2.69：匹配到的靶点键 → 胜出的报告条目（含无 jobId 的旧版报告与合并报告 —
+   *  enrich 步骤据此读源文件解析统计 + 上传原文） */
+  matchedByKey: Map<string, HtArchiveReport | undefined>
 }
 
 /** v2.38→v2.45 导入既有报告匹配 — 用 planArchiveSkips 统一严格规则 + v2.45 组号通道：
@@ -209,21 +212,32 @@ function applyArchiveSkips(
     }
   }
   const matchedKeys = planArchiveSkips(reports, matchable, { totalGroups: r.groups.length })
-  // v2.68：逐项定位匹配的报告条目 — jobId（zip 清单 / 报告内嵌标记）随靶点留存，
-  //  汇总报告生成时发回服务端恢复完整统计行（DB 保留期内）
-  const jobReports = reports.filter((rep) => rep.kind === 'job' && rep.jobId)
+  // v2.68→v2.69：逐项定位匹配的报告条目 — jobId（zip 清单 / 报告内嵌标记）随靶点留存，
+  //  汇总报告生成时发回服务端恢复完整统计行（DB 保留期内）；v2.69 起同时留存胜出
+  //  条目本身（无 jobId 的旧版报告也定位）— enrich 步骤读源文件解析统计快照 +
+  //  上传原文，旧版报告也能整合进汇总表格与弹出页
+  const jobReports = reports.filter((rep) => rep.kind === 'job')
+  const mergedReports = reports.filter((rep) => rep.kind === 'merged' && rep.group != null)
   const targetByKey = new Map(all.map((t) => [t.key, t]))
+  const matchedByKey = new Map<string, HtArchiveReport | undefined>()
   for (const it of r.groups.flatMap((g) => g.items)) {
     if (matchedKeys.has(it.key)) {
       it.status = 'skipped'
       it.error = undefined
       it.skipNote = `已导入 ${fileName.slice(0, 40)} 的既有报告`
       it.imported = true // v2.60：进度统计计入已完成（「N 评估 + M 载入」）
-      const rep = jobReports.find((r2) => matchReportToTarget(r2, targetByKey.get(it.key)!))
+      const t = targetByKey.get(it.key)!
+      let rep = jobReports.find((r2) => matchReportToTarget(r2, t))
+      if (!rep) {
+        // 组号通道的合并报告整组跳过 — 按靶点所在组定位合并条目（源文件 = 合并报告）
+        const gi = r.groups.findIndex((g) => g.items.some((x) => x.key === it.key))
+        rep = gi >= 0 ? mergedReports.find((m) => m.group === gi + 1) : undefined
+      }
       it.importedJobId = rep?.jobId
       it.importedFile = rep
         ? (rep.path.split('::')[0] ?? rep.path).split('/').pop()?.slice(0, 80) ?? fileName.slice(0, 80)
         : fileName.slice(0, 80)
+      matchedByKey.set(it.key, rep)
     }
   }
   // v2.49 逐文件诊断（含已完成靶点提示 — 避免误报「不在清单」）
@@ -232,6 +246,7 @@ function applyArchiveSkips(
     matched: matchedKeys.size,
     missLines: diag.filter((d) => !d.matched && !d.doneOnly).map((d) => `${d.file}：${d.reason}`),
     doneOnlyCount: diag.filter((d) => d.doneOnly).length,
+    matchedByKey,
   }
 }
 
@@ -837,21 +852,30 @@ export function useHighThroughputFlow() {
     const runState = runRef.current
     if (!runState || runState.dashboardId || runState.dashboardError === '__done__') return
     const entries: HtArchiveEntry[] = []
-    // v2.68：导入既有报告的靶点纳入汇总（修复「汇总报告信息不全」）—
+    // v2.68→v2.69：导入既有报告的靶点纳入汇总（修复「汇总报告信息不全」）—
     //  有 importedJobId（zip 清单 / 报告内嵌标记）的靶点同时走两条通道：
     //  ① entries + importedJobIds → DB 仍在保留期内时恢复完整统计行（评分/结构/结论，
     //     与本次评估同权，行标「载入」）；
-    //  ② importedBare 降级行（主表呈现 + 完成口径，不参与评分分布）— DB 命中时
-    //     服务端按 label 去重剔除，过期/无快照时兜底呈现（靶点不因数据过期而从
-    //     汇总中消失）；无作业标记（旧版报告）的靶点只有这条通道
-    const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string }> = []
+    //  ② imported 载荷（全部导入靶点）— v2.69 起 stats（导入报告解析的统计快照）
+    //     存在时直接构建完整统计行（不依赖 DB 保留期，旧版报告也能整合进表格）；
+    //     reportId（原文服务端留存 id）供弹出页内嵌报告原文；两者都缺时降级行兜底。
+    //     DB 命中时服务端按 label 去重（以 DB 恢复行为准 — 数据更全）
+    const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string; reportId?: string; range?: [number, number]; stats?: HTGroupItemState['importedStats'] }> = []
     const importedJobIds = new Set<string>()
     for (const g of runState.groups) {
       for (const it of g.items) {
         if (it.status === 'done' && it.jobId) {
           entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
         } else if (it.imported === true || (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))) {
-          importedBare.push({ label: it.label, group: g.index + 1, sequence: it.sequence?.slice(0, 50_000), fileName: it.importedFile })
+          importedBare.push({
+            label: it.label,
+            group: g.index + 1,
+            sequence: it.sequence?.slice(0, 50_000),
+            fileName: it.importedFile,
+            reportId: it.importedReportId,
+            range: it.range,
+            stats: it.importedStats,
+          })
           if (it.importedJobId) {
             entries.push({ jobId: it.importedJobId, group: g.index + 1, label: it.label })
             importedJobIds.add(it.importedJobId)
@@ -860,7 +884,7 @@ export function useHighThroughputFlow() {
       }
       if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
     }
-    if (!entries.some((e) => e.jobId)) {
+    if (!entries.some((e) => e.jobId) && importedBare.length === 0) {
       runState.dashboardError = '__done__'
       saveHTRun(runState)
       setRun(cloneRun(runState))
@@ -917,8 +941,10 @@ export function useHighThroughputFlow() {
         const dropTail = (dash.droppedCount ?? 0) > 0
           ? `${dash.droppedCount} 个靶点因服务端与本地缓存均无数据被跳过${dash.droppedLabels?.length ? `（如 ${dash.droppedLabels.slice(0, 3).join('、')}）` : ''}；`
           : ''
+        // v2.69：导入靶点统计整合情况（toast 提示 — 与服务端实际行构建结果对齐）
+        const parsedImportedCount = importedBare.filter((t) => t.stats).length
         const importedTail = importedBare.length + importedJobIds.size > 0
-          ? `已包含 ${importedJobIds.size + importedBare.length} 个导入载入的靶点（${importedJobIds.size} 个恢复了完整统计${importedBare.length ? `、${importedBare.length} 个以载入行呈现（旧版报告无作业标记）` : ''}）；`
+          ? `已包含 ${importedJobIds.size + importedBare.length} 个导入载入的靶点（${importedJobIds.size} 个恢复了完整统计${parsedImportedCount ? `、${parsedImportedCount} 个已解析导入报告的评分与结论` : ''}${importedBare.length - parsedImportedCount > 0 ? `、${importedBare.length - parsedImportedCount} 个以载入行呈现（报告无法解析）` : ''}）；`
           : ''
         toast({
           title: '统计看板已生成',
@@ -1059,6 +1085,8 @@ export function useHighThroughputFlow() {
             if (rep) {
               it.importedJobId = rep.jobId
               it.importedFile = rep.fileName
+              it.importedStats = rep.stats
+              it.importedReportId = rep.reportId
             }
           }
         }
@@ -1073,6 +1101,8 @@ export function useHighThroughputFlow() {
             if (rep) {
               it.importedJobId = rep.jobId
               it.importedFile = rep.fileName
+              it.importedStats = rep.stats
+              it.importedReportId = rep.reportId
             }
           }
         }
@@ -1098,11 +1128,12 @@ export function useHighThroughputFlow() {
       }
       const skippedAtStart = groupStates.reduce((n, g) => n + g.items.filter((it) => it.status === 'skipped').length, 0)
       const toEvaluate = newRun.totalTargetCount - skippedAtStart
-      if (toEvaluate <= 0) {
+      if (toEvaluate <= 0 && importedAtStart === 0) {
         const msg = '所有靶点都被跳过了 — 请至少勾选一个要评估的靶点（或移除跳过标记）'
         toast({ title: '无法开始高通量评估', description: msg, variant: 'destructive' })
         return { ok: false, error: msg }
       }
+      // v2.69：纯导入运行（0 个待评估、全部载入）— 全部组即刻完成，直接产出汇总报告
       runRef.current = newRun
       runFolderRef.current = safeDir(`TargetEval_HT_${new Date(now).toISOString().slice(0, 10)}_${groupStates.length}g`)
       pausedRef.current = false
@@ -1120,10 +1151,15 @@ export function useHighThroughputFlow() {
       startTick()
       warmupBlast(newRun)
       void orchestrate()
-      if (skippedAtStart > 0) {
+      if (importedAtStart > 0 && toEvaluate === 0) {
         toast({
           title: '高通量评估已开始',
-          description: `将评估 ${toEvaluate} 个靶点（另跳过 ${skippedAtStart} 个 — 可在运行中随时恢复评估）。`,
+          description: `全部 ${importedAtStart} 个靶点已载入既有报告 — 无需重复评估，运行即刻完成并直接生成汇总报告（导入报告的评分与结论已整合）。`,
+        })
+      } else if (skippedAtStart > 0) {
+        toast({
+          title: '高通量评估已开始',
+          description: `将评估 ${toEvaluate} 个靶点（另载入/跳过 ${skippedAtStart} 个 — 可在运行中随时恢复评估）。`,
         })
       }
       return { ok: true }
@@ -1206,6 +1242,8 @@ export function useHighThroughputFlow() {
       it.imported = undefined // v2.60：恢复评估 — 脱离「载入」统计口径
       it.importedJobId = undefined // v2.68：报告数据一并清空（重新评估后以本作业为准）
       it.importedFile = undefined
+      it.importedStats = undefined // v2.69：解析快照与原文留存一并作废
+      it.importedReportId = undefined
       touchGroupForRerun(g, r)
     } else if (it.status !== 'done' && it.status !== 'running') {
       it.status = 'skipped'
@@ -1213,6 +1251,8 @@ export function useHighThroughputFlow() {
       it.imported = undefined
       it.importedJobId = undefined
       it.importedFile = undefined
+      it.importedStats = undefined
+      it.importedReportId = undefined
     }
     snapshot()
   }, [ensureEditable, snapshot])
@@ -1233,6 +1273,8 @@ export function useHighThroughputFlow() {
       it.imported = undefined
       it.importedJobId = undefined // v2.68：重新评估 — 导入数据作废
       it.importedFile = undefined
+      it.importedStats = undefined // v2.69：解析快照与原文留存一并作废
+      it.importedReportId = undefined
       it.reportIncomplete = undefined
       it.reportMissingNote = undefined
       it.jobId = undefined // v2.41 修复：清旧作业引用（重置为重新提交）
@@ -1313,8 +1355,8 @@ export function useHighThroughputFlow() {
     if (!r) throw new Error('没有打开的运行')
     const list = (Array.isArray(files) ? files : [files]).filter(Boolean)
     if (list.length === 0) throw new Error('未选择要导入的报告文件')
-    const reports = await parseHtImportFiles(list)
-    if (reports.length === 0) throw new Error('所选文件中没有可识别的报告（支持 zip 归档与报告 HTML）')
+    const parsed = await parseHtImportFiles(list)
+    if (parsed.reports.length === 0) throw new Error('所选文件中没有可识别的报告（支持 zip 归档与报告 HTML）')
     // 序列靶点预先算好 SHA（清单通道精确匹配）
     const shaByKey = new Map<string, string | undefined>()
     for (const g of r.groups) {
@@ -1323,7 +1365,35 @@ export function useHighThroughputFlow() {
       }
     }
     const displayName = list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`
-    const result = applyArchiveSkips(r, reports, shaByKey, displayName)
+    const result = applyArchiveSkips(r, parsed.reports, shaByKey, displayName)
+    // v2.69 enrich：解析匹配报告的统计快照 + 上传原文到服务端留存 —
+    //  stats 入运行记录（localStorage 持久化，不依赖服务端保留期）；reportId 供
+    //  汇总报告生成时服务端读回内嵌弹出页。任一失败独立降级，不阻塞导入
+    if (result.matchedByKey.size > 0) {
+      const enrichItems: ImportEnrichItem[] = []
+      const enrichedTargets: HTGroupItemState[] = []
+      for (const g of r.groups) {
+        for (const it of g.items) {
+          if (!result.matchedByKey.has(it.key)) continue
+          enrichItems.push({
+            acc: it.sequence ? undefined : it.label,
+            range: it.range,
+            length: it.sequence?.length,
+            rep: result.matchedByKey.get(it.key),
+          })
+          enrichedTargets.push(it)
+        }
+      }
+      try {
+        const enriched = await enrichImportedReports(enrichItems, parsed)
+        enrichedTargets.forEach((it, i) => {
+          if (enriched[i]?.stats) it.importedStats = enriched[i]!.stats
+          if (enriched[i]?.reportId) it.importedReportId = enriched[i]!.reportId
+        })
+      } catch {
+        /* enrich 失败（网络/解析）→ 降级「载入」行，导入匹配本身不受影响 */
+      }
+    }
     r.importedNote = result.matched > 0 ? `已从 ${displayName.slice(0, 40)} 导入 ${result.matched} 个靶点的既有报告（跳过评估）` : undefined
     snapshot()
     return result
@@ -1339,7 +1409,7 @@ export function useHighThroughputFlow() {
       toast({ title: '汇总报告生成中', description: '请等待当前生成完成后重试。' })
       return
     }
-    if (!r.groups.some((g) => g.items.some((it) => (it.status === 'done' && it.jobId) || it.importedJobId))) {
+    if (!r.groups.some((g) => g.items.some((it) => (it.status === 'done' && it.jobId) || it.importedJobId || it.importedReportId || it.importedStats))) {
       toast({ title: '无法生成汇总报告', description: '该运行没有成功完成的靶点（全部失败/被取消/被跳过）— 可「重跑失败/不完整项」补齐后自动重新生成。', variant: 'destructive' })
       return
     }
