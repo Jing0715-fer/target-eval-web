@@ -20,8 +20,12 @@ cleanup() {
             service_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "unknown")
             echo "   关闭进程 $pid ($service_name)..."
             kill -TERM "$pid" 2>/dev/null
+            # watchdog 子 shell 里的 bun 是其子进程，需一并终止
+            pkill -TERM -P "$pid" 2>/dev/null || true
         fi
     done
+    # 兜底：watchdog 重拉出的 Next 进程 PID 不在 pids 里，按命令行精确匹配
+    pkill -TERM -f "next-service-dist/server.js" 2>/dev/null || true
     
     # 等待所有进程退出（最多等待 5 秒）
     sleep 1
@@ -40,6 +44,7 @@ cleanup() {
             fi
         fi
     done
+    pkill -KILL -f "next-service-dist/server.js" 2>/dev/null || true
     
     echo "✅ 所有服务已关闭"
     exit 0
@@ -89,8 +94,24 @@ if [ -f "./next-service-dist/server.js" ]; then
         echo "🗄️  当前使用外部指定数据库: $DATABASE_URL"
     fi
     
-    # 后台启动 Next.js
-    bun server.js &
+    # 后台启动 Next.js（带崩溃自动重启 watchdog）
+    # - 首次启动即失败：watchdog 直接退出（保持「启动失败」语义，
+    #   交给平台健康检查暴露问题，不做无意义的重试）
+    # - 运行期崩溃退出：2 秒后自动重拉，避免整实例失联只能重新部署
+    (
+        first_run=1
+        while :; do
+            bun server.js
+            code=$?
+            if [ "$first_run" -eq 1 ] && [ "$code" -ne 0 ]; then
+                echo "❌ Next.js 首次启动失败 (code=$code)，watchdog 退出"
+                exit "$code"
+            fi
+            first_run=0
+            echo "⚠️ Next.js 运行中退出 (code=$code)，2 秒后自动重启..."
+            sleep 2
+        done
+    ) &
     NEXT_PID=$!
     pids="$NEXT_PID"
     
@@ -100,7 +121,7 @@ if [ -f "./next-service-dist/server.js" ]; then
         echo "❌ Next.js 服务器启动失败"
         exit 1
     else
-        echo "✅ Next.js 服务器已启动 (PID: $NEXT_PID, Port: $PORT)"
+        echo "✅ Next.js 服务器已启动 (watchdog PID: $NEXT_PID, Port: $PORT)"
     fi
     
     cd ../

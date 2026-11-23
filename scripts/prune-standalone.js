@@ -9,14 +9,16 @@
  * 「很抱歉,当前生成的代码在部署时遇到了一些问题」的直接嫌疑就是包体
  * 过大 / 冷启动过慢（FUSE 存储上健康检查 120s 超时）。
  *
- * 本脚本在 patch-standalone 之后运行，只做两类**保守**剔除：
+ * 本脚本在 patch-standalone 之后运行，只做三类**保守**剔除：
  *   1. @prisma/client/runtime 下非 SQLite 方言的 wasm-base64 冗余
  *      （本项目 SQLite + 原生 library 引擎，cockroachdb/mysql/postgresql/
  *      sqlserver 四方言各 ~5.5MB 永不加载；sqlite 方言全部保留）
  *   2. @img（sharp 图像库）的非本平台二进制：musl 变体（运行时为 Debian
  *      glibc）、darwin / win32 / arm64 变体（运行时为 linux x64）
+ *   3. Next 16 内嵌 sharp（next/node_modules/sharp）下的 musl 平台二进制
+ *      （~19.5MB；嵌套 glibc 变体因与外层疑似版本不同，ABI 兼容考虑保留）
  *
- * 不碰其它任何文件（next、.prisma/client 引擎、playwright-core 均为
+ * 不碰其它任何文件（next 本体、.prisma/client 引擎、playwright-core 均为
  * 运行必需，原样保留）。
  *
  * 健壮性：幂等可重复运行；目标不存在静默跳过；**任何异常只告警、永不
@@ -105,6 +107,23 @@ try {
     }
   } else {
     console.log('prune-standalone: @img 不存在，跳过 sharp 段')
+  }
+
+  // ── 3. Next 16 内嵌 sharp（next/node_modules/sharp）：musl 二进制 ──
+  // Next 的 standalone 会把图片优化用的 sharp 以嵌套依赖完整拷进自己名下
+  // （node_modules/next/node_modules/sharp/node_modules/@img），其平台二进制
+  // 独立于外层 @img，同样携带 musl 变体（libvips-musl ~19MB + loader-musl）
+  // —— glibc 运行环境永不加载。嵌套的 glibc 变体与外层疑似版本不同，
+  // 为 ABI 兼容保守保留（Next require 解析优先命中的就是嵌套这份）。
+  const nestedImg = nm('next/node_modules/sharp/node_modules/@img')
+  if (fs.existsSync(nestedImg)) {
+    for (const d of fs.readdirSync(nestedImg)) {
+      if (d.includes('musl')) {
+        rm(path.join(nestedImg, d), 'Next 内嵌 sharp 的 musl 二进制')
+      }
+    }
+  } else {
+    console.log('prune-standalone: Next 内嵌 sharp @img 不存在，跳过嵌套 sharp 段')
   }
 } catch (err) {
   // 兜底：任何未预见异常都不允许弄挂构建
