@@ -23,6 +23,15 @@
  *    组分有结构 → 组装先例与组分模板可用（X-ray +1）；curated 装配总分子量
  *    ≥100 kDa → Cryo-EM +1（curated 化学计量比 mwAugment 伙伴推断可靠，
  *    接管时抑制 mwAugment/寡聚维度的 Cryo-EM 分量，避免双重加分）
+ *  - v2.72：抗原-抗体复合物交付（评估表同行抗体链 — 用户需求：小分子量蛋白
+ *    加抗体形成的复合物可用 Cryo-EM 解析，不得只按抗原自身分子量压低评分）：
+ *    · Cryo-EM 基础分按复合物合计长度计（complexLengthAa — 小分子量单体
+ *      惩罚不再适用，长度加分同口径）；
+ *    · mw-augment 抗体装配路径（装配 MW = 单体 + 抗体链合计）：≥100 kDa → +1；
+ *      50-100 kDa → +1（抗体为在手试剂，该规模 Fab/纳米抗体-抗原复合物已有
+ *      大量解析先例，VPP/优化采集可常规推进）；<50 kDa → 0（非 -1 — 路线
+ *      方向正确，建议完整 IgG ~150 kDa 进一步增重）；
+ *    · X-ray/NMR 仍按抗原自身评估（增重对 NMR 无益；结晶瓶颈不在分子量）。
  *  - v2.14：已有结构方法先例对评分的约束（用户反馈：小分子量靶点已有结构全部为
  *    Cryo-EM 复合物时，不得仅凭分子量推荐 X-ray/NMR — 不符合科学事实）：
  *    · 已有 Cryo-EM 结构 = 该靶点以复合物/增重形式被 Cryo-EM 解析的直接先例
@@ -68,6 +77,11 @@ export interface ScoreInput {
   mwAugment?: MwAugmentAnalysis | null
   /** v1.29：互作复合物证据分析（无直接结构时运行；可缺省） */
   interaction?: InteractionAnalysis | null
+  /** v2.72：抗原-抗体复合物合计长度 aa（评估表同行抗体链存在时非空）— Cryo-EM
+   *  基础分按交付复合物的颗粒尺寸计（小分子量单体惩罚/长度加分都用复合物尺寸；
+   *  X-ray/NMR 仍按抗原自身评估 — 用户需求：小分子量抗原 + 抗体复合物可用
+   *  Cryo-EM 解析，不能只按抗原自身分子量评分） */
+  complexLengthAa?: number
 }
 
 export interface ScoreResult extends Scores {
@@ -102,6 +116,8 @@ export function computeMwAugmentAdjust(
   const assemblyKda = mw.assemblyKda
   const isHomolog = mw.assemblyPath === 'homolog-complex'
   const isPartner = mw.assemblyPath === 'partner'
+  // v2.72：抗体路径 — 交付样品即复合物（评估表同行抗体链，在手试剂非推断）
+  const isAntibody = mw.assemblyPath === 'antibody'
   // v2.33：partner 路径可信度 — 仅复合物/同源复合物结构证据支持的伙伴装配才可
   // 完全信任（用户需求：无结构支持的互作不应被认为可用于增大分子量做 Cryo-EM）。
   // 历史作业无 assemblyEvidence 字段 → 按 experimental（无证据）处理，不加分。
@@ -126,20 +142,32 @@ export function computeMwAugmentAdjust(
       note = `互作伙伴推断（无复合物结构/同源结构支持）：1:1 估计 ~${assemblyKda} kDa 可信度有限 — 不可据此认定可用于 Cryo-EM 增重（不计分）；采用前需 pull-down/SPR/SEC-MALS 验证互作与化学计量`
     } else {
       cryoem = 1
-      note = `装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间${isPartner
+      note = `装配后有效分子量 ~${assemblyKda} kDa（≥100 kDa）— 进入 Cryo-EM 常规可行区间${isAntibody
+        ? '（抗原-抗体复合物 — 评估表同行的抗体链为在手试剂，Fab/纳米抗体辅助是该分子量区间的标准 Cryo-EM 路线）'
+        : isPartner
         ? `（互作伙伴推断，${mw.assemblyEvidence === 'complex' ? '复合物结构支持' : '同源复合物结构支持'} — 组装先例可信，化学计量建议 SEC-MALS 验证）`
         : mw.assemblyPath === 'complex' ? '（已有复合物结构先例）' : '（自身寡聚装配）'}`
     }
   } else if (assemblyKda != null && assemblyKda >= 50) {
-    cryoem = 0
-    note = isHomolog
+    // v2.72：抗体复合物 50-100 kDa → +1（区别于泛化 partner/同源推断：抗体为
+    // 在手试剂无开发周期，该规模的 Fab/纳米抗体-抗原复合物已有大量解析先例，
+    // 相位板（VPP）/优化采集条件下可常规推进 — 用户需求：小分子量蛋白加抗体
+    // 形成的复合物可用 Cryo-EM 解析，不得只按抗原自身分子量压低评分）
+    cryoem = isAntibody ? 1 : 0
+    note = isAntibody
+      ? `抗原-抗体复合物 ~${assemblyKda} kDa（50-100 kDa）— 该规模的抗体（Fab/scFv/nanobody）-抗原复合物已有大量 Cryo-EM 解析先例（相位板 VPP/优化采集条件下可常规推进）；抗体为评估表提供的在手试剂，无额外开发周期`
+      : isHomolog
       ? `同源复合物推断（identity ${homologIdentity ?? '—'}%）：换算装配 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件，且靶点组装需实验验证`
       : isPartner && !partnerTrusted
         ? `互作伙伴推断（无结构支持）：1:1 估计 ~${assemblyKda} kDa 处于边缘区间且可信度有限 — 不可据此认定可用于 Cryo-EM 增重；需验证互作后再评估`
         : `装配后 ~${assemblyKda} kDa，处于 Cryo-EM 边缘区间（50-100 kDa）— 可行但需相位板（VPP）/优化玻璃化条件`
   } else if (assemblyKda != null) {
-    cryoem = -1
-    note = isHomolog
+    // v2.72：抗体复合物 <50 kDa → 0（非 -1：增重路线方向正确且试剂在手，
+    // 建议改用完整 IgG（~150 kDa）进一步增重；基础分已按复合物尺寸计）
+    cryoem = isAntibody ? 0 : -1
+    note = isAntibody
+      ? `抗原-抗体复合物 ~${assemblyKda} kDa（<50 kDa）— 仍低于 Cryo-EM 常规门槛；抗体增重路线方向正确（试剂在手），可评估改用完整 IgG（~150 kDa）进一步增重或相位板/优化玻璃化条件后再推进`
+      : isHomolog
       ? `同源复合物换算后仍仅 ~${assemblyKda} kDa（<50 kDa）— Cryo-EM 颗粒对齐困难，需技术增重（Fab/支架融合）后再行评估`
       : isPartner && !partnerTrusted
         ? `互作伙伴推断（无结构支持）1:1 估计仅 ~${assemblyKda} kDa（<50 kDa）且可信度有限 — 不可据此认定可用于 Cryo-EM 增重；需技术增重（Fab/支架融合）并验证互作`
@@ -334,13 +362,16 @@ export function computeScores(input: ScoreInput): FullScoreResult {
   xray = clamp(Math.round(xray), 1, 10)
 
   // ── Cryo-EM（基础分）──
+  // v2.72：评估表同行提供抗体链时，交付样品 = 抗原-抗体复合物 — 颗粒尺寸按
+  //  复合物合计长度计（小分子量单体惩罚不再适用，长度加分同样按复合物口径）
+  const cryoLen = input.complexLengthAa ?? sequenceLength
   let cryoem = 5
-  if (sequenceLength > 1500) cryoem += 3
-  else if (sequenceLength >= 500) cryoem += 1
-  else if (sequenceLength < 300) cryoem -= hasCryoemPrecedent ? 0 : 2 // v2.14：已有 Cryo-EM 先例时小分子量惩罚不适用（装配路线已被证明，仅样品制备需沿先例组装）
+  if (cryoLen > 1500) cryoem += 3
+  else if (cryoLen >= 500) cryoem += 1
+  else if (cryoLen < 300) cryoem -= hasCryoemPrecedent ? 0 : 2 // v2.14：已有 Cryo-EM 先例时小分子量惩罚不适用（装配路线已被证明，仅样品制备需沿先例组装）
   if (tmCount >= 2) cryoem += 2        // 膜蛋白是 Cryo-EM 强项
   if (highResCryoem > 0) cryoem += 1.5
-  if (domainCount >= 3 && sequenceLength < 600) cryoem -= 0.5 // 多结构域小蛋白柔性强
+  if (domainCount >= 3 && cryoLen < 600) cryoem -= 0.5 // 多结构域小蛋白柔性强
   cryoem = clamp(Math.round(cryoem), 1, 10)
 
   // ── NMR（基础分）──
@@ -383,11 +414,14 @@ export function computeScores(input: ScoreInput): FullScoreResult {
   r.cryoem = [
     // v2.14：小分子量 + 已有 Cryo-EM 先例 → 先例即复合物/增重路线被证明的直接证据，
     // 不得再按「改用其他方法」表述（科学事实：该靶点已被 Cryo-EM 反复解析）
-    sequenceLength > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间'
-      : sequenceLength >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）'
-        : hasCryoemPrecedent
-          ? `小分子量（<500 aa）单体颗粒成像困难，但已有 ${cryoemCount} 个 Cryo-EM 结构先例${allCryoem ? '（全部已有结构均为 Cryo-EM）' : ''}${bestCryoemRes != null ? `，最佳 ${bestCryoemRes}Å` : ''} — 靶点以复合物/装配形式可被 Cryo-EM 解析，沿已有组装路线可行`
-          : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
+    // v2.72：抗原-抗体复合物交付 → 尺寸/惩罚均按复合物口径表述
+    input.complexLengthAa != null
+      ? `评估样品为抗原-抗体复合物（合计 ~${input.complexLengthAa} aa，含评估表同行的抗体链）— Cryo-EM 颗粒尺寸按复合物计，小分子量单体惩罚不适用`
+      : sequenceLength > 1500 ? '大分子量（>1500 aa）是 Cryo-EM 优势区间'
+        : sequenceLength >= 500 ? '中等分子量，Cryo-EM 可行（可能需融合 MBP/ferritin 等增重策略）'
+          : hasCryoemPrecedent
+            ? `小分子量（<500 aa）单体颗粒成像困难，但已有 ${cryoemCount} 个 Cryo-EM 结构先例${allCryoem ? '（全部已有结构均为 Cryo-EM）' : ''}${bestCryoemRes != null ? `，最佳 ${bestCryoemRes}Å` : ''} — 靶点以复合物/装配形式可被 Cryo-EM 解析，沿已有组装路线可行`
+            : '小分子量（<500 aa）Cryo-EM 数据采集困难，建议截短+增重或改用其他方法',
     tmCount >= 2 ? '多次跨膜膜蛋白，Cryo-EM 是首选方法' : '',
     highResCryoem > 0 ? `已有 ${highResCryoem} 个 ≤3.5Å 的 Cryo-EM 结构` : cryoemCount > 0 ? `已有 ${cryoemCount} 个 Cryo-EM 结构` : '',
     oligo && oligo.cryoem > 0 && !mwTakeover && !intTakeover ? `聚集形式加成 ${fmtAdj(oligo.cryoem)}：寡聚装配使有效分子量增大/复合物特征形貌利于 Cryo-EM` : '',

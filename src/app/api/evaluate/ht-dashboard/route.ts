@@ -31,6 +31,7 @@ import {
   loadHtDashboardRows,
   buildImportedRows,
   loadImportedReportHtml,
+  backfillImportedStats,
   computeHtStats,
   generateHtDashboardReport,
   renderHtDashboardHtml,
@@ -428,6 +429,20 @@ async function runDashboardGeneration(ctx: {
     const reportPathById = owner
       ? await loadImportedReportHtml(pendingImported, owner, reportBudget)
       : new Map<string, string>()
+    // v2.72：服务端补解析（客户端 enrich 解析失败的降级行兜底 — 修复「报告打开
+    //  正常但表格评分列为空」：读留存原文前缀，同一解析器 + 提交序列 SHA/容差
+    //  定位，命中即回填 stats → 完整统计行，与本次评估同权参与统计）
+    const backfillPending = pendingImported.filter(t =>
+      !t.stats && t.reportId && reportPathById.has(t.reportId)).length
+    if (backfillPending > 0) {
+      progress(`解析导入报告统计（待补 ${backfillPending} 个）…`)
+      const backfilled = await backfillImportedStats(pendingImported, reportPathById, (d, n) => {
+        progress(`解析导入报告统计 ${d}/${n}…`)
+      })
+      if (backfilled > 0) {
+        console.log(`[ht-dashboard] 导入报告统计服务端补解析：${backfilled}/${backfillPending} 个降级行已回填为完整统计行`)
+      }
+    }
     const { rows: importedRows, bareRows } = buildImportedRows(pendingImported, reportPathById)
     const statRows = [...rows, ...importedRows]
     if (statRows.length === 0 && bareRows.length === 0) return void (await fail('没有可统计的已完成靶点'))

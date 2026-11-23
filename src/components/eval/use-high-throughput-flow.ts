@@ -629,8 +629,9 @@ export function useHighThroughputFlow() {
             sequenceHeader: item.sequenceHeader,
             goal: runState.goal,
             ligands: runState.ligands,
-            // v2.27/v2.29：行内构建区间与域名提示（手动值优先于比对推导；域名匹 UniProt domain 推导）
-            options: { ...runState.options, reportMode: 'single', range: item.range, rangeHint: item.domainHint },
+            // v2.27/v2.29：行内构建区间与域名提示（手动值优先于比对推导；域名匹 UniProt domain 推导）；
+            // v2.72：同行抗体链（抗原-抗体复合物交付 — Cryo-EM 评分计入复合物分子量）
+            options: { ...runState.options, reportMode: 'single', range: item.range, rangeHint: item.domainHint, ...(item.antibodyPartner ? { antibodyPartner: item.antibodyPartner } : {}) },
           }
         : {
             mode: 'uniprot',
@@ -1078,6 +1079,9 @@ export function useHighThroughputFlow() {
             range: s.range,
             sequence: s.seq,
             sequenceHeader: s.header || undefined,
+            // v2.72：同行被忽略的抗体链透传（提交评估时随 options — 抗原的 Cryo-EM
+            //  评分计入抗原-抗体复合物分子量）
+            ...(s.antibodyPartner ? { antibodyPartner: s.antibodyPartner } : {}),
             // v2.38：同上 — 启动时未勾选的序列靶点跳过（可恢复）
             status: (payload.skipFlags?.seqGroups?.[k]?.[j] ? 'skipped' : 'pending') as 'skipped' | 'pending',
             // v2.66：同上 — 导入匹配而跳过的序列靶点计入「载入」口径
@@ -1389,10 +1393,14 @@ export function useHighThroughputFlow() {
       for (const g of r.groups) {
         for (const it of g.items) {
           if (!result.matchedByKey.has(it.key)) continue
+          // v2.72：seqSha（导入前已算好 — shaByKey 复用）/label 一并传入（SHA 精确
+          //  定位区段 + 同长歧义标签消歧 — 修复合并报告内已识别序列靶点定位失败）
           enrichItems.push({
             acc: it.sequence ? undefined : it.label,
             range: it.range,
             length: it.sequence?.length,
+            seqSha: shaByKey.get(it.key),
+            label: it.label,
             rep: result.matchedByKey.get(it.key),
           })
           enrichedTargets.push(it)

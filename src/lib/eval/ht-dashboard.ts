@@ -72,16 +72,27 @@
  *    大批次 LLM 重试叠加原文内嵌可超 4 分钟，旧上限误报超时）；⑦ 重建页
  *    样式 c 保守内嵌（任何行无内存原文即内嵌 — 写盘丢文件行回退变体不缺样式）。
  *
+ *    v2.72：导入报告统计快照服务端补解析（backfillImportedStats）— 修复用户
+ *    实测「报告打开正常但表格评分列为空」：客户端 enrich 解析失败/未运行的
+ *    导入靶点此前只能以降级行呈现（评分列「—」），而服务端本来就要为弹出页
+ *    读回留存的报告原文 — 现用同一解析器（lib/eval/imported-stats.ts 前后端
+ *    共享）读原文前缀（≤4MB、≤8 路并发 — 内存安全）再补解析一次，命中即
+ *    回填 stats → 完整统计行。定位链增强：提交序列 SHA 精确（报告 meta 权威
+ *    值 — 已识别序列靶点的刊头长度是 UniProt 全长，旧长度通道天然对不上）/
+ *    meta 提交长度 / 容差 ±3 aa / 同长歧义标签消歧。
+ *
  * 离线链接语义：zip 相对路径与 ht-archive 打包命名同源（planArchiveNames 共享
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
  */
 import { db } from '@/lib/db'
-import { readFile, stat } from 'node:fs/promises'
+import { open, readFile, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { llmChat } from './llm'
 import { getEngineSummary } from './llm-provider'
 import { renderMarkdown } from './report-html'
 import { planArchiveNames, type ArchivePlanItem } from './ht-archive-names'
 import { ensureImportedReportTable } from './imported-report-table'
+import { extractImportedStatsSections, pickImportedStats, toCleanImportedStats } from './imported-stats'
 import type { HtExcelRowSnapshot } from './ht-excel'
 import type { ImportedReportStats, PdbEntry, BlastHit } from './types'
 
@@ -1041,6 +1052,72 @@ export function makeHtDashboardProgressWriter(dashboardId: string): (msg: string
       data: { progress: msg.slice(0, 200) },
     }).catch(() => undefined) // 进度写失败不影响生成
   }
+}
+
+// ── v2.72：导入报告统计快照服务端补解析（降级行兜底）──────────────────────
+
+/** 补解析读取的报告原文前缀（字节）：h1/刊头/评分卡与 targeteval meta 标记都在
+ *  文档头部；合并报告内嵌页较深时 4MB 也能覆盖绝大多数。内存安全：≤8 路并发
+ *  × 4MB 前缀 ≈ 32MB 瞬时峰值，读完即释放（与 v2.71 延迟读取同一口径）。 */
+const IMPORTED_BACKFILL_PREFIX_BYTES = 4_000_000
+
+/**
+ * v2.72：导入靶点统计快照服务端补解析（修复用户实测「报告打开正常但表格评分
+ * 列为空」— 客户端 enrich 解析失败/未运行的导入靶点以降级行呈现，而服务端
+ * 本来就要为弹出页读回留存的报告原文，用同一解析器再补解析一次：
+ * 命中即把 stats 回填到 HtImportedTarget（降级行 → 完整统计行，与本次评估
+ * 同权参与分布/均值/结论）。
+ *
+ * 定位链与客户端 v2.72 同源（imported-stats.ts）：提交序列 SHA 精确（meta
+ * 标记权威值 — 已识别序列靶点的刊头长度是 UniProt 全长，长度通道对不上）→
+ * acc+区间 → 长度精确（meta 提交长度优先）→ 容差 ±3 → 标签消歧。
+ *
+ * 只读前缀（内存安全）；读失败/解析不到保持降级行，不抛异常。
+ * 返回回填成功的靶点数。
+ */
+export async function backfillImportedStats(
+  imported: HtImportedTarget[],
+  reportPathById: Map<string, string>,
+  onTick?: (done: number, total: number) => void,
+): Promise<number> {
+  const pending = imported.filter(t =>
+    !t.stats && t.reportId && reportPathById.get(t.reportId) != null)
+  if (pending.length === 0) return 0
+  let done = 0
+  let backfilled = 0
+  await runBounded(pending, FILE_READ_CONCURRENCY, async (t) => {
+    const path = reportPathById.get(t.reportId!)!
+    try {
+      const fh = await open(path, 'r')
+      try {
+        const buf = Buffer.alloc(IMPORTED_BACKFILL_PREFIX_BYTES)
+        const { bytesRead } = await fh.read(buf, 0, IMPORTED_BACKFILL_PREFIX_BYTES, 0)
+        const html = buf.toString('utf8', 0, bytesRead)
+        if (html) {
+          const seqSha = t.sequence
+            ? createHash('sha256').update(t.sequence).digest('hex').slice(0, 16)
+            : undefined
+          const hit = pickImportedStats(extractImportedStatsSections(html), {
+            length: t.sequence?.length,
+            seqSha,
+            range: t.range,
+            label: t.label,
+          })
+          if (hit) {
+            t.stats = toCleanImportedStats(hit)
+            backfilled++
+          }
+        }
+      } finally {
+        await fh.close()
+      }
+    } catch {
+      /* 读失败 — 保持降级行（弹出页仍可用原文路径，写盘时另行处理） */
+    }
+    done++
+    onTick?.(done, pending.length)
+  })
+  return backfilled
 }
 
 /** v2.65：原表行快照序列折叠 — ≥30 连续大写氨基酸字符的串折叠为「[序列已折叠]」。

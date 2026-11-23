@@ -109,6 +109,15 @@ export async function POST(req: Request) {
     }
   }
 
+  // v2.72：复合物评估中同行的抗体链（HT 序列靶点行携带 — 抗体已忽略不评估，
+  // 但其分子量计入抗原的 Cryo-EM 复合物评分）。链数 1-20、合计长度 90-20000。
+  const rawAbp = body.options?.antibodyPartner
+  const antibodyPartner = rawAbp && typeof rawAbp === 'object'
+    && Number.isFinite(rawAbp.chains) && rawAbp.chains >= 1 && rawAbp.chains <= 20
+    && Number.isFinite(rawAbp.lengthAa) && rawAbp.lengthAa >= 90 && rawAbp.lengthAa <= 20000
+    ? { chains: Math.round(rawAbp.chains), lengthAa: Math.round(rawAbp.lengthAa) }
+    : undefined
+
   const options: EvaluationOptions = {
     skipBlast: body.options?.skipBlast ?? false,
     forceBlast: body.options?.forceBlast ?? false,
@@ -119,6 +128,7 @@ export async function POST(req: Request) {
     // v2.29：结构域名提示（评估表不写区间而写域名 — 管线内与 UniProt domain 划分匹配推导区间）
     rangeHint: typeof body.options?.rangeHint === 'string' && body.options.rangeHint.trim()
       ? body.options.rangeHint.trim().slice(0, 60) : undefined,
+    antibodyPartner,
   }
   const batchNote = body.batchNote?.trim().slice(0, 500) || undefined
   // v2.19：用户本地引擎配置消毒（未知供应商/缺模型名 → 回退内置；不持久化）

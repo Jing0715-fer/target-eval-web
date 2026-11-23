@@ -16,6 +16,10 @@
  *     复合物/寡聚装配，则将同源亚基尺寸按靶点单体换算后作为装配 MW 估计
  *     （寡聚状态/互作界面在同一家族内常保守，需实验验证）
  *  4. partner — UniProt 互作伙伴（1:1 假设的二元素装配估计，无结构先例）
+ *  5. antibody（v2.72）— 抗原-抗体复合物：评估表同行提供的抗体链（已被忽略
+ *     不评估）— 交付样品即复合物形式，抗体为在手试剂而非推断：装配 MW =
+ *     单体 + 抗体链合计（用户需求：小分子量抗原 + Fab/scFv/nanobody 复合物
+ *     可用 Cryo-EM 解析，不能只按抗原自身分子量评分）
  * 取可用路径中装配分子量最高者作为 assemblyKda；技术工具箱（Fab/nanobody/MBP/ferritin）
  * 作为兜底策略在 notes/options 中给出。
  *
@@ -570,6 +574,9 @@ export interface MwAugmentInput {
   homologSearch?: { searched: number; complexes: HomologComplexInfo[] }
   /** v2.33：binary 互作伙伴可信度评估结果（analyzeMwAugmentation 拉取；无结构证据的伙伴不计入可靠装配估计） */
   partnerEvidence?: Map<string, BinaryEvidence>
+  /** v2.72：评估表同行的抗体链（已被忽略不评估）— 抗原-抗体复合物交付形式；
+   *  抗体为用户提供的在手试剂（非推断），装配 MW = 单体 + 抗体链合计 */
+  antibodyPartner?: { chains: number; lengthAa: number }
 }
 
 /** 单体分子量区间解读 */
@@ -599,6 +606,10 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
   const seqLen = input.sequenceLength
   const monomerKda = aaToKda(seqLen)
   const applicable = monomerKda < SMALL_MONOMER_KDA
+  // v2.72 路径 5：抗原-抗体复合物（评估表同行提供的抗体链 — 在手试剂，非推断）
+  const abp = input.antibodyPartner
+  const antibodyKda = abp ? aaToKda(abp.lengthAa) : null
+  const antibodyAssemblyKda = antibodyKda != null ? Math.round(monomerKda + antibodyKda) : null
 
   if (!applicable) {
     return {
@@ -612,7 +623,14 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
       partners: [],
       options: [],
       conflicts: [],
-      notes: ['分子量维度不适用（非小分子量靶点）；聚集形式维度（寡聚态）继续单独生效'],
+      notes: [
+        '分子量维度不适用（非小分子量靶点）；聚集形式维度（寡聚态）继续单独生效',
+        // v2.72：大抗原不适用增重分析，但交付复合物含抗体时口径要诚实 —
+        // Cryo-EM 基础分已按复合物尺寸评估（computeScores 的 complexLengthAa）
+        ...(abp && antibodyKda != null
+          ? [`评估表同行的 ${abp.chains} 条抗体链（合计 ~${antibodyKda} kDa）不计入装配估计（单体已 ≥${SMALL_MONOMER_KDA} kDa）— 但 Cryo-EM 基础分已按抗原-抗体复合物尺寸（~${antibodyAssemblyKda} kDa）评估`]
+          : []),
+      ],
     }
   }
 
@@ -702,12 +720,20 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
   const partnerAssemblyKda = largestTrusted?.kda != null ? Math.round(monomerKda + largestTrusted.kda) : null
   let assemblyEvidence: MwAugmentAnalysis['assemblyEvidence'] = null
 
-  // ── 装配路径择优（分子量最高者为有效装配）──
+  // ── 装配路径择优（分子量最高者为有效装配；v2.72：抗体路径同量级优先 —
+  //    交付样品即复合物形式，非推断证据可及性更好）──
   let assemblyKda: number | null = null
   let assemblyPath: MwAugmentAnalysis['assemblyPath'] = null
   let assemblyBasis = ''
   const bestComplex = complexes[0]
-  if (bestComplex && bestComplex.totalKda >= (oligoAssemblyKda ?? 0) && bestComplex.totalKda >= (partnerAssemblyKda ?? 0)) {
+  if (antibodyAssemblyKda != null
+    && antibodyAssemblyKda >= (bestComplex?.totalKda ?? 0)
+    && antibodyAssemblyKda >= (oligoAssemblyKda ?? 0)
+    && antibodyAssemblyKda >= (partnerAssemblyKda ?? 0)) {
+    assemblyKda = antibodyAssemblyKda
+    assemblyPath = 'antibody'
+    assemblyBasis = `抗原-抗体复合物（评估表同行的 ${abp!.chains} 条抗体链，合计 ~${antibodyKda} kDa）：靶点单体（~${monomerKda} kDa）+ 抗体 = ~${antibodyAssemblyKda} kDa — 交付样品即复合物形式，抗体为在手试剂（无需推断或额外开发；结合表位遮蔽功能位点时需在报告中说明）`
+  } else if (bestComplex && bestComplex.totalKda >= (oligoAssemblyKda ?? 0) && bestComplex.totalKda >= (partnerAssemblyKda ?? 0)) {
     assemblyKda = bestComplex.totalKda
     assemblyPath = 'complex'
     assemblyBasis = `已有复合物结构 ${bestComplex.pdbId}（${bestComplex.basis === 'assembly' ? '生物装配' : '去重实体'}口径：${bestComplex.components.length} 个蛋白组分，合计 ~${bestComplex.totalKda} kDa；分辨率 ${bestComplex.resolution ?? '—'}Å）`
@@ -777,6 +803,11 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
 
   // ── 综合要点 ──
   notes.push(zoneOf(monomerKda).note)
+  // v2.72：抗体复合物交付说明（抗体在手 — Fab/scFv/nanobody 兼具 Cryo-EM 增重
+  //  与结晶伴侣用途；<50 kDa 时建议完整 IgG 进一步增重）
+  if (abp && antibodyKda != null) {
+    notes.push(`抗原-抗体复合物交付（v2.72）：评估表同行的 ${abp.chains} 条抗体链（合计 ~${antibodyKda} kDa）— 抗原 + 抗体 ≈ ~${antibodyAssemblyKda} kDa${assemblyPath === 'antibody' ? '（已计入装配估计）' : ''}。抗体（Fab/scFv/nanobody）既是 Cryo-EM 增重手段也是经典结晶伴侣；若总分子量仍 <50 kDa，可评估改用完整 IgG（~150 kDa）进一步增重`)
+  }
   if (assemblyKda != null) {
     const zone = assemblyKda >= EM_ROUTINE_KDA
       ? `≥${EM_ROUTINE_KDA} kDa — 进入 Cryo-EM 常规可行区间`
@@ -815,6 +846,7 @@ export function buildMwAugmentAnalysis(input: MwAugmentInput): MwAugmentAnalysis
     assemblyBasis,
     assemblyPath,
     assemblyEvidence,
+    ...(abp && antibodyKda != null ? { antibodyPartner: { chains: abp.chains, lengthAa: abp.lengthAa, kda: antibodyKda } } : {}),
     complexes: complexes.slice(0, 6),
     homologComplexes,
     homologSearchNote,

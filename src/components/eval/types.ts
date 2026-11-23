@@ -29,6 +29,10 @@ export interface EvaluateOptions {
   /** v2.29：结构域名提示（评估表不写区间而写域名时，如「胞外域」/「kinase domain」）—
    *  管线内与 UniProt domain 划分匹配推导评估区间 */
   rangeHint?: string
+  /** v2.72：复合物评估中同行的抗体链（已被忽略不评估）— 抗原评分时计入
+   *  抗原-抗体复合物分子量（Cryo-EM：小分子量抗原 + Fab/scFv/nanobody
+   *  复合物可解析，不能只按抗原自身分子量评分） */
+  antibodyPartner?: { chains: number; lengthAa: number }
 }
 
 export interface EvaluateRequest {
@@ -967,6 +971,9 @@ export interface HtSeqTarget {
   /** v2.27 行内构建区间 · v2.37 起序列靶点不再填充（接口兼容保留）：序列靶点的
    *  评估区间由管线在 BLAST 归属后推导（构建比对 / BLAST nr HSP），不从 Excel 行文本配对 */
   range?: [number, number]
+  /** v2.72：同行被忽略的抗体链（抗原-抗体复合物交付行 — 抗体不评估，但其
+   *  分子量计入抗原的 Cryo-EM 复合物评分；合计 ≥90 aa 才携带） */
+  antibodyPartner?: { chains: number; lengthAa: number }
 }
 
 /** 高通量运行的一组内单个靶点（作业）状态 */
@@ -1006,6 +1013,9 @@ export interface HTGroupItemState {
   /** v2.69：导入报告原文的服务端留存 id（导入时上传 — 汇总报告生成时服务端
    *  读回作为「完整报告」弹出页内嵌原文，与下载的单独报告一致） */
   importedReportId?: string
+  /** v2.72：同行被忽略的抗体链（HtSeqTarget.antibodyPartner 透传 — 提交评估
+   *  时随 options 携带，抗原的 Cryo-EM 评分计入复合物分子量） */
+  antibodyPartner?: { chains: number; lengthAa: number }
   /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
   reportIncomplete?: boolean
   /** v2.41：报告不完整说明（缺章数/失败摘要 — chip tooltip 与重跑确认展示） */
