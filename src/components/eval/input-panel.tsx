@@ -188,13 +188,18 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   // v2.38：靶点选择（启动前勾选；未勾选 = 跳过，入运行记录可恢复）— 键：`g:${组}:${项}` / `sq:${组}:${项}`
   // （输入变化时经包装 setter 重置 — 索引重排后旧键无意义）
   const [htSkipKeys, setHtSkipKeys] = useState<string[]>([])
+  // v2.66：因「导入报告」而取消勾选的键（skipKeys 子集 — 启动时以 imported=true 入
+  // 运行记录，进度统计计入「载入」完成口径；输入变化时与 skipKeys 一并重置）
+  const [htImportedKeys, setHtImportedKeys] = useState<string[]>([])
   const handleHtTextChange = useCallback((v: string) => {
     setHtText(v)
     setHtSkipKeys([])
+    setHtImportedKeys([])
   }, [])
   const handleHtSeqGroupsChange = useCallback((g: HtSeqTarget[][]) => {
     setHtSeqGroups(g)
     setHtSkipKeys([])
+    setHtImportedKeys([])
   }, [])
   const htParsed = useMemo(() => parseGroupedUniprotIds(htText), [htText])
   const htTargetTotal = htParsed.groups.reduce((n, g) => n + g.length, 0)
@@ -501,6 +506,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
       const groupDomainHints: Array<Array<string | undefined>> = []
       // v2.38：跳过标记随组对齐收集（源索引 → 载荷索引，防空组错位）
       const groupSkipFlags: boolean[][] = []
+      // v2.66：导入匹配标记同构收集（skipFlags 子集 — 启动时以 imported=true 入运行记录）
+      const groupImportedFlags: boolean[][] = []
+      const htImportedSet = new Set(htImportedKeys)
       for (let i = 0; i < htParsed.groups.length && groups.length < MAX_HT_GROUPS; i++) {
         const ids = htParsed.groups[i].slice(0, MAX_HT_TARGETS_PER_GROUP)
         if (ids.length === 0) continue
@@ -514,19 +522,23 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             ?? ids.map(() => undefined),
         )
         groupSkipFlags.push(ids.map((_, j) => htSkipSet.has(`g:${i}:${j}`)))
+        groupImportedFlags.push(ids.map((_, j) => htImportedSet.has(`g:${i}:${j}`)))
       }
       const seqGroups: HtSeqTarget[][] = []
       const seqSkipFlags: boolean[][] = []
+      const seqImportedFlags: boolean[][] = []
       for (let k = 0; k < htSeqGroups.length && groups.length + seqGroups.length < MAX_HT_GROUPS; k++) {
         const g = htSeqGroups[k].slice(0, MAX_HT_TARGETS_PER_GROUP)
         if (g.length === 0) continue
         seqGroups.push(g)
         seqSkipFlags.push(g.map((_, j) => htSkipSet.has(`sq:${k}:${j}`)))
+        seqImportedFlags.push(g.map((_, j) => htImportedSet.has(`sq:${k}:${j}`)))
       }
       if (groups.length === 0 && seqGroups.length === 0) return
       // v2.38：启动时的靶点选择（未勾选 → skipped 入运行记录，可事后恢复评估）
       const skipFlags = { groups: groupSkipFlags, seqGroups: seqSkipFlags }
-      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, skipFlags, excelRows: htExcelRows.length ? htExcelRows : undefined, goal: trimmedGoal, ligands, options }
+      const importedFlags = { groups: groupImportedFlags, seqGroups: seqImportedFlags }
+      const payload: HTStartPayload = { groups, groupRanges, groupDomainHints, seqGroups, skipFlags, importedFlags, excelRows: htExcelRows.length ? htExcelRows : undefined, goal: trimmedGoal, ligands, options }
       await onStartHighThroughput(payload)
       return
     }
@@ -974,6 +986,8 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                   archiving={htArchiving}
                   skipKeys={htSkipKeys}
                   onSkipKeysChange={setHtSkipKeys}
+                  importedKeys={htImportedKeys}
+                  onImportedKeysChange={setHtImportedKeys}
                 />
                 {htOverLimit && (
                   <p className="mt-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">

@@ -1,9 +1,11 @@
 /**
- * v2.59 fixture：BLAST nr 全库检索命中块渲染验证（前 5 条直出 + 其余折叠）。
+ * v2.59→v2.67 fixture：BLAST nr 结果展示渲染验证（与 PDB 库同款表格全量直出 + 库切换）。
  * 场景 A：近似身份（nr 最佳命中 <85% 未回填 UniProt — 用户报告的「未回填」典型态），
- *         8 条 nr 命中（sp/tr/other 混合、长描述、缺 entryName 边界）→ 5 直出 + 3 折叠。
- * 场景 B：PDB BLAST 失败 + nr 兜底成功回填（blastStatus failed 但 nrHits 存在）。
- * 字符串断言：nr-block / 前 5 行 / 折叠 details / 库 chips / UniProt 链接 / 章节头计数。
+ *         2 条 PDB 同源 + 8 条 nr 命中（sp/tr/other 混合、长描述、缺 entryName 边界）
+ *         → 库切换按钮 + 双面板（PDB 默认 / nr hidden），nr 表 8 行全量（无折叠）。
+ * 场景 B：PDB BLAST 失败 + nr 兜底成功回填（blastStatus failed 但 nrHits 存在）
+ *         → 无切换按钮，nr 单独全量展示（h3 标题 + 6 行）。
+ * 字符串断言：切换按钮 / 面板 hidden / 全量行数 / 库 chips / UniProt 链接 / 章节头计数。
  */
 import * as fs from 'node:fs/promises'
 import { renderReportHtml } from '../src/lib/eval/report-html'
@@ -91,11 +93,17 @@ async function main() {
   await fs.writeFile('/tmp/render/nr-report-b.html', htmlB, 'utf-8')
   console.log('written /tmp/render/nr-report-{a,b}.html', htmlA.length, htmlB.length)
 
-  // ─── 场景 A 断言 ───
-  assert(htmlA.includes('BLAST nr 全库检索'), 'A: nr 块标题')
-  assert(htmlA.includes('NCBI nr · 8 hits · 靶点身份识别'), 'A: 命中计数副标题')
-  assert((htmlA.match(/class="tbl-data tbl-blastnr"/g) ?? []).length === 2, 'A: 两张 nr 表（直出 + 折叠）')
-  assert(htmlA.includes('展开其余 3 条 nr 命中（共 8 条'), 'A: 折叠 summary 文案（8-5=3 条）')
+  // ─── 场景 A 断言（v2.67：切换 + 双面板 + 全量 nr 表）───
+  assert(htmlA.includes('class="lib-toggle"'), 'A: 库切换按钮容器')
+  assert(htmlA.includes('PDB 库 · 2 同源结构'), 'A: PDB 库按钮文案与计数')
+  assert(htmlA.includes('nr 全库 · 8 命中'), 'A: nr 库按钮文案与计数')
+  assert(htmlA.includes('data-libpanel="pdb"'), 'A: PDB 面板标记')
+  assert(htmlA.includes('<div data-libpanel="nr" hidden>'), 'A: nr 面板默认隐藏')
+  assert((htmlA.match(/data-tbl="blastnr"/g) ?? []).length === 1, 'A: 单张 nr 表（全量，无折叠副表）')
+  const tblA = htmlA.indexOf('data-tbl="blastnr"')
+  const nrTableA = htmlA.slice(tblA, htmlA.indexOf('</table>', tblA))
+  assert((nrTableA.match(/<tr /g) ?? []).length === 8, 'A: nr 表数据行 = 8（全量直出）')
+  assert(!htmlA.slice(htmlA.indexOf('data-libpanel="nr"')).includes('<details class="fold">'), 'A: nr 面板内无折叠 details')
   assert(htmlA.includes('Homologs · 2 · nr 8'), 'A: 章节头计数含 nr 8')
   assert(htmlA.includes('href="https://www.uniprot.org/uniprotkb/Q8N4C6"'), 'A: sp 命中 UniProt 链接')
   assert(htmlA.includes('CXorf51_HUMAN'), 'A: entryName 副行')
@@ -104,15 +112,20 @@ async function main() {
   assert(htmlA.includes('nr 其他</span>'), 'A: nr 其他 chip')
   assert(htmlA.includes('WP_012345678.1'), 'A: other 命中编号原样（不链接）')
   assert(!htmlA.includes('href="https://www.uniprot.org/uniprotkb/WP_012345678.1"'), 'A: other 命中无 UniProt 链接')
-  // 直出表 5 行：直出 tbody 内 <tr> 计数（避开 CSS 选择器 — 按完整 class 属性定位）
-  const tblA = htmlA.indexOf('class="tbl-data tbl-blastnr"')
-  const firstTable = htmlA.slice(tblA, htmlA.indexOf('</table>', tblA))
-  assert((firstTable.match(/<tr>/g) ?? []).length === 5 + 1 /* thead 行 */, 'A: 直出表数据行 = 5')
-  // ─── 场景 B 断言 ───
+  assert(nrTableA.includes('data-ident="54.3"'), 'A: nr 行携带排序属性 data-ident')
+  // 切换 JS + CSS 注入（TABLE_FILTER_JS / TABLE_FILTER_CSS 携带 v2.67 逻辑）
+  assert(htmlA.includes("querySelectorAll('.lib-toggle')"), 'A: 库切换 JS 已注入')
+  assert(htmlA.includes('.lt-btn.lt-on'), 'A: 切换按钮 CSS 已注入')
+  // ─── 场景 B 断言（PDB 失败 → nr 单独全量展示，无切换按钮）───
   assert(htmlB.includes('同源检索失败 — 本报告不含同源结构证据'), 'B: PDB 失败 callout 保留')
-  assert(htmlB.includes('NCBI nr · 6 hits · 靶点身份识别'), 'B: nr 块仍展示（6 命中）')
+  assert(!htmlB.includes('class="lib-toggle"'), 'B: 无 PDB 命中 → 无切换按钮')
+  assert(htmlB.includes('BLAST nr 全库检索'), 'B: nr 面板 h3 标题（单独展示）')
+  assert(!htmlB.includes('data-libpanel='), 'B: 无面板标记（nr 直接展示）')
+  assert(htmlB.includes('NCBI nr · 6 hits · 靶点身份识别'), 'B: 命中计数副标题（6 命中）')
   assert(htmlB.includes('Homologs · 0 · nr 6'), 'B: 章节头 Homologs · 0 · nr 6')
-  assert(htmlB.includes('展开其余 1 条 nr 命中（共 6 条'), 'B: 折叠 1 条')
+  const tblB = htmlB.indexOf('data-tbl="blastnr"')
+  const nrTableB = htmlB.slice(tblB, htmlB.indexOf('</table>', tblB))
+  assert((nrTableB.match(/<tr /g) ?? []).length === 6, 'B: nr 表数据行 = 6（全量直出）')
   // 场景 C：无 nrHits 时不应出现 nr 块（回归）
   const htmlC = await renderReportHtml({
     ctx: { ...ctxA, blastNrHits: undefined },
@@ -123,6 +136,10 @@ async function main() {
   })
   assert(!htmlC.includes('class="nr-block"'), 'C: 无 blastNrHits 时不渲染 nr 块')
   assert(!htmlC.includes('nr-chip nr-chip-'), 'C: 无 nr chips 泄漏')
+  // 注：lib-toggle/data-libpanel 字样存在于注入的 TABLE_FILTER_JS/CSS 文本中，
+  // 断言须锚定 DOM 标记（class="…" / <div data-…），不能裸搜子串
+  assert(!htmlC.includes('class="lib-toggle"'), 'C: 无 nr 命中 → 无切换按钮（DOM）')
+  assert(!htmlC.includes('<div data-libpanel'), 'C: 无面板标记（DOM）')
   console.log(process.exitCode ? 'FIXTURE ASSERT FAILED' : 'ALL ASSERTS PASSED')
 }
 main().catch(e => { console.error(e); process.exit(1) })

@@ -981,6 +981,40 @@ export const TABLE_FILTER_JS = `<script>
     if (selEl) selEl.addEventListener('change', function () { state.sort = selEl.value; render(); });
     render();
   });
+  // ── v2.67：BLAST 库切换（PDB 库 / nr 全库 — 两库都有结果时章节头部分段按钮）──
+  Array.prototype.forEach.call(document.querySelectorAll('.lib-toggle'), function (tg) {
+    var sec = tg.closest ? tg.closest('section') : null;
+    var btns = tg.querySelectorAll('.lt-btn');
+    var setLib = function (lib) {
+      Array.prototype.forEach.call(btns, function (b) {
+        var on = b.getAttribute('data-lib') === lib;
+        b.classList.toggle('lt-on', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      if (!sec || !sec.querySelectorAll) return;
+      Array.prototype.forEach.call(sec.querySelectorAll('[data-libpanel]'), function (p) {
+        p.hidden = p.getAttribute('data-libpanel') !== lib;
+      });
+    };
+    Array.prototype.forEach.call(btns, function (b) {
+      b.addEventListener('click', function () { setLib(b.getAttribute('data-lib')); });
+    });
+  });
+  // 打印/PDF：两库面板全展开（完整证据链入档），打印后恢复切换前状态
+  window.addEventListener('beforeprint', function () {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-libpanel]'), function (p) { p.removeAttribute('hidden'); });
+  });
+  window.addEventListener('afterprint', function () {
+    Array.prototype.forEach.call(document.querySelectorAll('.lib-toggle'), function (tg) {
+      var on = tg.querySelector('.lt-btn.lt-on');
+      var lib = on ? on.getAttribute('data-lib') : 'pdb';
+      var sec = tg.closest ? tg.closest('section') : null;
+      if (!sec || !sec.querySelectorAll) return;
+      Array.prototype.forEach.call(sec.querySelectorAll('[data-libpanel]'), function (p) {
+        p.hidden = p.getAttribute('data-libpanel') !== lib;
+      });
+    });
+  });
 })();
 </script>`
 
@@ -1001,6 +1035,13 @@ export const TABLE_FILTER_CSS = `  /* v2.48/v2.53/v2.54 PDB/BLAST 列表筛选�
   .tc-x { margin-left:6px; color:var(--accent-2,#047857); border-color:#c7ece0; background:#f0fdf7; }
   .tc-x:hover { border-color:var(--accent-2,#047857); background:#d9f5e8; }
   @media print { .tbl-ctl { display:none !important; } }
+  /* v2.67 BLAST 库切换分段按钮（PDB 库 / nr 全库 — 两库面板 data-libpanel 显隐） */
+  .lib-toggle { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 12px; }
+  .lt-btn { font-family:var(--mono,ui-monospace,Menlo,monospace); font-size:11px; font-weight:600; padding:4px 13px; border-radius:99px; border:1px solid var(--line,#e7e5e4); background:var(--paper,#fff); color:var(--sub,#57534e); cursor:pointer; transition:border-color .15s, color .15s, background .15s; }
+  .lt-btn:hover { border-color:var(--accent-2,#047857); color:var(--accent,#065f46); }
+  .lt-btn:focus-visible { outline:2px solid var(--accent-2,#047857); outline-offset:2px; }
+  .lt-btn.lt-on { background:var(--accent,#065f46); border-color:var(--accent,#065f46); color:#fff; }
+  @media print { .lib-toggle { display:none !important; } }
 `
 
 // ─── v2.53 旧报告表筛选自举（服务端按需注入 — 无/旧标记的 report.html）──────
@@ -1728,17 +1769,21 @@ function blastOutsideFoldHtml(hits: BlastHit[], range: [number, number] | undefi
   </details>`
 }
 
-/** v2.59：BLAST nr 全库检索命中块（靶点身份识别级联实际执行 nr 检索时展示 —
+/** v2.67：BLAST nr 全库检索面板（靶点身份识别级联实际执行 nr 检索时展示 —
  *  PDB 库同源不足以归属 UniProt 时提交序列改查 NCBI nr 全库）。
- *  前 5 条直出 + 其余折叠（details.fold — 与 PDB 表/文献同款折叠交互，打印自动展开）。 */
-function blastNrBlockHtml(hits: BlastNrHit[]): string {
+ *  与 PDB 库同款表格版式全量直出（v2.65 前为「前 5 条直出 + 其余折叠」— 应用户要求
+ *  改为同格式全量）；data-tbl="blastnr" 挂载 TABLE_FILTER_JS 工具条（Identity /
+ *  E-value / 覆盖排序 + 计数 + CSV 导出）。withHead=true 时附 h3 标题（PDB 库检索
+ *  失败/无命中时的单独展示；两库切换展示时由分段按钮标识，不重复出标题）。 */
+function blastNrPanelHtml(hits: BlastNrHit[], withHead: boolean): string {
   if (!hits.length) return ''
-  const shown = hits.slice(0, 5)
-  const rest = hits.slice(5, 20)
   const nrRow = (h: BlastNrHit) => {
     const range = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
       ? `${h.queryFrom}-${h.queryTo}`
       : (h.queryCoverage > 0 ? `${h.queryCoverage} aa` : '—')
+    const covSpan = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo >= h.queryFrom
+      ? h.queryTo - h.queryFrom + 1
+      : (h.queryCoverage > 0 ? h.queryCoverage : '')
     const dbChip = h.db === 'sp'
       ? '<span class="nr-chip nr-chip-sp" title="Swiss-Prot 人工审校条目 — UniProt 归属可信度高">Swiss-Prot</span>'
       : h.db === 'tr'
@@ -1749,7 +1794,7 @@ function blastNrBlockHtml(hits: BlastNrHit[]): string {
       : esc(h.accession || '—')
     const descTitle = esc([h.description, h.organism ? `OS=${h.organism}` : '', h.geneName ? `GN=${h.geneName}` : ''].filter(Boolean).join(' '))
     return `
-    <tr>
+    <tr data-ident="${h.identity}" data-e="${Number.isFinite(h.evalue) ? h.evalue : ''}" data-cov="${covSpan}">
       <td class="td-id">${accLink}${h.entryName ? `<div class="nr-entry">${esc(h.entryName)}</div>` : ''}</td>
       <td class="t-desc" title="${descTitle}"><span class="t-clamp">${esc(h.description || '—')}</span></td>
       <td class="num">${h.identity.toFixed(1)}%</td>
@@ -1758,27 +1803,25 @@ function blastNrBlockHtml(hits: BlastNrHit[]): string {
       <td>${dbChip}</td>
     </tr>`
   }
-  const colgroup = `
-      <colgroup>
-        <col style="width:118px"><col><col style="width:78px"><col style="width:92px"><col style="width:88px"><col style="width:96px">
-      </colgroup>`
-  const thead = `<thead><tr><th>UniProt / 编号</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num" title="首个 HSP 在提交序列上的残基区间（1-based 闭区间）">覆盖范围</th><th>库</th></tr></thead>`
   return `
-  <div class="nr-block">
-    <h3 class="itx-h3">BLAST nr 全库检索 <span class="itx-h3-sub">NCBI nr · ${hits.length} hits · 靶点身份识别</span></h3>
-    <p class="note">PDB 库同源检索未能确定 UniProt 归属（最佳一致性 &lt;85% 或覆盖 &lt;40%，或检索失败）时，提交序列已自动改查 NCBI nr 全库（非冗余蛋白序列库）定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据（报告题目/刊头的「nr 识别」标注即来源于此）。命中主体多为 UniProt 序列条目：Swiss-Prot（sp）= 人工审校 / TrEMBL（tr）= 自动注释；按显著性排序、同编号去重取最高一致性。默认展示前 5 条，其余折叠（打印时自动展开）；「覆盖范围」为提交序列上的残基区间。</p>
-    <div class="tbl-wrap"><table class="tbl-data tbl-blastnr">${colgroup}
-      ${thead}
-      <tbody>${shown.map(nrRow).join('')}</tbody>
-    </table></div>
-    ${rest.length ? `
-    <details class="fold">
-      <summary>展开其余 ${rest.length} 条 nr 命中（共 ${hits.length} 条，打印时自动展开）</summary>
-      <div class="tbl-wrap"><table class="tbl-data tbl-blastnr">${colgroup}
-        ${thead}
-        <tbody>${rest.map(nrRow).join('')}</tbody>
-      </table></div>
-    </details>` : ''}
+  ${withHead ? `<h3 class="itx-h3">BLAST nr 全库检索 <span class="itx-h3-sub">NCBI nr · ${hits.length} hits · 靶点身份识别</span></h3>` : ''}
+  <p class="note">PDB 库同源检索未能确定 UniProt 归属（最佳一致性 &lt;85% 或覆盖 &lt;40%，或检索失败）时，提交序列已自动改查 NCBI nr 全库（非冗余蛋白序列库）定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据（报告题目/刊头的「nr 识别」标注即来源于此）。命中主体为 UniProt 序列条目：Swiss-Prot（sp）= 人工审校 / TrEMBL（tr）= 自动注释；按显著性排序、同编号去重取最高一致性；「覆盖范围」为提交序列上的残基区间（首个 HSP，1-based 闭区间）。可经表头下方「排序」切换 Identity 降序等，并支持导出 CSV。</p>
+  <div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blastnr">
+    <colgroup>
+      <col style="width:118px"><col><col style="width:78px"><col style="width:92px"><col style="width:88px"><col style="width:96px">
+    </colgroup>
+    <thead><tr><th>UniProt / 编号</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num" title="首个 HSP 在提交序列上的残基区间（1-based 闭区间）">覆盖范围</th><th>库</th></tr></thead>
+    <tbody>${hits.map(nrRow).join('')}</tbody>
+  </table></div>`
+}
+
+/** v2.67：BLAST 结果库切换（PDB 库 / nr 全库 — 两库都有命中时表头上方分段按钮；
+ *  面板显隐由 TABLE_FILTER_JS 驱动，打印时两库面板自动全展开、打印后恢复切换态） */
+function blastLibToggleHtml(pdbCount: number, nrCount: number): string {
+  return `
+  <div class="lib-toggle" role="group" aria-label="BLAST 结果库切换">
+    <button type="button" class="lt-btn lt-on" data-lib="pdb" aria-pressed="true">PDB 库 · ${pdbCount} 同源结构</button>
+    <button type="button" class="lt-btn" data-lib="nr" aria-pressed="false">nr 全库 · ${nrCount} 命中</button>
   </div>`
 }
 
@@ -2667,18 +2710,19 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   ${showBlastSec ? `
   <section class="sec" id="${idOf('blast')}">
     <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}${blastNrCount ? ` · nr ${blastNrCount}` : ''}`)}</h2>
-    ${ctx.blastHits.length ? `<p class="note">按检索显著性排序（已排除直接结构重复项；可经表头下方「排序」切换为 Identity 降序等）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。表头下方可按方法筛选、切换排序。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast">
+    ${(ctx.blastHits.length > 0 && blastNrCount > 0) ? blastLibToggleHtml(ctx.blastHits.length, blastNrCount) : ''}
+    ${ctx.blastHits.length ? `<div${blastNrCount > 0 ? ' data-libpanel="pdb"' : ''}><p class="note">按检索显著性排序（已排除直接结构重复项；可经表头下方「排序」切换为 Identity 降序等）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。表头下方可按方法筛选、切换排序。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast">
       <colgroup>
         <col style="width:74px"><col><col style="width:78px"><col style="width:88px">
         <col style="width:74px"><col style="width:104px"><col style="width:74px"><col style="width:92px">
       </colgroup>
       <thead><tr><th>PDB ID</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num">覆盖范围</th><th>方法</th><th class="num">分辨率 (Å)</th><th>文献</th></tr></thead>
       <tbody>${blastRowsHtml(ctx.blastHits)}</tbody>
-    </table></div>${blastOutsideFoldHtml(ctx.rangeOutsideBlastHits ?? [], ctx.range)}`
+    </table></div>${blastOutsideFoldHtml(ctx.rangeOutsideBlastHits ?? [], ctx.range)}</div>`
     : ctx.blastStatus?.status === 'failed'
       ? `<div class="callout callout-amber"><b>同源检索失败 — 本报告不含同源结构证据</b>${esc(describeBlastStatus(ctx.blastStatus))}。本报告结论主要基于直接结构与文献证据；同源先例缺失可能低估或高估可行性，建议重新评估补齐同源证据。</div>`
       : `<p class="note">${esc(describeBlastStatus(ctx.blastStatus))}。同源结构证据在本报告中缺位，结论主要基于直接结构与文献证据；如需同源检索可重新评估并勾选「强制 BLAST」。</p>`}
-    ${blastNrBlockHtml(ctx.blastNrHits ?? [])}
+    ${blastNrCount > 0 ? `<div${ctx.blastHits.length > 0 ? ' data-libpanel="nr" hidden' : ''}>${blastNrPanelHtml(ctx.blastNrHits ?? [], ctx.blastHits.length === 0)}</div>` : ''}
   </section>` : ''}
 
   ${ctx.literature.length ? `

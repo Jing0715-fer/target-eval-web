@@ -979,6 +979,11 @@ export function useHighThroughputFlow() {
             domainHint: payload.groupDomainHints?.[i]?.[j],
             // v2.38：启动时未勾选的靶点直接跳过（保留在记录里 — 可随时恢复评估）
             status: (payload.skipFlags?.groups?.[i]?.[j] ? 'skipped' : 'pending') as 'skipped' | 'pending',
+            // v2.66：因「导入既有报告」而取消勾选 → imported 标记（进度统计计入「载入」
+            //  完成口径 — 修复：启动面板导入后组数涨而靶点完成数恒 0）
+            ...(payload.importedFlags?.groups?.[i]?.[j]
+              ? { imported: true as const, skipNote: '已导入既有报告（启动前导入匹配 — 跳过评估，计入「载入」）' }
+              : {}),
           })),
           status: 'pending' as const,
         })),
@@ -997,10 +1002,15 @@ export function useHighThroughputFlow() {
             sequenceHeader: s.header || undefined,
             // v2.38：同上 — 启动时未勾选的序列靶点跳过（可恢复）
             status: (payload.skipFlags?.seqGroups?.[k]?.[j] ? 'skipped' : 'pending') as 'skipped' | 'pending',
+            // v2.66：同上 — 导入匹配而跳过的序列靶点计入「载入」口径
+            ...(payload.importedFlags?.seqGroups?.[k]?.[j]
+              ? { imported: true as const, skipNote: '已导入既有报告（启动前导入匹配 — 跳过评估，计入「载入」）' }
+              : {}),
           })),
           status: 'pending' as const,
         })),
       ]
+      const importedAtStart = groupStates.reduce((n, g) => n + g.items.filter((it) => it.imported === true).length, 0)
       const newRun: HTRunState = {
         id: `ht-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         createdAt: now,
@@ -1014,6 +1024,10 @@ export function useHighThroughputFlow() {
         totalTargetCount: groupStates.reduce((n, g) => n + g.items.length, 0),
         // v2.36：原始 Excel 行快照（汇总报告「原表内容」列）
         excelRows: payload.excelRows,
+        // v2.66：启动前导入的靶点数（运行级备注 — 与运行中 zip 导入的 importedNote 同构）
+        importedNote: importedAtStart > 0
+          ? `启动前已导入 ${importedAtStart} 个靶点的既有报告（跳过评估，进度计入「载入」）`
+          : undefined,
       }
       const skippedAtStart = groupStates.reduce((n, g) => n + g.items.filter((it) => it.status === 'skipped').length, 0)
       const toEvaluate = newRun.totalTargetCount - skippedAtStart

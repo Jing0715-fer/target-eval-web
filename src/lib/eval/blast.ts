@@ -859,7 +859,9 @@ export function parseBlastNrXml(xml: string): BlastNrHit[] {
   return [...seen.values()]
 }
 
-/** 提交 BLASTp 任务到 nr 库（v2.16 靶点身份识别；HITLIST 20 — 只需最佳命中定位身份） */
+/** 提交 BLASTp 任务到 nr 库（v2.16 靶点身份识别；v2.67 HITLIST 50 — 历史检索
+ *  只为最佳命中定位身份取 20；现报告 BLAST 章节全量展示 nr 结果，取 50 兼顾
+ *  展示信息量与响应体积） */
 export async function submitBlastNr(
   sequence: string,
   onProgress?: (msg: string) => void,
@@ -867,7 +869,7 @@ export async function submitBlastNr(
 ): Promise<BlastSubmitResult> {
   if (!sequence || sequence.length < 30) throw new Error('序列过短（<30 aa），无法 BLAST nr')
   onProgress?.('提交 BLASTp 任务到 NCBI (nr)…')
-  return submitBlastPut({ database: 'nr', hitlist: 20, sequence, label: 'BLAST nr', onProgress, signal })
+  return submitBlastPut({ database: 'nr', hitlist: 50, sequence, label: 'BLAST nr', onProgress, signal })
 }
 
 /** nr 识别的墙钟上限（best-effort 通道：超时优雅放弃，不阻塞评估）。

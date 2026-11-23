@@ -220,16 +220,10 @@ export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]
   )
 }
 
-/** v2.59：nr 命中折叠阈值（前 5 条直出，其余折叠 — 用户指定） */
-const NR_COLLAPSED_COUNT = 5
-
-/** v2.59：BLAST nr 全库检索命中表（靶点身份识别证据 — PDB 库同源不足以归属
- *  UniProt 时提交序列改查 NCBI nr 全库；前 5 条直出 + 其余折叠）。 */
+/** v2.59→v2.67：BLAST nr 全库检索命中表（靶点身份识别证据 — PDB 库同源不足以
+ *  归属 UniProt 时提交序列改查 NCBI nr 全库）。v2.67：与 HTML 报告同口径 — 全量
+ *  直出（此前「前 5 条直出 + 其余折叠」），容器内滚动查看。 */
 export function BlastNrTable({ hits }: { hits: BlastNrHit[] }) {
-  const [expanded, setExpanded] = useState(false)
-  const collapsed = !expanded && hits.length > NR_COLLAPSED_COUNT
-  const visible = collapsed ? hits.slice(0, NR_COLLAPSED_COUNT) : hits
-
   const rows = (list: BlastNrHit[]) => list.map((h, i) => {
     const isUniprot = h.db !== 'other' && /^[A-Z0-9]{6,10}$/.test(h.accession)
     return (
@@ -313,31 +307,9 @@ export function BlastNrTable({ hits }: { hits: BlastNrHit[] }) {
               <TableHead className="eval-eyebrow h-9 pr-4 text-muted-foreground">库</TableHead>
             </TableRow>
           </TableHeader>
-          <TableBody>{rows(visible)}</TableBody>
+          <TableBody>{rows(hits)}</TableBody>
         </Table>
       </div>
-      {hits.length > NR_COLLAPSED_COUNT && (
-        <div className="border-t border-border/70">
-          <Button
-            variant="ghost"
-            onClick={() => setExpanded((v) => !v)}
-            className="h-10 w-full gap-1.5 rounded-none font-mono text-[11px] text-muted-foreground hover:bg-accent hover:text-primary"
-            aria-expanded={expanded}
-          >
-            {expanded ? (
-              <>
-                <ChevronUp className="size-3.5" />
-                收起 · 仍可滚动查看全部 {hits.length} 条
-              </>
-            ) : (
-              <>
-                <ChevronDown className="size-3.5" />
-                展开全部 {hits.length} 条 nr 命中（当前显示前 {NR_COLLAPSED_COUNT} 条）
-              </>
-            )}
-          </Button>
-        </div>
-      )}
       <p className="border-t border-border/60 px-4 py-2.5 text-[11px] leading-relaxed text-muted-foreground/85">
         PDB 库同源不足以归属 UniProt（一致性 &lt;85% 或覆盖 &lt;40%，或检索失败）时，提交序列自动改查 NCBI nr 全库定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。
       </p>

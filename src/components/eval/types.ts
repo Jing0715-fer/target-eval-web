@@ -1066,6 +1066,10 @@ export interface HTStartPayload {
   /** v2.38：启动时的靶点选择（true = 跳过不评估；与 groups/seqGroups 逐组逐位对齐。
    *  未选中项仍入运行记录（status=skipped，可恢复评估），便于事后勾选补跑） */
   skipFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
+  /** v2.66：skipFlags 中因「导入既有报告」而取消勾选的靶点（true = 载入而非手动跳过 —
+   *  与 groups/seqGroups 逐组逐位对齐）。这类靶点入运行记录时 imported=true + skipNote，
+   *  进度统计计入「载入」完成口径（修复：启动面板导入后进度只涨组数、靶点数恒 0） */
+  importedFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

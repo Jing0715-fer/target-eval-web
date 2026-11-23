@@ -594,7 +594,7 @@ export function sanitizeCheckpoint(raw: unknown): PipelineCheckpoint | null {
   if (st.nrBlastDone != null && typeof st.nrBlastDone !== 'boolean') return null
   if (st.nrIdentityDone != null && typeof st.nrIdentityDone !== 'boolean') return null
   if (st.nrHits != null) {
-    if (!Array.isArray(st.nrHits) || st.nrHits.length > 20) return null
+    if (!Array.isArray(st.nrHits) || st.nrHits.length > 50) return null
     for (const h of st.nrHits) {
       if (!h || typeof h !== 'object' || typeof (h as { accession?: unknown }).accession !== 'string') return null
     }
@@ -1678,9 +1678,10 @@ class SegmentRunner {
     //  级联顺序（用户语义）：评估表蛋白名（phaseUniprot 已派生）→ PDB 同源描述推断
     //  → BLAST nr 兜底（定位真实蛋白身份；sp|ACC| 命中 ≥85% 时回填 UniProt 全量元数据）
     //  → EBI Swiss-Prot 直查（v2.44）→ UniProt 全库精确匹配（v2.58，含 TrEMBL）
+    // v2.67：PDB 库检索整体失败（blastStatus=failed）时不再跳过 nr — 此时 nr 是唯一
+    //  身份通道（用户反馈：序列靶点 UniProt 回填率不足）；仅显式禁用 BLAST / 抗体链豁免
     if (!st.uniprotInfo && st.sequence.length >= 30 && (!st.nrBlastDone || !st.nrIdentityDone)
-      && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody'
-      && st.blastStatus.status !== 'failed') {
+      && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody') {
       // a) 同源推断命名（零网络 — 评估表无蛋白名时，用 PDB 同源最佳命中描述命名）
       //    v2.32：覆盖度加权最佳命中（identity × 覆盖率）— 与靶点回填同口径，
       //    短片段高一致性巧合匹配（曾把 ADSL 构建命名成 SARS-CoV-2 polymerase）
@@ -2385,8 +2386,8 @@ class SegmentRunner {
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs : undefined, // v2.29：无重叠结构（折叠保留展示）
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits : undefined,
       /** v2.59：BLAST nr 全库检索命中（身份识别级联实际执行 nr 时携带 — 报告
-       *  BLAST 章节展示「前 5 条直出 + 其余折叠」；未执行时缺省） */
-      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 20) : undefined,
+       *  BLAST 章节与 PDB 库同款表格全量展示；未执行时缺省。v2.67：上限 20→50） */
+      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 50) : undefined,
       directPdbs: st.directPdbs,
       blastHits: st.blastHits,
       blastStatus: st.blastStatus,
@@ -2637,9 +2638,9 @@ class SegmentRunner {
       /** v2.29：与区间无链范围重叠的结构（折叠保留展示 — 前端灰色行；上限 200/100） */
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs.slice(0, 200) : undefined,
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits.slice(0, 100) : undefined,
-      /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档，≤20 条；
-       *  结果页/报告展示前 5 条 + 折叠；nr 未执行/无命中/历史作业缺省） */
-      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 20) : undefined,
+      /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档；v2.67 ≤50 条
+       *  — 结果页/报告与 PDB 库同款表格全量展示；nr 未执行/无命中/历史作业缺省） */
+      blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 50) : undefined,
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,
