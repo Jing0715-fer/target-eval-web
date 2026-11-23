@@ -179,6 +179,9 @@ interface ArchiveSkipResult {
   /** v2.69：匹配到的靶点键 → 胜出的报告条目（含无 jobId 的旧版报告与合并报告 —
    *  enrich 步骤据此读源文件解析统计 + 上传原文） */
   matchedByKey: Map<string, HtArchiveReport | undefined>
+  /** v2.70：有源文件但原文未能留存/内嵌的靶点数（上传失败或超 32MB 上限 —
+   *  统计快照不受影响，仅汇总弹出页无原文可嵌；toast 提示用户） */
+  uploadMissed: number
 }
 
 /** v2.38→v2.45 导入既有报告匹配 — 用 planArchiveSkips 统一严格规则 + v2.45 组号通道：
@@ -247,6 +250,7 @@ function applyArchiveSkips(
     missLines: diag.filter((d) => !d.matched && !d.doneOnly).map((d) => `${d.file}：${d.reason}`),
     doneOnlyCount: diag.filter((d) => d.doneOnly).length,
     matchedByKey,
+    uploadMissed: 0,
   }
 }
 
@@ -1390,6 +1394,10 @@ export function useHighThroughputFlow() {
           if (enriched[i]?.stats) it.importedStats = enriched[i]!.stats
           if (enriched[i]?.reportId) it.importedReportId = enriched[i]!.reportId
         })
+        // v2.70：原文留存失败计数（有源文件但没拿到 reportId — 上传失败/超 32MB）
+        result.uploadMissed = enriched.reduce(
+          (n, e, i) => n + (enrichItems[i]?.rep && !e.reportId ? 1 : 0), 0,
+        )
       } catch {
         /* enrich 失败（网络/解析）→ 降级「载入」行，导入匹配本身不受影响 */
       }

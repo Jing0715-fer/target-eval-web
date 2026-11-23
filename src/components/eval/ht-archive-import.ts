@@ -860,8 +860,13 @@ export interface HtImportParseResult {
   sourceKey: (rep: HtArchiveReport) => string
 }
 
-/** 单份导入源文件读取体积上限（与服务端上传端点同口径 — 超大文件不解析不上传） */
+/** 单份导入源文件读取体积上限（解析前缀用 — 超大文件切片保留头部，统计解析
+ *  仍可用；上传按服务端 32MB 上限独立门控，见 IMPORTED_UPLOAD_MAX_CHARS） */
 const IMPORT_SOURCE_MAX_CHARS = 33_000_000
+/** v2.70：上传体积上限（与服务端 ht-imported-report MAX_HTML_CHARS 同口径 —
+ *  超大文件不再上传原文，但统计解析照常（修复：v2.69 里读取超限直接置 null，
+ *  大报告（多结构/3D 内嵌）的靶点全部降级为无评分 bare 行） */
+const IMPORTED_UPLOAD_MAX_CHARS = 32_000_000
 
 export async function parseHtImportFiles(files: File[]): Promise<HtImportParseResult> {
   const out: HtArchiveReport[] = []
@@ -904,7 +909,12 @@ export async function parseHtImportFiles(files: File[]): Promise<HtImportParseRe
     } catch {
       text = null
     }
-    if (text != null && text.length > IMPORT_SOURCE_MAX_CHARS) text = null
+    // v2.70：超大文件切片保留头部（不再置 null）— 统计证据（h1/glance/评分卡）
+    //  都在报告头部，切片后照常解析；上传制 32MB 上限由 enrichImportedReports
+    //  按长度独立门控（切片文本不会作为原文上传）
+    if (text != null && text.length > IMPORT_SOURCE_MAX_CHARS) {
+      text = text.slice(0, IMPORT_SOURCE_MAX_CHARS)
+    }
     src.cache.set(cacheKey, text)
     return text
   }
@@ -955,17 +965,20 @@ const H1_TITLE_RE = /<h1 class="rpt-title"[^>]*>([^<]+)<\/h1>/g
  * 降级行，不影响导入匹配本身。
  */
 export function extractImportedStatsSections(html: string): ImportedReportStats[] {
-  if (!html || html.length > IMPORT_SOURCE_MAX_CHARS) return []
+  if (!html) return []
+  // v2.70：超长文本前缀解析（不再整单放弃）— 每个区段的有效证据（h1/glance/
+  //  评分卡/刊头）都在区段头部，尾部被截断的区段自然解析失败跳过，不影响其余
+  const capped = html.length > IMPORT_SOURCE_MAX_CHARS ? html.slice(0, IMPORT_SOURCE_MAX_CHARS) : html
   const h1s: Array<{ title: string; at: number }> = []
   H1_TITLE_RE.lastIndex = 0
   let m: RegExpExecArray | null
-  while ((m = H1_TITLE_RE.exec(html))) h1s.push({ title: m[1].trim(), at: m.index })
+  while ((m = H1_TITLE_RE.exec(capped))) h1s.push({ title: m[1].trim(), at: m.index })
   if (h1s.length === 0) return []
   const sections: StatsSection[] = []
   for (let i = 0; i < h1s.length; i++) {
     const from = h1s[i].at
-    const to = i + 1 < h1s.length ? h1s[i + 1].at : Math.min(html.length, from + 2_000_000)
-    const sec = html.slice(from, to)
+    const to = i + 1 < h1s.length ? h1s[i + 1].at : Math.min(capped.length, from + 2_000_000)
+    const sec = capped.slice(from, to)
     const s = parseStatsSection(h1s[i].title, sec)
     if (s) sections.push(s)
   }
@@ -1118,9 +1131,13 @@ export async function enrichImportedReports(
       const text = await parsed.readSource(rep)
       if (text) {
         entry.sections = extractImportedStatsSections(text)
-        const base = (rep.path.split('::')[0] ?? rep.path).split('/').pop() ?? ''
-        const fileName = base.replace(/\.html?$/i, '').slice(0, 100) || '导入报告'
-        entry.reportId = await uploadImportedReport(`${fileName}.html`, text)
+        // v2.70：上传按 32MB 上限独立门控（超大文件统计照常解析，仅不内嵌原文 —
+        //  readSource 的 33M 切片不会作为原文上传，此处长度检查双重保险）
+        if (text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
+          const base = (rep.path.split('::')[0] ?? rep.path).split('/').pop() ?? ''
+          const fileName = base.replace(/\.html?$/i, '').slice(0, 100) || '导入报告'
+          entry.reportId = await uploadImportedReport(`${fileName}.html`, text)
+        }
       }
     }
     const stats = pickImportedStats(entry.sections, it)
