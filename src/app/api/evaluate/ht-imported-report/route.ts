@@ -18,6 +18,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { getOwner } from '@/lib/eval/request-guard'
+import { ensureImportedReportTable } from '@/lib/eval/imported-report-table'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -49,16 +50,31 @@ export async function POST(req: Request) {
     .trim()
     .slice(0, 120) || '导入报告.html'
 
-  const record = await db.importedReport.create({
-    data: {
-      fileName,
-      ownerKey: owner.key,
-      ownerMask: owner.mask,
-      // 先建行拿 id，再落盘（路径以 id 命名 — 无用户可控路径成分）
-      htmlPath: '',
-      size: Buffer.byteLength(html, 'utf-8'),
-    },
-  })
+  // v2.70：表自愈（本地部署未 db:push 时自动补建 — 此前直接 P2021 → 500，
+  //  上传全失败 → 汇总弹出页全部降级为重建页）
+  try {
+    await ensureImportedReportTable()
+  } catch (err) {
+    console.error('[ht-imported-report] 表自愈失败：', err instanceof Error ? err.message : String(err))
+    return NextResponse.json({ ok: false, error: '报告留存表初始化失败（不影响导入 — 汇总弹出页将降级）' }, { status: 500 })
+  }
+
+  let record: { id: string }
+  try {
+    record = await db.importedReport.create({
+      data: {
+        fileName,
+        ownerKey: owner.key,
+        ownerMask: owner.mask,
+        // 先建行拿 id，再落盘（路径以 id 命名 — 无用户可控路径成分）
+        htmlPath: '',
+        size: Buffer.byteLength(html, 'utf-8'),
+      },
+    })
+  } catch (err) {
+    console.error('[ht-imported-report] 留存记录创建失败：', err instanceof Error ? err.message : String(err))
+    return NextResponse.json({ ok: false, error: '报告留存记录创建失败（不影响导入 — 汇总弹出页将降级）' }, { status: 500 })
+  }
   try {
     const dir = path.join(process.cwd(), 'db', 'reports', 'imports')
     await fs.mkdir(dir, { recursive: true })

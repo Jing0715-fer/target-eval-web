@@ -224,12 +224,16 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       const doneNote = result.doneOnlyCount > 0
         ? `\n另有 ${result.doneOnlyCount} 个文件的靶点在当前运行中已完成/进行中（无需导入）。`
         : ''
+      // v2.70：原文留存失败提示（统计解析不受影响 — 仅弹出页无原文可嵌）
+      const uploadNote = result.uploadMissed > 0
+        ? `\n注意：${result.uploadMissed} 份报告原文未能内嵌（体积超 32MB 上限或服务端留存失败）— 评分与结论已照常解析进汇总表格，对应「完整报告」弹出页将显示已解析的评分统计；完整原文可直接打开导入的报告文件。`
+        : ''
       if (result.matched > 0) {
         toast({
           title: `已导入 ${result.matched} 个靶点的既有报告`,
           description: (
             <div className="whitespace-pre-line">
-              {`这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。${doneNote}${missTail}`}
+              {`这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。${doneNote}${uploadNote}${missTail}`}
             </div>
           ),
         })

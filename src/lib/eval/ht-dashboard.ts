@@ -64,6 +64,7 @@ import { llmChat } from './llm'
 import { getEngineSummary } from './llm-provider'
 import { renderMarkdown } from './report-html'
 import { planArchiveNames, type ArchivePlanItem } from './ht-archive-names'
+import { ensureImportedReportTable } from './imported-report-table'
 import type { HtExcelRowSnapshot } from './ht-excel'
 import type { ImportedReportStats, PdbEntry, BlastHit } from './types'
 
@@ -445,22 +446,36 @@ export function buildImportedRows(
 
 /** v2.69：读取导入报告原文的服务端留存（ht-imported-report 上传的文件）。
  *  归属校验（仅上传者可读）+ 体积护栏（与作业报告原文同预算 — 超出仅丢失
- *  「完全一致」内嵌，统计与降级行不受影响）。文件丢失/超预算 → 不入 Map。 */
+ *  「完全一致」内嵌，统计与降级行不受影响）。文件丢失/超预算 → 不入 Map。
+ *  v2.70：① 使用前自愈补建 ImportedReport 表（本地部署未 db:push 时此前直接
+ *  查询抛错 → 全部无原文可嵌）；② 预算优先级 — 无 stats 的降级行先读（它们
+ *  的弹出页除原文外一无所有，stats 行还有已解析的评分重建页兜底）；③ 查询
+ *  失败记日志（不再静默空 Map）。 */
 export async function loadImportedReportHtml(
   imported: HtImportedTarget[],
   owner: { key: string; ipKey: string },
   budget: { total: number },
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>()
-  const ids = [...new Set(imported.map((t) => t.reportId).filter((x): x is string => Boolean(x)))]
-  if (ids.length === 0) return out
+  const withId = imported.filter((t): t is HtImportedTarget & { reportId: string } => Boolean(t.reportId))
+  if (withId.length === 0) return out
+  try {
+    await ensureImportedReportTable()
+  } catch (err) {
+    console.error('[ht-dashboard] 导入报告表自愈失败（弹出页将全部降级）：', err instanceof Error ? err.message : String(err))
+    return out
+  }
+  // v2.70 预算优先级：无 stats 的降级行优先读原文（弹出页唯一内容来源）
+  const ordered = [...withId.filter((t) => !t.stats), ...withId.filter((t) => t.stats)]
+  const ids = [...new Set(ordered.map((t) => t.reportId))]
   let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string }> = []
   try {
     recs = await db.importedReport.findMany({
       where: { id: { in: ids.slice(0, 600) } },
       select: { id: true, ownerKey: true, htmlPath: true },
     })
-  } catch {
+  } catch (err) {
+    console.error('[ht-dashboard] 导入报告留存读取失败（弹出页将降级）：', err instanceof Error ? err.message : String(err))
     return out
   }
   for (const id of ids) {
@@ -846,7 +861,7 @@ ${r.sequence ? `<div class="seqbox"><div class="seq-head"><b>提交序列</b> ·
   const body = r.reportMarkdown
     ? renderMarkdown(r.reportMarkdown, 0)
     : r.importedFromFile
-      ? '<p style="color:var(--sub)">（该靶点导入的报告原文已过期不可用 — 评分、计数与结论已从导入报告解析完整保留，见上方刊头与汇总主表；完整判定可重新导入该报告文件。）</p>'
+      ? `<p style="color:var(--sub)">（该靶点的导入报告原文未能内嵌弹出（超出体积预算或服务端留存不可用）— 评分、计数与结论已从导入报告解析完整保留，见上方刊头与汇总主表${r.importedFile ? `；完整原文可直接打开导入的报告文件「${esc(r.importedFile)}」` : ''}。）</p>`
       : '<p style="color:var(--sub)">（该靶点无内嵌报告正文 — AI 报告未生成成功或未随缓存快照保留；评分、计数与结论不受影响，完整判定见汇总报告主表。）</p>'
   const uniBadge = r.uniprotId && r.label !== r.uniprotId
     ? `<a class="uni-id" href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(r.uniprotId)}" target="_blank" rel="noopener"${r.identifiedVia ? ` title="回补的 UniProt ID（${esc(r.identifiedVia)}）— 点击打开 UniProt 条目"` : ' title="UniProt ID — 点击打开 UniProt 条目"'}>UniProt ${esc(r.uniprotId)}</a>${r.identifiedVia ? `<span class="uni-src" title="该 ID 为评估中由提交序列识别回补（${esc(r.identifiedVia)}）">回补 · ${esc(r.identifiedVia)}</span>` : ''}`
@@ -930,8 +945,11 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   // v2.60：缓存恢复行（服务端作业已过期 — 由浏览器本地快照重建统计）头部提示 + 行内徽标
   const recoveredCount = rows.filter(r => r.fromArchive).length
   // v2.63：单靶点完整报告内嵌载荷（原文报告或 markdown 正文任一存在才内嵌；
-  // v2.68：降级载入行（说明 + 提交序列）同样可弹出）
-  const anyBody = sorted.some(r => r.reportHtml || r.reportMarkdown || r.bare)
+  // v2.68：降级载入行（说明 + 提交序列）同样可弹出；
+  // v2.70：导入行（imported / importedFromFile）无论是否内嵌原文都可弹出 —
+  //  无原文时弹出已解析评分的重建页（修复：v2.69 只看 reportHtml/markdown/bare，
+  //  原文留存失败/超预算时这些行的报告列整列空白、按钮整个消失）
+  const anyBody = sorted.some(r => r.reportHtml || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
   const rptPayload = anyBody
     ? buildHtReportPayload({ title: input.title, rows: sorted, verdicts, generatedAt: input.generatedAt, engineSummary, origin })
     : null
@@ -958,16 +976,19 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
       ? `<div class="tg-uni"><a class="uni-id" href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(r.uniprotId)}" target="_blank" rel="noopener"${r.identifiedVia ? ` title="回补的 UniProt ID（${esc(r.identifiedVia)}）— 点击打开 UniProt 条目"` : ' title="UniProt ID — 点击打开 UniProt 条目"'}>UniProt ${esc(r.uniprotId)}</a>${r.identifiedVia ? `<span class="uni-src" title="该 ID 为评估中由提交序列识别回补（${esc(r.identifiedVia)}）">回补 · ${esc(r.identifiedVia)}</span>` : ''}</div>`
       : '<span class="dim">—</span>'
     // v2.68：bare 载入行同样可弹出（说明 + 提交序列的重建页）；v2.69：有原文留存的
-    //  bare 行 / 解析导入行弹出导入的报告原文（与下载的单独报告一致）
-    const hasPopup = Boolean(r.reportHtml || r.reportMarkdown || r.bare)
+    //  bare 行 / 解析导入行弹出导入的报告原文（与下载的单独报告一致）；
+    //  v2.70：导入行无原文时也保留按钮 — 弹出已解析评分的重建页（不再整列空白）
+    const hasPopup = Boolean(r.reportHtml || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
     const openBtn = anyBody && hasPopup
       ? `<button type="button" class="mt-open" data-i="${idx}"${r.reportHtml
           ? r.imported
             ? ' title="新标签页弹出该靶点导入的评估报告原文（与导入的报告文件完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
             : ' title="新标签页弹出该靶点的单独评估报告原文（与下载的单独报告完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
-          : r.bare
-            ? ' title="新标签页弹出该靶点的载入说明与提交序列（导入报告原文不可用 — 评分与结论见导入的报告文件）"'
-            : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>完整报告 ↗</button>`
+          : r.imported
+            ? ` title="新标签页弹出该靶点的载入说明与已解析的评分统计（导入报告原文未能内嵌 — 超出体积预算或留存失败${r.importedFile ? `；完整原文可直接打开导入的报告文件「${esc(r.importedFile)}」` : ''}）"`
+            : r.bare
+              ? ' title="新标签页弹出该靶点的载入说明与提交序列（导入报告原文不可用 — 评分与结论见导入的报告文件）"'
+              : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>完整报告 ↗</button>`
       : ''
     // v2.65：逐靶点下载按钮 — 内嵌的原文/重建页一键存盘（命名与单独报告下载同源）
     const dlBtn = anyBody && hasPopup
@@ -975,7 +996,9 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
           ? r.imported
             ? ' title="下载该靶点导入的评估报告 HTML 文件（与弹出页及导入的报告文件一致 — 离线自包含）"'
             : ' title="下载该靶点的单独评估报告 HTML 文件（与弹出页及单独报告下载完全一致 — 离线自包含）"'
-          : ' title="下载该靶点的重建报告页 HTML（服务端报告原文已回收 — 由缓存数据重建）"'}>下载 ⤓</button>`
+          : r.imported
+            ? ' title="下载该靶点的载入说明与已解析评分统计页 HTML（导入报告原文未能内嵌 — 完整原文可直接打开导入的报告文件）"'
+            : ' title="下载该靶点的重建报告页 HTML（服务端报告原文已回收 — 由缓存数据重建）"'}>下载 ⤓</button>`
       : ''
     // v2.68→v2.69：载入徽标（DB 命中行 = 统计已从服务端恢复；解析行 = 整合自导入
     //  报告文件；降级行 = 报告见导入文件/弹出页）
@@ -1186,7 +1209,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 </div>
 
 ${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，评估正文经「完整报告」弹出页提供；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.filter(r => !r.fromArchive).length} 个靶点数据完整来自服务器。</div>` : ''}
-${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计，「完整报告」弹出页内嵌导入的报告原文）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && r.reportHtml) ? '或「完整报告」弹出页' : ''}）` : ''}。</div>` : ''}
+${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计${rows.some(r => r.importedFromFile && r.reportHtml) ? '，「完整报告」弹出页内嵌导入的报告原文' : ''}）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && r.reportHtml) ? '或「完整报告」弹出页' : ''}）` : ''}${rows.some(r => (r.importedFromFile || r.bare) && !r.reportHtml && r.importedFile) ? `；${rows.filter(r => (r.importedFromFile || r.bare) && !r.reportHtml && r.importedFile).length} 个的原文未能内嵌弹出页（超出体积预算或留存失败 — 可直接打开导入的报告文件查看完整原文）` : ''}。</div>` : ''}
 
 ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 

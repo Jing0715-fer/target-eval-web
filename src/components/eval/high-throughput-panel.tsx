@@ -166,10 +166,13 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
   const zipInputRef = useRef<HTMLInputElement>(null)
   const [importingZip, setImportingZip] = useState(false)
   const [zipMeta, setZipMeta] = useState<{ name: string; reports: number; matched: number } | null>(null)
+  /** v2.70：本次导入中原文未能留存/内嵌的靶点数（超 32MB 或上传失败 — toast 提示） */
+  const importUploadMissedRef = useRef(0)
   const handleZipImport = async (files: FileList | null | undefined) => {
     const list = files ? Array.from(files) : []
     if (list.length === 0 || importingZip) return
     setImportingZip(true)
+    importUploadMissedRef.current = 0
     try {
       const importParsed = await parseHtImportFiles(list)
       const reports = importParsed.reports
@@ -234,12 +237,16 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         //  表格）；reportId 供汇总弹出页内嵌报告原文。任一失败独立降级，不阻塞导入
         try {
           const enriched = await enrichImportedReports(enrichItems, importParsed)
+          let uploadMissed = 0
           enriched.forEach((e, i) => {
             const entry = nextImported.get(enrichKeys[i]!)
             if (!entry) return
             if (e.stats) entry.stats = e.stats
             if (e.reportId) entry.reportId = e.reportId
+            // v2.70：原文留存失败计数（有源文件但没拿到 reportId — 上传失败/超 32MB）
+            if (enrichItems[i]?.rep && !e.reportId) uploadMissed++
           })
+          importUploadMissedRef.current = uploadMissed
         } catch {
           /* enrich 失败（网络/解析）→ 降级「载入」行，导入匹配本身不受影响 */
         }
@@ -254,11 +261,15 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         ? `\n未命中文件原因：\n${missLines.slice(0, 5).join('\n')}${missLines.length > 5 ? `\n…等共 ${missLines.length} 个文件` : ''}`
         : ''
       if (matched > 0) {
+        // v2.70：原文留存失败提示（统计解析不受影响 — 仅弹出页无原文可嵌）
+        const uploadNote = importUploadMissedRef.current > 0
+          ? `\n注意：${importUploadMissedRef.current} 份报告原文未能内嵌（体积超 32MB 上限或服务端留存失败）— 评分与结论已照常解析，对应弹出页将显示已解析的评分统计；完整原文可直接打开导入的报告文件。`
+          : ''
         toast({
           title: `已匹配 ${matched} 个已有报告的靶点`,
           description: (
             <div className="whitespace-pre-line">
-              {`这些靶点已取消勾选（启动时跳过不重复评估，进度计入「载入」完成口径）；报告的评分与结论已解析，将整合进本次运行的汇总报告表格（「完整报告」弹出页内嵌导入的报告原文）。匹配依据：UniProt/序列/区间严格一致，或报告携带的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。${missTail}`}
+              {`这些靶点已取消勾选（启动时跳过不重复评估，进度计入「载入」完成口径）；报告的评分与结论已解析，将整合进本次运行的汇总报告表格（「完整报告」弹出页内嵌导入的报告原文）。匹配依据：UniProt/序列/区间严格一致，或报告携带的组号（G{NN}，需总组数对齐；多靶点组内按序列 SHA/比对跨度/长度唯一定位）。可手动重新勾选恢复评估。${uploadNote}${missTail}`}
             </div>
           ),
         })
