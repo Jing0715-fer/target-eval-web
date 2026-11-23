@@ -18,6 +18,7 @@ import type {
   SequenceAttribution,
   UploadResponse,
 } from './types'
+import type { ImportedReportStats } from '@/lib/eval/types'
 import {
   migrateMinimaxDomesticDefault,
   migrateMinimaxEndpoint,
@@ -744,6 +745,23 @@ export interface HtArchiveEntry {
 
 // ─── 高通量统计看板（v2.28）──────────────────────────────────────
 
+/** v2.69：上传一份导入的既有报告原文到服务端留存 — 返回留存 id（后续汇总报告
+ *  生成时服务端读回，作为「完整报告」弹出页内嵌原文，与下载的单独报告一致）。
+ *  失败返回 undefined（不阻塞导入 — 统计快照已本地解析，仅弹出页降级）。 */
+export async function uploadImportedReport(fileName: string, html: string): Promise<string | undefined> {
+  try {
+    const res = await fetch('/api/evaluate/ht-imported-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName, html }),
+    })
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; id?: string } | null
+    return res.ok && data?.ok && typeof data.id === 'string' ? data.id : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告） */
 export interface HtDashboardInfo {
   id: string
@@ -836,8 +854,18 @@ export async function generateHtDashboard(input: {
   /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 单靶点完整报告弹出页展示） */
   sequences?: Array<{ jobId: string; sequence: string }>
   /** v2.68：导入既有报告但无作业标记的靶点（降级「载入」行 — 主表呈现 + 计入完成口径，
-   *  无评分参与统计分布；sequence 供该行复制序列按钮用） */
-  imported?: Array<{ label: string; group?: number; sequence?: string; fileName?: string }>
+   *  无评分参与统计分布；sequence 供该行复制序列按钮用）。
+   *  v2.69：stats（导入报告解析的统计快照）存在时构建与本次评估同权的完整统计行；
+   *  reportId（原文服务端留存 id）存在时弹出页内嵌报告原文 */
+  imported?: Array<{
+    label: string
+    group?: number
+    sequence?: string
+    fileName?: string
+    reportId?: string
+    range?: [number, number]
+    stats?: ImportedReportStats
+  }>
   /** v2.68：导入报告携带的原作业 id（entries 中对应行标「载入」徽标 — 与本次评估行区分） */
   importedJobIds?: string[]
 }): Promise<HtDashboardInfo> {

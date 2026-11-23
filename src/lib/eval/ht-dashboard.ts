@@ -43,6 +43,18 @@
  *    字号随版心微升 — 去 100% 全宽）；⑳ 内嵌原文预算放宽（单份 ≤32MB /
  *    批次 ≤192MB — 74 靶点 × ~1.2MB 全量内嵌不再触顶回退重建页）。
  *
+ *    v2.69：导入报告内容整合 — ① HtImportedTarget 扩展 stats（客户端解析的
+ *    统计快照）+ reportId（原文服务端留存 id）；② buildImportedRows 双通道：
+ *    stats 存在 → 完整统计行（importedFromFile — 评分/结构/覆盖/展示信息来自
+ *    导入报告解析，与本次评估同权参与分布/均值/结论，不依赖 DB 保留期 —
+ *    修复「导入的报告内容并未整合到表格中」）；无 stats → 降级「载入」行；
+ *    两条通道都挂 reportHtml（原文留存读回 — 弹出页内嵌导入的报告原文，
+ *    修复「报告也没有内嵌到汇总报告中」）；③ loadImportedReportHtml：归属
+ *    校验 + 与作业报告共用 32MB/192MB 预算；④ computeHtStats 口径：解析行入
+ *    靶点总数与载入数、失败数不掺水；⑤ 渲染：载入徽标三分（DB 恢复 / 解析
+ *    导入文件 / 降级）tooltip 区分、载入说明横幅与主表 note 同步、弹出/下载
+ *    按钮说明区分导入原文。
+ *
  * 离线链接语义：zip 相对路径与 ht-archive 打包命名同源（planArchiveNames 共享
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
  */
@@ -53,7 +65,7 @@ import { getEngineSummary } from './llm-provider'
 import { renderMarkdown } from './report-html'
 import { planArchiveNames, type ArchivePlanItem } from './ht-archive-names'
 import type { HtExcelRowSnapshot } from './ht-excel'
-import type { PdbEntry, BlastHit } from './types'
+import type { ImportedReportStats, PdbEntry, BlastHit } from './types'
 
 // ─── 数据行 ───────────────────────────────────────────────────────────────────
 
@@ -108,6 +120,9 @@ export interface HtDashboardRow {
   bare?: boolean
   /** v2.68：导入来源文件名（降级行说明 — DB 命中行不携带） */
   importedFile?: string
+  /** v2.69：本行统计与报告内容整合自导入的报告文件（客户端解析的统计快照构建 —
+   *  与本次评估同权参与分布/均值；区别于 DB 原作业恢复行与降级行） */
+  importedFromFile?: boolean
   /** v2.68：匹配到的原表行内序列格原文（与 excelText 中 [序列 N aa] 标记按序对应 —
    *  主表序列标记处一键复制按钮数据源；旧快照无 seqs 则标记无按钮） */
   excelSeqs?: string[]
@@ -158,7 +173,10 @@ export interface HtDashboardEntry {
 }
 
 /** v2.68：导入既有报告但无作业标记的靶点（POST 载荷 — 降级「载入」行：
- *  主表呈现 + 完成口径计数，不参与评分分布；sequence 供行内复制按钮用） */
+ *  主表呈现 + 完成口径计数，不参与评分分布；sequence 供行内复制按钮用）。
+ *  v2.69：stats（客户端解析的统计快照）存在时构建完整统计行（与本次评估同权
+ *  参与分布/均值，行内标「载入」）；reportId（原文服务端留存 id）供弹出页内嵌
+ *  报告原文；两者都缺时才降级行 */
 export interface HtImportedTarget {
   label: string
   /** 1-based 组序号（主表行 G 归属说明） */
@@ -167,6 +185,12 @@ export interface HtImportedTarget {
   sequence?: string
   /** 导入来源文件名（行说明） */
   fileName?: string
+  /** v2.69：导入报告原文的服务端留存 id（弹出页内嵌原文） */
+  reportId?: string
+  /** v2.69：运行侧评估区间（完整统计行的展示列） */
+  range?: [number, number]
+  /** v2.69：客户端解析的统计快照（存在即构建完整统计行） */
+  stats?: ImportedReportStats
 }
 
 /** v2.60：浏览器本地缓存恢复的作业快照 — 服务端作业已过期（实例回收/起出保留期）
@@ -278,10 +302,11 @@ async function readReportHtml(reportPath: string | null, budget: { total: number
  *  前端上传的缓存快照（archivedByJob）恢复统计行（行标 fromArchive）；
  *  v2.61：sequencesByJob 按 jobId 回填提交序列全文（汇总表复制按钮 + 弹出报告页展示）；
  *  v2.68：importedJobIds 中的作业为「导入既有报告」的靶点 — 行标 imported（「载入」徽标）。 */
-export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedByJob?: Map<string, ArchivedJobSnapshot>, sequencesByJob?: Map<string, string>, importedJobIds?: Set<string>): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
+export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedByJob?: Map<string, ArchivedJobSnapshot>, sequencesByJob?: Map<string, string>, importedJobIds?: Set<string>, reportBudget?: { total: number }): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
   const rows: HtDashboardRow[] = []
   let jobCount = 0
-  const reportBudget = { total: 0 }
+  // v2.69：可选的外部预算（与导入报告原文留存共用总量 — 调用方传入；缺省独立预算）
+  const budget = reportBudget ?? { total: 0 }
   for (const entry of entries) {
     if (!entry.jobId) continue
     jobCount++
@@ -306,7 +331,7 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
         fromArchive: undefined,
         sequence: sequencesByJob?.get(job.id) ?? null,
         // v2.63：报告文件原文（与下载的单独报告完全一致）— 丢失/超预算时回退 markdown 重建页
-        reportHtml: await readReportHtml(job.reportPath, reportBudget),
+        reportHtml: await readReportHtml(job.reportPath, budget),
         imported: importedJobIds?.has(job.id) ? true : undefined,
       })
       if (row) rows.push(row)
@@ -335,36 +360,124 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
   return { rows, jobCount }
 }
 
-/** v2.68：导入既有报告但无作业标记的靶点 → 降级「载入」行（bare = true）。
- *  评分/计数全空（渲染层显示「—」），仅主表呈现 + 完成口径；不参与分布/均值/结论。
- *  jobId 用伪 id（`imp-{n}` — 与 verdict/zipHref 索引不冲突，永不指向真实作业）。 */
-export function buildImportedBareRows(imported: HtImportedTarget[]): HtDashboardRow[] {
-  return imported.map((t, i) => ({
-    jobId: `imp-${i + 1}`,
-    label: t.label.slice(0, 60),
-    proteinName: t.label.slice(0, 60),
-    organism: '',
-    overall: 0,
-    xray: 0,
-    cryoem: 0,
-    nmr: 0,
-    directPdbCount: 0,
-    blastHitCount: 0,
-    coverage: 0,
-    methodXrayCount: 0,
-    methodCryoemCount: 0,
-    methodNmrCount: 0,
-    bestResolution: null,
-    ligandCount: 0,
-    literatureCount: 0,
-    reportLlmOk: false,
-    durationMs: 0,
-    hasReport: false,
-    imported: true,
-    bare: true,
-    importedFile: t.fileName,
-    sequence: t.sequence,
-  }))
+/** v2.68→v2.69：导入既有报告的靶点 → 统计行构建。
+ *  v2.69 双通道：
+ *  - stats（客户端解析的统计快照）存在 → **完整统计行**（importedFromFile —
+ *    评分/结构/覆盖/展示信息全部来自导入报告的解析，与本次评估同权参与
+ *    分布/均值/结论；不依赖 DB 保留期，旧版报告也能整合进汇总表格）；
+ *  - 无 stats → 降级「载入」行（bare = true：评分列「—」，仅主表呈现 + 完成
+ *    口径，不参与分布/均值/结论）。
+ *  两条通道都尽可能挂上 reportHtml（导入原文的服务端留存 — 弹出页内嵌报告
+ *  原文，与下载的单独报告一致）。
+ *  jobId 用伪 id（`imp-{n}` / `impb-{n}` — 与 verdict/zipHref 索引不冲突，
+ *  永不指向真实作业）。 */
+export function buildImportedRows(
+  imported: HtImportedTarget[],
+  reportHtmlById: Map<string, string>,
+): { rows: HtDashboardRow[]; bareRows: HtDashboardRow[] } {
+  const rows: HtDashboardRow[] = []
+  const bareRows: HtDashboardRow[] = []
+  imported.forEach((t, i) => {
+    const reportHtml = t.reportId ? reportHtmlById.get(t.reportId) : undefined
+    if (t.stats) {
+      const s = t.stats
+      rows.push({
+        jobId: `imp-${i + 1}`,
+        label: t.label.slice(0, 60),
+        uniprotId: s.uniprotId,
+        proteinName: (s.proteinName || t.label).slice(0, 80),
+        organism: s.organism ?? '',
+        range: s.range ?? t.range,
+        overall: s.overall,
+        xray: s.xray,
+        cryoem: s.cryoem,
+        nmr: s.nmr,
+        directPdbCount: s.pdbCount,
+        blastHitCount: s.blastHitCount,
+        coverage: s.coverage,
+        methodXrayCount: s.methodXrayCount,
+        methodCryoemCount: s.methodCryoemCount,
+        methodNmrCount: s.methodNmrCount,
+        bestResolution: s.bestResolution,
+        ligandCount: 0,
+        literatureCount: s.literatureCount,
+        reportLlmOk: false,
+        durationMs: 0,
+        hasReport: false,
+        reportHtml,
+        imported: true,
+        importedFromFile: true,
+        importedFile: t.fileName,
+        sequence: t.sequence,
+      })
+      return
+    }
+    bareRows.push({
+      jobId: `impb-${i + 1}`,
+      label: t.label.slice(0, 60),
+      proteinName: t.label.slice(0, 60),
+      organism: '',
+      overall: 0,
+      xray: 0,
+      cryoem: 0,
+      nmr: 0,
+      directPdbCount: 0,
+      blastHitCount: 0,
+      coverage: 0,
+      methodXrayCount: 0,
+      methodCryoemCount: 0,
+      methodNmrCount: 0,
+      bestResolution: null,
+      ligandCount: 0,
+      literatureCount: 0,
+      reportLlmOk: false,
+      durationMs: 0,
+      hasReport: false,
+      reportHtml,
+      imported: true,
+      bare: true,
+      importedFile: t.fileName,
+      sequence: t.sequence,
+    })
+  })
+  return { rows, bareRows }
+}
+
+/** v2.69：读取导入报告原文的服务端留存（ht-imported-report 上传的文件）。
+ *  归属校验（仅上传者可读）+ 体积护栏（与作业报告原文同预算 — 超出仅丢失
+ *  「完全一致」内嵌，统计与降级行不受影响）。文件丢失/超预算 → 不入 Map。 */
+export async function loadImportedReportHtml(
+  imported: HtImportedTarget[],
+  owner: { key: string; ipKey: string },
+  budget: { total: number },
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const ids = [...new Set(imported.map((t) => t.reportId).filter((x): x is string => Boolean(x)))]
+  if (ids.length === 0) return out
+  let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string }> = []
+  try {
+    recs = await db.importedReport.findMany({
+      where: { id: { in: ids.slice(0, 600) } },
+      select: { id: true, ownerKey: true, htmlPath: true },
+    })
+  } catch {
+    return out
+  }
+  for (const id of ids) {
+    const rec = recs.find((r) => r.id === id)
+    if (!rec || !rec.htmlPath) continue
+    if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) continue // 他人留存 — 不采信
+    try {
+      const html = await readFile(rec.htmlPath, 'utf-8')
+      if (html.length > REPORT_HTML_MAX_BYTES) continue
+      if (budget.total + html.length > REPORT_HTML_TOTAL_BUDGET) continue
+      budget.total += html.length
+      out.set(id, html)
+    } catch {
+      /* 文件已被清理/磁盘回收 → 跳过（弹出页降级） */
+    }
+  }
+  return out
 }
 
 /** v2.36：评估条目 ↔ 原始 Excel 行匹配（汇总报告「原表内容」列）。
@@ -390,6 +503,10 @@ export function attachExcelRows(rows: HtDashboardRow[], excelRows: HtExcelRowSna
 
 export function computeHtStats(rows: HtDashboardRow[], jobCount: number, importedBareCount = 0): HtDashboardStats {
   const n = rows.length
+  // v2.69：解析导入行（importedFromFile）在 rows 内但不对应真实作业 —
+  //  靶点总数计入、失败数不掺水（失败 = 真实作业中未加载出统计行的）
+  const parsedImported = rows.filter(r => r.importedFromFile).length
+  const realRows = n - parsedImported
   const overall = rows.map(r => r.overall).sort((a, b) => a - b)
   const mean = (xs: number[]): number => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : 0)
   const buckets = new Array(10).fill(0)
@@ -399,9 +516,9 @@ export function computeHtStats(rows: HtDashboardRow[], jobCount: number, importe
   }
   const verdicts = rows.map(r => ruleVerdict(r).verdict)
   return {
-    totalTargets: jobCount + importedBareCount,
+    totalTargets: jobCount + importedBareCount + parsedImported,
     loadedTargets: n,
-    failedTargets: Math.max(0, jobCount - n),
+    failedTargets: Math.max(0, jobCount - realRows),
     importedTargets: rows.filter(r => r.imported).length + importedBareCount,
     overallMean: mean(overall),
     overallMedian: n ? overall[Math.floor(n / 2)] : 0,
@@ -728,14 +845,16 @@ ${r.sequence ? `<div class="seqbox"><div class="seq-head"><b>提交序列</b> ·
   }
   const body = r.reportMarkdown
     ? renderMarkdown(r.reportMarkdown, 0)
-    : '<p style="color:var(--sub)">（该靶点无内嵌报告正文 — AI 报告未生成成功或未随缓存快照保留；评分、计数与结论不受影响，完整判定见汇总报告主表。）</p>'
+    : r.importedFromFile
+      ? '<p style="color:var(--sub)">（该靶点导入的报告原文已过期不可用 — 评分、计数与结论已从导入报告解析完整保留，见上方刊头与汇总主表；完整判定可重新导入该报告文件。）</p>'
+      : '<p style="color:var(--sub)">（该靶点无内嵌报告正文 — AI 报告未生成成功或未随缓存快照保留；评分、计数与结论不受影响，完整判定见汇总报告主表。）</p>'
   const uniBadge = r.uniprotId && r.label !== r.uniprotId
     ? `<a class="uni-id" href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(r.uniprotId)}" target="_blank" rel="noopener"${r.identifiedVia ? ` title="回补的 UniProt ID（${esc(r.identifiedVia)}）— 点击打开 UniProt 条目"` : ' title="UniProt ID — 点击打开 UniProt 条目"'}>UniProt ${esc(r.uniprotId)}</a>${r.identifiedVia ? `<span class="uni-src" title="该 ID 为评估中由提交序列识别回补（${esc(r.identifiedVia)}）">回补 · ${esc(r.identifiedVia)}</span>` : ''}`
     : ''
   const online = r.hasReport && origin ? `<span><a href="${esc(origin)}/api/jobs/${esc(r.jobId)}/report" target="_blank" rel="noopener">在线报告 ↗</a></span>` : ''
   return `<article class="tg">
 <div class="tg-head">
-  <div class="tg-meta">${uniBadge}${r.imported ? '<span class="tg-load" title="该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端恢复">载入</span>' : ''}${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<span>${esc(r.proteinName)}</span>` : ''}${r.organism ? `<span>${esc(r.organism)}</span>` : ''}</div>
+  <div class="tg-meta">${uniBadge}${r.imported ? `<span class="tg-load" title="${r.importedFromFile ? '该靶点的报告来自导入的既有报告（本次运行未重复评估）— 评分与结论解析自导入的报告文件，与本次评估同权' : '该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端恢复'}">载入</span>` : ''}${r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<span>${esc(r.proteinName)}</span>` : ''}${r.organism ? `<span>${esc(r.organism)}</span>` : ''}</div>
   <div class="tg-meta"><span>总分 <b class="score ${scoreTone(r.overall)}">${r.overall}</b></span><span>X-ray ${r.xray} · Cryo-EM ${r.cryoem} · NMR ${r.nmr}</span><span>直接结构 ${r.directPdbCount}${r.blastHitCount ? ` · 同源 ${r.blastHitCount}` : ''}</span>${r.bestResolution != null ? `<span>最佳 ${r.bestResolution}Å</span>` : ''}<span>覆盖 ${Math.round(r.coverage)}%</span>${online}</div>
   <div class="tg-verdict"><span class="vd vd-${v.verdict}">${VERDICT_META[v.verdict].label}</span><span class="vl">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</span></div>
 </div>
@@ -838,26 +957,34 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
     const uniBadge = r.uniprotId
       ? `<div class="tg-uni"><a class="uni-id" href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(r.uniprotId)}" target="_blank" rel="noopener"${r.identifiedVia ? ` title="回补的 UniProt ID（${esc(r.identifiedVia)}）— 点击打开 UniProt 条目"` : ' title="UniProt ID — 点击打开 UniProt 条目"'}>UniProt ${esc(r.uniprotId)}</a>${r.identifiedVia ? `<span class="uni-src" title="该 ID 为评估中由提交序列识别回补（${esc(r.identifiedVia)}）">回补 · ${esc(r.identifiedVia)}</span>` : ''}</div>`
       : '<span class="dim">—</span>'
-    // v2.68：bare 载入行同样可弹出（说明 + 提交序列的重建页）
+    // v2.68：bare 载入行同样可弹出（说明 + 提交序列的重建页）；v2.69：有原文留存的
+    //  bare 行 / 解析导入行弹出导入的报告原文（与下载的单独报告一致）
     const hasPopup = Boolean(r.reportHtml || r.reportMarkdown || r.bare)
     const openBtn = anyBody && hasPopup
       ? `<button type="button" class="mt-open" data-i="${idx}"${r.reportHtml
-          ? ' title="新标签页弹出该靶点的单独评估报告原文（与下载的单独报告完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
+          ? r.imported
+            ? ' title="新标签页弹出该靶点导入的评估报告原文（与导入的报告文件完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
+            : ' title="新标签页弹出该靶点的单独评估报告原文（与下载的单独报告完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
           : r.bare
-            ? ' title="新标签页弹出该靶点的载入说明与提交序列（旧版导入报告无作业标记 — 评分与结论见导入的报告文件）"'
+            ? ' title="新标签页弹出该靶点的载入说明与提交序列（导入报告原文不可用 — 评分与结论见导入的报告文件）"'
             : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>完整报告 ↗</button>`
       : ''
     // v2.65：逐靶点下载按钮 — 内嵌的原文/重建页一键存盘（命名与单独报告下载同源）
     const dlBtn = anyBody && hasPopup
       ? `<button type="button" class="mt-dl" data-i="${idx}"${r.reportHtml
-          ? ' title="下载该靶点的单独评估报告 HTML 文件（与弹出页及单独报告下载完全一致 — 离线自包含）"'
+          ? r.imported
+            ? ' title="下载该靶点导入的评估报告 HTML 文件（与弹出页及导入的报告文件一致 — 离线自包含）"'
+            : ' title="下载该靶点的单独评估报告 HTML 文件（与弹出页及单独报告下载完全一致 — 离线自包含）"'
           : ' title="下载该靶点的重建报告页 HTML（服务端报告原文已回收 — 由缓存数据重建）"'}>下载 ⤓</button>`
       : ''
-    // v2.68：载入徽标（DB 命中行 = 统计已从服务端恢复；降级行 = 报告见导入文件）
+    // v2.68→v2.69：载入徽标（DB 命中行 = 统计已从服务端恢复；解析行 = 整合自导入
+    //  报告文件；降级行 = 报告见导入文件/弹出页）
     const loadBadge = r.imported
       ? `<span class="tg-load" title="${r.bare
-        ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；旧版报告无作业标记，评分与结论见导入的报告文件`
-        : '该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端原作业恢复，与本次评估同权'}">载入</span>`
+        ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；报告无法解析出统计数据，以降级行呈现（评分与结论见导入的报告文件${r.reportHtml ? '或「完整报告」弹出页' : ''}）`
+        : r.importedFromFile
+          ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；评分/结构/结论解析自导入的报告文件，与本次评估同权`
+          : '该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端原作业恢复，与本次评估同权'}">载入</span>`
       : ''
     return `<tr class="mt-row" data-job="${esc(r.jobId)}" data-overall="${r.bare ? -1 : r.overall}" data-xray="${r.bare ? -1 : r.xray}" data-cryoem="${r.bare ? -1 : r.cryoem}" data-nmr="${r.bare ? -1 : r.nmr}" data-pdb="${r.bare ? -1 : r.directPdbCount}" data-cov="${r.bare ? -1 : Math.round(r.coverage)}" data-verdict="${r.bare ? 'load' : v.verdict}"${r.imported && !r.bare ? ' data-imported="1"' : ''} data-uniprot="${esc(r.uniprotId ?? '')}" data-search="${search}">
 <td class="td-idx">${idx + 1}</td>
@@ -1059,7 +1186,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 </div>
 
 ${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，评估正文经「完整报告」弹出页提供；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.filter(r => !r.fromArchive).length} 个靶点数据完整来自服务器。</div>` : ''}
-${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个为旧版报告（无作业标记），以降级行呈现（评分列「—」，评分与结论见导入的报告文件）` : ''}。</div>` : ''}
+${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计，「完整报告」弹出页内嵌导入的报告原文）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && r.reportHtml) ? '或「完整报告」弹出页' : ''}）` : ''}。</div>` : ''}
 
 ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 
@@ -1118,7 +1245,7 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 <tbody>${rowPairs || '<tr><td colspan="11" style="padding:16px;color:var(--faint)">无成功靶点</td></tr>'}</tbody>
 </table>
 </div>
-<div class="note">「完整报告 ↗」新标签页弹出该靶点自己的单独评估报告 — 服务器数据保留期内的靶点弹出<b>报告文件原文（与「在线/离线包」下载的单独报告完全一致，含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节）</b>；缓存恢复的靶点（服务端文件已回收）弹出由 markdown 与统计数据重建的页面；载入的旧版报告靶点弹出载入说明与提交序列。「下载 ⤓」把同一份报告一键存盘（文件名与单独报告下载同源）。「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。UniProt 列回补的 ID 以徽标展示（标注识别来源）。原表内容中带 ⧉ 的序列标记可<b>一键复制该行原表的完整序列</b>（无按钮的标记为旧版快照）；各靶点的完整序列亦见其单独报告。</div>
+<div class="note">「完整报告 ↗」新标签页弹出该靶点自己的单独评估报告 — 服务器数据保留期内的靶点弹出<b>报告文件原文（与「在线/离线包」下载的单独报告完全一致，含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节）</b>；缓存恢复的靶点（服务端文件已回收）弹出由 markdown 与统计数据重建的页面；载入的靶点弹出导入的报告原文（导入时已上传服务端留存）；导入报告原文不可用的载入靶点弹出载入说明与提交序列。「下载 ⤓」把同一份报告一键存盘（文件名与单独报告下载同源）。「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。UniProt 列回补的 ID 以徽标展示（标注识别来源）。原表内容中带 ⧉ 的序列标记可<b>一键复制该行原表的完整序列</b>（无按钮的标记为旧版快照）；各靶点的完整序列亦见其单独报告。</div>
 
 <h2 class="sec"><span class="k">03</span>AI 整体可行性报告</h2>
 <div class="panel md">${body}</div>

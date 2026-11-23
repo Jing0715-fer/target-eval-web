@@ -44,14 +44,31 @@
  *    导入 toast 直接展示 — 用户不再只能看到「未命中」三个字。
  *
  * 匹配计划由 planArchiveSkips 统一计算（新建运行与既有运行导入同一套规则）。
+ *
+ * v2.69（用户诉求「导入的报告内容并未整合到表格中，报告也没有内嵌到汇总报告中」）：
+ *  导入时解析报告统计快照 + 上传原文服务端留存 —
+ *  - extractImportedStatsSections：按 h1.rpt-title 切区段（合并报告多靶点各成区段，
+ *    封面无评分自然跳过），解析评分卡（glance 总分 + X-ray/Cryo-EM/NMR 行）、
+ *    刊头 meta-grid（蛋白名称/物种/序列长度/结构证据计数）、速览 tile（方法计数/
+ *    最佳分辨率/覆盖率）→ ImportedReportStats（客户端解析，随运行记录持久化）；
+ *  - pickImportedStats：多区段合并报告内按 UniProt+区间 / 比对跨度唯一定位子页
+ *    （与导入匹配同口径 — 歧义不解析，宁降级不误配）；
+ *  - enrichImportedReports：匹配后读源文件 → 解析统计 + 上传原文
+ *    （POST /api/evaluate/ht-imported-report → reportId；同一源文件只传一次）；
+ *    任一失败独立降级，不影响导入匹配本身。
  */
 import JSZip from 'jszip'
+import type { ImportedReportStats } from '@/lib/eval/types'
+import { uploadImportedReport } from './api'
 
 /** 导入的 zip/文件内一份可匹配的报告 */
 export interface HtArchiveReport {
   kind: 'job' | 'merged' | 'dashboard'
   /** zip 内相对路径（提示用） */
   path: string
+  /** v2.69：所属源文件序号（parseHtImportFiles 内部指派 — readSource/sourceKey
+   *  定位源文件用；单文件导入的多条 h1 条目共享同一序号） */
+  srcIdx?: number
   /** UniProt accession（清单 / 文件名 / 题目解析） */
   uniprot?: string
   /** 评估区间（清单 / 题目「残基 X-Y」解析） */
@@ -830,15 +847,285 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
 /**
  * v2.44：混合导入解析 — zip 归档与单独 HTML 报告统一入口（可多选批量）。
  * 非报告文件（扩展名不识别）跳过；全部不可识别时返回空数组（调用方提示）。
+ * v2.69：除报告条目外另携带 readSource（读取条目所属源文件的完整 HTML —
+ *  匹配后解析统计快照 + 上传原文用）与 sourceKey（同一源文件的条目同键 —
+ *  上传去重）。旧调用方只消费 .reports 即可，行为不变。
  */
-export async function parseHtImportFiles(files: File[]): Promise<HtArchiveReport[]> {
+export interface HtImportParseResult {
+  reports: HtArchiveReport[]
+  /** 读取条目所属源文件的完整 HTML 文本（单文件 = 整个文件；zip = 该 zip 内该路径
+   *  的成员文件；路径已被删改/文件丢失时 null）。内部有缓存，可重复调用。 */
+  readSource: (rep: HtArchiveReport) => Promise<string | null>
+  /** 条目所属源文件的稳定键（同一源文件的全部条目同键 — 上传去重用） */
+  sourceKey: (rep: HtArchiveReport) => string
+}
+
+/** 单份导入源文件读取体积上限（与服务端上传端点同口径 — 超大文件不解析不上传） */
+const IMPORT_SOURCE_MAX_CHARS = 33_000_000
+
+export async function parseHtImportFiles(files: File[]): Promise<HtImportParseResult> {
   const out: HtArchiveReport[] = []
+  /** 源文件句柄（srcIdx → 单文件 File 或已解开的 zip 实例） */
+  const sources: Array<
+    | { zip: JSZip; isZip: true; cache: Map<string, string | null> }
+    | { file: File; isZip: false; cache: Map<string, string | null> }
+  > = []
   for (const f of files.slice(0, MAX_ZIP_FILES)) {
+    const srcIdx = sources.length
     if (/\.zip$/i.test(f.name)) {
-      out.push(...(await parseHtArchive(f)))
+      try {
+        const zip = await JSZip.loadAsync(f)
+        const reps = await parseHtArchiveEntries(zip)
+        for (const r of reps) r.srcIdx = srcIdx
+        out.push(...reps)
+        sources.push({ zip, isZip: true, cache: new Map() })
+      } catch {
+        // 非 zip / 损坏 → 跳过该文件（与旧版 parseHtArchive 抛错不同：混合批量时不阻断其余文件）
+      }
     } else if (/\.html?$/i.test(f.name)) {
-      out.push(...(await parseHtReportFile(f)))
+      const reps = await parseHtReportFile(f)
+      for (const r of reps) r.srcIdx = srcIdx
+      out.push(...reps)
+      sources.push({ file: f, isZip: false, cache: new Map() })
     }
+  }
+  const readSource = async (rep: HtArchiveReport): Promise<string | null> => {
+    const src = rep.srcIdx != null ? sources[rep.srcIdx] : undefined
+    if (!src) return null
+    const cacheKey = src.isZip ? rep.path : ''
+    if (src.cache.has(cacheKey)) return src.cache.get(cacheKey) ?? null
+    let text: string | null = null
+    try {
+      if (src.isZip) {
+        text = (await src.zip.file(rep.path)?.async('text')) ?? null
+      } else {
+        text = await src.file.text()
+      }
+    } catch {
+      text = null
+    }
+    if (text != null && text.length > IMPORT_SOURCE_MAX_CHARS) text = null
+    src.cache.set(cacheKey, text)
+    return text
+  }
+  const sourceKey = (rep: HtArchiveReport): string => {
+    const src = rep.srcIdx != null ? sources[rep.srcIdx] : undefined
+    if (!src) return `none:${rep.path}`
+    // 单文件导入：一份文件只上传一次（多靶点合并报告内嵌全部子页）。
+    // zip：逐成员文件上传（rep.path = zip 内路径，各成员独立成报告）
+    return src.isZip ? `z:${rep.srcIdx}:${rep.path}` : `f:${rep.srcIdx}`
+  }
+  return { reports: out, readSource, sourceKey }
+}
+
+// ── v2.69 导入报告统计快照解析（汇总报告整合 — 见 ImportedReportStats）───────
+
+/** HTML 实体反转义（报告正文 esc 后的值还原 — 展示用） */
+function unescapeHtml(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+}
+
+/** 去标签取纯文本（meta-grid 行值等 — 保留实体位置再反转义） */
+function stripTags(s: string): string {
+  return unescapeHtml(s.replace(/<[^>]*>/g, ''))
+}
+
+/** 解析出的单区段统计（未消毒的原始形态 — 内部用） */
+interface StatsSection extends ImportedReportStats {
+  /** 题目「残基 X-Y」无同源度后缀时的全同比对跨度（= 提交序列长度 — 区段定位用） */
+  alignedSpan?: number
+}
+
+const H1_TITLE_RE = /<h1 class="rpt-title"[^>]*>([^<]+)<\/h1>/g
+
+/** v2.69：解析一份报告 HTML 内全部靶点区段的统计快照。
+ *
+ * 报告由本系统生成，结构稳定：每个靶点子页一个 <h1 class="rpt-title"> 锚点，
+ * 区段内含刊头 meta-grid（蛋白名称/物种/序列长度/结构证据）+ 核心结论速览
+ * （glance-score 总分 + 已有结构/结构覆盖率 tile）+ 评分卡（X-ray/Cryo-EM/NMR
+ * score-row）。合并报告的封面区段无评分卡 → 自然跳过；单靶点报告 = 唯一区段。
+ *
+ * 解析失败的区段（旧版报告结构变化/被改动）返回缺项 — 调用方降级为「载入」
+ * 降级行，不影响导入匹配本身。
+ */
+export function extractImportedStatsSections(html: string): ImportedReportStats[] {
+  if (!html || html.length > IMPORT_SOURCE_MAX_CHARS) return []
+  const h1s: Array<{ title: string; at: number }> = []
+  H1_TITLE_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = H1_TITLE_RE.exec(html))) h1s.push({ title: m[1].trim(), at: m.index })
+  if (h1s.length === 0) return []
+  const sections: StatsSection[] = []
+  for (let i = 0; i < h1s.length; i++) {
+    const from = h1s[i].at
+    const to = i + 1 < h1s.length ? h1s[i + 1].at : Math.min(html.length, from + 2_000_000)
+    const sec = html.slice(from, to)
+    const s = parseStatsSection(h1s[i].title, sec)
+    if (s) sections.push(s)
+  }
+  return sections
+}
+
+/** 单区段解析（题目 + 区段 HTML → 统计快照；无任何评分证据 → null） */
+function parseStatsSection(title: string, sec: string): StatsSection | null {
+  // ── 身份：题目「NAME（P12345 · 残基 X-Y）」/「NAME（序列靶点 · …）」──
+  const shape = /^([^（]+)（([^）]*)）$/.exec(title)
+  const name = shape?.[1]?.trim()
+  const inner = shape?.[2] ?? ''
+  const accM = UNIPROT_ACC_RE.exec(inner)
+  const uniprotId = accM ? accM[0].toUpperCase() : undefined
+  const rangeM = /残基\s*(\d{1,5})\s*[-–]\s*(\d{1,5})/.exec(inner)
+  const range = rangeM && Number(rangeM[1]) >= 1 && Number(rangeM[2]) >= Number(rangeM[1])
+    ? [Number(rangeM[1]), Number(rangeM[2])] as [number, number]
+    : undefined
+  const hasIdentitySuffix = /(?:UniProt 匹配|nr 识别)\s*\d+(?:\.\d+)?\s*%/.test(inner)
+  const alignedSpan = range && !hasIdentitySuffix ? range[1] - range[0] + 1 : undefined
+
+  // ── 评分：glance 速览总分（v1.28+）+ 评分卡四行（X-ray 结晶 / Cryo-EM / NMR / 综合评估）──
+  const glanceScore = /<div class="glance-score"[^>]*>\s*(\d+(?:\.\d+)?)\s*<span/.exec(sec)
+  const rowRe = /<div class="score-row[^"]*">[\s\S]*?<div class="score-label">([^<]+)<\/div>[\s\S]*?<div class="score-num">(\d+(?:\.\d+)?)/g
+  const methodScores: Partial<Record<'xray' | 'cryoem' | 'nmr' | 'overall', number>> = {}
+  let rm: RegExpExecArray | null
+  while ((rm = rowRe.exec(sec))) {
+    const label = rm[1]!
+    const val = Math.round(Number(rm[2]))
+    if (!Number.isFinite(val) || val < 0 || val > 10) continue
+    if (/X-ray/.test(label)) methodScores.xray = val
+    else if (/Cryo/i.test(label)) methodScores.cryoem = val
+    else if (/NMR/.test(label)) methodScores.nmr = val
+    else if (/综合/.test(label)) methodScores.overall = val
+  }
+  const overall = glanceScore ? Math.round(Number(glanceScore[1])) : methodScores.overall
+  if (overall == null || !Number.isFinite(overall)) return null // 封面/无评分区段（合并报告封面）
+
+  // ── 刊头 meta-grid：蛋白名称 / 物种 / 序列长度 / 结构证据计数 ──
+  const metaVal = (label: string): string | undefined => {
+    // 注意：new RegExp 的模板串里 \\s 才是空白符（\s 会被字符串求值吞掉反斜杠）
+    const mm = new RegExp(`<div><b>${label}<\\/b>([\\s\\S]*?)</div>`, 'i').exec(sec)
+    return mm ? stripTags(mm[1]).trim() : undefined
+  }
+  const proteinName = metaVal('蛋白名称') || (name && name !== '序列靶点评估' ? name : undefined)
+  const organism = metaVal('物种')
+  const seqLenM = /序列长度<\/b>\s*(\d{2,5})\s*aa/.exec(sec)
+  const seqLength = seqLenM ? Number(seqLenM[1]) : undefined
+  const evidenceM = /结构证据<\/b>[\s\S]*?直接结构\s*(\d+)(?:\s*\/\s*检索命中\s*(\d+))?[\s\S]*?同源\s*(\d+)\s*个[\s\S]*?文献\s*(\d+)\s*篇/.exec(sec)
+  const pdbCount = evidenceM ? Number(evidenceM[1]) : 0
+  const blastHitCount = evidenceM ? Number(evidenceM[3]) : 0
+  const literatureCount = evidenceM ? Number(evidenceM[4]) : 0
+
+  // ── 速览 tile：已有结构（方法计数 + 最佳分辨率）+ 结构覆盖率 ──
+  let methodXrayCount = 0
+  let methodCryoemCount = 0
+  let methodNmrCount = 0
+  let bestResolution: number | null = null
+  const structTileM = /<div class="gt-label">已有结构<\/div><div class="gt-value">([\s\S]*?)<\/div>(?:<div class="gt-sub">([\s\S]*?)<\/div>)?/.exec(sec)
+  if (structTileM) {
+    const sub = structTileM[2] ?? ''
+    const xM = /X-ray\s*(\d+)/.exec(sub)
+    const cM = /Cryo-EM\s*(\d+)/.exec(sub)
+    const nM = /NMR\s*(\d+)/.exec(sub)
+    if (xM) methodXrayCount = Number(xM[1])
+    if (cM) methodCryoemCount = Number(cM[1])
+    if (nM) methodNmrCount = Number(nM[1])
+    const rM = /最佳\s*(\d+(?:\.\d+)?)\s*[ÅÅ]/.exec(sub)
+    if (rM) bestResolution = Number(rM[1])
+  }
+  const covM = /<div class="gt-label">结构覆盖率<\/div><div class="gt-value">(\d+(?:\.\d+)?)%/.exec(sec)
+  const coverage = covM ? Math.round(Number(covM[1])) : 0
+
+  return {
+    overall,
+    xray: methodScores.xray ?? 0,
+    cryoem: methodScores.cryoem ?? 0,
+    nmr: methodScores.nmr ?? 0,
+    pdbCount,
+    blastHitCount,
+    literatureCount,
+    methodXrayCount,
+    methodCryoemCount,
+    methodNmrCount,
+    bestResolution,
+    coverage,
+    ...(proteinName ? { proteinName: proteinName.slice(0, 80) } : {}),
+    ...(organism && organism !== '—' ? { organism: organism.slice(0, 80) } : {}),
+    ...(uniprotId ? { uniprotId } : {}),
+    ...(range ? { range } : {}),
+    ...(seqLength ? { seqLength } : {}),
+    alignedSpan,
+  }
+}
+
+/** v2.69：区段 → 靶点定位（多靶点合并报告内选对子页；单区段直接命中）。
+ *  规则与导入匹配同口径：UniProt accession +（区间已知时）严格相等；
+ *  序列靶点按提交长度（含全同比对跨度）唯一命中 — 歧义时不解析（降级行）。 */
+export function pickImportedStats(
+  sections: ImportedReportStats[],
+  t: { acc?: string; range?: [number, number]; length?: number },
+): ImportedReportStats | undefined {
+  if (sections.length === 0) return undefined
+  if (sections.length === 1) return sections[0]
+  if (t.acc) {
+    const byAcc = sections.filter((s) => s.uniprotId && s.uniprotId.toUpperCase() === t.acc!.toUpperCase())
+    if (byAcc.length === 1) return byAcc[0]
+    const byRange = byAcc.filter((s) => s.range && t.range && s.range[0] === t.range[0] && s.range[1] === t.range[1])
+    return byRange.length >= 1 ? byRange[0] : undefined
+  }
+  const byLen = sections.filter((s) =>
+    (s.seqLength != null && s.seqLength === t.length)
+    || (s.range != null && t.length != null && s.range[1] - s.range[0] + 1 === t.length))
+  return byLen.length === 1 ? byLen[0] : undefined
+}
+
+/** v2.69：导入 enrich 单项（匹配到的靶点 + 胜出的报告条目） */
+export interface ImportEnrichItem {
+  acc?: string
+  range?: [number, number]
+  length?: number
+  rep?: HtArchiveReport
+}
+
+/** v2.69：为匹配到的导入靶点解析统计快照并上传报告原文 — 返回逐项结果
+ *  （stats 缺失 = 降级行；reportId 缺失 = 弹出页无原文可内嵌；两者独立降级）。
+ *  任一步骤失败都不阻塞导入（导入匹配本身不受影响）。上传按源文件去重
+ *  （同一文件只传一次 — 合并报告整组共享）。 */
+export async function enrichImportedReports(
+  items: ImportEnrichItem[],
+  parsed: HtImportParseResult,
+): Promise<Array<{ stats?: ImportedReportStats; reportId?: string }>> {
+  const out: Array<{ stats?: ImportedReportStats; reportId?: string }> = items.map(() => ({}))
+  if (items.length === 0) return out
+  // 源文件分组：同一源文件只读一次 / 只上传一次（loaded = 已尝试读取，读到 0 个区段也不重试）
+  const bySource = new Map<string, { rep: HtArchiveReport; sections: ImportedReportStats[]; reportId?: string; loaded?: boolean }>()
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]!
+    const rep = it.rep
+    if (!rep || rep.kind === 'dashboard') continue
+    const key = parsed.sourceKey(rep)
+    let entry = bySource.get(key)
+    if (!entry) {
+      entry = { rep, sections: [] }
+      bySource.set(key, entry)
+    }
+    // 逐项解析区段（同一源文件的多个靶点各自定位自己的子页）
+    if (entry.sections.length === 0 && !entry.loaded) {
+      entry.loaded = true
+      const text = await parsed.readSource(rep)
+      if (text) {
+        entry.sections = extractImportedStatsSections(text)
+        const base = (rep.path.split('::')[0] ?? rep.path).split('/').pop() ?? ''
+        const fileName = base.replace(/\.html?$/i, '').slice(0, 100) || '导入报告'
+        entry.reportId = await uploadImportedReport(`${fileName}.html`, text)
+      }
+    }
+    const stats = pickImportedStats(entry.sections, it)
+    if (stats) out[i]!.stats = stats
+    if (entry.reportId) out[i]!.reportId = entry.reportId
   }
   return out
 }
@@ -851,6 +1138,11 @@ export async function parseHtArchive(file: File): Promise<HtArchiveReport[]> {
   const zip = await JSZip.loadAsync(file).catch(() => {
     throw new Error('无法读取该 zip 文件（可能不是有效的 zip 归档）')
   })
+  return parseHtArchiveEntries(zip)
+}
+
+/** zip 实例 → 可匹配报告条目（v2.69 抽出 — parseHtImportFiles 复用已解开的实例） */
+async function parseHtArchiveEntries(zip: JSZip): Promise<HtArchiveReport[]> {
   const names = Object.keys(zip.files).filter((n) => !zip.files[n]?.dir).slice(0, MAX_ZIP_FILES)
 
   // ── ① 清单通道 ──

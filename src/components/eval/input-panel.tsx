@@ -222,8 +222,18 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
     htTargetTotal + htSeqTargetTotal > MAX_HT_TARGETS_TOTAL ||
     htParsed.groups.some((g) => g.length > MAX_HT_TARGETS_PER_GROUP) ||
     htSeqGroups.some((g) => g.length > MAX_HT_TARGETS_PER_GROUP)
-  // v2.38：至少勾选 1 个靶点才可启动（全部跳过无意义）
-  const htValid = htGroupTotal >= 1 && htParsed.invalid.length === 0 && !htOverLimit && htSelectedTotal >= 1
+  /** v2.69：当前清单内「载入」状态的导入靶点数（勾选列表里被导入取消勾选 —
+   *  纯导入运行（全部载入、0 个待评估）也可启动：直接产出汇总报告） */
+  const htImportedActive = useMemo(() => {
+    const valid = (k: string): boolean => {
+      const [kind, gi, ti] = k.split(':')
+      return kind === 'g' ? htParsed.groups[Number(gi)]?.[Number(ti)] != null : htSeqGroups[Number(gi)]?.[Number(ti)] != null
+    }
+    return htImportedEntries.filter((e) => htSkipSet.has(e.key) && valid(e.key)).length
+  }, [htImportedEntries, htSkipSet, htParsed, htSeqGroups])
+  // v2.38→v2.69：至少勾选 1 个靶点才可启动；v2.69 起纯导入运行（全部载入）
+  //  也放行 — 0 个待评估时运行即刻完成并直接产出汇总报告（载入行整合）
+  const htValid = htGroupTotal >= 1 && htParsed.invalid.length === 0 && !htOverLimit && (htSelectedTotal >= 1 || htImportedActive >= 1)
 
   // UniProt Tab 的可选伴随序列（合并评估）
   const [companionOpen, setCompanionOpen] = useState(false)
@@ -654,7 +664,9 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
   const startLabel = submitting
     ? '正在创建评估作业…'
     : mode === 'highthroughput'
-      ? `开始高通量评估（${htGroupTotal} 组 · ${htSelectedTotal} 靶点${htSelectedTotal < htTargetTotal + htSeqTargetTotal ? ` · 跳过 ${htTargetTotal + htSeqTargetTotal - htSelectedTotal}` : ''}）`
+      ? htSelectedTotal === 0 && htImportedActive > 0
+        ? `开始高通量评估（${htGroupTotal} 组 · 载入 ${htImportedActive} 靶点 · 出汇总报告）`
+        : `开始高通量评估（${htGroupTotal} 组 · ${htSelectedTotal} 靶点${htSelectedTotal < htTargetTotal + htSeqTargetTotal ? ` · 跳过 ${htTargetTotal + htSeqTargetTotal - htSelectedTotal}` : ''}）`
       : mode === 'docx' && selectedUniprots.length > 1
         ? `开始评估（${selectedUniprots.length} 个靶点）`
         : mode === 'uniprot' && uniprotMulti

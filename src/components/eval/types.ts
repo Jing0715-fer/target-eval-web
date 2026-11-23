@@ -4,7 +4,7 @@
  * 注意：后端并行开发中，字段可能缺失，所有可缺失字段均按可空处理。
  */
 
-import type { BlastStatusInfo, TargetIdentityInfo } from '@/lib/eval/types'
+import type { BlastStatusInfo, ImportedReportStats, TargetIdentityInfo } from '@/lib/eval/types'
 
 export type { BlastStatusInfo, BlastStatusCode, TargetIdentityInfo } from '@/lib/eval/types'
 export { MAX_PDB_UNLIMITED } from '@/lib/eval/types'
@@ -999,6 +999,13 @@ export interface HTGroupItemState {
   importedJobId?: string
   /** v2.68：导入来源文件名（行内「载入」徽标 tooltip 与降级行说明用） */
   importedFile?: string
+  /** v2.69：导入报告解析出的统计快照（评分/结构/覆盖/展示信息 — 客户端解析，
+   *  随运行记录持久化；汇总报告据此构建与本次评估同权的完整统计行，
+   *  不再依赖服务端 DB 保留期，旧版报告也能整合进汇总表格） */
+  importedStats?: ImportedReportStats
+  /** v2.69：导入报告原文的服务端留存 id（导入时上传 — 汇总报告生成时服务端
+   *  读回作为「完整报告」弹出页内嵌原文，与下载的单独报告一致） */
+  importedReportId?: string
   /** v2.41：done 但 LLM 报告未完整生成（部分章节失败）— 可重跑补齐 */
   reportIncomplete?: boolean
   /** v2.41：报告不完整说明（缺章数/失败摘要 — chip tooltip 与重跑确认展示） */
@@ -1060,12 +1067,18 @@ export interface HTRunState {
 }
 
 /** v2.68：启动面板「导入报告」匹配到的靶点键 → 报告数据（skipKeys 的导入子集）。
- *  jobId 存在时汇总报告从服务端恢复完整统计行；否则该靶点在汇总中以降级「载入」行呈现 */
+ *  jobId 存在时汇总报告从服务端恢复完整统计行；否则该靶点在汇总中以降级「载入」行呈现。
+ *  v2.69：stats（客户端解析的统计快照）+ reportId（原文服务端留存 id）— 旧版报告
+ *  无 jobId 也能整合进汇总表格与弹出页 */
 export interface HtImportedKeyEntry {
   key: string
   jobId?: string
   /** 来源文件名（行内「载入」徽标说明 — zip 内相对路径取文件段） */
   fileName: string
+  /** v2.69：导入报告解析出的统计快照（汇总完整统计行） */
+  stats?: ImportedReportStats
+  /** v2.69：导入报告原文的服务端留存 id（弹出页内嵌原文） */
+  reportId?: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
@@ -1088,8 +1101,9 @@ export interface HTStartPayload {
    *  进度统计计入「载入」完成口径（修复：启动面板导入后进度只涨组数、靶点数恒 0） */
   importedFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
   /** v2.68：启动面板导入报告携带的靶点键→报告数据（importedFlags 对应键的补充 —
-   *  jobId 供汇总报告从服务端恢复完整统计行；fileName 为行内「载入」徽标说明） */
-  importedReports?: Array<{ key: string; jobId?: string; fileName: string }>
+   *  jobId 供汇总报告从服务端恢复完整统计行；fileName 为行内「载入」徽标说明；
+   *  v2.69 stats/reportId = 解析的统计快照 + 原文服务端留存 id） */
+  importedReports?: Array<{ key: string; jobId?: string; fileName: string; stats?: ImportedReportStats; reportId?: string }>
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions
