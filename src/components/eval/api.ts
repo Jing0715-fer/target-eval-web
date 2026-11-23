@@ -762,13 +762,16 @@ export async function uploadImportedReport(fileName: string, html: string): Prom
   }
 }
 
-/** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告） */
+/** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告）
+ *  v2.71：progress = 生成阶段进度文案（running 期间轮询回传 — 横幅实时展示） */
 export interface HtDashboardInfo {
   id: string
   status: 'running' | 'done' | 'error'
   title?: string
   error?: string | null
   createdAt?: string
+  /** v2.71：生成阶段进度（仅 running 期间返回 — 前端「生成中」横幅实时展示） */
+  progress?: string
   /** v2.60：本次生成从浏览器本地缓存快照恢复的靶点数（服务端作业已过期/实例回收） */
   recoveredCount?: number
   /** v2.60：无数据副本被跳过的靶点数（服务端已过期且本地缓存无快照） */
@@ -868,6 +871,8 @@ export async function generateHtDashboard(input: {
   }>
   /** v2.68：导入报告携带的原作业 id（entries 中对应行标「载入」徽标 — 与本次评估行区分） */
   importedJobIds?: string[]
+  /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示） */
+  onProgress?: (msg: string) => void
 }): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
   const post = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>
@@ -899,15 +904,20 @@ export async function generateHtDashboard(input: {
     ...(data.dashboard.droppedCount != null ? { droppedCount: data.dashboard.droppedCount } : {}),
     ...(data.dashboard.droppedLabels?.length ? { droppedLabels: data.dashboard.droppedLabels } : {}),
   }
-  // 轮询至终态（LLM 整体报告 ≤2 分钟；失败/超时均如实返回 — 调用方降级提示）
+  // 轮询至终态（LLM 整体报告 ≤2 分钟；失败/超时均如实返回 — 调用方降级提示）。
+  //  v2.71：① 超时 240s → 600s（对齐服务端 maxDuration — 大批次 LLM 重试叠加
+  //  原文内嵌时可超 4 分钟，旧上限把仍在正常生成的运行误报为「超时」；
+  //  ② running 期间回传服务端阶段进度（生成中横幅实时展示，不再黑盒等待）；
+  //  ③ 服务端短暂重启（如部署/OOM 后自愈）期间 fetch 失败 → 继续轮询不中断。
   const t0 = Date.now()
   for (;;) {
     await new Promise(r => setTimeout(r, 3000))
     const d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store' })
       .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
     if (d?.dashboard && d.dashboard.status !== 'running') return { ...d.dashboard, ...recoverInfo }
-    if (Date.now() - t0 > 240_000) {
-      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（可稍后从历史重试）', ...recoverInfo }
+    if (d?.dashboard?.progress) input.onProgress?.(d.dashboard.progress)
+    if (Date.now() - t0 > 600_000) {
+      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（10 分钟 — 生成可能仍在后台进行，可稍后从历史重试或刷新查看）', ...recoverInfo }
     }
   }
 }

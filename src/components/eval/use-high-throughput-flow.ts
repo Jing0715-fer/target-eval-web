@@ -111,6 +111,7 @@ function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
     r.dashboardId = undefined
     r.dashboardError = undefined
     r.dashboardPending = false
+    r.dashboardProgress = undefined
   }
 }
 
@@ -926,8 +927,16 @@ export function useHighThroughputFlow() {
         sequences,
         imported: importedBare.length ? importedBare : undefined,
         importedJobIds: importedJobIds.size ? [...importedJobIds] : undefined,
+        // v2.71：running 期间轮询回传阶段进度（生成中横幅实时展示 — 不落盘，
+        //  仅文本变化时刷新视图避免重渲染抖动）
+        onProgress: (msg) => {
+          if (runState.dashboardProgress === msg) return
+          runState.dashboardProgress = msg
+          setRun(cloneRun(runState))
+        },
       })
       runState.dashboardPending = false
+      runState.dashboardProgress = undefined
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
         runState.dashboardError = undefined
@@ -964,6 +973,7 @@ export function useHighThroughputFlow() {
       }
     } catch (e) {
       runState.dashboardPending = false
+      runState.dashboardProgress = undefined
       runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
       toast({
         title: '统计看板生成失败',
@@ -1423,6 +1433,7 @@ export function useHighThroughputFlow() {
     }
     r.dashboardId = undefined
     r.dashboardError = undefined
+    r.dashboardProgress = undefined
     snapshot()
     await finalizeHtDashboardRef.current?.()
   }, [snapshot])

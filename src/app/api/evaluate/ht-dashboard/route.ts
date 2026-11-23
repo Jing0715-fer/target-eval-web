@@ -34,6 +34,9 @@ import {
   computeHtStats,
   generateHtDashboardReport,
   renderHtDashboardHtml,
+  writeHtDashboardHtmlFile,
+  ensureHtDashboardProgressColumn,
+  makeHtDashboardProgressWriter,
   resolveZipHrefs,
   htDashboardTitle,
   attachExcelRows,
@@ -327,6 +330,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '没有已完成的评估作业（统计看板需要至少 1 个成功靶点）' }, { status: 400 })
   }
 
+  // v2.71：progress 列自愈（本地部署未 db:push 时 Prisma create 返回全列 → P2021）
+  await ensureHtDashboardProgressColumn().catch((err: unknown) => {
+    console.error('[ht-dashboard] progress 列自愈失败（不影响生成 — 进度展示将缺省）：', err instanceof Error ? err.message : String(err))
+  })
   const record = await db.htDashboard.create({
     data: {
       jobIds: JSON.stringify(keptJobIds),
@@ -373,9 +380,11 @@ export async function POST(req: Request) {
 }
 
 /** 后台生成：行加载（v2.60 含缓存快照回退；v2.61 含序列回填；v2.63 含单独报告
- *  文件原文读取；v2.68 含导入载入靶点；v2.69 导入报告原文留存读取 + stats
- *  完整统计行构建（不依赖 DB 保留期））→ 统计 → LLM（报告 + 每靶点结论）→
- *  HTML 落盘 → 终态 */
+ *  文件原文路径；v2.68 含导入载入靶点；v2.69 导入报告原文留存规划 + stats
+ *  完整统计行构建）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态。
+ *  v2.71：① 各阶段进度写入 DB（前端轮询展示 — 生成不再黑盒等待）；② HTML
+ *  落盘改流式（writeHtDashboardHtmlFile — 报告原文逐份读盘写入，修复百级
+ *  靶点全量内嵌时四份全量字符串拷贝同驻堆内存导致的 OOM/502）。 */
 async function runDashboardGeneration(ctx: {
   dashboardId: string
   entries: HtDashboardEntry[]
@@ -395,15 +404,18 @@ async function runDashboardGeneration(ctx: {
 }): Promise<void> {
   const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob, importedBare, importedJobIds, owner } = ctx
   const startedAt = Date.now()
+  const progress = makeHtDashboardProgressWriter(dashboardId)
   const fail = async (msg: string) => {
     await db.htDashboard.update({
       where: { id: dashboardId },
-      data: { status: 'error', error: msg.slice(0, 500), updatedAt: new Date() },
+      data: { status: 'error', error: msg.slice(0, 500), progress: null, updatedAt: new Date() },
     }).catch(() => undefined)
   }
   try {
-    // v2.69：报告原文体积预算（作业报告 + 导入留存共用 — 弹出页内嵌总量护栏）
+    // v2.69：报告原文体积预算（作业报告 + 导入留存共用 — 弹出页内嵌总量护栏；
+    // v2.71 起按 stat 字节分配，内容写盘时逐份延迟读取）
     const reportBudget = { total: 0 }
+    progress(`加载 ${entries.filter(e => e.jobId).length} 个靶点的评估数据…`)
     const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob, importedJobIds, reportBudget)
     // v2.68→v2.69：导入载入靶点 — DB 命中（完整统计已从原作业恢复）的同名靶点剔除
     //  （以 DB 恢复行为准 — 数据更全），仅保留未命中的：stats 存在 → 完整统计行
@@ -411,11 +423,12 @@ async function runDashboardGeneration(ctx: {
     //  同源 — 去重键可靠）
     const restoredLabels = new Set(rows.filter(r => r.imported).map(r => r.label))
     const pendingImported = (importedBare ?? []).filter(t => !restoredLabels.has(t.label.slice(0, 60)))
-    // v2.69：导入报告原文留存读取（归属校验 + 体积预算 — 弹出页内嵌报告原文）
-    const reportHtmlById = owner
+    if (pendingImported.length > 0) progress(`规划 ${pendingImported.length} 个导入报告的原文留存…`)
+    // v2.69：导入报告原文留存规划（归属校验 + 体积预算 — 弹出页内嵌报告原文）
+    const reportPathById = owner
       ? await loadImportedReportHtml(pendingImported, owner, reportBudget)
       : new Map<string, string>()
-    const { rows: importedRows, bareRows } = buildImportedRows(pendingImported, reportHtmlById)
+    const { rows: importedRows, bareRows } = buildImportedRows(pendingImported, reportPathById)
     const statRows = [...rows, ...importedRows]
     if (statRows.length === 0 && bareRows.length === 0) return void (await fail('没有可统计的已完成靶点'))
     // v2.68：导入但 DB 过期/无快照的 jobId 不计入「失败」（这些靶点已由导入行兜底呈现，
@@ -425,11 +438,14 @@ async function runDashboardGeneration(ctx: {
       ? [...importedJobIds].filter(id => !restoredJobIds.has(id)).length
       : 0
     const allRows = [...statRows, ...bareRows]
+    progress('汇总批次统计…')
     const stats = computeHtStats(statRows, Math.max(0, jobCount - droppedImported), bareRows.length)
+    progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`)
     const generated = await generateHtDashboardReport(statRows, stats, goal)
     const engineSummary = await getEngineSummary()
     // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）；
     // v2.60：缓存恢复行无服务器报告文件，zip 内无对应文件 — 不挂离线链接
+    progress('规划离线包链接命名…')
     const zipHrefs = await resolveZipHrefs(entries)
     for (const r of allRows) r.zipHref = r.fromArchive || r.bare || r.importedFromFile ? undefined : zipHrefs.get(r.jobId)
 
@@ -438,7 +454,11 @@ async function runDashboardGeneration(ctx: {
     const title = htDashboardTitle(Math.max(0, jobCount - droppedImported) + importedRows.length + bareRows.length, generatedAt)
     // v2.36：原始 Excel 行匹配到各靶点（「原表内容」列）
     if (excelRows && excelRows.length) attachExcelRows(allRows, excelRows)
-    const html = renderHtDashboardHtml({
+    // v2.71：流式落盘（内存安全 — 载荷报告原文逐份读盘写入，不再四份全量拷贝）
+    const dir = path.join(process.cwd(), 'db', 'reports', dashboardId)
+    await fs.mkdir(dir, { recursive: true })
+    const htmlPath = path.join(dir, 'report.html')
+    await writeHtDashboardHtmlFile({
       title,
       goal,
       rows: allRows,
@@ -451,12 +471,7 @@ async function runDashboardGeneration(ctx: {
       origin: ctx.origin,
       generatedAt,
       excelRows,
-    })
-
-    const dir = path.join(process.cwd(), 'db', 'reports', dashboardId)
-    await fs.mkdir(dir, { recursive: true })
-    const htmlPath = path.join(dir, 'report.html')
-    await fs.writeFile(htmlPath, html, 'utf-8')
+    }, htmlPath, progress)
     await db.htDashboard.update({
       where: { id: dashboardId },
       data: {
@@ -468,6 +483,7 @@ async function runDashboardGeneration(ctx: {
         engine: engineSummary,
         status: 'done',
         error: generated.ok ? null : (generated.errors.join('；').slice(0, 500) || null),
+        progress: null,
         updatedAt: new Date(),
       },
     })
@@ -481,6 +497,8 @@ export async function GET(req: Request) {
   const owner = getOwner(req)
   const url = new URL(req.url)
   const id = url.searchParams.get('id')?.trim()
+  // v2.71：progress 列自愈（旧库无此列时 findUnique 全列查询抛 P2021 → 误报 404）
+  await ensureHtDashboardProgressColumn().catch(() => undefined)
   if (!id) {
     // 无 id — 最近看板列表（历史回看入口）
     const rows = await db.htDashboard.findMany({
@@ -516,10 +534,16 @@ export async function GET(req: Request) {
   if (url.searchParams.get('inline') === '1' || url.searchParams.get('download') === '1') {
     if (!record.htmlPath) return reportNotFoundResponse({ kind: 'dashboard', reason: '该看板无 HTML 文件（生成失败或未落盘）' })
     try {
-      const html = await fs.readFile(record.htmlPath, 'utf-8')
+      // v2.71：流式回送（百级靶点全量内嵌的看板可达数百 MB — readFile 整读会
+      //  在生成刚结束时再制造一次堆内存尖峰，与生成期间同样的 OOM 风险）。
+      //  注意：createReadStream 不带 encoding — 产出 Buffer（Uint8Array）块；
+      //  带 'utf-8' 会产出字符串块，违反 Response body 字节流规范 → 中途 ECONNRESET
+      const { createReadStream } = await import('node:fs')
+      const { Readable } = await import('node:stream')
+      const stream = Readable.toWeb(createReadStream(record.htmlPath)) as unknown as ReadableStream<Uint8Array>
       if (url.searchParams.get('download') === '1') {
         const base = (record.title ?? '').replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || `TargetEval_Dashboard_${record.id.slice(0, 8)}`
-        return new Response(html, {
+        return new Response(stream, {
           headers: {
             'Content-Type': 'text/html; charset=utf-8',
             'Content-Disposition': `attachment; filename="TargetEval_Dashboard.html"; filename*=UTF-8''${encodeURIComponent(base)}.html`,
@@ -527,7 +551,7 @@ export async function GET(req: Request) {
           },
         })
       }
-      return new Response(html, {
+      return new Response(stream, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store',
@@ -539,7 +563,7 @@ export async function GET(req: Request) {
     }
   }
 
-  // JSON 状态（前端轮询）
+  // JSON 状态（前端轮询）— v2.71 附带生成阶段进度（running 期间横幅实时展示）
   return NextResponse.json({
     ok: true,
     dashboard: {
@@ -547,6 +571,7 @@ export async function GET(req: Request) {
       status: record.status === 'done' ? 'done' : record.status === 'error' ? 'error' : 'running',
       title: record.title ?? '',
       error: record.error ?? null,
+      ...(record.status !== 'done' && record.status !== 'error' && record.progress ? { progress: record.progress } : {}),
       createdAt: record.createdAt.toISOString(),
     },
   })

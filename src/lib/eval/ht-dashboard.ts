@@ -55,11 +55,28 @@
  *    导入文件 / 降级）tooltip 区分、载入说明横幅与主表 note 同步、弹出/下载
  *    按钮说明区分导入原文。
  *
+ *    v2.71：生成链路提速 + 内存安全（修复「报告太大导致服务器 OOM → 502、
+ *    统计看板生成超时」）——① 批量加载：作业一次 findMany（旧版逐条
+ *    findUnique 串行查百级靶点）、zip 命名规划合并批量查询；② 原文延迟
+ *    读取：rows 只带 reportHtmlPath（stat 预检 + 预算分配，条目顺序 = 旧版
+ *    优先级），写盘时逐份读盘→序列化→写入流释放 — 旧链路四份全量字符串
+ *    拷贝（rows 原文 + JSON.stringify + `<` 转义 replace + 模板拼接）同驻
+ *    堆内存，117×1.5MB 运行实测峰值 >1.2GB → OOM-kill；新链路压测峰值
+ *    26MB 且更快；③ writeHtDashboardHtmlFile 流式落盘（shell MARKER 拆分 +
+ *    载荷逐行分块，读盘失败行回退重建页变体）；④ GET inline/download 流式
+ *    回送（createReadStream → Readable.toWeb，Buffer 块 — 带 'utf-8' 编码
+ *    会产出字符串块导致中途 ECONNRESET）；ht-archive zip 打包改有界前缀读
+ *    取（≤2MB — 百靶点看板数百 MB 不再整读入堆）；⑤ 生成进度：HtDashboard
+ *    .progress 列（自愈补列）+ 各阶段节流写入，GET 轮询回传，「生成中」
+ *    横幅实时展示；⑥ 前端轮询超时 240s → 600s（对齐服务端 maxDuration —
+ *    大批次 LLM 重试叠加原文内嵌可超 4 分钟，旧上限误报超时）；⑦ 重建页
+ *    样式 c 保守内嵌（任何行无内存原文即内嵌 — 写盘丢文件行回退变体不缺样式）。
+ *
  * 离线链接语义：zip 相对路径与 ht-archive 打包命名同源（planArchiveNames 共享
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
  */
 import { db } from '@/lib/db'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { llmChat } from './llm'
 import { getEngineSummary } from './llm-provider'
 import { renderMarkdown } from './report-html'
@@ -108,8 +125,14 @@ export interface HtDashboardRow {
   /** v2.61：提交序列全文（前端按 jobId 精确携带 — 汇总表「复制序列」按钮 + 单靶点完整报告弹出页展示） */
   sequence?: string
   /** v2.63：单独报告文件原文（job.reportPath — 与下载的单独报告完全一致；
-   *  服务端文件丢失/超预算时缺省，回退 reportMarkdown 重建页） */
+   *  服务端文件丢失/超预算时缺省，回退 reportMarkdown 重建页）。
+   *  v2.71：仅内存路径（fixture/单测）使用 — 服务端生成链路改用 reportHtmlPath
+   *  延迟到写盘时逐份读取（见 writeHtDashboardHtmlFile），避免百级报告原文
+   *  同时驻留堆内存导致 OOM */
   reportHtml?: string
+  /** v2.71：单独报告文件的磁盘路径（延迟读取 — stat 预检通过且预算已分配；
+   *  与 reportHtml 二选一，渲染层视同「有原文可内嵌」，写盘时才读内容） */
+  reportHtmlPath?: string
   /** v2.61：回补来源标注（序列靶点身份识别链 — 如「BLAST nr 识别 98%」「UniProt 精确匹配」；
   *  uniprotId 为评估中回补时的徽标提示） */
   identifiedVia?: string
@@ -222,8 +245,11 @@ interface RowSource {
   fromArchive?: boolean
   /** v2.61：提交序列全文（前端载荷按 jobId 回填） */
   sequence?: string | null
-  /** v2.63：单独报告文件原文（与下载的单独报告完全一致 — 由加载层读文件回填） */
+  /** v2.63：单独报告文件原文（与下载的单独报告完全一致 — 由加载层读文件回填；
+   *  v2.71 起服务端链路改传路径，见 reportHtmlPath） */
   reportHtml?: string | null
+  /** v2.71：单独报告文件路径（延迟读取 — stat/预算预检通过时由加载层回填） */
+  reportHtmlPath?: string | null
   /** v2.68：本行来自导入报告（原作业恢复 — 行内「载入」徽标） */
   imported?: boolean
 }
@@ -273,6 +299,7 @@ function buildDashboardRow(src: RowSource): HtDashboardRow | null {
     fromArchive: src.fromArchive ? true : undefined,
     sequence: src.sequence ?? undefined,
     reportHtml: src.reportHtml ?? undefined,
+    reportHtmlPath: src.reportHtmlPath ?? undefined,
     identifiedVia,
     imported: src.imported ? true : undefined,
   }
@@ -284,34 +311,114 @@ function buildDashboardRow(src: RowSource): HtDashboardRow | null {
 const REPORT_HTML_MAX_BYTES = 32_000_000
 const REPORT_HTML_TOTAL_BUDGET = 192_000_000
 
-/** v2.63：读取单独报告文件原文（与下载的单独报告完全一致）— 文件丢失/超预算
- *  时返回 null，弹出页回退 markdown 重建页（统计不受影响）。 */
-async function readReportHtml(reportPath: string | null, budget: { total: number }): Promise<string | null> {
-  if (!reportPath) return null
+// ── v2.71：批量加载与并发读取（汇总看板生成超时修复）──────────────────────────
+//  百级靶点运行的全链路此前完全串行：逐靶点 findUnique 查询 + 逐份报告文件
+//  顺序读取（可达 192MB）+ zip 命名再逐条查询 — 叠加 LLM 最多 2 分钟后轻松
+//  超过前端 240s 轮询上限（用户实测「汇总报告生成失败 · 统计看板生成超时」）。
+//  此处：① 作业批量 findMany；② 报告文件 stat 预检字节数后按原优先级顺序
+//  分配预算（不读注定超预算的文件 — 旧版先整读再丢弃白耗磁盘）；③ 选中文件
+//  ≤8 路并发读取。语义与旧版一致（单份上限/总量预算/先到先得优先级不变）。
+
+/** 并发读取上限（磁盘/句柄友好 — 避免百级并发打满 fd） */
+const FILE_READ_CONCURRENCY = 8
+
+/** 有界并发映射（保持输出顺序；fn 抛错由调用方在 fn 内自行捕获） */
+async function runBounded<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i]!, i)
+    }
+  })
+  await Promise.all(workers)
+  return out
+}
+
+/** stat 字节数（文件丢失/不可读 → null；字节数 ≥ 字符数 — 预算预检保守判定） */
+async function statBytes(p: string): Promise<number | null> {
   try {
-    const html = await readFile(reportPath, 'utf-8')
-    if (html.length > REPORT_HTML_MAX_BYTES) return null
-    if (budget.total + html.length > REPORT_HTML_TOTAL_BUDGET) return null
-    budget.total += html.length
-    return html
+    return (await stat(p)).size
   } catch {
     return null
   }
 }
 
+interface ReportFilePlan {
+  /** 预算分配后的待读文件（顺序即优先级 — 先到先得与旧串行版一致） */
+  selected: Array<{ key: string; path: string }>
+  /** stat 预检通过的文件字节数（丢失文件不在内） */
+  foundCount: number
+}
+
+/** v2.71：通用 stat 预检 + 按优先级顺序分配预算 → 待嵌清单。
+ *  **不读文件内容**（内存安全的关键 — 百级报告原文不同时驻留堆内存，写盘时
+ *  逐份延迟读取）。stat 字节数 ≥ 字符数（ASCII 等长 / 非 ASCII UTF-8 字节数
+ *  ≥ UTF-16 字数），预算判定与旧版读内容后验字符数同样保守。 */
+async function planReportFiles(
+  candidates: Array<{ key: string; path: string }>,
+  budget: { total: number },
+): Promise<ReportFilePlan> {
+  const sized = await runBounded(candidates, FILE_READ_CONCURRENCY, async c => ({ ...c, size: await statBytes(c.path) }))
+  const selected: Array<{ key: string; path: string }> = []
+  let foundCount = 0
+  for (const c of sized) {
+    if (c.size == null) continue
+    foundCount++
+    if (c.size > REPORT_HTML_MAX_BYTES) continue // 单份超限 — 弹出页回退重建页
+    if (budget.total + c.size > REPORT_HTML_TOTAL_BUDGET) continue // 总量预算已满
+    budget.total += c.size
+    selected.push({ key: c.key, path: c.path })
+  }
+  return { selected, foundCount }
+}
+
+/** v2.71：行级「有原文可内嵌」判定（内存原文或已规划路径） */
+function rowHasReportHtml(r: HtDashboardRow): boolean {
+  return Boolean(r.reportHtml || r.reportHtmlPath)
+}
+
 /** 从 DB 加载统计行（不校验归属 — 路由层负责）；v2.60：DB 无该作业时回退
  *  前端上传的缓存快照（archivedByJob）恢复统计行（行标 fromArchive）；
  *  v2.61：sequencesByJob 按 jobId 回填提交序列全文（汇总表复制按钮 + 弹出报告页展示）；
- *  v2.68：importedJobIds 中的作业为「导入既有报告」的靶点 — 行标 imported（「载入」徽标）。 */
-export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedByJob?: Map<string, ArchivedJobSnapshot>, sequencesByJob?: Map<string, string>, importedJobIds?: Set<string>, reportBudget?: { total: number }): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
+ *  v2.68：importedJobIds 中的作业为「导入既有报告」的靶点 — 行标 imported（「载入」徽标）。
+ *  v2.71：① 作业一次 findMany 批量加载（此前逐条 findUnique — 百级靶点串行
+ *  查询是看板生成超时主因之一）；② 报告原文只做 stat 预检 + 预算分配（条目
+ *  顺序 = 旧串行优先级），**内容延迟到写盘时逐份读取** — 修复百级靶点全量
+ *  内嵌时生成进程 OOM 被杀（网关 502）的问题。 */
+export async function loadHtDashboardRows(
+  entries: HtDashboardEntry[],
+  archivedByJob?: Map<string, ArchivedJobSnapshot>,
+  sequencesByJob?: Map<string, string>,
+  importedJobIds?: Set<string>,
+  reportBudget?: { total: number },
+): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
   const rows: HtDashboardRow[] = []
-  let jobCount = 0
   // v2.69：可选的外部预算（与导入报告原文留存共用总量 — 调用方传入；缺省独立预算）
   const budget = reportBudget ?? { total: 0 }
+  const jobEntries = entries.filter((e): e is HtDashboardEntry & { jobId: string } => Boolean(e.jobId))
+  const jobCount = jobEntries.length
+  // v2.71：一次批量加载全部作业（含报告路径/摘要/结构 JSON — 旧版逐条串行查询）
+  const jobs = jobEntries.length
+    ? await db.evaluationJob.findMany({ where: { id: { in: jobEntries.map(e => e.jobId) } } })
+    : []
+  const jobById = new Map(jobs.map(j => [j.id, j]))
+  // v2.71：报告原文 — stat 预检 + 预算分配（条目顺序 = 旧版串行优先级；内容不读）
+  const seenJobIds = new Set<string>()
+  const reportCandidates: Array<{ key: string; path: string }> = []
+  for (const e of jobEntries) {
+    const j = jobById.get(e.jobId)
+    if (!j || j.status !== 'done' || !j.reportPath || seenJobIds.has(j.id)) continue
+    seenJobIds.add(j.id)
+    reportCandidates.push({ key: j.id, path: j.reportPath })
+  }
+  const plan = await planReportFiles(reportCandidates, budget)
+  const reportPathByJob = new Map(plan.selected.map(s => [s.key, s.path]))
   for (const entry of entries) {
     if (!entry.jobId) continue
-    jobCount++
-    const job = await db.evaluationJob.findUnique({ where: { id: entry.jobId } })
+    const job = jobById.get(entry.jobId)
     if (job && job.status === 'done') {
       let summary: Record<string, unknown> | null = null
       try { summary = job.summary ? JSON.parse(job.summary) : null } catch { /* ignore */ }
@@ -331,8 +438,9 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
         hasReport: Boolean(job.reportPath),
         fromArchive: undefined,
         sequence: sequencesByJob?.get(job.id) ?? null,
-        // v2.63：报告文件原文（与下载的单独报告完全一致）— 丢失/超预算时回退 markdown 重建页
-        reportHtml: await readReportHtml(job.reportPath, budget),
+        // v2.63：报告文件原文（与下载的单独报告完全一致）— 丢失/超预算时回退 markdown 重建页；
+        // v2.71：只传路径（延迟读取 — stat/预算预检通过才在此）
+        reportHtmlPath: reportPathByJob.get(job.id) ?? null,
         imported: importedJobIds?.has(job.id) ? true : undefined,
       })
       if (row) rows.push(row)
@@ -353,6 +461,7 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
         fromArchive: true,
         sequence: sequencesByJob?.get(snap.jobId) ?? null,
         reportHtml: null, // 快照仅存 markdown — 弹出页由重建页提供（无服务器文件可内嵌）
+        reportHtmlPath: null,
         imported: importedJobIds?.has(snap.jobId) ? true : undefined,
       })
       if (row) rows.push(row)
@@ -368,18 +477,18 @@ export async function loadHtDashboardRows(entries: HtDashboardEntry[], archivedB
  *    分布/均值/结论；不依赖 DB 保留期，旧版报告也能整合进汇总表格）；
  *  - 无 stats → 降级「载入」行（bare = true：评分列「—」，仅主表呈现 + 完成
  *    口径，不参与分布/均值/结论）。
- *  两条通道都尽可能挂上 reportHtml（导入原文的服务端留存 — 弹出页内嵌报告
- *  原文，与下载的单独报告一致）。
+ *  两条通道都尽可能挂上导入原文（服务端留存 — 弹出页内嵌报告原文，与下载
+ *  的单独报告一致）。v2.71：改传路径（延迟读取 — Map 值为磁盘路径而非内容）。
  *  jobId 用伪 id（`imp-{n}` / `impb-{n}` — 与 verdict/zipHref 索引不冲突，
  *  永不指向真实作业）。 */
 export function buildImportedRows(
   imported: HtImportedTarget[],
-  reportHtmlById: Map<string, string>,
+  reportPathById: Map<string, string>,
 ): { rows: HtDashboardRow[]; bareRows: HtDashboardRow[] } {
   const rows: HtDashboardRow[] = []
   const bareRows: HtDashboardRow[] = []
   imported.forEach((t, i) => {
-    const reportHtml = t.reportId ? reportHtmlById.get(t.reportId) : undefined
+    const reportHtmlPath = t.reportId ? reportPathById.get(t.reportId) : undefined
     if (t.stats) {
       const s = t.stats
       rows.push({
@@ -405,7 +514,7 @@ export function buildImportedRows(
         reportLlmOk: false,
         durationMs: 0,
         hasReport: false,
-        reportHtml,
+        reportHtmlPath,
         imported: true,
         importedFromFile: true,
         importedFile: t.fileName,
@@ -434,7 +543,7 @@ export function buildImportedRows(
       reportLlmOk: false,
       durationMs: 0,
       hasReport: false,
-      reportHtml,
+      reportHtmlPath,
       imported: true,
       bare: true,
       importedFile: t.fileName,
@@ -444,13 +553,13 @@ export function buildImportedRows(
   return { rows, bareRows }
 }
 
-/** v2.69：读取导入报告原文的服务端留存（ht-imported-report 上传的文件）。
+/** v2.69：规划导入报告原文的服务端留存读取（ht-imported-report 上传的文件）。
  *  归属校验（仅上传者可读）+ 体积护栏（与作业报告原文同预算 — 超出仅丢失
- *  「完全一致」内嵌，统计与降级行不受影响）。文件丢失/超预算 → 不入 Map。
- *  v2.70：① 使用前自愈补建 ImportedReport 表（本地部署未 db:push 时此前直接
- *  查询抛错 → 全部无原文可嵌）；② 预算优先级 — 无 stats 的降级行先读（它们
- *  的弹出页除原文外一无所有，stats 行还有已解析的评分重建页兜底）；③ 查询
- *  失败记日志（不再静默空 Map）。 */
+ *  「完全一致」内嵌，统计与降级行不受影响）。
+ *  v2.70：① 使用前自愈补建 ImportedReport 表；② 预算优先级 — 无 stats 的降级
+ *  行先读（弹出页除原文外一无所有）；③ 查询失败记日志。
+ *  v2.71：**只规划不读内容** — 返回 reportId → 磁盘路径（写盘时逐份延迟读取，
+ *  与作业报告同内存安全口径；stat 预检 + 预算分配，超限文件不入 Map）。 */
 export async function loadImportedReportHtml(
   imported: HtImportedTarget[],
   owner: { key: string; ipKey: string },
@@ -465,7 +574,7 @@ export async function loadImportedReportHtml(
     console.error('[ht-dashboard] 导入报告表自愈失败（弹出页将全部降级）：', err instanceof Error ? err.message : String(err))
     return out
   }
-  // v2.70 预算优先级：无 stats 的降级行优先读原文（弹出页唯一内容来源）
+  // v2.70 预算优先级：无 stats 的降级行优先（弹出页唯一内容来源）
   const ordered = [...withId.filter((t) => !t.stats), ...withId.filter((t) => t.stats)]
   const ids = [...new Set(ordered.map((t) => t.reportId))]
   let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string }> = []
@@ -478,20 +587,17 @@ export async function loadImportedReportHtml(
     console.error('[ht-dashboard] 导入报告留存读取失败（弹出页将降级）：', err instanceof Error ? err.message : String(err))
     return out
   }
+  const recById = new Map(recs.map(r => [r.id, r]))
+  const candidates: Array<{ key: string; path: string }> = []
   for (const id of ids) {
-    const rec = recs.find((r) => r.id === id)
+    const rec = recById.get(id)
     if (!rec || !rec.htmlPath) continue
     if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) continue // 他人留存 — 不采信
-    try {
-      const html = await readFile(rec.htmlPath, 'utf-8')
-      if (html.length > REPORT_HTML_MAX_BYTES) continue
-      if (budget.total + html.length > REPORT_HTML_TOTAL_BUDGET) continue
-      budget.total += html.length
-      out.set(id, html)
-    } catch {
-      /* 文件已被清理/磁盘回收 → 跳过（弹出页降级） */
-    }
+    candidates.push({ key: id, path: rec.htmlPath })
   }
+  // v2.71：stat 预检（丢失/超限不出队）→ 预算分配（降级行优先）→ 只返回路径
+  const plan = await planReportFiles(candidates, budget)
+  for (const s of plan.selected) out.set(s.key, s.path)
   return out
 }
 
@@ -676,19 +782,42 @@ export async function generateHtDashboardReport(
 
 /** 解析条目 zip 命名（job: label/uniprotId/title/jobId；merged: DB title/短 id）→ 与输入同序路径 */
 export async function resolveZipHrefs(entries: HtDashboardEntry[]): Promise<Map<string, string>> {
+  // v2.71：作业与合并报告各一次 findMany 批量加载（旧版逐条 findUnique — zip
+  //  命名规划单独又串行查一轮 DB，百级靶点雪上加霜）
+  const jobIds = [...new Set(entries.filter(e => e.jobId).map(e => e.jobId as string))]
+  const mergedIds = [...new Set(entries.filter(e => e.mergedId).map(e => e.mergedId as string))]
+  const [jobs, mergeds] = await Promise.all([
+    jobIds.length
+      ? db.evaluationJob.findMany({ where: { id: { in: jobIds } }, select: { id: true, uniprotId: true, title: true } })
+      : Promise.resolve([] as Array<{ id: string; uniprotId: string | null; title: string | null }>),
+    mergedIds.length
+      ? db.batchReport.findMany({ where: { id: { in: mergedIds } }, select: { id: true, title: true } })
+      : Promise.resolve([] as Array<{ id: string; title: string | null }>),
+  ])
+  const jobById = new Map(jobs.map(j => [j.id, j]))
+  const mergedById = new Map(mergeds.map(r => [r.id, r]))
   const plan: ArchivePlanItem[] = []
+  // 条目 → plan 下标（缺失条目不产出命名项 — 对齐旧版索引语义）
+  const planIndexByEntry: Array<number | undefined> = []
   for (const e of entries) {
     if (e.jobId) {
-      const job = await db.evaluationJob.findUnique({ where: { id: e.jobId }, select: { uniprotId: true, title: true } })
+      const job = jobById.get(e.jobId)
       plan.push({ kind: 'job', group: e.group, title: e.label || job?.uniprotId || job?.title || e.jobId })
+      planIndexByEntry.push(plan.length - 1)
     } else if (e.mergedId) {
-      const rec = await db.batchReport.findUnique({ where: { id: e.mergedId }, select: { title: true } })
+      const rec = mergedById.get(e.mergedId)
       plan.push({ kind: 'merged', group: e.group, title: rec?.title || `merged-${e.mergedId.slice(0, 8)}` })
+      planIndexByEntry.push(plan.length - 1)
+    } else {
+      planIndexByEntry.push(undefined)
     }
   }
   const names = planArchiveNames(plan)
   const byJob = new Map<string, string>()
-  entries.forEach((e, i) => { if (e.jobId) byJob.set(e.jobId, names[i]) })
+  entries.forEach((e, i) => {
+    const pi = planIndexByEntry[i]
+    if (e.jobId && pi != null && names[pi]) byJob.set(e.jobId, names[pi])
+  })
   return byJob
 }
 
@@ -739,9 +868,179 @@ function embedJsonScript(id: string, data: unknown): string {
   return `<script type="application/json" id="${id}">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`
 }
 
+// ── v2.71：载荷流式写入（内存安全 — 修复百级靶点全量内嵌时生成进程 OOM）──────
+//  旧链路四份全量拷贝同时驻留（rows 原文 + JSON.stringify + `<` 转义 replace +
+//  模板拼接最终 HTML — 175M 字符的运行峰值 >1.4GB 堆，进程被 OOM-kill，网关
+//  返回 502、前端 240s 轮询超时）。新链路：① rows 只带路径不带内容（延迟读）；
+//  ② shell（统计/主表/AI 章 — 无载荷时 <1MB）单独渲染；③ 载荷 JSON 按行分块
+//  逐份读盘→stringify→转义→写入流释放，峰值 = shell + 单份报告（典型几 MB）。
+//  输出与旧版字节同构（键序/转义规则一致）。
+
+/** 载荷占位标记（NUL 包围 — 正文 HTML 不含 NUL，拆分定位零歧义） */
+const HT_PAYLOAD_MARKER = '\u0000__HT_RPT_PAYLOAD__\u0000'
+
+/** 主表行排序（总分降序 — shell 与载荷分块共用，保证 data-i 索引一致） */
+function sortHtDashboardRows(rows: HtDashboardRow[]): HtDashboardRow[] {
+  return [...rows].sort((a, b) => b.overall - a.overall)
+}
+
+/** 载荷行 JSON（与 embedJsonScript 全量 stringify 的单行输出同构 — esc 口径与
+ *  buildHtReportPayload 完全一致，`<` 转义阻断 script 提前闭合）。html 缺省时
+ *  弹出页回退重建页变体（与 buildHtReportPayload 一致） */
+function payloadRowJson(r: HtDashboardRow, verdictByJob: Map<string, HtVerdict>, generatedAt: string, origin: string, html?: string): string {
+  const j = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
+  const tt = esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`)
+  const fn = esc(reportFileName(r, generatedAt))
+  if (html != null) {
+    return j({ tt, j: esc(r.jobId), fn, html })
+  }
+  const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
+  return j({
+    tt,
+    h: `${esc(r.label)}${r.range ? `<span class="tg-range"> · 残基 ${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用，正文与统计完整保留">缓存恢复</span>' : ''}`,
+    j: esc(r.jobId),
+    fn,
+    a: renderTargetArticle(r, v, origin),
+  })
+}
+
+/** v2.71：载荷 JSON 分块生成器 — 逐份延迟读盘（内存安全），顺序与 shell 主表
+ *  （sortHtDashboardRows）一致。读盘失败/超限的行回退重建页变体（与旧版「文件
+ *  丢失→markdown 重建页」降级语义一致）。onRow 每行回调（进度展示用）。 */
+async function* htPayloadJsonChunks(
+  input: RenderHtDashboardInput,
+  onRow?: (done: number, total: number) => void,
+): AsyncGenerator<string> {
+  const { rows, verdicts, generatedAt, engineSummary, origin } = input
+  const verdictByJob = new Map(verdicts.map(v => [v.jobId, v]))
+  const sorted = sortHtDashboardRows(rows)
+  const j = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
+  // v2.71：重建页样式判定 — 任何行无内存原文即内嵌（与 buildHtReportPayload 同规则；
+  //  保守正确：路径行文件可能在写盘时丢失回退重建页变体，样式必须已在载荷里）
+  const needFallbackCss = sorted.some(r => !r.reportHtml)
+  const meta: string[] = []
+  if (needFallbackCss) meta.push(`"c":${j(HT_TARGET_REPORT_CSS)}`)
+  meta.push(
+    `"g":${j(esc(generatedAt.length > 48 ? generatedAt.slice(0, 48) + '…' : generatedAt))}`,
+    `"m":${j(esc(input.title.length > 46 ? input.title.slice(0, 46) + '…' : input.title))}`,
+    `"e":${j(esc(engineSummary.length > 60 ? engineSummary.slice(0, 60) + '…' : engineSummary))}`,
+  )
+  yield `{${meta.join(',')},"r":[`
+  for (let i = 0; i < sorted.length; i++) {
+    const r = sorted[i]!
+    let html: string | undefined
+    if (rowHasReportHtml(r)) {
+      const src = r.reportHtml ?? (r.reportHtmlPath ? await readFile(r.reportHtmlPath, 'utf-8').catch(() => null) : null)
+      if (src && src.length <= REPORT_HTML_MAX_BYTES) html = src
+    }
+    yield `${i > 0 ? ',' : ''}${payloadRowJson(r, verdictByJob, generatedAt, origin, html)}`
+    onRow?.(i + 1, sorted.length)
+  }
+  yield ']}'
+}
+
+/** v2.71：看板 HTML 流式落盘（服务端生成链路专用 — 内存安全）。
+ *  shell 以 MARKER 模式渲染后拆分；载荷分块流式写入（每行读盘→序列化→写→释放）。
+ *  无载荷行时退化为一次性写入（shell 本身 <1MB）。onProgress 报告阶段进度。 */
+export async function writeHtDashboardHtmlFile(
+  input: RenderHtDashboardInput,
+  htmlPath: string,
+  onProgress?: (msg: string) => void,
+): Promise<void> {
+  const anyBody = input.rows.some(r => rowHasReportHtml(r) || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
+  if (!anyBody) {
+    onProgress?.('写入看板 HTML…')
+    await (await import('node:fs/promises')).writeFile(htmlPath, renderHtDashboardHtml(input), 'utf-8')
+    return
+  }
+  onProgress?.('渲染看板版面…')
+  const shell = renderHtDashboardHtml(input, { payloadMarker: true })
+  const at = shell.indexOf(HT_PAYLOAD_MARKER)
+  if (at < 0) {
+    // 无载荷（anyBody 判定与渲染一致时不会走到 — 兜底直写）
+    await (await import('node:fs/promises')).writeFile(htmlPath, shell, 'utf-8')
+    return
+  }
+  const before = shell.slice(0, at)
+  const after = shell.slice(at + HT_PAYLOAD_MARKER.length)
+  const { createWriteStream } = await import('node:fs')
+  await new Promise<void>((resolve, reject) => {
+    const ws = createWriteStream(htmlPath, { encoding: 'utf-8' })
+    ws.on('error', reject)
+    const write = (chunk: string): Promise<void> => new Promise(res => {
+      if (ws.write(chunk)) res()
+      else ws.once('drain', () => res())
+    })
+    void (async () => {
+      try {
+        await write(before)
+        await write('<script type="application/json" id="ht-rpt-data">')
+        let lastTick = 0
+        for await (const chunk of htPayloadJsonChunks(input, (done, total) => {
+          const now = Date.now()
+          if (now - lastTick > 2_000 || done === total) {
+            lastTick = now
+            onProgress?.(`内嵌报告原文 ${done}/${total} 份（逐份读取写入 — 内存安全）…`)
+          }
+        })) {
+          await write(chunk)
+        }
+        await write('</script>')
+        await write(after)
+        ws.end(() => resolve())
+      } catch (err) {
+        ws.destroy()
+        reject(err instanceof Error ? err : new Error(String(err)))
+      }
+    })()
+  })
+}
+
 /** 评分 → 高/中/低配色（与总分 chip 同口径） */
 function scoreTone(n: number): string {
   return n >= 7 ? 'hi' : n >= 5 ? 'md' : 'lo'
+}
+
+// ── v2.71：生成进度持久化（running 期间前端轮询展示）──────────────────────────
+
+let htProgressColumnEnsured: Promise<void> | null = null
+
+/** v2.71：HtDashboard.progress 列自愈（幂等，进程内缓存一次）。
+ *  与 ensureImportedReportTable 同一模式：本地部署拉新版后通常不跑 db:push —
+ *  schema 有 progress 而库里没有时，Prisma 全列查询（findUnique 无 select）直接
+ *  抛 P2021，看板列表/状态轮询/zip 打包全部 404。首次使用前 PRAGMA 检查补列
+ *  （列已存在时零开销；失败清缓存允许重试）。 */
+export function ensureHtDashboardProgressColumn(): Promise<void> {
+  if (!htProgressColumnEnsured) {
+    htProgressColumnEnsured = (async () => {
+      const cols = await db.$queryRawUnsafe<Array<{ name: unknown }>>('PRAGMA table_info("HtDashboard")')
+      if (!cols.some(c => c.name === 'progress')) {
+        await db.$executeRawUnsafe('ALTER TABLE "HtDashboard" ADD COLUMN "progress" TEXT')
+      }
+    })().catch((err: unknown) => {
+      htProgressColumnEnsured = null // 本次失败不缓存 — 下次调用重试
+      throw err
+    })
+  }
+  return htProgressColumnEnsured
+}
+
+/** v2.71：看板生成进度写入器（节流 fire-and-forget — 同文本 1.5s 内不重复写；
+ *  仅 running 期间有意义，终态由调用方覆盖）。进度让前端「汇总报告生成中」横幅
+ *  从黑盒等待变为实时阶段展示（用户实测超时场景下可区分卡在哪一步）。 */
+export function makeHtDashboardProgressWriter(dashboardId: string): (msg: string) => void {
+  let last = ''
+  let lastAt = 0
+  return (msg: string) => {
+    const now = Date.now()
+    if (msg === last && now - lastAt < 1_500) return
+    last = msg
+    lastAt = now
+    void db.htDashboard.update({
+      where: { id: dashboardId },
+      data: { progress: msg.slice(0, 200) },
+    }).catch(() => undefined) // 进度写失败不影响生成
+  }
 }
 
 /** v2.65：原表行快照序列折叠 — ≥30 连续大写氨基酸字符的串折叠为「[序列已折叠]」。
@@ -898,6 +1197,8 @@ function buildHtReportPayload(input: {
   origin: string
 }): { c?: string; g: string; m: string; e: string; r: Array<{ tt: string; j: string; fn: string; html?: string; h?: string; a?: string }> } {
   const verdictByJob = new Map(input.verdicts.map(v => [v.jobId, v]))
+  // v2.71：重建页样式内嵌判定 — 任何行无内存原文即内嵌（保守正确：路径行的
+  //  文件可能在写盘时丢失回退重建页，样式必须已在）
   const needFallbackCss = input.rows.some(r => !r.reportHtml)
   return {
     // 共享样式仅在有重建页条目时才内嵌（原文报告自带完整样式，无需共享）
@@ -908,7 +1209,9 @@ function buildHtReportPayload(input: {
     r: input.rows.map(r => {
       const fn = esc(reportFileName(r, input.generatedAt))
       if (r.reportHtml) {
-        // 原文报告自带 <title>，tt 仅作 Blob 打不开时的索引提示
+        // 原文报告自带 <title>，tt 仅作 Blob 打不开时的索引提示；
+        // v2.71：仅内存原文走此分支 — 路径行（reportHtmlPath）在整串渲染链路
+        //  降级为重建页变体（服务端链路由流式写入器延迟读盘嵌入原文）
         return { tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`), j: esc(r.jobId), fn, html: r.reportHtml }
       }
       const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
@@ -937,11 +1240,14 @@ function renderExcelCell(text: string, seqs?: string[]): string {
   })
 }
 
-/** 汇总主表（可筛选 · 可排序 · X-ray/Cryo-EM/NMR 评分分列单独排序 · 「完整报告」弹出单靶点完整报告） */
-export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
+/** 汇总主表（可筛选 · 可排序 · X-ray/Cryo-EM/NMR 评分分列单独排序 · 「完整报告」弹出单靶点完整报告）。
+ *  v2.71：opts.payloadMarker — 服务端生成链路传 true，载荷位置输出 MARKER 占位
+ *  （由 writeHtDashboardHtmlFile 拆分后流式写入，报告原文逐份延迟读取 — 内存安全）；
+ *  缺省（fixture/单测）行为不变：完整载荷 JSON.stringify 内嵌。 */
+export function renderHtDashboardHtml(input: RenderHtDashboardInput, opts?: { payloadMarker?: boolean }): string {
   const { rows, stats, verdicts, markdown, llmOk, llmErrors, engineSummary, origin } = input
   const verdictByJob = new Map(verdicts.map(v => [v.jobId, v]))
-  const sorted = [...rows].sort((a, b) => b.overall - a.overall)
+  const sorted = sortHtDashboardRows(rows)
   // v2.60：缓存恢复行（服务端作业已过期 — 由浏览器本地快照重建统计）头部提示 + 行内徽标
   const recoveredCount = rows.filter(r => r.fromArchive).length
   // v2.63：单靶点完整报告内嵌载荷（原文报告或 markdown 正文任一存在才内嵌；
@@ -949,10 +1255,12 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
   // v2.70：导入行（imported / importedFromFile）无论是否内嵌原文都可弹出 —
   //  无原文时弹出已解析评分的重建页（修复：v2.69 只看 reportHtml/markdown/bare，
   //  原文留存失败/超预算时这些行的报告列整列空白、按钮整个消失）
-  const anyBody = sorted.some(r => r.reportHtml || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
+  const anyBody = sorted.some(r => rowHasReportHtml(r) || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
   const rptPayload = anyBody
-    ? buildHtReportPayload({ title: input.title, rows: sorted, verdicts, generatedAt: input.generatedAt, engineSummary, origin })
-    : null
+    ? (opts?.payloadMarker
+        ? HT_PAYLOAD_MARKER
+        : embedJsonScript('ht-rpt-data', buildHtReportPayload({ title: input.title, rows: sorted, verdicts, generatedAt: input.generatedAt, engineSummary, origin })))
+    : ''
 
   const body = renderMarkdown(markdown || '（AI 整体可行性报告未生成 — 见上方提示；统计与每靶点结论不受影响）', 0)
 
@@ -978,9 +1286,9 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
     // v2.68：bare 载入行同样可弹出（说明 + 提交序列的重建页）；v2.69：有原文留存的
     //  bare 行 / 解析导入行弹出导入的报告原文（与下载的单独报告一致）；
     //  v2.70：导入行无原文时也保留按钮 — 弹出已解析评分的重建页（不再整列空白）
-    const hasPopup = Boolean(r.reportHtml || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
+    const hasPopup = Boolean(rowHasReportHtml(r) || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
     const openBtn = anyBody && hasPopup
-      ? `<button type="button" class="mt-open" data-i="${idx}"${r.reportHtml
+      ? `<button type="button" class="mt-open" data-i="${idx}"${rowHasReportHtml(r)
           ? r.imported
             ? ' title="新标签页弹出该靶点导入的评估报告原文（与导入的报告文件完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
             : ' title="新标签页弹出该靶点的单独评估报告原文（与下载的单独报告完全一致 — 含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节，离线可用）"'
@@ -992,7 +1300,7 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
       : ''
     // v2.65：逐靶点下载按钮 — 内嵌的原文/重建页一键存盘（命名与单独报告下载同源）
     const dlBtn = anyBody && hasPopup
-      ? `<button type="button" class="mt-dl" data-i="${idx}"${r.reportHtml
+      ? `<button type="button" class="mt-dl" data-i="${idx}"${rowHasReportHtml(r)
           ? r.imported
             ? ' title="下载该靶点导入的评估报告 HTML 文件（与弹出页及导入的报告文件一致 — 离线自包含）"'
             : ' title="下载该靶点的单独评估报告 HTML 文件（与弹出页及单独报告下载完全一致 — 离线自包含）"'
@@ -1004,7 +1312,7 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput): string {
     //  报告文件；降级行 = 报告见导入文件/弹出页）
     const loadBadge = r.imported
       ? `<span class="tg-load" title="${r.bare
-        ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；报告无法解析出统计数据，以降级行呈现（评分与结论见导入的报告文件${r.reportHtml ? '或「完整报告」弹出页' : ''}）`
+        ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；报告无法解析出统计数据，以降级行呈现（评分与结论见导入的报告文件${rowHasReportHtml(r) ? '或「完整报告」弹出页' : ''}）`
         : r.importedFromFile
           ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；评分/结构/结论解析自导入的报告文件，与本次评估同权`
           : '该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端原作业恢复，与本次评估同权'}">载入</span>`
@@ -1209,7 +1517,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 </div>
 
 ${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，评估正文经「完整报告」弹出页提供；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.filter(r => !r.fromArchive).length} 个靶点数据完整来自服务器。</div>` : ''}
-${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计${rows.some(r => r.importedFromFile && r.reportHtml) ? '，「完整报告」弹出页内嵌导入的报告原文' : ''}）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && r.reportHtml) ? '或「完整报告」弹出页' : ''}）` : ''}${rows.some(r => (r.importedFromFile || r.bare) && !r.reportHtml && r.importedFile) ? `；${rows.filter(r => (r.importedFromFile || r.bare) && !r.reportHtml && r.importedFile).length} 个的原文未能内嵌弹出页（超出体积预算或留存失败 — 可直接打开导入的报告文件查看完整原文）` : ''}。</div>` : ''}
+${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计${rows.some(r => r.importedFromFile && rowHasReportHtml(r)) ? '，「完整报告」弹出页内嵌导入的报告原文' : ''}）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && rowHasReportHtml(r)) ? '或「完整报告」弹出页' : ''}）` : ''}${rows.some(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile) ? `；${rows.filter(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile).length} 个的原文未能内嵌弹出页（超出体积预算或留存失败 — 可直接打开导入的报告文件查看完整原文）` : ''}。</div>` : ''}
 
 ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 
@@ -1277,7 +1585,7 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 <button type="button" class="backtop no-print" id="backtop" aria-label="回到顶部" title="回到顶部">↑</button>
 </div>
 
-${rptPayload ? embedJsonScript('ht-rpt-data', rptPayload) : ''}
+${rptPayload}
 
 <script>
 (function(){
