@@ -37,8 +37,8 @@ import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDateTime } from './format'
 import { extractHtTargetsFromExcel } from './api'
-import { parseHtImportFiles, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtMatchTarget } from './ht-archive-import'
-import type { HTRunState, HtSeqTarget } from './types'
+import { parseHtImportFiles, planArchiveSkips, matchReportToTarget, sha256Hex16, diagnoseArchiveImport, type HtMatchTarget } from './ht-archive-import'
+import type { HTRunState, HtImportedKeyEntry, HtSeqTarget } from './types'
 
 export interface HighThroughputPanelProps {
   value: string
@@ -54,9 +54,10 @@ export interface HighThroughputPanelProps {
   /** v2.23.1 序列兜底组（Excel 导入：行缺 UniProt 但有构建序列） */
   seqGroups: HtSeqTarget[][]
   onSeqGroupsChange: (groups: HtSeqTarget[][]) => void
-  /** v2.36：原始 Excel 行快照（导入时留存 → 汇总报告「原表内容」列） */
-  excelRows: Array<{ label: string; text: string }>
-  onExcelRowsChange: (rows: Array<{ label: string; text: string }>) => void
+  /** v2.36：原始 Excel 行快照（导入时留存 → 汇总报告「原表内容」列；v2.68 seqs =
+   *  行内序列格原文 — 主表序列标记处一键复制按钮的数据源） */
+  excelRows: Array<{ label: string; text: string; seqs?: string[] }>
+  onExcelRowsChange: (rows: Array<{ label: string; text: string; seqs?: string[] }>) => void
   recentRuns: HTRunState[]
   onResumeRun: (id: string) => void
   onDeleteRun: (id: string) => void
@@ -66,10 +67,12 @@ export interface HighThroughputPanelProps {
   /** v2.38：启动时跳过的靶点键（`g:${组}:${项}` / `sq:${组}:${项}` — 未勾选项） */
   skipKeys: string[]
   onSkipKeysChange: (keys: string[]) => void
-  /** v2.66：因「导入报告」而取消勾选的靶点键（skipKeys 的子集）— 启动时这类靶点以
-   *  imported=true 入运行记录，进度统计计入「载入」完成口径（区别于手动跳过） */
-  importedKeys: string[]
-  onImportedKeysChange: (keys: string[]) => void
+  /** v2.66→v2.68：因「导入报告」而取消勾选的靶点（skipKeys 的子集）— 启动时这类
+   *  靶点以 imported=true 入运行记录，进度统计计入「载入」完成口径（区别于手动跳过）；
+   *  v2.68 起随键携带报告数据（jobId — 汇总报告从服务端恢复完整统计行；fileName —
+   *  行内「载入」徽标说明） */
+  importedEntries: HtImportedKeyEntry[]
+  onImportedEntriesChange: (entries: HtImportedKeyEntry[]) => void
 }
 
 const inputBase =
@@ -117,21 +120,23 @@ function runStatusPill(run: HTRunState): { label: string; cls: string } {
   }
 }
 
-export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, excelRows, onExcelRowsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving, skipKeys, onSkipKeysChange, importedKeys, onImportedKeysChange }: HighThroughputPanelProps) {
+export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqGroupsChange, excelRows, onExcelRowsChange, recentRuns, onResumeRun, onDeleteRun, onArchiveRun, archiving, skipKeys, onSkipKeysChange, importedEntries, onImportedEntriesChange }: HighThroughputPanelProps) {
   const totalTargets = parsed.groups.reduce((n, g) => n + g.length, 0)
   const seqTargetTotal = seqGroups.reduce((n, g) => n + g.length, 0)
   const groupTotal = parsed.groups.length + seqGroups.length
 
   // ── v2.38 靶点选择（启动前勾选；未勾选 = 跳过） ──
   const skipSet = new Set(skipKeys)
-  /** v2.66：导入报告而取消勾选的键集合（skipKeys 子集 — 启动时以 imported=true 入运行记录） */
-  const importedSet = new Set(importedKeys)
+  /** v2.66→v2.68：导入报告而取消勾选的键集合（skipKeys 子集 — 启动时以 imported=true
+   *  入运行记录；v2.68 随键携带 jobId/fileName 供汇总报告恢复统计行） */
+  const importedSet = new Set(importedEntries.map((e) => e.key))
+  const importedByKey = new Map(importedEntries.map((e) => [e.key, e]))
   const toggleSkip = (key: string) => {
     const next = new Set(skipSet)
     if (next.has(key)) {
       next.delete(key)
       // v2.66：恢复勾选 → 脱离「导入载入」口径（此后再手动取消勾选算手动跳过）
-      if (importedSet.has(key)) onImportedKeysChange(importedKeys.filter((k) => k !== key))
+      if (importedSet.has(key)) onImportedEntriesChange(importedEntries.filter((e) => e.key !== key))
     } else {
       next.add(key)
     }
@@ -148,7 +153,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
     onSkipKeysChange([...next])
     // v2.66：恢复全组 → 清除组内键的「导入」标记
     if (allSkipped && keys.some((k) => importedSet.has(k))) {
-      onImportedKeysChange(importedKeys.filter((k) => !keys.includes(k)))
+      onImportedEntriesChange(importedEntries.filter((e) => !keys.includes(e.key)))
     }
   }
   const selectedCount = totalTargets + seqTargetTotal - [...skipSet].filter((k) => {
@@ -195,13 +200,26 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         }
       }
       onSkipKeysChange([...next])
-      // v2.66：记录「因导入而跳过」的键（含重复导入 — 报告确实匹配即算载入）。
-      //  启动时这些靶点以 imported=true 入运行记录 → 进度统计计入「载入」完成口径
-      // （修复：此前只取消勾选，运行后组数涨而靶点完成数恒 0）
+      // v2.66→v2.68：记录「因导入而跳过」的键 + 报告数据（含重复导入 — 报告确实
+      //  匹配即算载入）。启动时这些靶点以 imported=true 入运行记录 → 进度统计计入
+      //  「载入」完成口径（修复：此前只取消勾选，运行后组数涨而靶点完成数恒 0）；
+      //  v2.68 起逐键定位匹配的报告条目：jobId（zip 清单 / 报告内嵌标记）随运行留存，
+      //  汇总报告生成时发回服务端 — DB 仍在保留期内即恢复完整统计行（评分/结构/结论）
       if (matchedKeys.size > 0) {
-        const nextImported = new Set(importedKeys)
-        for (const key of matchedKeys) nextImported.add(key)
-        onImportedKeysChange([...nextImported])
+        const fallbackName = list.length === 1 ? (list[0] as File).name.slice(0, 80) : `${list.length} 个报告文件`
+        const jobReports = reports.filter((r) => r.kind === 'job')
+        const nextImported = new Map(importedEntries.map((e) => [e.key, e]))
+        for (const t of targets) {
+          if (!matchedKeys.has(t.key)) continue
+          const rep = jobReports.find((r) => r.jobId && matchReportToTarget(r, t))
+          const existing = nextImported.get(t.key)
+          nextImported.set(t.key, {
+            key: t.key,
+            jobId: rep?.jobId ?? existing?.jobId,
+            fileName: rep ? (rep.path.split('::')[0] ?? rep.path).split('/').pop()!.slice(0, 80) : (existing?.fileName ?? fallbackName),
+          })
+        }
+        onImportedEntriesChange([...nextImported.values()].filter((e) => next.has(e.key)))
       }
       setZipMeta({ name: list.length === 1 ? (list[0] as File).name : `${list.length} 个报告文件`, reports: reports.length, matched })
       // v2.49 逐文件诊断：未命中文件给出人话原因（用户此前只能看到「未命中」三个字）
@@ -519,7 +537,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             type="button"
             onClick={() => {
               onSkipKeysChange([])
-              onImportedKeysChange([]) // v2.66：全选同时清空「导入载入」标记
+              onImportedEntriesChange([]) // v2.66：全选同时清空「导入载入」标记
             }}
             className="ml-auto inline-flex h-6 items-center gap-1 rounded-md px-1.5 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             title="恢复勾选全部靶点（清除所有跳过标记）"
@@ -561,7 +579,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                 const dh = parsed.groupDomainHints?.[i]?.[ti]
                 const skipped = skipSet.has(`g:${i}:${ti}`)
                 // v2.66：导入匹配而跳过 — emerald 样式（计入「载入」完成，不似手动跳过的删除线）
-                const imported = skipped && importedSet.has(`g:${i}:${ti}`)
+                const importedEntry = skipped ? importedByKey.get(`g:${i}:${ti}`) : undefined
+                const imported = Boolean(importedEntry)
                 return (
                   <span
                     key={t}
@@ -575,7 +594,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                     )}
                     title={
                       imported
-                        ? '已有报告（导入匹配）— 启动时跳过不评估，进度计入「载入」完成口径'
+                        ? `已有报告（导入匹配${importedEntry?.fileName ? ` · ${importedEntry.fileName}` : ''}）— 启动时跳过不评估，进度计入「载入」完成口径${importedEntry?.jobId ? '；汇总报告将恢复该靶点的完整统计（评分/结构/结论）' : '；旧版报告无作业标记，汇总中该靶点以「载入」行呈现'}`
                         : skipped
                           ? '已跳过（启动时不评估；运行中可恢复）'
                           : rr
@@ -625,7 +644,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
               {g.map((s, si) => {
                 const skipped = skipSet.has(`sq:${gi}:${si}`)
                 // v2.66：导入匹配而跳过 — emerald 样式（同 UniProt 靶点 chip）
-                const imported = skipped && importedSet.has(`sq:${gi}:${si}`)
+                const importedEntry = skipped ? importedByKey.get(`sq:${gi}:${si}`) : undefined
+                const imported = Boolean(importedEntry)
                 return (
                   <span
                     key={`${s.header}-${si}`}
@@ -637,7 +657,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                           : 'border-sky-500/30 text-sky-700/60 line-through decoration-sky-500/40 dark:text-sky-400/60'
                         : 'border-border text-foreground/90',
                     )}
-                    title={`${s.header || '裸序列'}（${s.length} aa）${imported ? ' · 已有报告（导入匹配，进度计入「载入」）' : skipped ? ' · 已跳过（启动时不评估；运行中可恢复）' : ''}`}
+                    title={`${s.header || '裸序列'}（${s.length} aa）${imported ? ` · 已有报告（导入匹配${importedEntry?.fileName ? ` · ${importedEntry.fileName}` : ''}，进度计入「载入」${importedEntry?.jobId ? '；汇总报告将恢复完整统计' : '；旧版报告以「载入」行呈现'}）` : skipped ? ' · 已跳过（启动时不评估；运行中可恢复）' : ''}`}
                   >
                     <Checkbox
                       checked={!skipped}

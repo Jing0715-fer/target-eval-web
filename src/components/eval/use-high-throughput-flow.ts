@@ -48,7 +48,7 @@ import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
-import { parseHtImportFiles, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
+import { parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -209,12 +209,21 @@ function applyArchiveSkips(
     }
   }
   const matchedKeys = planArchiveSkips(reports, matchable, { totalGroups: r.groups.length })
+  // v2.68：逐项定位匹配的报告条目 — jobId（zip 清单 / 报告内嵌标记）随靶点留存，
+  //  汇总报告生成时发回服务端恢复完整统计行（DB 保留期内）
+  const jobReports = reports.filter((rep) => rep.kind === 'job' && rep.jobId)
+  const targetByKey = new Map(all.map((t) => [t.key, t]))
   for (const it of r.groups.flatMap((g) => g.items)) {
     if (matchedKeys.has(it.key)) {
       it.status = 'skipped'
       it.error = undefined
       it.skipNote = `已导入 ${fileName.slice(0, 40)} 的既有报告`
       it.imported = true // v2.60：进度统计计入已完成（「N 评估 + M 载入」）
+      const rep = jobReports.find((r2) => matchReportToTarget(r2, targetByKey.get(it.key)!))
+      it.importedJobId = rep?.jobId
+      it.importedFile = rep
+        ? (rep.path.split('::')[0] ?? rep.path).split('/').pop()?.slice(0, 80) ?? fileName.slice(0, 80)
+        : fileName.slice(0, 80)
     }
   }
   // v2.49 逐文件诊断（含已完成靶点提示 — 避免误报「不在清单」）
@@ -828,9 +837,26 @@ export function useHighThroughputFlow() {
     const runState = runRef.current
     if (!runState || runState.dashboardId || runState.dashboardError === '__done__') return
     const entries: HtArchiveEntry[] = []
+    // v2.68：导入既有报告的靶点纳入汇总（修复「汇总报告信息不全」）—
+    //  有 importedJobId（zip 清单 / 报告内嵌标记）的靶点同时走两条通道：
+    //  ① entries + importedJobIds → DB 仍在保留期内时恢复完整统计行（评分/结构/结论，
+    //     与本次评估同权，行标「载入」）；
+    //  ② importedBare 降级行（主表呈现 + 完成口径，不参与评分分布）— DB 命中时
+    //     服务端按 label 去重剔除，过期/无快照时兜底呈现（靶点不因数据过期而从
+    //     汇总中消失）；无作业标记（旧版报告）的靶点只有这条通道
+    const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string }> = []
+    const importedJobIds = new Set<string>()
     for (const g of runState.groups) {
       for (const it of g.items) {
-        if (it.status === 'done' && it.jobId) entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
+        if (it.status === 'done' && it.jobId) {
+          entries.push({ jobId: it.jobId, group: g.index + 1, label: it.label })
+        } else if (it.imported === true || (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))) {
+          importedBare.push({ label: it.label, group: g.index + 1, sequence: it.sequence?.slice(0, 50_000), fileName: it.importedFile })
+          if (it.importedJobId) {
+            entries.push({ jobId: it.importedJobId, group: g.index + 1, label: it.label })
+            importedJobIds.add(it.importedJobId)
+          }
+        }
       }
       if (g.mergedReportId) entries.push({ mergedId: g.mergedReportId, group: g.index + 1 })
     }
@@ -852,18 +878,27 @@ export function useHighThroughputFlow() {
     setRun(cloneRun(runState))
     try {
       // v2.61：各序列靶点的提交序列（jobId → 全文 — 汇总表「复制序列」按钮与全靶点
-      // 完整报告页展示；≤600 条、总量 600K 字符防载荷膨胀 — 超出部分静默丢弃）
+      // 完整报告页展示；≤600 条、总量 600K 字符防载荷膨胀 — 超出部分静默丢弃）。
+      // v2.68：导入载入的序列靶点（importedJobId）同样回填 — 汇总弹出页/复制按钮可用
       const sequences: Array<{ jobId: string; sequence: string }> = []
       let seqChars = 0
       for (const g of runState.groups) {
         for (const it of g.items) {
-          if (it.status !== 'done' || !it.jobId || !it.sequence) continue
+          const sid = it.status === 'done' && it.jobId ? it.jobId : it.importedJobId
+          if (!sid || !it.sequence) continue
           if (sequences.length >= 600 || seqChars + it.sequence.length > 600_000) continue
-          sequences.push({ jobId: it.jobId, sequence: it.sequence })
+          sequences.push({ jobId: sid, sequence: it.sequence })
           seqChars += it.sequence.length
         }
       }
-      const dash = await generateHtDashboard({ entries, goal: runState.goal, excelRows: runState.excelRows, sequences })
+      const dash = await generateHtDashboard({
+        entries,
+        goal: runState.goal,
+        excelRows: runState.excelRows,
+        sequences,
+        imported: importedBare.length ? importedBare : undefined,
+        importedJobIds: importedJobIds.size ? [...importedJobIds] : undefined,
+      })
       runState.dashboardPending = false
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
@@ -882,9 +917,12 @@ export function useHighThroughputFlow() {
         const dropTail = (dash.droppedCount ?? 0) > 0
           ? `${dash.droppedCount} 个靶点因服务端与本地缓存均无数据被跳过${dash.droppedLabels?.length ? `（如 ${dash.droppedLabels.slice(0, 3).join('、')}）` : ''}；`
           : ''
+        const importedTail = importedBare.length + importedJobIds.size > 0
+          ? `已包含 ${importedJobIds.size + importedBare.length} 个导入载入的靶点（${importedJobIds.size} 个恢复了完整统计${importedBare.length ? `、${importedBare.length} 个以载入行呈现（旧版报告无作业标记）` : ''}）；`
+          : ''
         toast({
           title: '统计看板已生成',
-          description: `${recoverTail}${dropTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
+          description: `${recoverTail}${dropTail}${importedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
         })
       } else {
         runState.dashboardError = dash.error ?? '统计看板生成失败'
@@ -1010,6 +1048,35 @@ export function useHighThroughputFlow() {
           status: 'pending' as const,
         })),
       ]
+      // v2.68：启动面板导入报告携带的数据（键与 skipFlags 同构重排 — 按载荷组索引
+      //  `g:${i}:${j}` / `sq:${k}:${j}`）：jobId 供汇总报告从服务端恢复完整统计行
+      const importedReportByKey = new Map((payload.importedReports ?? []).map((e) => [e.key, e]))
+      for (let i = 0; i < groups.length; i++) {
+        for (let j = 0; j < groupStates[i]!.items.length; j++) {
+          const it = groupStates[i]!.items[j]!
+          if (it.imported) {
+            const rep = importedReportByKey.get(`g:${i}:${j}`)
+            if (rep) {
+              it.importedJobId = rep.jobId
+              it.importedFile = rep.fileName
+            }
+          }
+        }
+      }
+      for (let k = 0; k < seqGroups.length; k++) {
+        const g = groupStates[groups.length + k]
+        if (!g) continue
+        for (let j = 0; j < g.items.length; j++) {
+          const it = g.items[j]!
+          if (it.imported) {
+            const rep = importedReportByKey.get(`sq:${k}:${j}`)
+            if (rep) {
+              it.importedJobId = rep.jobId
+              it.importedFile = rep.fileName
+            }
+          }
+        }
+      }
       const importedAtStart = groupStates.reduce((n, g) => n + g.items.filter((it) => it.imported === true).length, 0)
       const newRun: HTRunState = {
         id: `ht-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1137,11 +1204,15 @@ export function useHighThroughputFlow() {
       it.status = 'pending'
       it.skipNote = undefined
       it.imported = undefined // v2.60：恢复评估 — 脱离「载入」统计口径
+      it.importedJobId = undefined // v2.68：报告数据一并清空（重新评估后以本作业为准）
+      it.importedFile = undefined
       touchGroupForRerun(g, r)
     } else if (it.status !== 'done' && it.status !== 'running') {
       it.status = 'skipped'
       it.skipNote = '手动跳过（不评估）'
       it.imported = undefined
+      it.importedJobId = undefined
+      it.importedFile = undefined
     }
     snapshot()
   }, [ensureEditable, snapshot])
@@ -1160,6 +1231,8 @@ export function useHighThroughputFlow() {
       it.error = undefined
       it.skipNote = undefined
       it.imported = undefined
+      it.importedJobId = undefined // v2.68：重新评估 — 导入数据作废
+      it.importedFile = undefined
       it.reportIncomplete = undefined
       it.reportMissingNote = undefined
       it.jobId = undefined // v2.41 修复：清旧作业引用（重置为重新提交）
@@ -1266,7 +1339,7 @@ export function useHighThroughputFlow() {
       toast({ title: '汇总报告生成中', description: '请等待当前生成完成后重试。' })
       return
     }
-    if (!r.groups.some((g) => g.items.some((it) => it.status === 'done' && it.jobId))) {
+    if (!r.groups.some((g) => g.items.some((it) => (it.status === 'done' && it.jobId) || it.importedJobId))) {
       toast({ title: '无法生成汇总报告', description: '该运行没有成功完成的靶点（全部失败/被取消/被跳过）— 可「重跑失败/不完整项」补齐后自动重新生成。', variant: 'destructive' })
       return
     }

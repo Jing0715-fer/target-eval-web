@@ -24,6 +24,7 @@ import { runWithLlmOverride, sanitizeLlmOverride, getEngineSummary } from '@/lib
 import type { HtDashboard } from '@prisma/client'
 import {
   loadHtDashboardRows,
+  buildImportedBareRows,
   computeHtStats,
   generateHtDashboardReport,
   renderHtDashboardHtml,
@@ -32,6 +33,7 @@ import {
   attachExcelRows,
   type ArchivedJobSnapshot,
   type HtDashboardEntry,
+  type HtImportedTarget,
 } from '@/lib/eval/ht-dashboard'
 
 export const runtime = 'nodejs'
@@ -41,8 +43,12 @@ export const maxDuration = 600
 interface DashboardBody {
   entries?: unknown
   goal?: string
-  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列） */
-  excelRows?: Array<{ label?: unknown; text?: unknown }>
+  /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；v2.68 seqs = 行内序列格原文） */
+  excelRows?: Array<{ label?: unknown; text?: unknown; seqs?: unknown }>
+  /** v2.68：导入既有报告但无作业标记的靶点（降级「载入」行） */
+  imported?: unknown
+  /** v2.68：entries 中来自导入报告的原作业 id（行标「载入」徽标） */
+  importedJobIds?: unknown
   /** v2.61：各靶点提交序列（jobId → 全文 — 汇总表「复制序列」按钮 + 单靶点完整报告弹出页展示） */
   sequences?: Array<{ jobId?: unknown; sequence?: unknown }>
   llm?: { providerKey?: string; baseUrl?: string; apiKey?: string; model?: string }
@@ -79,18 +85,69 @@ function sanitizeArchived(v: unknown): Map<string, ArchivedJobSnapshot> {
   return out
 }
 
-/** excelRows 消毒：{label, text} 形态（≤600 行；每字段截断） */
-function sanitizeExcelRows(v: unknown): Array<{ label: string; text: string }> {
+/** excelRows 消毒：{label, text, seqs?} 形态（≤600 行；每字段截断）。
+ *  v2.68 seqs：行内序列格原文（与 text 中 [序列 N aa] 标记按序对应 — 主表复制按钮；
+ *  氨基酸字符集清洗、单条 ≤50K、总预算 400K 防载荷膨胀，超出丢弃余下序列） */
+function sanitizeExcelRows(v: unknown): Array<{ label: string; text: string; seqs?: string[] }> {
   if (!Array.isArray(v)) return []
-  const out: Array<{ label: string; text: string }> = []
+  const out: Array<{ label: string; text: string; seqs?: string[] }> = []
+  let seqBudget = 400_000
   for (const e of v) {
-    if (!e || typeof e !== 'object') continue
-    const o = e as { label?: unknown; text?: unknown }
+    if (!e || typeof e !== 'object' || out.length >= 600) continue
+    const o = e as { label?: unknown; text?: unknown; seqs?: unknown }
     const label = typeof o.label === 'string' ? o.label.trim().slice(0, 60) : ''
     const text = typeof o.text === 'string' ? o.text.trim().slice(0, 400) : ''
     if (!label && !text) continue
-    out.push({ label, text })
-    if (out.length >= 600) break
+    const seqs: string[] = []
+    if (Array.isArray(o.seqs)) {
+      const marks = (text.match(/\[序列 \d+ aa\]/g) ?? []).length
+      for (const raw of o.seqs) {
+        if (seqs.length >= marks || seqs.length >= 8) break
+        if (typeof raw !== 'string') continue
+        const seq = raw.replace(/\s+/g, '').replace(/[^ACDEFGHIKLMNPQRSTVWYBXZJUO*-]/gi, '').toUpperCase()
+        if (!seq || seq.length > 50_000 || seqBudget < seq.length) continue
+        seqs.push(seq)
+        seqBudget -= seq.length
+      }
+    }
+    out.push(seqs.length ? { label, text, seqs } : { label, text })
+  }
+  return out
+}
+
+/** v2.68：imported 消毒 — 导入既有报告但无作业标记的靶点（降级「载入」行；
+ *  ≤600 条；sequence 氨基酸清洗 ≤50K、总预算 400K；fileName 截断） */
+function sanitizeImported(v: unknown): HtImportedTarget[] {
+  if (!Array.isArray(v)) return []
+  const out: HtImportedTarget[] = []
+  let seqBudget = 400_000
+  for (const e of v) {
+    if (!e || typeof e !== 'object' || out.length >= 600) continue
+    const o = e as { label?: unknown; group?: unknown; sequence?: unknown; fileName?: unknown }
+    const label = typeof o.label === 'string' ? o.label.trim().slice(0, 60) : ''
+    if (!label) continue
+    const group = typeof o.group === 'number' && Number.isFinite(o.group) && o.group > 0 && o.group <= 999 ? Math.round(o.group) : undefined
+    const fileName = typeof o.fileName === 'string' && o.fileName.trim() ? o.fileName.trim().slice(0, 80) : undefined
+    let sequence: string | undefined
+    if (typeof o.sequence === 'string') {
+      const seq = o.sequence.replace(/\s+/g, '').replace(/[^ACDEFGHIKLMNPQRSTVWYBXZJUO*-]/gi, '').toUpperCase()
+      if (seq && seq.length <= 50_000 && seqBudget >= seq.length) {
+        sequence = seq
+        seqBudget -= seq.length
+      }
+    }
+    out.push(sequence || fileName || group ? { label, ...(group ? { group } : {}), ...(sequence ? { sequence } : {}), ...(fileName ? { fileName } : {}) } : { label })
+  }
+  return out
+}
+
+/** v2.68：importedJobIds 消毒 — entries 中来自导入报告的原作业 id（行标「载入」） */
+function sanitizeImportedJobIds(v: unknown): Set<string> {
+  const out = new Set<string>()
+  if (!Array.isArray(v)) return out
+  for (const x of v) {
+    if (typeof x === 'string' && /^[a-z0-9]{20,40}$/i.test(x)) out.add(x)
+    if (out.size >= 600) break
   }
   return out
 }
@@ -164,6 +221,9 @@ export async function POST(req: Request) {
   //  DB 无记录且无快照 → allowPartial 时计入 dropped 跳过，否则 409 让前端
   //  先回本地缓存提取快照重试（两阶段 — 覆盖「运行中途环境重置后续跑」场景）。
   const archivedByJob = sanitizeArchived(body.archived)
+  // v2.68：导入报告携带的原作业 id（这些靶点有 importedBare 降级兜底 — DB 过期
+  //  时不强制要求快照恢复，不触发 409 两阶段重试）
+  const importedJobIdSet = sanitizeImportedJobIds(body.importedJobIds)
   const jobs = await db.evaluationJob.findMany({ where: { id: { in: jobIds } }, select: { id: true, ownerKey: true, ownerMask: true, status: true } })
   const jobById = new Map(jobs.map(j => [j.id, j]))
   // 快照仅用于 DB 无记录的作业（DB 有记录一律以 DB 为准 — 含他人作业不采信快照）
@@ -174,7 +234,7 @@ export async function POST(req: Request) {
   }
   const missingIds: string[] = []
   for (const id of new Set(jobIds)) {
-    if (!jobById.has(id) && !archivedByJob.has(id)) missingIds.push(id)
+    if (!jobById.has(id) && !archivedByJob.has(id) && !importedJobIdSet.has(id)) missingIds.push(id)
   }
   if (missingIds.length > 0 && body.allowPartial !== true) {
     return NextResponse.json({
@@ -189,12 +249,15 @@ export async function POST(req: Request) {
   const recoveredCount = keptJobIds.filter(id => !jobById.has(id)).length
   const droppedEntries = entries.filter(e => e.jobId && !ownedIds.has(e.jobId) && !archivedByJob.has(e.jobId))
   const droppedLabels = droppedEntries.map(e => (e.label ?? e.jobId ?? '').slice(0, 40)).filter(Boolean).slice(0, 10)
-  if (keptJobIds.length === 0) {
+  // v2.68：纯导入运行（全部靶点载入既有报告）允许无统计作业 — importedBare 降级行仍可生成
+  const importedBareSanitized = sanitizeImported(body.imported)
+  if (keptJobIds.length === 0 && importedBareSanitized.length === 0) {
     return NextResponse.json({ ok: false, error: '条目中没有可统计的评估作业（均已过期且无本地缓存副本）' }, { status: 400 })
   }
-  // 至少 1 个可统计行（本人已完成作业 / 有效快照 — summary 含 scores）
+  // 至少 1 个可统计行（本人已完成作业 / 有效快照 — summary 含 scores）；
+  // v2.68：纯导入运行（bare 降级行）同样放行
   const ownedDoneCount = jobs.filter(j => ownedIds.has(j.id) && j.status === 'done').length
-  if (ownedDoneCount === 0 && recoveredCount === 0) {
+  if (ownedDoneCount === 0 && recoveredCount === 0 && importedBareSanitized.length === 0) {
     return NextResponse.json({ ok: false, error: '没有已完成的评估作业（统计看板需要至少 1 个成功靶点）' }, { status: 400 })
   }
 
@@ -214,6 +277,9 @@ export async function POST(req: Request) {
   const llmOverride = sanitizeLlmOverride(body.llm)
   const excelRows = sanitizeExcelRows(body.excelRows)
   const sequencesByJob = sanitizeSequences(body.sequences)
+  // v2.68：导入载入靶点 — bare 行（含 DB 过期兜底）+ entries 内导入作业的「载入」徽标集
+  const importedBare = importedBareSanitized
+  const importedJobIds = importedJobIdSet
   void runWithLlmOverride(llmOverride, () => runDashboardGeneration({
     dashboardId: record.id,
     entries: kept,
@@ -222,6 +288,8 @@ export async function POST(req: Request) {
     origin: new URL(req.url).origin,
     excelRows,
     sequencesByJob,
+    importedBare,
+    importedJobIds,
   }))
 
   return NextResponse.json({
@@ -237,7 +305,8 @@ export async function POST(req: Request) {
 }
 
 /** 后台生成：行加载（v2.60 含缓存快照回退；v2.61 含序列回填；v2.63 含单独报告
- *  文件原文读取）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
+ *  文件原文读取；v2.68 含导入载入靶点 — entries 内导入作业打「载入」徽标 +
+ *  无作业标记的旧报告降级行）→ 统计 → LLM（报告 + 每靶点结论）→ HTML 落盘 → 终态 */
 async function runDashboardGeneration(ctx: {
   dashboardId: string
   entries: HtDashboardEntry[]
@@ -245,11 +314,15 @@ async function runDashboardGeneration(ctx: {
   archivedByJob?: Map<string, ArchivedJobSnapshot>
   goal?: string
   origin: string
-  excelRows?: Array<{ label: string; text: string }>
+  excelRows?: Array<{ label: string; text: string; seqs?: string[] }>
   /** v2.61：jobId → 提交序列全文（汇总表复制按钮 + 单靶点弹出报告页） */
   sequencesByJob?: Map<string, string>
+  /** v2.68：导入既有报告但无作业标记的靶点（降级「载入」行） */
+  importedBare?: HtImportedTarget[]
+  /** v2.68：entries 中来自导入报告的原作业 id（行标「载入」徽标） */
+  importedJobIds?: Set<string>
 }): Promise<void> {
-  const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob } = ctx
+  const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob, importedBare, importedJobIds } = ctx
   const startedAt = Date.now()
   const fail = async (msg: string) => {
     await db.htDashboard.update({
@@ -258,24 +331,37 @@ async function runDashboardGeneration(ctx: {
     }).catch(() => undefined)
   }
   try {
-    const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob)
-    if (rows.length === 0) return void (await fail('没有可统计的已完成靶点'))
-    const stats = computeHtStats(rows, jobCount)
+    const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob, importedJobIds)
+    // v2.68：导入载入的降级行 — DB 命中（完整统计已恢复）的同名靶点剔除，
+    //  仅保留未命中/旧版报告（无作业标记）的降级行（主表呈现 + 完成口径，
+    //  不参与评分分布；label 与运行侧条目同源 — 去重键可靠）
+    const restoredLabels = new Set(rows.filter(r => r.imported).map(r => r.label))
+    const bareRows = buildImportedBareRows((importedBare ?? []).filter(t => !restoredLabels.has(t.label.slice(0, 60))))
+    if (rows.length === 0 && bareRows.length === 0) return void (await fail('没有可统计的已完成靶点'))
+    // v2.68：导入但 DB 过期/无快照的 jobId 不计入「失败」（这些靶点已由 bare 行兜底呈现，
+    //  双计会同时虚增失败数与靶点总数）
+    const restoredJobIds = new Set(rows.map(r => r.jobId))
+    const droppedImported = importedJobIds
+      ? [...importedJobIds].filter(id => !restoredJobIds.has(id)).length
+      : 0
+    const allRows = [...rows, ...bareRows]
+    const stats = computeHtStats(rows, Math.max(0, jobCount - droppedImported), bareRows.length)
     const generated = await generateHtDashboardReport(rows, stats, goal)
     const engineSummary = await getEngineSummary()
     // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）；
     // v2.60：缓存恢复行无服务器报告文件，zip 内无对应文件 — 不挂离线链接
     const zipHrefs = await resolveZipHrefs(entries)
-    for (const r of rows) r.zipHref = r.fromArchive ? undefined : zipHrefs.get(r.jobId)
+    for (const r of allRows) r.zipHref = r.fromArchive || r.bare ? undefined : zipHrefs.get(r.jobId)
 
     const generatedAt = new Date().toISOString().replace('T', ' ').slice(0, 16)
-    const title = htDashboardTitle(jobCount, generatedAt)
+    // v2.68：标题与统计的靶点规模含载入靶点（有效作业数 + 降级行数）
+    const title = htDashboardTitle(Math.max(0, jobCount - droppedImported) + bareRows.length, generatedAt)
     // v2.36：原始 Excel 行匹配到各靶点（「原表内容」列）
-    if (excelRows && excelRows.length) attachExcelRows(rows, excelRows)
+    if (excelRows && excelRows.length) attachExcelRows(allRows, excelRows)
     const html = renderHtDashboardHtml({
       title,
       goal,
-      rows,
+      rows: allRows,
       stats,
       verdicts: generated.verdicts,
       markdown: generated.markdown,
@@ -305,7 +391,7 @@ async function runDashboardGeneration(ctx: {
         updatedAt: new Date(),
       },
     })
-    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${rows.length} 个靶点 · AI 报告 ${generated.ok ? '成功' : '降级'} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s`)
+    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${rows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + rows.filter(r => r.imported).length}）· AI 报告 ${generated.ok ? '成功' : '降级'} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s`)
   } catch (err) {
     await fail(err instanceof Error ? err.message : String(err))
   }
