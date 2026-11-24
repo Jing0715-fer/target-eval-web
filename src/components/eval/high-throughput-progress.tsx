@@ -7,6 +7,12 @@
  *  · 总进度条：组 × 靶点双轨
  *  · 暂停横幅：原因 + 「重新开始运行」（配额恢复后手动续跑）— 用户核心诉求
  *  · v2.38 停止横幅：手动停止后可恢复（继续运行 / 重跑失败项 / 返回输入）
+ *  · v2.73 全部载入直达汇总（用户诉求「载入列表后再载入所有的报告后也可以
+ *    点击评估直接生成汇总报告」）：导入 toast 按剩余状态给出准确下一步（全部
+ *    载入 → 「继续运行」即刻完成并直接生成汇总报告；已完成运行 → 「重新生成」
+ *    并入新载入靶点；混合 → 「评估其余 N 个」）；pendingLeft 结果字段（flow）+
+ *    pendingAfterResume/directSummaryReady 派生 — 暂停/停止横幅与按钮文案
+ *    自适应（「继续运行 · 直接出汇总报告」+ tooltip 与说明行同步）
  *  · v2.38 靶点级操作（非 running）：每个靶点 chip 可跳过/恢复/重跑；组级
  *    「重跑失败」「跳过未开始」；「导入报告（zip）」把已有报告的靶点标跳过
  *  · 组矩阵（v2.25 紧凑化）：响应式多列网格（sm 2 列 / xl 3 列 / 2xl 4 列），
@@ -177,6 +183,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
 
   const allItems = run.groups.flatMap((g) => g.items)
   const doneGroups = run.groups.filter((g) => g.status === 'done').length
+  const isRunning = flow.phase === 'running'
+  const isPaused = flow.phase === 'paused'
+  const isStopped = flow.phase === 'stopped'
+  const isDone = flow.phase === 'done'
   const doneTargets = allItems.filter((it) => it.status === 'done').length
   /** v2.60：导入既有报告而跳过的靶点（计入完成口径 — 「N 评估 + M 载入」；
    *  旧版 localStorage 运行无 imported 字段，回退按 skipNote 前缀「已导入」识别） */
@@ -189,11 +199,14 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const incompleteTargets = allItems.filter((it) => it.status === 'done' && it.reportIncomplete).length
   /** v2.41：全局重跑入口的靶点数（失败/中断 + 报告不完整） */
   const retryableTargets = failedTargets + incompleteTargets
+  /** v2.73：恢复后仍需评估的靶点数（pending + canceled — 恢复时 canceled 重置为
+   *  pending 重新评估）。0 = 全部靶点已了结（完成/载入/手动跳过），点击「继续
+   *  运行」即刻完成并直接生成汇总报告。 */
+  const pendingAfterResume = allItems.filter((it) => it.status === 'pending' || it.status === 'canceled').length
+  /** v2.73：非运行阶段且全部靶点已了结（有载入/完成）— 「继续运行」语义变为
+   *  「直接出汇总报告」（用户诉求：载入所有报告后点击评估直接生成汇总报告） */
+  const directSummaryReady = !isRunning && settledTargets > 0 && pendingAfterResume === 0
   const currentGroup = run.groups.find((g) => g.index === run.currentIndex && (g.status !== 'done' && g.status !== 'canceled'))
-  const isRunning = flow.phase === 'running'
-  const isPaused = flow.phase === 'paused'
-  const isStopped = flow.phase === 'stopped'
-  const isDone = flow.phase === 'done'
   /** 非运行阶段（可编辑靶点选择 / 导入 zip） */
   const editable = !isRunning
   /** 已产出报告的组数（v2.25 批量下载入口可用性） */
@@ -229,11 +242,18 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         ? `\n注意：${result.uploadMissed} 份报告原文未能内嵌（体积超 32MB 上限或服务端留存失败）— 评分与结论已照常解析进汇总表格，对应「完整报告」弹出页将显示已解析的评分统计；完整原文可直接打开导入的报告文件。`
         : ''
       if (result.matched > 0) {
+        // v2.73：后续操作指引自适应 — 导入后按剩余状态给出准确下一步（全部载入 →
+        //  继续运行即直接出汇总；运行已完成的旧运行 → 重新生成并入）
+        const nextHint = isDone
+          ? `新载入的靶点将在重新生成的汇总报告中呈现（评分与结论整合进总表）— 点击汇总横幅中的「重新生成」即可。`
+          : result.pendingLeft === 0
+            ? `全部靶点已载入/完成 — 点击「继续运行」即刻完成并直接生成汇总报告（无需评估，报告自动下载）。`
+            : `点击「继续运行」评估其余 ${result.pendingLeft} 个靶点（已载入的不再评估）。`
         toast({
           title: `已导入 ${result.matched} 个靶点的既有报告`,
           description: (
             <div className="whitespace-pre-line">
-              {`这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。${doneNote}${uploadNote}${missTail}`}
+              {`这些靶点将跳过评估（报告见导入的文件）；${nextHint}${doneNote}${uploadNote}${missTail}`}
             </div>
           ),
         })
@@ -419,7 +439,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 {run.pausedReason ?? '前端编排因页面刷新中断；服务器侧仍在执行的作业会继续，恢复后自动接上等待结果。'}
               </p>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                点击下方「继续运行」从断点恢复（已完成的组与靶点不会重复评估，不浪费配额）；也可先在组卡片中跳过/重跑指定靶点，或导入既有报告 zip 跳过已完成靶点。
+                {directSummaryReady
+                  ? '全部靶点已了结（完成/载入）— 点击「继续运行」即刻完成并直接生成汇总报告（无需评估，完成后自动下载）。'
+                  : '点击下方「继续运行」从断点恢复（已完成的组与靶点不会重复评估，不浪费配额）；也可先在组卡片中跳过/重跑指定靶点，或导入既有报告 zip 跳过已完成靶点。'}
               </p>
             </div>
           </div>
@@ -429,9 +451,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               onClick={() => void flow.resumeRun()}
               className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
-              继续运行
+              {directSummaryReady ? '继续运行 · 直接出汇总报告' : '继续运行'}
             </Button>
             {retryableTargets > 0 && (
               <Button
@@ -478,7 +501,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 已完成 {settledTargets} 个靶点的结果保留{importedTargets > 0 ? `（${doneTargets} 个评估完成 + ${importedTargets} 个载入既有报告）` : ''}{skippedTargets > 0 ? `；另手动跳过 ${skippedTargets} 个` : ''}；未开始/被中断的靶点可随时继续，失败的靶点可单独重跑。
               </p>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                「继续运行」从断点恢复（已完成的靶点不重复评估）；也可先在组卡片中跳过不需要的靶点、重跑失败项，或导入既有报告 zip 跳过已完成靶点。
+                {directSummaryReady
+                  ? '全部靶点已了结（完成/载入）— 点击「继续运行」即刻完成并直接生成汇总报告（无需评估，完成后自动下载）。'
+                  : '「继续运行」从断点恢复（已完成的靶点不重复评估）；也可先在组卡片中跳过不需要的靶点、重跑失败项，或导入既有报告 zip 跳过已完成靶点。'}
               </p>
             </div>
           </div>
@@ -488,9 +513,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               onClick={() => void flow.resumeRun()}
               className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
-              继续运行
+              {directSummaryReady ? '继续运行 · 直接出汇总报告' : '继续运行'}
             </Button>
             {retryableTargets > 0 && (
               <Button
@@ -961,9 +987,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               onClick={() => void flow.resumeRun()}
               className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
-              继续运行
+              {directSummaryReady ? '继续运行 · 直接出汇总报告' : '继续运行'}
             </Button>
           )}
           {reportableGroups > 0 && (

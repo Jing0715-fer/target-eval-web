@@ -183,6 +183,10 @@ interface ArchiveSkipResult {
   /** v2.70：有源文件但原文未能留存/内嵌的靶点数（上传失败或超 32MB 上限 —
    *  统计快照不受影响，仅汇总弹出页无原文可嵌；toast 提示用户） */
   uploadMissed: number
+  /** v2.73：导入后仍需评估的靶点数（pending + canceled — 恢复运行时 canceled
+   *  会被重置为 pending 重新评估）。0 = 全部靶点已了结（完成/载入/跳过），
+   *  点击「继续运行」即刻完成并直接生成汇总报告（toast/按钮文案自适应用） */
+  pendingLeft: number
 }
 
 /** v2.38→v2.45 导入既有报告匹配 — 用 planArchiveSkips 统一严格规则 + v2.45 组号通道：
@@ -246,12 +250,17 @@ function applyArchiveSkips(
   }
   // v2.49 逐文件诊断（含已完成靶点提示 — 避免误报「不在清单」）
   const diag = diagnoseArchiveImport(reports, matchable, { totalGroups: r.groups.length }, all)
+  // v2.73：导入后仍需评估的靶点数（pending + canceled；恢复时 canceled 重置为
+  //  pending 重新评估）。0 = 点击「继续运行」即刻完成并直接生成汇总报告。
+  const pendingLeft = r.groups.flatMap((g) => g.items)
+    .filter((it) => it.status === 'pending' || it.status === 'canceled').length
   return {
     matched: matchedKeys.size,
     missLines: diag.filter((d) => !d.matched && !d.doneOnly).map((d) => `${d.file}：${d.reason}`),
     doneOnlyCount: diag.filter((d) => d.doneOnly).length,
     matchedByKey,
     uploadMissed: 0,
+    pendingLeft,
   }
 }
 
