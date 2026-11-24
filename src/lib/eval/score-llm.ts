@@ -88,7 +88,7 @@ function buildReviewDigest(input: ScoreReviewInput, scores: FullScoreResult): st
 
   const lines: string[] = []
   lines.push('【靶点】')
-  lines.push(`${input.targetName || '未命名靶点'}${input.uniprotId ? `（UniProt ${input.uniprotId}）` : '（序列输入，无 UniProt 归属）'}；序列长度 ${input.sequenceLength} aa`)
+  lines.push(`${input.targetName || '未命名靶点'}${input.uniprotId ? `（UniProt ${input.uniprotId}）` : '（序列输入，无 UniProt 归属）'}；序列长度 ${input.sequenceLength} aa${input.complexLengthAa != null ? `（评估样品为抗原-抗体复合物，合计 ~${input.complexLengthAa} aa — Cryo-EM 按复合物颗粒尺寸评估，勿按单体分子量下调）` : ''}`)
   if (input.goal) lines.push(`客户目标：${input.goal.slice(0, 200)}`)
 
   lines.push('')

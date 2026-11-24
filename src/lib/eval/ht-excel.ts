@@ -46,6 +46,9 @@
  *       不同拷贝/可及区（保留最长），IL17A vs IL17F 等异源同族不受影响；
  *    ⑤ 行标签命名：取行内首个非序列单元格（结构交付表 = 文件路径）剥目录与
  *       扩展名作为靶点名（多靶点行附「·链N」），报告/预览可读。
+ *  - v2.72：被忽略的抗体链合计 ≥90 aa 时以 antibodyPartner 附到本行保留的
+ *    靶点（抗原-抗体复合物交付行 — 抗体不评估，但其分子量计入抗原的 Cryo-EM
+ *    复合物评分：小分子量抗原 + Fab/scFv/nanobody 复合物可用 Cryo-EM 解析）；
  *  - 纯抗体行（全部链均为抗体，如 Fab+短肽抗原交付）无可评估靶点 → 跳过并在
  *    note 中列明行号与原因（不静默丢行）。
  *
@@ -500,7 +503,10 @@ function deriveRowLabel(row: string[]): string {
 /**
  * 行 → 序列靶点组（v2.34 行级语义）：
  *  ① 链级收集（FASTA ≥40 aa / 构基与裸序列 ≥90 aa）
- *  ② 抗体链忽略（detectAntibody — Fab/VHH 可变域也识别）
+ *  ② 抗体链忽略（detectAntibody — Fab/VHH 可变域也识别）；v2.72：被忽略的
+ *    抗体链合计长度 ≥90 aa 时以 antibodyPartner 附到本行保留的靶点（抗原-
+ *    抗体复合物交付行 — 抗体不评估，但其分子量计入抗原的 Cryo-EM 复合物
+ *    评分：小分子量抗原 + Fab/scFv/nanobody 复合物可用 Cryo-EM 解析）
  *  ③ 行内同源合并（同源多聚体只计 1 条，保留最长 = 可及区最完整）
  *  ④ 命名：FASTA/裸序列 → 行标签（多靶点附「·链N」）；构基标签头保留原语义
  */
@@ -510,13 +516,21 @@ function extractRowSeqTargets(
   stats: HtSeqFallbackInfo,
 ): HtSeqTarget[] {
   const chains = collectRowChains(row)
-  const targets = chains.filter((c) => {
+  // v2.72：抗体链分离收集（不进入靶点去重 — 抗体链间彼此同源是常态，混入会
+  //  误吞非抗体链；合计 ≥90 aa（约一个 VHH）才构成有意义的复合物分子量）
+  const keptChains: RowChain[] = []
+  let abChains = 0
+  let abAa = 0
+  for (const c of chains) {
     if (detectAntibody(c.seq, c.header).isAntibody) {
       stats.antibodyChains += 1
-      return false
+      abChains += 1
+      abAa += c.seq.length
+      continue
     }
-    return true
-  })
+    keptChains.push(c)
+  }
+  const targets = keptChains
   if (targets.length === 0) return []
   const sorted = [...targets].sort((a, b) => b.seq.length - a.seq.length)
   const kept: Array<RowChain & { kmers: Set<string> }> = []
@@ -539,6 +553,10 @@ function extractRowSeqTargets(
           : k.header || `序列${i + 1}`,
     seq: k.seq,
     length: k.seq.length,
+    // v2.72：同行抗体链（合计 ≥90 aa ≈ 一个纳米抗体）→ 复合物分子量证据
+    ...(abChains > 0 && abAa >= 90 && abChains <= 20
+      ? { antibodyPartner: { chains: abChains, lengthAa: abAa } }
+      : {}),
   }))
 }
 
@@ -845,7 +863,7 @@ function seqInfoNote(info: HtSeqFallbackInfo): string {
       ? `可评估序列行 ${evaluableRows} 行 → 跨行去重后 ${info.groups} 组`
       : `序列行 ${info.groups} 组（行=组）`,
   )
-  if (info.antibodyChains > 0) parts.push(`抗体链已忽略 ${info.antibodyChains} 条`)
+  if (info.antibodyChains > 0) parts.push(`抗体链已忽略 ${info.antibodyChains} 条（同行的抗原评分已计入抗体的复合物分子量 — Cryo-EM 增重）`)
   if (info.homologMerged > 0) parts.push(`同源多聚体合并 ${info.homologMerged} 条`)
   if (info.crossRowMerged > 0) {
     const listed = info.crossRowDupRows

@@ -29,6 +29,12 @@ export interface EvaluationOptions {
    *  UniProt domain 划分匹配推导评估区间（层级：手动区间 > 构建比对 > 域名匹配）；
    *  匹配失败按无区间评估，不阻塞。 */
   rangeHint?: string
+  /** v2.72：复合物评估中同行的抗体链（已被忽略不评估）— 抗原评分时计入复合物
+   *  分子量（用户需求：小分子量抗原 + 抗体（Fab/scFv/nanobody）复合物可用
+   *  Cryo-EM 解析，不能只按抗原自身分子量评分）。chains = 链数，lengthAa =
+   *  抗体链合计长度。Cryo-EM 基础分按复合物尺寸计（小分子量单体惩罚不再
+   *  适用）+ mw-augment 抗体装配路径（单体 + 抗体合计）。 */
+  antibodyPartner?: { chains: number; lengthAa: number }
 }
 
 // ─── UniProt ──────────────────────────────────────────────────────────────────
@@ -557,10 +563,12 @@ export interface MwAugmentAnalysis {
   assemblyKda: number | null
   /** 装配分子量计算依据（展示用） */
   assemblyBasis: string
-  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（v2.33 起仅复合物/同源复合物结构证据支持的伙伴计入） */
-  assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  /** 装配路径类型：oligomer = 自身寡聚；complex = 已有复合物结构；homolog-complex = 同源复合物推断（v1.27，BLAST 扩展检索）；partner = 互作伙伴推断（v2.33 起仅复合物/同源复合物结构证据支持的伙伴计入）；antibody = 抗原-抗体复合物（v2.72，评估表同行提供的抗体链 — 交付样品即复合物，非推断） */
+  assemblyPath: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | 'antibody' | null
   /** v2.33：partner 装配路径的证据级别（assemblyPath='partner' 时非空；历史作业缺省 — 无证据的旧伙伴装配按 experimental 处理不加分） */
   assemblyEvidence?: BinaryEvidenceLevel | null
+  /** v2.72：评估表同行的抗体链信息（antibody 路径的未源 — 展示用） */
+  antibodyPartner?: { chains: number; lengthAa: number; kda: number }
   /** 已有复合物结构（组分明细 + 总分子量；按分辨率排序） */
   complexes: MwComplex[]
   /** v1.27：同源结构形成的大复合物（直接路径不足 50 kDa 时 BLAST 扩展检索；历史作业缺省） */
@@ -584,7 +592,7 @@ export interface MwAugmentAdjustInfo {
   /** 装配有效分子量（kDa，可为 null） */
   assemblyKda: number | null
   /** v1.27：装配路径（评分卡/报告展示；历史作业缺省） */
-  assemblyPath?: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | null
+  assemblyPath?: 'oligomer' | 'complex' | 'homolog-complex' | 'partner' | 'antibody' | null
   /** 三方法调整值（整数；当前仅 cryoem 有非零值 — 分子量维度主要影响 Cryo-EM） */
   xray: number
   cryoem: number

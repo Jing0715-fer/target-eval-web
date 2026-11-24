@@ -56,9 +56,21 @@
  *  - enrichImportedReports：匹配后读源文件 → 解析统计 + 上传原文
  *    （POST /api/evaluate/ht-imported-report → reportId；同一源文件只传一次）；
  *    任一失败独立降级，不影响导入匹配本身。
+ *
+ * v2.72：统计解析抽出为前后端共享模块 lib/eval/imported-stats.ts（服务端汇总
+ *  生成链路补解析回填用同一解析器），并增强定位链（提交序列 SHA 精确 /
+ *  meta 提交长度 / 容差 ±3 aa / 标签消歧 — 修复已识别序列靶点在合并报告内
+ *  因刊头长度为 UniProt 全长而定位失败 → 降级行评分列为空）。此处 re-export
+ *  维持旧导出签名不变（调用方无感）。
  */
 import JSZip from 'jszip'
 import type { ImportedReportStats } from '@/lib/eval/types'
+import {
+  extractImportedStatsSections as extractImportedStatsSectionsShared,
+  pickImportedStats as pickImportedStatsShared,
+  toCleanImportedStats,
+  type ImportedStatsSection,
+} from '@/lib/eval/imported-stats'
 import { uploadImportedReport } from './api'
 
 /** 导入的 zip/文件内一份可匹配的报告 */
@@ -928,178 +940,33 @@ export async function parseHtImportFiles(files: File[]): Promise<HtImportParseRe
   return { reports: out, readSource, sourceKey }
 }
 
-// ── v2.69 导入报告统计快照解析（汇总报告整合 — 见 ImportedReportStats）───────
+// ── v2.69 导入报告统计快照解析（v2.72 起实现在前后端共享模块 lib/eval/imported-stats.ts
+//    —— 此处薄包装维持旧导出签名，见共享模块头部注释）──
 
-/** HTML 实体反转义（报告正文 esc 后的值还原 — 展示用） */
-function unescapeHtml(s: string): string {
-  return s
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-}
-
-/** 去标签取纯文本（meta-grid 行值等 — 保留实体位置再反转义） */
-function stripTags(s: string): string {
-  return unescapeHtml(s.replace(/<[^>]*>/g, ''))
-}
-
-/** 解析出的单区段统计（未消毒的原始形态 — 内部用） */
-interface StatsSection extends ImportedReportStats {
-  /** 题目「残基 X-Y」无同源度后缀时的全同比对跨度（= 提交序列长度 — 区段定位用） */
-  alignedSpan?: number
-}
-
-const H1_TITLE_RE = /<h1 class="rpt-title"[^>]*>([^<]+)<\/h1>/g
-
-/** v2.69：解析一份报告 HTML 内全部靶点区段的统计快照。
- *
- * 报告由本系统生成，结构稳定：每个靶点子页一个 <h1 class="rpt-title"> 锚点，
- * 区段内含刊头 meta-grid（蛋白名称/物种/序列长度/结构证据）+ 核心结论速览
- * （glance-score 总分 + 已有结构/结构覆盖率 tile）+ 评分卡（X-ray/Cryo-EM/NMR
- * score-row）。合并报告的封面区段无评分卡 → 自然跳过；单靶点报告 = 唯一区段。
- *
- * 解析失败的区段（旧版报告结构变化/被改动）返回缺项 — 调用方降级为「载入」
- * 降级行，不影响导入匹配本身。
- */
+/** v2.69→v2.72：解析一份报告 HTML 内全部靶点区段的统计快照（含 meta 标记对齐）。 */
 export function extractImportedStatsSections(html: string): ImportedReportStats[] {
-  if (!html) return []
-  // v2.70：超长文本前缀解析（不再整单放弃）— 每个区段的有效证据（h1/glance/
-  //  评分卡/刊头）都在区段头部，尾部被截断的区段自然解析失败跳过，不影响其余
-  const capped = html.length > IMPORT_SOURCE_MAX_CHARS ? html.slice(0, IMPORT_SOURCE_MAX_CHARS) : html
-  const h1s: Array<{ title: string; at: number }> = []
-  H1_TITLE_RE.lastIndex = 0
-  let m: RegExpExecArray | null
-  while ((m = H1_TITLE_RE.exec(capped))) h1s.push({ title: m[1].trim(), at: m.index })
-  if (h1s.length === 0) return []
-  const sections: StatsSection[] = []
-  for (let i = 0; i < h1s.length; i++) {
-    const from = h1s[i].at
-    const to = i + 1 < h1s.length ? h1s[i + 1].at : Math.min(capped.length, from + 2_000_000)
-    const sec = capped.slice(from, to)
-    const s = parseStatsSection(h1s[i].title, sec)
-    if (s) sections.push(s)
-  }
-  return sections
+  return extractImportedStatsSectionsShared(html)
 }
 
-/** 单区段解析（题目 + 区段 HTML → 统计快照；无任何评分证据 → null） */
-function parseStatsSection(title: string, sec: string): StatsSection | null {
-  // ── 身份：题目「NAME（P12345 · 残基 X-Y）」/「NAME（序列靶点 · …）」──
-  const shape = /^([^（]+)（([^）]*)）$/.exec(title)
-  const name = shape?.[1]?.trim()
-  const inner = shape?.[2] ?? ''
-  const accM = UNIPROT_ACC_RE.exec(inner)
-  const uniprotId = accM ? accM[0].toUpperCase() : undefined
-  const rangeM = /残基\s*(\d{1,5})\s*[-–]\s*(\d{1,5})/.exec(inner)
-  const range = rangeM && Number(rangeM[1]) >= 1 && Number(rangeM[2]) >= Number(rangeM[1])
-    ? [Number(rangeM[1]), Number(rangeM[2])] as [number, number]
-    : undefined
-  const hasIdentitySuffix = /(?:UniProt 匹配|nr 识别)\s*\d+(?:\.\d+)?\s*%/.test(inner)
-  const alignedSpan = range && !hasIdentitySuffix ? range[1] - range[0] + 1 : undefined
-
-  // ── 评分：glance 速览总分（v1.28+）+ 评分卡四行（X-ray 结晶 / Cryo-EM / NMR / 综合评估）──
-  const glanceScore = /<div class="glance-score"[^>]*>\s*(\d+(?:\.\d+)?)\s*<span/.exec(sec)
-  const rowRe = /<div class="score-row[^"]*">[\s\S]*?<div class="score-label">([^<]+)<\/div>[\s\S]*?<div class="score-num">(\d+(?:\.\d+)?)/g
-  const methodScores: Partial<Record<'xray' | 'cryoem' | 'nmr' | 'overall', number>> = {}
-  let rm: RegExpExecArray | null
-  while ((rm = rowRe.exec(sec))) {
-    const label = rm[1]!
-    const val = Math.round(Number(rm[2]))
-    if (!Number.isFinite(val) || val < 0 || val > 10) continue
-    if (/X-ray/.test(label)) methodScores.xray = val
-    else if (/Cryo/i.test(label)) methodScores.cryoem = val
-    else if (/NMR/.test(label)) methodScores.nmr = val
-    else if (/综合/.test(label)) methodScores.overall = val
-  }
-  const overall = glanceScore ? Math.round(Number(glanceScore[1])) : methodScores.overall
-  if (overall == null || !Number.isFinite(overall)) return null // 封面/无评分区段（合并报告封面）
-
-  // ── 刊头 meta-grid：蛋白名称 / 物种 / 序列长度 / 结构证据计数 ──
-  const metaVal = (label: string): string | undefined => {
-    // 注意：new RegExp 的模板串里 \\s 才是空白符（\s 会被字符串求值吞掉反斜杠）
-    const mm = new RegExp(`<div><b>${label}<\\/b>([\\s\\S]*?)</div>`, 'i').exec(sec)
-    return mm ? stripTags(mm[1]).trim() : undefined
-  }
-  const proteinName = metaVal('蛋白名称') || (name && name !== '序列靶点评估' ? name : undefined)
-  const organism = metaVal('物种')
-  const seqLenM = /序列长度<\/b>\s*(\d{2,5})\s*aa/.exec(sec)
-  const seqLength = seqLenM ? Number(seqLenM[1]) : undefined
-  const evidenceM = /结构证据<\/b>[\s\S]*?直接结构\s*(\d+)(?:\s*\/\s*检索命中\s*(\d+))?[\s\S]*?同源\s*(\d+)\s*个[\s\S]*?文献\s*(\d+)\s*篇/.exec(sec)
-  const pdbCount = evidenceM ? Number(evidenceM[1]) : 0
-  const blastHitCount = evidenceM ? Number(evidenceM[3]) : 0
-  const literatureCount = evidenceM ? Number(evidenceM[4]) : 0
-
-  // ── 速览 tile：已有结构（方法计数 + 最佳分辨率）+ 结构覆盖率 ──
-  let methodXrayCount = 0
-  let methodCryoemCount = 0
-  let methodNmrCount = 0
-  let bestResolution: number | null = null
-  const structTileM = /<div class="gt-label">已有结构<\/div><div class="gt-value">([\s\S]*?)<\/div>(?:<div class="gt-sub">([\s\S]*?)<\/div>)?/.exec(sec)
-  if (structTileM) {
-    const sub = structTileM[2] ?? ''
-    const xM = /X-ray\s*(\d+)/.exec(sub)
-    const cM = /Cryo-EM\s*(\d+)/.exec(sub)
-    const nM = /NMR\s*(\d+)/.exec(sub)
-    if (xM) methodXrayCount = Number(xM[1])
-    if (cM) methodCryoemCount = Number(cM[1])
-    if (nM) methodNmrCount = Number(nM[1])
-    const rM = /最佳\s*(\d+(?:\.\d+)?)\s*[ÅÅ]/.exec(sub)
-    if (rM) bestResolution = Number(rM[1])
-  }
-  const covM = /<div class="gt-label">结构覆盖率<\/div><div class="gt-value">(\d+(?:\.\d+)?)%/.exec(sec)
-  const coverage = covM ? Math.round(Number(covM[1])) : 0
-
-  return {
-    overall,
-    xray: methodScores.xray ?? 0,
-    cryoem: methodScores.cryoem ?? 0,
-    nmr: methodScores.nmr ?? 0,
-    pdbCount,
-    blastHitCount,
-    literatureCount,
-    methodXrayCount,
-    methodCryoemCount,
-    methodNmrCount,
-    bestResolution,
-    coverage,
-    ...(proteinName ? { proteinName: proteinName.slice(0, 80) } : {}),
-    ...(organism && organism !== '—' ? { organism: organism.slice(0, 80) } : {}),
-    ...(uniprotId ? { uniprotId } : {}),
-    ...(range ? { range } : {}),
-    ...(seqLength ? { seqLength } : {}),
-    alignedSpan,
-  }
-}
-
-/** v2.69：区段 → 靶点定位（多靶点合并报告内选对子页；单区段直接命中）。
- *  规则与导入匹配同口径：UniProt accession +（区间已知时）严格相等；
- *  序列靶点按提交长度（含全同比对跨度）唯一命中 — 歧义时不解析（降级行）。 */
+/** v2.69→v2.72：区段 → 靶点定位（增强定位链见共享模块；单区段直接命中）。 */
 export function pickImportedStats(
   sections: ImportedReportStats[],
-  t: { acc?: string; range?: [number, number]; length?: number },
+  t: { acc?: string; range?: [number, number]; length?: number; seqSha?: string; label?: string },
 ): ImportedReportStats | undefined {
-  if (sections.length === 0) return undefined
-  if (sections.length === 1) return sections[0]
-  if (t.acc) {
-    const byAcc = sections.filter((s) => s.uniprotId && s.uniprotId.toUpperCase() === t.acc!.toUpperCase())
-    if (byAcc.length === 1) return byAcc[0]
-    const byRange = byAcc.filter((s) => s.range && t.range && s.range[0] === t.range[0] && s.range[1] === t.range[1])
-    return byRange.length >= 1 ? byRange[0] : undefined
-  }
-  const byLen = sections.filter((s) =>
-    (s.seqLength != null && s.seqLength === t.length)
-    || (s.range != null && t.length != null && s.range[1] - s.range[0] + 1 === t.length))
-  return byLen.length === 1 ? byLen[0] : undefined
+  const hit = pickImportedStatsShared(sections as ImportedStatsSection[], t)
+  return hit ? toCleanImportedStats(hit) : undefined
 }
 
-/** v2.69：导入 enrich 单项（匹配到的靶点 + 胜出的报告条目） */
+/** v2.69：导入 enrich 单项（匹配到的靶点 + 胜出的报告条目；v2.72 增 seqSha/label
+ *  —— 提交序列 SHA 精确定位 + 同长歧义时标签消歧） */
 export interface ImportEnrichItem {
   acc?: string
   range?: [number, number]
   length?: number
+  /** v2.72：提交序列 SHA-256 前 16 hex（调用方已算好 — 靶点循环里 sha256Hex16 复用） */
+  seqSha?: string
+  /** v2.72：运行侧标签（同长歧义时的标签消歧通道） */
+  label?: string
   rep?: HtArchiveReport
 }
 
@@ -1114,7 +981,7 @@ export async function enrichImportedReports(
   const out: Array<{ stats?: ImportedReportStats; reportId?: string }> = items.map(() => ({}))
   if (items.length === 0) return out
   // 源文件分组：同一源文件只读一次 / 只上传一次（loaded = 已尝试读取，读到 0 个区段也不重试）
-  const bySource = new Map<string, { rep: HtArchiveReport; sections: ImportedReportStats[]; reportId?: string; loaded?: boolean }>()
+  const bySource = new Map<string, { rep: HtArchiveReport; sections: ImportedStatsSection[]; reportId?: string; loaded?: boolean }>()
   for (let i = 0; i < items.length; i++) {
     const it = items[i]!
     const rep = it.rep
@@ -1130,7 +997,7 @@ export async function enrichImportedReports(
       entry.loaded = true
       const text = await parsed.readSource(rep)
       if (text) {
-        entry.sections = extractImportedStatsSections(text)
+        entry.sections = extractImportedStatsSectionsShared(text)
         // v2.70：上传按 32MB 上限独立门控（超大文件统计照常解析，仅不内嵌原文 —
         //  readSource 的 33M 切片不会作为原文上传，此处长度检查双重保险）
         if (text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
@@ -1140,8 +1007,8 @@ export async function enrichImportedReports(
         }
       }
     }
-    const stats = pickImportedStats(entry.sections, it)
-    if (stats) out[i]!.stats = stats
+    const stats = pickImportedStatsShared(entry.sections, it)
+    if (stats) out[i]!.stats = toCleanImportedStats(stats)
     if (entry.reportId) out[i]!.reportId = entry.reportId
   }
   return out

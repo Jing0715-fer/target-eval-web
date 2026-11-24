@@ -229,7 +229,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
               ? (rep.path.split('::')[0] ?? rep.path).split('/').pop()?.slice(0, 80) ?? fallbackName
               : (existing?.fileName ?? fallbackName),
           })
-          enrichItems.push({ acc: t.acc, range: t.range, length: t.length, rep })
+          // v2.72：seqSha/label 一并传入（提交序列 SHA 精确定位区段 + 同长歧义标签消歧）
+          enrichItems.push({ acc: t.acc, range: t.range, length: t.length, seqSha: t.seqSha, label: t.label, rep })
           enrichKeys.push(t.key)
         }
         // v2.69 enrich：解析匹配报告的统计快照 + 上传原文到服务端留存 —

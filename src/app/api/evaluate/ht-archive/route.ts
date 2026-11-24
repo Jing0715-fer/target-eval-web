@@ -20,6 +20,7 @@ import { db } from '@/lib/db'
 import { getOwner, isOwnedBy } from '@/lib/eval/request-guard'
 import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
 import { planArchiveNames, HT_DASHBOARD_ZIP_NAME, type ArchivePlanItem } from '@/lib/eval/ht-archive-names'
+import { ensureHtDashboardProgressColumn } from '@/lib/eval/ht-dashboard'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -46,6 +47,22 @@ interface ArchiveEntryInput {
 
 /** 单条 HTML 上限（防超大报告撑爆内存；正常报告 ≤1MB） */
 const MAX_HTML_BYTES = 2 * 1024 * 1024
+
+/** v2.71：有界读取文件前缀（≤ cap 字节）— 旧版 readFile 整读后再 slice，
+ *  百靶点全量内嵌的看板可达数百 MB，zip 打包时再制造一次堆内存尖峰（与
+ *  生成期间同源的 OOM 风险）。文件小于 cap 时全量读，语义与旧版一致。 */
+async function readHtmlPrefix(filePath: string): Promise<string> {
+  const size = (await fs.stat(filePath)).size
+  if (size <= MAX_HTML_BYTES) return fs.readFile(filePath, 'utf-8')
+  const fh = await fs.open(filePath, 'r')
+  try {
+    const buf = Buffer.alloc(MAX_HTML_BYTES)
+    const { bytesRead } = await fh.read(buf, 0, MAX_HTML_BYTES, 0)
+    return buf.subarray(0, bytesRead).toString('utf-8')
+  } finally {
+    await fh.close()
+  }
+}
 /** 打包报告份数上限（对齐高通量 MAX_HT_TARGETS_TOTAL） */
 const MAX_ENTRIES = 600
 
@@ -104,7 +121,8 @@ export async function GET(req: Request) {
         continue
       }
       try {
-        let html = await fs.readFile(job.reportPath, 'utf-8')
+        // v2.71：有界读取（≤2MB — 内存安全）
+        let html = await readHtmlPrefix(job.reportPath)
         if (html.length > MAX_HTML_BYTES) html = html.slice(0, MAX_HTML_BYTES)
         html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
         loaded.push({ entry, html, kind: 'job', title: safeName(entry.label || job.uniprotId || job.title || entry.jobId) })
@@ -118,7 +136,8 @@ export async function GET(req: Request) {
         continue
       }
       try {
-        let html = await fs.readFile(record.htmlPath, 'utf-8')
+        // v2.71：有界读取（≤2MB — 内存安全）
+        let html = await readHtmlPrefix(record.htmlPath)
         if (html.length > MAX_HTML_BYTES) html = html.slice(0, MAX_HTML_BYTES)
         html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
         loaded.push({ entry, html, kind: 'merged', title: safeName(record.title || `merged-${record.id.slice(0, 8)}`, 80) })
@@ -128,13 +147,16 @@ export async function GET(req: Request) {
     } else if (entry.dashboardId) {
       // v2.28：统计看板 — 根级文件（00_统计看板…html），不在分组目录；
       // 看板内的相对链接与本包命名同源（planArchiveNames 共享）
+      // v2.71：progress 列自愈（旧库无此列时 findUnique 全列查询抛 P2021）
+      await ensureHtDashboardProgressColumn().catch(() => undefined)
       const record = await db.htDashboard.findUnique({ where: { id: entry.dashboardId } })
       if (!record || (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) || !record.htmlPath || record.status !== 'done') {
         missing.push('统计看板')
         continue
       }
       try {
-        let html = await fs.readFile(record.htmlPath, 'utf-8')
+        // v2.71：有界读取（≤2MB — 百靶点看板数百 MB 时不再整读入堆）
+        let html = await readHtmlPrefix(record.htmlPath)
         if (html.length > MAX_HTML_BYTES) html = html.slice(0, MAX_HTML_BYTES)
         loaded.push({ entry, html, kind: 'dashboard', title: safeName(record.title || '统计看板', 80) })
       } catch {

@@ -101,6 +101,10 @@ model HtDashboard {
   engine    String? // 生成引擎摘要
   status    String   @default("running") // running / done / error
   error     String? // 生成失败原因（status=error 时）
+  // v2.71：生成中阶段进度（running 期间节流写入 — 前端「汇总报告生成中」横幅
+  // 实时展示；终态清空。本地部署未 db:push 时由 ensureHtDashboardProgressColumn
+  // 自愈补列，见 ht-dashboard.ts）
+  progress  String?
   ownerKey  String? // 创建者归属键（与 EvaluationJob 一致）
   ownerMask String? // 创建者来源 IP 掩码
   // v2.36：原始 Excel 行快照 JSON（汇总报告「原表内容」列 — [{label, text}]，序列折叠）

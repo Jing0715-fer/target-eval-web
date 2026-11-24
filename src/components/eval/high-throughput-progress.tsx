@@ -831,8 +831,15 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
           ) : run.dashboardPending ? (
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-semibold text-foreground">汇总报告生成中…</p>
+              {/* v2.71：服务端阶段进度实时展示（running 期间轮询回传 — 生成不再黑盒等待） */}
+              {run.dashboardProgress ? (
+                <p className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                  <LoaderCircle className="size-3 shrink-0 animate-spin" aria-hidden />
+                  <span className="truncate">{run.dashboardProgress}</span>
+                </p>
+              ) : null}
               <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；此过程通常需要 1-3 分钟，期间可自由查看各组结果。
+                正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；大批次（百级靶点）报告原文逐份流式写入可能需要数分钟，期间可自由查看各组结果。
               </p>
             </div>
           ) : (

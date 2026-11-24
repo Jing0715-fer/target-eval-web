@@ -2234,7 +2234,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   // v1.26/v1.27：分子量增重策略（小分子量靶点）— 评分卡内嵌（不单独成章，与聚集形式同区呈现）
   const mwA = ctx.mwAugment
   const mwAdj = ctx.scores.mwAugmentAdjust
-  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? (mwA.assemblyEvidence === 'complex' ? '互作伙伴推断（复合物结构支持）' : mwA.assemblyEvidence === 'homolog' ? '互作伙伴推断（同源复合物结构支持）' : '互作伙伴推断') : '无生物装配路径'
+  const mwPathZh = mwA?.assemblyPath === 'complex' ? '已有复合物结构' : mwA?.assemblyPath === 'oligomer' ? '自身寡聚装配' : mwA?.assemblyPath === 'homolog-complex' ? '同源复合物推断（BLAST）' : mwA?.assemblyPath === 'partner' ? (mwA.assemblyEvidence === 'complex' ? '互作伙伴推断（复合物结构支持）' : mwA.assemblyEvidence === 'homolog' ? '互作伙伴推断（同源复合物结构支持）' : '互作伙伴推断') : mwA?.assemblyPath === 'antibody' ? `抗原-抗体复合物（评估表提供的 ${mwA.antibodyPartner?.chains ?? '?'} 条抗体链）` : '无生物装配路径'
   const mwBadgeColor = mwA?.assemblyPath === 'homolog-complex'
     ? (mwA.assemblyKda != null && mwA.assemblyKda >= 100 ? '#0f766e' : '#b45309')
     : mwA?.assemblyKda != null && mwA.assemblyKda >= 100 ? '#065f46' : mwA?.assemblyKda != null && mwA.assemblyKda >= 50 ? '#b45309' : '#78716c'

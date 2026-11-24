@@ -2162,6 +2162,17 @@ class SegmentRunner {
     return null
   }
 
+  /** v2.72：交付构建长度（抗原-抗体复合物尺寸的抗原侧）— 提交序列（序列模式，
+   *  识别为 UniProt 后评分口径虽用全长，交付物仍是提交构建）> 评估区间跨度
+   *  （effectiveRange：手动区间 > 构建比对 > 域名/BLAST 推导）> UniProt 全长。 */
+  private antigenDeliveryLengthAa(): number {
+    const st = this.st
+    if (st.sequence) return st.sequence.length
+    const er = this.effectiveRange()
+    if (er) return er[1] - er[0] + 1
+    return st.uniprotInfo?.sequenceLength ?? st.sequence.length
+  }
+
   // ─── 阶段 7：聚集形式（寡聚态）分析 + 评分 + LLM 复核 ──────────────────────
   //
   // v2.18：phaseAnalysis 改为幂等可重入（子步骤守卫）并新增 LLM 评分复核子步骤 —
@@ -2194,10 +2205,12 @@ class SegmentRunner {
         goal: st.goal || undefined,
         goalHints: st.goalHints,
         signal: this.signal,
+        // v2.72：评估表同行的抗体链（抗原-抗体复合物交付 — 装配 MW 计入抗体）
+        antibodyPartner: this.input.options.antibodyPartner,
       })
       this.log(st.mwAugment.applicable
-        ? `分子量增重分析：单体 ~${st.mwAugment.monomerKda} kDa${st.mwAugment.assemblyKda != null ? ` → 装配 ~${st.mwAugment.assemblyKda} kDa（${st.mwAugment.assemblyPath}；复合物结构 ${st.mwAugment.complexes.length} 个；同源复合物 ${(st.mwAugment.homologComplexes ?? []).length} 个；伙伴 ${st.mwAugment.partners.filter(p => p.kda != null).length} 个）` : '，无装配增重路径'}（冲突分析 ${st.mwAugment.conflicts.length} 条）`
-        : `分子量增重分析：不适用（单体 ~${st.mwAugment.monomerKda} kDa ≥ 50 kDa）`)
+        ? `分子量增重分析：单体 ~${st.mwAugment.monomerKda} kDa${st.mwAugment.assemblyKda != null ? ` → 装配 ~${st.mwAugment.assemblyKda} kDa（${st.mwAugment.assemblyPath}；复合物结构 ${st.mwAugment.complexes.length} 个；同源复合物 ${(st.mwAugment.homologComplexes ?? []).length} 个；伙伴 ${st.mwAugment.partners.filter(p => p.kda != null).length} 个${st.mwAugment.antibodyPartner ? `；同行抗体 ${st.mwAugment.antibodyPartner.chains} 条 ~${st.mwAugment.antibodyPartner.kda} kDa` : ''}）` : '，无装配增重路径'}（冲突分析 ${st.mwAugment.conflicts.length} 条）`
+        : `分子量增重分析：不适用（单体 ~${st.mwAugment.monomerKda} kDa ≥ 50 kDa${st.mwAugment.antibodyPartner ? `；Cryo-EM 基础分已按抗原-抗体复合物尺寸（~${Math.round(st.mwAugment.monomerKda + st.mwAugment.antibodyPartner.kda)} kDa）评估` : ''}）`)
     }
 
     if (!st.scores) {
@@ -2211,6 +2224,13 @@ class SegmentRunner {
         oligomer: st.oligomer,
         mwAugment: st.mwAugment,
         interaction: st.interaction,
+        // v2.72：评估表同行抗体链 — Cryo-EM 基础分按交付复合物尺寸计。物理交付物 =
+        // 评估的构建 + 抗体链：序列模式取提交序列长度（识别为 UniProt 后其余评分
+        // 口径用全长，但交付的是提交构建 — 复合物尺寸按交付物计才不虚高）；
+        // UniProt 模式取区间跨度（有区间时）或全长。
+        complexLengthAa: this.input.options.antibodyPartner != null
+          ? this.antigenDeliveryLengthAa() + this.input.options.antibodyPartner.lengthAa
+          : undefined,
       })
       this.log(`评分完成：X-ray ${st.scores.xray.score}/10 · Cryo-EM ${st.scores.cryoem.score}/10 · NMR ${st.scores.nmr.score}/10 · 总体 ${st.scores.overall.score}/10${st.scores.interactionAdjust ? `（含互作复合物调整：${st.scores.interactionAdjust.level === 'curated' ? st.scores.interactionAdjust.complexAc : 'binary 伙伴'}）` : ''}`)
     }
@@ -2238,6 +2258,10 @@ class SegmentRunner {
         oligomer: st.oligomer,
         mwAugment: st.mwAugment,
         interaction: st.interaction,
+        // v2.72：复核层同口径（复合物尺寸 — 避免复核按单体尺寸误下调）
+        complexLengthAa: this.input.options.antibodyPartner != null
+          ? this.antigenDeliveryLengthAa() + this.input.options.antibodyPartner.lengthAa
+          : undefined,
         targetName: st.uniprotInfo?.proteinName ?? st.targetIdentity?.name,
         uniprotId: st.uniprotInfo?.uniprotId,
         goal: st.goal || undefined,
