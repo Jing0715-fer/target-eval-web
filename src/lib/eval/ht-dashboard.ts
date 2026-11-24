@@ -1079,6 +1079,54 @@ export function makeHtDashboardProgressWriter(dashboardId: string): (msg: string
   }
 }
 
+// ── v2.78：僵死看板检测（「10 分钟无进展」黑盒的终结）────────────────────────
+//
+// 用户实测（v2.77 后仍复现）：轮询一直成功、状态恒 running、progress 字段始终
+// 为空（进度条一直不确定态）、10 分钟后前端报「无进展超时」。服务端各阶段每 5s
+// 心跳写库（看门狗），生成进程活着时 progress 不可能 >5s 静默 — 唯一解释是
+// **记录的写入整体冻结**：生成后台任务已不在（服务重启/OOM 被杀/进程退出把
+// 后台 promise 带走，记录永远停在 running、progress 停在 NULL）。前端只能盲等
+// 10 分钟拿一个误导性超时文案。
+//
+// 检测原理：@updatedAt 随每次 update 自动推进 — 看门狗每 5s 写进度即每 5s 推进。
+// running 状态下 updatedAt 停滞超过阈值 = 生成进程必已不存在。事件循环阻塞场景
+// 天然免疫误报：定时器回调先于 I/O 回调执行，GET 处理器能观察到停滞时，排队的
+// 心跳已先把 updatedAt 推进。误报兜底：若生成器实际仍活着，其终态 update 会在
+// 完成时覆盖本检测写入的 error（自愈为 done，与 v2.77 看门狗 give-up 同口径）。
+
+/** running 状态下写入停滞判定阈值（ms）— 看门狗 5s 心跳的 18 倍余量 */
+export const HT_DASHBOARD_STALL_MS = 90_000
+
+/** 僵死标记的错误文案前缀（前端据此识别并自动重试 — 两端字面量需一致） */
+export const HT_DASHBOARD_STALL_PREFIX = '生成中断：'
+
+/** v2.78：僵死看板错误文案（单源 — GET 单查检测 / 列表清扫 / POST 清扫共用） */
+export function stalledHtDashboardError(): string {
+  return `${HT_DASHBOARD_STALL_PREFIX}服务进程在生成期间重启或退出，本次生成未完成 — 运行结果不受影响；正在自动重试，若稍后仍失败可打开运行自动重试或点击「重新生成汇总报告」`
+}
+
+/** v2.78：把僵死的 running 看板标记为 error（生成中断）。
+ *  ownerKey 可选 — 限定只清理该用户的记录（多进程部署下不误伤其他实例的活跃
+ *  生成器；单进程部署传空即全局清理）。updateMany 带 status:'running' 条件 —
+ *  与生成器终态写入竞态时败者退出（先完成者生效）。返回标记条数。 */
+export async function markStalledHtDashboards(ownerKey?: string): Promise<number> {
+  const cutoff = new Date(Date.now() - HT_DASHBOARD_STALL_MS)
+  const stalled = await db.htDashboard.findMany({
+    where: { status: 'running', updatedAt: { lt: cutoff }, ...(ownerKey ? { ownerKey } : {}) },
+    select: { id: true },
+    take: 50,
+  }).catch(() => [] as Array<{ id: string }>)
+  let marked = 0
+  for (const s of stalled) {
+    const n: number = await db.htDashboard.updateMany({
+      where: { id: s.id, status: 'running' },
+      data: { status: 'error', error: stalledHtDashboardError().slice(0, 500), progress: null, updatedAt: new Date() },
+    }).then(r => r.count).catch(() => 0)
+    marked += n
+  }
+  return marked
+}
+
 // ── v2.72：导入报告统计快照服务端补解析（降级行兜底）──────────────────────
 
 /** 补解析读取的报告原文前缀（字节）：h1/刊头/评分卡与 targeteval meta 标记都在

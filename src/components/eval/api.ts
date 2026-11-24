@@ -775,6 +775,9 @@ export interface HtDashboardInfo {
   progress?: string
   /** v2.76：全局进度百分比 0-100（仅 running 期间返回 — 前端「生成中」横幅进度条） */
   progressPct?: number
+  /** v2.78：可自动重试的失败（服务重启/失联导致的「生成中断」— generateHtDashboard
+   *  据此自动重新生成一次，重试仍失败才把错误呈现给用户） */
+  retryable?: boolean
   /** v2.60：本次生成从浏览器本地缓存快照恢复的靶点数（服务端作业已过期/实例回收） */
   recoveredCount?: number
   /** v2.60：无数据副本被跳过的靶点数（服务端已过期且本地缓存无快照） */
@@ -850,8 +853,12 @@ function buildSnapshotsForMissing(missingJobIds: string[]): HtArchivedSnapshotIn
  * v2.60 两阶段重试：服务端发现部分作业已不在 DB（实例回收/过期）时返 409 +
  * missingJobIds（不创建看板）；此处从浏览器本地缓存提取这些作业的终态快照
  * 重试（allowPartial — 仍缺的靶点计入 dropped 跳过，不再整单失败「作业不存在」）。
+ * v2.78 生成中断自动重试：服务端 GET 轮询内置僵死检测（running 且写入停滞
+ * >90s = 生成进程已被服务重启/OOM 带走 → 立即落库「生成中断」error），本函数
+ * 识别该错误（前缀）或与服务器失联（retryable）时自动重新生成一次 — 用户对
+ * 服务重启完全无感（重试仍失败才呈现错误与手动重试入口）。
  */
-export async function generateHtDashboard(input: {
+export interface HtDashboardGenerateInput {
   entries: HtDashboardEntry[]
   goal?: string
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；v2.68 seqs = 行内序列格原文 —
@@ -877,7 +884,37 @@ export async function generateHtDashboard(input: {
   /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示）；
    *  v2.76：第二参数 pct = 全局百分比 0-100（进度条，旧服务端无此字段时 undefined） */
   onProgress?: (msg: string, pct?: number) => void
-}): Promise<HtDashboardInfo> {
+}
+
+/** v2.78：服务端僵死检测落库的错误文案前缀 — 与服务端 HT_DASHBOARD_STALL_PREFIX
+ *  字面量一致（服务端 lib 带 Prisma/fs 依赖不能进客户端包，故两端各持一份；
+ *  文案变更需两处同步）。 */
+const HT_STALL_ERROR_PREFIX = '生成中断：'
+
+export async function generateHtDashboard(input: HtDashboardGenerateInput): Promise<HtDashboardInfo> {
+  for (let attempt = 0; ; attempt++) {
+    let result: HtDashboardInfo
+    try {
+      result = await generateHtDashboardAttempt(input)
+    } catch (e) {
+      // POST 阶段网络失败（post 内部已重试 3×5s 仍不通 — 服务器重启窗口）：
+      // 2s 后自动重新生成一次（服务器恢复即成功，重试仍失败才抛给调用方）
+      if (attempt >= 1) throw e
+      input.onProgress?.('与服务器连接中断 — 正在自动重新生成…', undefined)
+      await new Promise(r => setTimeout(r, 2000))
+      continue
+    }
+    // v2.78：服务端「生成中断」（僵死检测 — 生成进程被服务重启/OOM 带走）或
+    //  轮询阶段失联（retryable）→ 自动重新生成一次；其余错误原样返回
+    const stalled = result.status === 'error' && typeof result.error === 'string' && result.error.startsWith(HT_STALL_ERROR_PREFIX)
+    const lostServer = result.status === 'error' && result.retryable === true
+    if (attempt >= 1 || !(stalled || lostServer)) return result
+    input.onProgress?.(stalled ? '服务重启导致生成中断 — 正在自动重新生成…' : '与服务器连接中断 — 正在自动重新生成…', undefined)
+    await new Promise(r => setTimeout(r, 2000))
+  }
+}
+
+async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
   // v2.74：POST 瞬态重试 — dev server 重编译 / 网关瞬断窗口内 fetch 直接抛
   //  "Failed to fetch"（v2.73 及之前 POST 一次网络抖动即整体判死，而服务端实际
@@ -976,7 +1013,9 @@ export async function generateHtDashboard(input: {
     } catch {
       netFails++
       if (netFails >= 20) {
-        return { id: data.dashboard.id, status: 'error' as const, error: '与服务器失去连接（约 1 分钟内请求持续失败 — 服务可能重启中；生成可能仍在后台进行，恢复后可从历史重试或刷新查看）', ...recoverInfo }
+        // v2.78 retryable：失联多为服务重启窗口（生成进程大概率已死 — 记录僵死）
+        //  → 外层自动重新生成一次，恢复后无感续上
+        return { id: data.dashboard.id, status: 'error' as const, error: '与服务器失去连接（约 1 分钟内请求持续失败 — 服务可能重启中；生成可能仍在后台进行，恢复后可从历史重试或刷新查看）', retryable: true, ...recoverInfo }
       }
       continue
     }
@@ -996,7 +1035,9 @@ export async function generateHtDashboard(input: {
     //  重置/归属变更）时生成永远无法完成，早失败 + 明确文案优于超时；框架层瞬态
     //  404（HTML 体 → d=null）不在此列，继续轮询等自愈。
     if (d && !d.dashboard && !d.ok && typeof (d as { error?: unknown }).error === 'string') {
-      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成失败（${(d as { error: string }).error} — 服务端看板数据已不存在；运行结果不受影响，可点击「重新生成汇总报告」重建）`, ...recoverInfo }
+      // v2.78 retryable：看板记录已不在服务器（实例回收/数据重置）— 重新 POST
+      //  即可整体重建（409 时走缓存快照两阶段恢复），外层自动重试一次
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成失败（${(d as { error: string }).error} — 服务端看板数据已不存在；运行结果不受影响，可点击「重新生成汇总报告」重建）`, retryable: true, ...recoverInfo }
     }
     if (d?.dashboard?.progress) {
       input.onProgress?.(d.dashboard.progress, d.dashboard.progressPct)

@@ -1068,6 +1068,9 @@ export interface HTRunState {
   dashboardError?: string
   /** v2.36：汇总报告生成中（完成横幅的「生成中」态 — 终态后由 dashboardId/dashboardError 接替） */
   dashboardPending?: boolean
+  /** v2.78：本次生成开始时间戳（ms — 生成中横幅「已等待 Ns」计时；服务进程中断时
+   *  配合 v2.78 僵死检测 90s 内自动标记「生成中断」并自动重新生成一次） */
+  dashboardPendingSince?: number
   /** v2.71：汇总报告生成阶段进度（running 期间轮询回传 — 生成中横幅实时展示；
    *  纯展示字段，终态后由 dashboardId/dashboardError 接替清空） */
   dashboardProgress?: string

@@ -22,7 +22,7 @@
  *  · v2.25 批量下载：当前运行 / 每组均可一键打包 zip（每组子文件夹 + 合并报告 + README）
  */
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Ban,
@@ -179,6 +179,16 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   /** v2.38 报告 zip 导入（非 running 阶段） */
   const [importingZip, setImportingZip] = useState(false)
   const zipInputRef = useRef<HTMLInputElement>(null)
+
+  /** v2.78：汇总报告生成中横幅「已等待 Ns」本地计时（每秒重渲染 — 服务端进度
+   *  尚未上报时给用户即时反馈，不再黑盒空转；配合服务端僵死检测：生成进程
+   *  中断时 90s 内自动标记「生成中断」并自动重新生成一次，无需用户处理） */
+  const [, setDashboardPendingTick] = useState(0)
+  useEffect(() => {
+    if (!run?.dashboardPending) return
+    const t = setInterval(() => setDashboardPendingTick((x) => x + 1), 1000)
+    return () => clearInterval(t)
+  }, [run?.dashboardPending])
 
   if (!run) return null
 
@@ -859,12 +869,18 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
                 <p className="text-[13px] font-semibold text-foreground">汇总报告生成中…</p>
-                {/* v2.76：全局百分比（服务端各阶段权重标定回传 — 进度条主指标） */}
-                {run.dashboardProgressPct != null && (
+                {/* v2.76：全局百分比（服务端各阶段权重标定回传 — 进度条主指标）；
+                    v2.78：无百分比时（首条进度落库前/旧服务端）显示本地已等待计时 —
+                    横幅始终有具体数字反馈，不再只有空转动画条 */}
+                {run.dashboardProgressPct != null ? (
                   <span className="font-mono text-[12px] font-semibold tabular-nums text-primary">
                     {Math.round(run.dashboardProgressPct)}%
                   </span>
-                )}
+                ) : run.dashboardPendingSince != null ? (
+                  <span className="font-mono text-[12px] font-semibold tabular-nums text-muted-foreground">
+                    已等待 {Math.max(0, Math.round((Date.now() - run.dashboardPendingSince) / 1000))}s
+                  </span>
+                ) : null}
               </div>
               {/* v2.76 进度条：有百分比 → 确定性（Radix 过渡平滑推进）；无（旧服务
                   端纯文本进度 / 首条进度落库前）→ 不确定态滑动动画，不再黑盒等待 */}
@@ -885,7 +901,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 </p>
               ) : null}
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；大批次（百级靶点）报告原文逐份流式写入可能需要数分钟，期间可自由查看各组结果。
+                {run.dashboardProgress
+                  ? '正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；大批次（百级靶点）报告原文逐份流式写入可能需要数分钟，期间可自由查看各组结果。'
+                  : '服务端正在加载靶点数据并规划报告内嵌（首条进度数秒内到达）；若服务进程在生成期间中断，系统会在 90 秒内自动检测并重新生成一次，无需手动处理 — 运行结果不受影响。'}
               </p>
             </div>
           ) : (

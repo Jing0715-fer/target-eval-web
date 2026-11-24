@@ -42,6 +42,9 @@ import {
   resolveZipHrefs,
   htDashboardTitle,
   attachExcelRows,
+  markStalledHtDashboards,
+  stalledHtDashboardError,
+  HT_DASHBOARD_STALL_MS,
   type ArchivedJobSnapshot,
   type HtDashboardEntry,
   type HtImportedTarget,
@@ -336,6 +339,10 @@ export async function POST(req: Request) {
   await ensureHtDashboardProgressColumn().catch((err: unknown) => {
     console.error('[ht-dashboard] progress 列自愈失败（不影响生成 — 进度展示将缺省）：', err instanceof Error ? err.message : String(err))
   })
+  // v2.78：创建前清扫本人名下的僵死 running 看板（服务重启/OOM 被杀遗留 —
+  // 生成后台任务已不在，记录永远停在 running；此处标记为「生成中断」让历史
+  // 列表如实呈现，避免僵尸态在「打开运行自动重试」时被误判为仍在生成）
+  await markStalledHtDashboards(owner.key).catch(() => 0)
   const record = await db.htDashboard.create({
     data: {
       jobIds: JSON.stringify(keptJobIds),
@@ -596,6 +603,9 @@ export async function GET(req: Request) {
   await ensureHtDashboardProgressColumn().catch(() => undefined)
   if (!id) {
     // 无 id — 最近看板列表（历史回看入口）
+    // v2.78：列表前清扫本人僵死 running 看板（服务重启遗留 — 生成进程已不在，
+    //  记录停在 running 会让历史项永远显示「生成中」且不可打开）
+    await markStalledHtDashboards(owner.key).catch(() => 0)
     const rows = await db.htDashboard.findMany({
       where: { ownerKey: owner.key },
       orderBy: { createdAt: 'desc' },
@@ -624,6 +634,23 @@ export async function GET(req: Request) {
   if (!record) return htmlView ? reportNotFoundResponse({ kind: 'dashboard' }) : notFound('看板不存在')
   if (record.ownerKey && record.ownerKey !== owner.key && record.ownerKey !== owner.ipKey) {
     return htmlView ? reportNotFoundResponse({ kind: 'dashboard' }) : notFound('看板不存在')
+  }
+
+  // ── v2.78：僵死检测（前端轮询路径的核心修复）──
+  //  running 且 updatedAt 停滞 >90s = 生成后台任务已不在（服务重启/OOM 被杀/
+  //  进程退出把 promise 带走 — 看门狗每 5s 心跳写库，活着不可能停滞这么久）。
+  //  旧实现此时前端只能盲等 10 分钟拿误导性「无进展超时」且进度条全程空转；
+  //  现在立即标记「生成中断」error 终态 — 前端马上拿到明确失败并自动重试一次
+  //  （api.ts 识别前缀），用户无感恢复。竞态安全：updateMany 带 status:'running'
+  //  条件，若生成器恰好在此刻完成/失败，其终态写入先到则本标记败退（重读回落）。
+  if (record.status === 'running' && Date.now() - record.updatedAt.getTime() > HT_DASHBOARD_STALL_MS) {
+    await db.htDashboard.updateMany({
+      where: { id: record.id, status: 'running' },
+      data: { status: 'error', error: stalledHtDashboardError().slice(0, 500), progress: null, updatedAt: new Date() },
+    }).catch(() => 0)
+    console.warn(`[ht-dashboard] 检测到僵死看板（running 且写入停滞 >${Math.round(HT_DASHBOARD_STALL_MS / 1000)}s — 生成进程已不存在）：${record.id}，已标记为「生成中断」`)
+    // 重读落库终态（本标记生效 → error；生成器竞态先完成 → done/error 原值）
+    record = (await db.htDashboard.findUnique({ where: { id } }).catch(() => null)) ?? record
   }
 
   if (url.searchParams.get('inline') === '1' || url.searchParams.get('download') === '1') {

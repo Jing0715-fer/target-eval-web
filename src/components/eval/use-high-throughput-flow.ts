@@ -130,6 +130,7 @@ function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
     r.dashboardPending = false
     r.dashboardProgress = undefined
     r.dashboardProgressPct = undefined
+    r.dashboardPendingSince = undefined
   }
 }
 
@@ -933,8 +934,9 @@ export function useHighThroughputFlow() {
       })
       return
     }
-    // v2.36：生成中标记（横幅立即可见，终态后接替）
+    // v2.36：生成中标记（横幅立即可见，终态后接替）；v2.78：起始时间戳（横幅「已等待 Ns」计时）
     runState.dashboardPending = true
+    runState.dashboardPendingSince = Date.now()
     saveHTRun(runState)
     setRun(cloneRun(runState))
     try {
@@ -972,6 +974,7 @@ export function useHighThroughputFlow() {
       runState.dashboardPending = false
       runState.dashboardProgress = undefined
       runState.dashboardProgressPct = undefined
+      runState.dashboardPendingSince = undefined
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
         runState.dashboardError = undefined
@@ -1010,6 +1013,7 @@ export function useHighThroughputFlow() {
       runState.dashboardPending = false
       runState.dashboardProgress = undefined
       runState.dashboardProgressPct = undefined
+      runState.dashboardPendingSince = undefined
       runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
       toast({
         title: '统计看板生成失败',
