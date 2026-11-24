@@ -407,23 +407,69 @@ async function runDashboardGeneration(ctx: {
   const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob, importedBare, importedJobIds, owner } = ctx
   const startedAt = Date.now()
   const progress = makeHtDashboardProgressWriter(dashboardId)
+  // ── v2.77：全局阶段看门狗（根除「10 分钟无进展」误报的最后一环）──
+  //  v2.74 的 LLM 心跳只覆盖 LLM 阶段；其余阶段（数据加载/导入留存规划/批次
+  //  统计/zip 规划/shell 渲染）无逐项 tick 时进度静默，前端 10 分钟窗口照旧
+  //  超时误报。本看门狗对「任何阶段」生效：静默 ≥5s 即以「原文本 · 已 Ns」心跳
+  //  写库（文本持续变化 → 前端窗口持续重置）；≥3min 附「耗时异常」提示；
+  //  ≥20min（PHASE_STALL_GIVEUP_MS — 各大阶段均有逐行/逐项 tick，LLM 有调
+  //  用方 60s/120s 硬预算，真实生成不可能静默这么久）判定真卡滞：落库 error
+  //  终态让前端立刻拿到明确失败（不再空转 30 分钟硬上限）；后台 promise 若
+  //  此后自行完成/失败，终态 update 仍会覆盖落库（自愈为 done）。
+  let phaseBaseText = '准备生成…'
+  let phaseBasePct: number | undefined
+  let phaseStartAt = Date.now()
+  let watchdogGivenUp = false
+  const PHASE_STALL_NOTE_MS = 3 * 60_000
+  const PHASE_STALL_GIVEUP_MS = 20 * 60_000
+  const progressWithPhase = (msg: string, pct?: number): void => {
+    // 规范化：剥离调用方（LLM 心跳）已内嵌的「· 已 Ns」尾巴 — 看门狗追加自己的
+    // 计时尾巴，避免静默子阶段期间出现「…· 已 187s · 已 12s」双重尾巴。
+    phaseBaseText = msg.replace(/\s*·\s*已\s*\d+s.*$/, '')
+    phaseBasePct = pct
+    phaseStartAt = Date.now()
+    progress(msg, pct)
+  }
+  const phaseWatchdog = setInterval(() => {
+    const silentMs = Date.now() - phaseStartAt
+    if (silentMs < 5_000 || watchdogGivenUp) return
+    const elapsedSec = Math.round(silentMs / 1000)
+    const note = silentMs >= PHASE_STALL_NOTE_MS && silentMs < PHASE_STALL_GIVEUP_MS
+      ? '（该阶段耗时异常 — 仍在等待完成，可稍后刷新查看）'
+      : ''
+    progress(`${phaseBaseText} · 已 ${elapsedSec}s${note}`, phaseBasePct)
+    if (silentMs >= PHASE_STALL_GIVEUP_MS) {
+      watchdogGivenUp = true
+      clearInterval(phaseWatchdog)
+      void db.htDashboard.update({
+        where: { id: dashboardId },
+        data: {
+          status: 'error',
+          error: `生成卡滞：${phaseBaseText} 阶段 ${Math.round(silentMs / 60_000)} 分钟无进展 — 已判定失败（运行结果不受影响，可点击「重新生成汇总报告」重试；若后台实际仍在完成，历史记录中会出现该看板）`.slice(0, 500),
+          progress: null,
+          updatedAt: new Date(),
+        },
+      }).catch(() => undefined)
+    }
+  }, 5_000)
+  const fail = async (msg: string) => {
+    clearInterval(phaseWatchdog)
+    await db.htDashboard.update({
+      where: { id: dashboardId },
+      data: { status: 'error', error: msg.slice(0, 500), progress: null, updatedAt: new Date() },
+    }).catch(() => undefined)
+  }
   // v2.76：全局进度百分比（进度条）— 阶段权重按典型耗时分布标定：
   //  数据加载 2→15 / 导入留存规划 16→20 / 导入统计补解析 21→30（逐个 tick）/
   //  批次统计 31→35 / LLM（每靶点结论 + 整体报告）36→60（心跳渐近推进 — 时长
   //  不可知，限流重试可静默数分钟）/ zip 链接 61→65 / HTML 流式落盘 66→98
   //  （百级靶点报告原文逐份读盘写入 — 主耗时阶段，逐行 tick）。各阶段仅推进到
   //  本阶段起始值（实际耗时未知），下一阶段消息携带自身起始百分比自然接续。
-  const fail = async (msg: string) => {
-    await db.htDashboard.update({
-      where: { id: dashboardId },
-      data: { status: 'error', error: msg.slice(0, 500), progress: null, updatedAt: new Date() },
-    }).catch(() => undefined)
-  }
   try {
     // v2.69：报告原文体积预算（作业报告 + 导入留存共用 — 弹出页内嵌总量护栏；
     // v2.71 起按 stat 字节分配，内容写盘时逐份延迟读取）
     const reportBudget = { total: 0 }
-    progress(`加载 ${entries.filter(e => e.jobId).length} 个靶点的评估数据…`, 2)
+    progressWithPhase(`加载 ${entries.filter(e => e.jobId).length} 个靶点的评估数据…`, 2)
     const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob, importedJobIds, reportBudget)
     // v2.68→v2.69：导入载入靶点 — DB 命中（完整统计已从原作业恢复）的同名靶点剔除
     //  （以 DB 恢复行为准 — 数据更全），仅保留未命中的：stats 存在 → 完整统计行
@@ -431,7 +477,7 @@ async function runDashboardGeneration(ctx: {
     //  同源 — 去重键可靠）
     const restoredLabels = new Set(rows.filter(r => r.imported).map(r => r.label))
     const pendingImported = (importedBare ?? []).filter(t => !restoredLabels.has(t.label.slice(0, 60)))
-    if (pendingImported.length > 0) progress(`规划 ${pendingImported.length} 个导入报告的原文留存…`, 16)
+    if (pendingImported.length > 0) progressWithPhase(`规划 ${pendingImported.length} 个导入报告的原文留存…`, 16)
     // v2.69：导入报告原文留存规划（归属校验 + 体积预算 — 弹出页内嵌报告原文）
     const reportPathById = owner
       ? await loadImportedReportHtml(pendingImported, owner, reportBudget)
@@ -442,9 +488,9 @@ async function runDashboardGeneration(ctx: {
     const backfillPending = pendingImported.filter(t =>
       !t.stats && t.reportId && reportPathById.has(t.reportId)).length
     if (backfillPending > 0) {
-      progress(`解析导入报告统计（待补 ${backfillPending} 个）…`, 21)
+      progressWithPhase(`解析导入报告统计（待补 ${backfillPending} 个）…`, 21)
       const backfilled = await backfillImportedStats(pendingImported, reportPathById, (d, n) => {
-        progress(`解析导入报告统计 ${d}/${n}…`, 21 + Math.round((d / n) * 9))
+        progressWithPhase(`解析导入报告统计 ${d}/${n}…`, 21 + Math.round((d / n) * 9))
       })
       if (backfilled > 0) {
         console.log(`[ht-dashboard] 导入报告统计服务端补解析：${backfilled}/${backfillPending} 个降级行已回填为完整统计行`)
@@ -460,7 +506,7 @@ async function runDashboardGeneration(ctx: {
       ? [...importedJobIds].filter(id => !restoredJobIds.has(id)).length
       : 0
     const allRows = [...statRows, ...bareRows]
-    progress('汇总批次统计…', 31)
+    progressWithPhase('汇总批次统计…', 31)
     const stats = computeHtStats(statRows, Math.max(0, jobCount - droppedImported), bareRows.length)
     // v2.74：LLM 阶段心跳进度 — 每靶点结论（≤60s）+ 整体报告（≤120s）叠加限流重试
     //  （20s/40s/60s/90s/120s 退避）时可静默数分钟，前端无进展判定会把仍在正常
@@ -470,15 +516,16 @@ async function runDashboardGeneration(ctx: {
     const llmHeartbeat = setInterval(() => {
       // v2.76：百分比渐近推进（36→60 永不越界）— LLM 总时长不可知（限流重退
       //  可静默数分钟），线性会提前到顶显得「假完成」，渐近曲线持续前进又不过冲
+      //  v2.77：改走 progressWithPhase — 与全局看门狗同一口径（心跳期间看门狗静默）
       const elapsedSec = (Date.now() - llmT0) / 1000
-      progress(
+      progressWithPhase(
         `AI 撰写整体可行性报告（${statRows.length} 个靶点）· 已 ${Math.round(elapsedSec)}s`,
         36 + 24 * (1 - Math.exp(-elapsedSec / 90)),
       )
     }, 5_000)
     let generated
     try {
-      progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 36)
+      progressWithPhase(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 36)
       generated = await generateHtDashboardReport(statRows, stats, goal)
     } finally {
       clearInterval(llmHeartbeat)
@@ -486,7 +533,7 @@ async function runDashboardGeneration(ctx: {
     const engineSummary = await getEngineSummary()
     // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）；
     // v2.60：缓存恢复行无服务器报告文件，zip 内无对应文件 — 不挂离线链接
-    progress('规划离线包链接命名…', 61)
+    progressWithPhase('规划离线包链接命名…', 61)
     const zipHrefs = await resolveZipHrefs(entries)
     for (const r of allRows) r.zipHref = r.fromArchive || r.bare || r.importedFromFile ? undefined : zipHrefs.get(r.jobId)
 
@@ -500,9 +547,10 @@ async function runDashboardGeneration(ctx: {
     await fs.mkdir(dir, { recursive: true })
     const htmlPath = path.join(dir, 'report.html')
     // v2.76：写盘子进度 → 全局百分比（shell 渲染 = 阶段头部 66；载荷逐行
-    //  70→98 — 百级靶点时该阶段占比最大，逐行 tick 让进度条持续前进）
+    //  70→98 — 百级靶点时该阶段占比最大，逐行 tick 让进度条持续前进）。
+    //  v2.77：经 progressWithPhase — 逐行 tick 持续重置看门狗静默计时。
     const writeProgress = (msg: string, frac?: number): void => {
-      progress(msg, frac != null ? 70 + Math.round(frac * 28) : 66)
+      progressWithPhase(msg, frac != null ? 70 + Math.round(frac * 28) : 66)
     }
     await writeHtDashboardHtmlFile({
       title,
@@ -533,7 +581,8 @@ async function runDashboardGeneration(ctx: {
         updatedAt: new Date(),
       },
     })
-    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· AI 报告 ${generated.ok ? '成功' : '降级'} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s`)
+    clearInterval(phaseWatchdog)
+    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· AI 报告 ${generated.ok ? '成功' : '降级'} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s${watchdogGivenUp ? '（看门狗曾判卡滞 — 本次完成已自愈覆盖）' : ''}`)
   } catch (err) {
     await fail(err instanceof Error ? err.message : String(err))
   }
