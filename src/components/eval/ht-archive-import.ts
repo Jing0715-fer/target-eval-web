@@ -71,7 +71,8 @@ import {
   toCleanImportedStats,
   type ImportedStatsSection,
 } from '@/lib/eval/imported-stats'
-import { uploadImportedReport } from './api'
+import { uploadImportedReport, verifyImportedReports } from './api'
+import { saveImportedSource, getImportedSource } from './ht-import-cache'
 
 /** 导入的 zip/文件内一份可匹配的报告 */
 export interface HtArchiveReport {
@@ -973,15 +974,19 @@ export interface ImportEnrichItem {
 /** v2.69：为匹配到的导入靶点解析统计快照并上传报告原文 — 返回逐项结果
  *  （stats 缺失 = 降级行；reportId 缺失 = 弹出页无原文可内嵌；两者独立降级）。
  *  任一步骤失败都不阻塞导入（导入匹配本身不受影响）。上传按源文件去重
- *  （同一文件只传一次 — 合并报告整组共享）。 */
+ *  （同一文件只传一次 — 合并报告整组共享）。
+ *  v2.81：源文件 HTML 一部落入浏览器本地留存（ht-import-cache — 内容哈希
+ *  sourceSha 随条目返回）。导入时上传失败/事后服务端留存丢失时，汇总报告
+ *  生成前可按 sha 取回缓存重新上传自愈（ensureImportedRetention）— 弹出页
+ *  原文内嵌不再取决于导入那一瞬间的上传成败。 */
 export async function enrichImportedReports(
   items: ImportEnrichItem[],
   parsed: HtImportParseResult,
-): Promise<Array<{ stats?: ImportedReportStats; reportId?: string }>> {
-  const out: Array<{ stats?: ImportedReportStats; reportId?: string }> = items.map(() => ({}))
+): Promise<Array<{ stats?: ImportedReportStats; reportId?: string; sourceSha?: string }>> {
+  const out: Array<{ stats?: ImportedReportStats; reportId?: string; sourceSha?: string }> = items.map(() => ({}))
   if (items.length === 0) return out
   // 源文件分组：同一源文件只读一次 / 只上传一次（loaded = 已尝试读取，读到 0 个区段也不重试）
-  const bySource = new Map<string, { rep: HtArchiveReport; sections: ImportedStatsSection[]; reportId?: string; loaded?: boolean }>()
+  const bySource = new Map<string, { rep: HtArchiveReport; sections: ImportedStatsSection[]; reportId?: string; sourceSha?: string; loaded?: boolean }>()
   for (let i = 0; i < items.length; i++) {
     const it = items[i]!
     const rep = it.rep
@@ -1003,6 +1008,8 @@ export async function enrichImportedReports(
         if (text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
           const base = (rep.path.split('::')[0] ?? rep.path).split('/').pop() ?? ''
           const fileName = base.replace(/\.html?$/i, '').slice(0, 100) || '导入报告'
+          // v2.81：浏览器本地留存（与上传并行 — 上传失败/事后丢失均可凭 sha 自愈重传）
+          entry.sourceSha = await saveImportedSource(`${fileName}.html`, text).catch(() => undefined)
           entry.reportId = await uploadImportedReport(`${fileName}.html`, text)
         }
       }
@@ -1010,8 +1017,90 @@ export async function enrichImportedReports(
     const stats = pickImportedStatsShared(entry.sections, it)
     if (stats) out[i]!.stats = toCleanImportedStats(stats)
     if (entry.reportId) out[i]!.reportId = entry.reportId
+    if (entry.sourceSha) out[i]!.sourceSha = entry.sourceSha
   }
   return out
+}
+
+/** v2.81：留存自愈的单项输入（导入靶点 — reportId 与内容哈希至少有其一） */
+export interface RetentionCheckItem {
+  reportId?: string
+  sha?: string
+}
+
+/**
+ * v2.81：汇总报告生成前的导入留存校验 + 自愈重传（「报告没有内嵌」根治）。
+ *
+ * 流程：① 收集全部 reportId → GET 批量校验服务端留存（记录在 + 归属匹配 +
+ * 文件在）；② 缺失/无 reportId 但有 sha 的源文件 → 从浏览器本地留存
+ * （ht-import-cache）取回 HTML 重新上传，拿新的 reportId；③ 返回
+ * sha → 新 reportId 映射（调用方回写运行记录，持久化自愈结果）。
+ *
+ * 设计边界：
+ *  - 校验端点不可达 → 返回空映射（视同全部存活 — 服务端不可用时生成本就
+ *    无法进行，不盲目触发上百 MB 重传）；
+ *  - 本地缓存也没有（旧版运行记录无 sha / IndexedDB 被清）→ 该源文件保持
+ *    现状（服务端留存若仍在则照常用；确实丢失则弹出页降级 — 与 v2.80 行为
+ *    一致，不劣化）；
+ *  - 单份重传失败 → 跳过继续（尽力而为，不阻塞汇总生成）。
+ *
+ * 返回：{ fixed: sha→新 reportId, reuploaded: 重传成功数, stillMissing: 仍无
+ * 可用留存的源文件数 }。
+ */
+export async function ensureImportedRetention(
+  items: RetentionCheckItem[],
+  opts: { onProgress?: (msg: string) => void; uploadConcurrency?: number } = {},
+): Promise<{ fixed: Map<string, string>; reuploaded: number; stillMissing: number }> {
+  const { onProgress, uploadConcurrency = 3 } = opts
+  const fixed = new Map<string, string>()
+  const uniqueIds = [...new Set(items.map(i => i.reportId).filter((x): x is string => Boolean(x)))]
+  if (uniqueIds.length === 0 && items.every(i => !i.sha)) return { fixed, reuploaded: 0, stillMissing: 0 }
+  // ① 批量校验（60 id/请求 — 端点上限同口径）
+  const missingIds = new Set<string>()
+  if (uniqueIds.length > 0) {
+    onProgress?.(`校验 ${uniqueIds.length} 份导入报告的服务端留存…`)
+    for (let i = 0; i < uniqueIds.length; i += 60) {
+      const chunk = uniqueIds.slice(i, i + 60)
+      const r = await verifyImportedReports(chunk)
+      if (!r) {
+        // 端点不可达 — 视同全部存活（不盲目重传）
+        onProgress?.('留存校验暂不可用 — 沿用既有服务端留存')
+        return { fixed, reuploaded: 0, stillMissing: 0 }
+      }
+      for (const m of r.missing) missingIds.add(m)
+    }
+  }
+  // ② 需自愈的源文件（reportId 缺失/死亡 且有 sha）— 按 sha 去重
+  const brokenShas = new Set<string>()
+  for (const it of items) {
+    if (!it.sha) continue
+    if (!it.reportId || missingIds.has(it.reportId)) brokenShas.add(it.sha)
+  }
+  if (brokenShas.size === 0) return { fixed, reuploaded: 0, stillMissing: missingIds.size }
+  // ③ 从本地留存取回并重传（限并发 — 百份 × MB 级不能全量齐发）
+  let reuploaded = 0
+  let stillMissing = 0
+  const queue = [...brokenShas]
+  let next = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(uploadConcurrency, queue.length)) }, async () => {
+    for (;;) {
+      const i = next++
+      if (i >= queue.length) return
+      const sha = queue[i]!
+      const src = await getImportedSource(sha)
+      if (!src) { stillMissing++; continue }
+      const newId = await uploadImportedReport(src.fileName, src.html)
+      if (newId) {
+        fixed.set(sha, newId)
+        reuploaded++
+        onProgress?.(`重新上传导入报告原文 ${reuploaded}/${queue.length}（${src.fileName.slice(0, 40)}）…`)
+      } else {
+        stillMissing++
+      }
+    }
+  })
+  await Promise.all(workers)
+  return { fixed, reuploaded, stillMissing }
 }
 
 /**

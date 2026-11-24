@@ -1013,6 +1013,11 @@ export interface HTGroupItemState {
   /** v2.69：导入报告原文的服务端留存 id（导入时上传 — 汇总报告生成时服务端
    *  读回作为「完整报告」弹出页内嵌原文，与下载的单独报告一致） */
   importedReportId?: string
+  /** v2.81：导入报告原文的浏览器本地留存键（内容哈希 — ht-import-cache）。
+   *  汇总报告生成前校验服务端留存（importedReportId），缺失/丢失时凭此键从
+   *  本地留存取回原文重新上传自愈（ensureImportedRetention）— 弹出页原文内嵌
+   *  不再取决于导入那一瞬间的上传成败 */
+  importedReportSha?: string
   /** v2.72：同行被忽略的抗体链（HtSeqTarget.antibodyPartner 透传 — 提交评估
    *  时随 options 携带，抗原的 Cryo-EM 评分计入复合物分子量） */
   antibodyPartner?: { chains: number; lengthAa: number }
@@ -1099,6 +1104,8 @@ export interface HtImportedKeyEntry {
   stats?: ImportedReportStats
   /** v2.69：导入报告原文的服务端留存 id（弹出页内嵌原文） */
   reportId?: string
+  /** v2.81：原文浏览器本地留存键（内容哈希 — 生成前自愈重传用） */
+  reportSha?: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
@@ -1122,8 +1129,9 @@ export interface HTStartPayload {
   importedFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
   /** v2.68：启动面板导入报告携带的靶点键→报告数据（importedFlags 对应键的补充 —
    *  jobId 供汇总报告从服务端恢复完整统计行；fileName 为行内「载入」徽标说明；
-   *  v2.69 stats/reportId = 解析的统计快照 + 原文服务端留存 id） */
-  importedReports?: Array<{ key: string; jobId?: string; fileName: string; stats?: ImportedReportStats; reportId?: string }>
+   *  v2.69 stats/reportId = 解析的统计快照 + 原文服务端留存 id；v2.81 reportSha =
+   *  原文浏览器本地留存键 — 生成前自愈重传用） */
+  importedReports?: Array<{ key: string; jobId?: string; fileName: string; stats?: ImportedReportStats; reportId?: string; reportSha?: string }>
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

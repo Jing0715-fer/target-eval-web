@@ -96,6 +96,8 @@ import { renderMarkdown } from './report-html'
 import { planArchiveNames, type ArchivePlanItem } from './ht-archive-names'
 import { ensureImportedReportTable } from './imported-report-table'
 import { extractImportedStatsSections, pickImportedStats, toCleanImportedStats } from './imported-stats'
+import { submitUniprotSequenceBlast, collectUniprotSequenceBlast } from './uniprot-blast'
+import { fetchUniprotInfo } from './uniprot'
 import type { HtExcelRowSnapshot } from './ht-excel'
 import type { ImportedReportStats, PdbEntry, BlastHit } from './types'
 
@@ -603,16 +605,189 @@ export async function loadImportedReportHtml(
   }
   const recById = new Map(recs.map(r => [r.id, r]))
   const candidates: Array<{ key: string; path: string }> = []
+  // v2.81 诊断计数（用户环境「全部未能内嵌」排查 — dev 控制台一眼定位缺在哪一环）
+  let diagNoRecord = 0, diagOwnerMismatch = 0
   for (const id of ids) {
     const rec = recById.get(id)
-    if (!rec || !rec.htmlPath) continue
-    if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) continue // 他人留存 — 不采信
+    if (!rec || !rec.htmlPath) { diagNoRecord++; continue }
+    if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) { diagOwnerMismatch++; continue } // 他人留存 — 不采信
     candidates.push({ key: id, path: rec.htmlPath })
+  }
+  if (diagNoRecord > 0 || diagOwnerMismatch > 0 || candidates.length < ids.length) {
+    console.warn(`[ht-dashboard] 导入报告留存规划：请求 ${ids.length} 份，可用 ${candidates.length} 份（无记录/无路径 ${diagNoRecord}，归属不匹配 ${diagOwnerMismatch}）${candidates.length === 0 && ids.length > 0 ? ' — 弹出页将全部降级（前端 v2.81 会在生成前校验并自愈重传；若仍全部缺失请检查 db/reports/imports 目录与 ImportedReport 表）' : ''}`)
   }
   // v2.71：stat 预检（丢失/超限不出队）→ 预算分配（降级行优先）→ 只返回路径
   const plan = await planReportFiles(candidates, budget)
+  if (plan.selected.length < candidates.length) {
+    console.warn(`[ht-dashboard] 导入报告预算分配：候选 ${candidates.length} 份，入嵌 ${plan.selected.length} 份（丢失 ${candidates.length - plan.foundCount}，超单份上限/总量预算 ${plan.foundCount - plan.selected.length}）`)
+  }
   for (const s of plan.selected) out.set(s.key, s.path)
   return out
+}
+
+// ─── v2.81 导入靶点 UniProt 序列识别回填 ─────────────────────────────────────
+
+/** 覆盖度加权最佳命中（与管线 bestCoverageHit 同口径 — score = identity × 查询覆盖率） */
+interface CoverableBlastHit {
+  accession: string
+  identity: number
+  evalue: number
+  queryCoverage: number
+  db?: string
+}
+
+function bestCoverageHitLocal<T extends CoverableBlastHit>(hits: T[], queryLength: number): { hit: T; covFrac: number; score: number } | null {
+  if (!hits.length) return null
+  const seqLen = Math.max(1, queryLength)
+  let best: { hit: T; covFrac: number; score: number } | null = null
+  for (const hit of hits) {
+    const covFrac = hit.queryCoverage > 0 ? Math.min(1, hit.queryCoverage / seqLen) : 0
+    const score = (hit.identity / 100) * covFrac
+    if (
+      !best
+      || score > best.score
+      || (score === best.score && (hit.identity > best.hit.identity
+        || (hit.identity === best.hit.identity && hit.evalue < best.hit.evalue)))
+    ) {
+      best = { hit, covFrac, score }
+    }
+  }
+  return best
+}
+
+/** UniProt 序列识别回填的最低一致性（85% — 与管线回填阈值同口径） */
+const UNIPROT_BACKFILL_MIN_ID = 85
+/** UniProt 序列识别回填的最低查询覆盖率（40% — 与管线 TARGET_IDENTIFY_MIN_COV 同口径） */
+const UNIPROT_BACKFILL_MIN_COV = 0.4
+/** 识别并发（EBI 公平使用 — 4 路并行轮询，每路 5s 间隔） */
+const UNIPROT_BACKFILL_CONCURRENCY = 4
+/** 单靶点识别墙钟上限（含提交 + 轮询；超时放弃该靶点 — 下一行继续） */
+const UNIPROT_BACKFILL_PER_TARGET_MS = 150_000
+/** 识别结果缓存上限（条 — 同序列重生成/跨运行秒回填，不再重提交 EBI） */
+const UNIPROT_IDENT_CACHE_MAX = 2000
+
+/** v2.81：识别结果缓存（进程内 — 序列 sha256 → 识别结论）。EBI 单序列实测
+ *  10-80s（队列波动），28 靶点全量识别可达数分钟；「重新生成汇总报告」与
+ *  后续运行的同序列靶点直接命中缓存秒回填。只缓存确定性结论（回填成功 /
+ *  明确未达阈值）— 网络/超时异常不缓存（下次生成重试）。 */
+interface UniprotIdentCacheEntry {
+  /** 命中回填阈值：UniProt accession（否则 undefined = 未达阈值/无命中） */
+  acc?: string
+  proteinName?: string
+  organism?: string
+  identityPct?: number
+}
+const uniprotIdentCache = new Map<string, UniprotIdentCacheEntry>()
+
+/** 序列 → 缓存键（sha256 前 24 hex — 与报告路径命名同源的 createHash 已引入） */
+function uniprotIdentCacheKey(seq: string): string {
+  return createHash('sha256').update(seq).digest('hex').slice(0, 24)
+}
+
+/**
+ * v2.81：导入靶点 UniProt 序列识别回填（用户实测「117 靶点中 28 个序列没有
+ * 回填出 UniProt ID」）。
+ *
+ * 背景：载入靶点的 UniProt 列来自导入报告的统计快照（原评估运行识别的结果）。
+ * 原运行若是旧版本（v2.44 UniProt 序列匹配通道之前）或当时 NCBI/EBI 患病，
+ * 序列靶点（构建链/模型链 — Conformation1·链2、lag3+fab·链4 这类）的身份
+ * 识别会整体落空，快照里没有 uniprotId，汇总表该列就一直空着。
+ *
+ * 本函数在汇总生成时补做一次身份识别：对「载入且无 UniProt 且带提交序列
+ * （≥30 aa）」的行，经 EBI BLAST 直查 UniProtKB（Swiss-Prot — 与管线 v2.44
+ * 通道同一服务）取覆盖度加权最佳命中，达「85% 一致性 + 40% 覆盖」回填阈值
+ * 时回填 uniprotId + 蛋白名/种属（fetchUniprotInfo），行内徽标标注
+ * identifiedVia「UniProt 序列匹配 N%」（与评估中回补的展示同构）。
+ *
+ * 有界性：总预算（默认 6 分钟）+ 单靶点墙钟 150s + 并发 4 — 预算耗尽后
+ * 剩余行保持原状（不阻塞 AI 增强与落盘）；任一靶点失败只记日志不中断。
+ * 识别结论进程内缓存（确定性结论 — 回填成功/明确未达阈值）：同序列重生成
+ * 或跨运行秒回填，预算可继续处理剩余行。best-effort：EBI 不可达时全部
+ * 跳过（0 回填），生成照常完成。
+ */
+export async function backfillImportedUniprot(
+  rows: HtDashboardRow[],
+  opts: {
+    onProgress?: (done: number, total: number, note: string) => void
+    budgetMs?: number
+    concurrency?: number
+  } = {},
+): Promise<{ tried: number; backfilled: number; failed: number; skippedByBudget: number; cacheHits: number }> {
+  const { onProgress, budgetMs = 6 * 60_000, concurrency = UNIPROT_BACKFILL_CONCURRENCY } = opts
+  const deadline = Date.now() + budgetMs
+  const pending = rows.filter(r =>
+    r.imported && !r.uniprotId && typeof r.sequence === 'string' && r.sequence.replace(/[^A-Za-z]/g, '').length >= 30,
+  )
+  const total = pending.length
+  if (total === 0) return { tried: 0, backfilled: 0, failed: 0, skippedByBudget: 0, cacheHits: 0 }
+  let done = 0, backfilled = 0, failed = 0, skippedByBudget = 0
+  let cacheHits = 0
+  let next = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, total)) }, async () => {
+    for (;;) {
+      const i = next++
+      if (i >= pending.length) return
+      const row = pending[i]!
+      const seq = row.sequence!.replace(/[^A-Za-z]/g, '').toUpperCase()
+      // ① 缓存命中 — 秒回填（同序列重生成/跨运行；确定性结论才入缓存）
+      const cacheKey = uniprotIdentCacheKey(seq)
+      const cached = uniprotIdentCache.get(cacheKey)
+      if (cached) {
+        if (cached.acc) {
+          row.uniprotId = cached.acc
+          if (cached.proteinName) row.proteinName = cached.proteinName.slice(0, 80)
+          if (cached.organism) row.organism = cached.organism.slice(0, 60)
+          row.identifiedVia = `UniProt 序列匹配 ${Math.round(cached.identityPct ?? 100)}%`
+          backfilled++
+        }
+        cacheHits++
+        done++
+        onProgress?.(done, total, cached.acc ? `${row.label.slice(0, 30)} → ${cached.acc}（缓存）` : `${row.label.slice(0, 30)}（缓存 · 此前未达阈值）`)
+        continue
+      }
+      if (Date.now() >= deadline) { skippedByBudget++; done++; onProgress?.(done, total, `${row.label.slice(0, 30)}（预算耗尽跳过）`); continue }
+      try {
+        const job = await submitUniprotSequenceBlast(seq, AbortSignal.timeout(UNIPROT_BACKFILL_PER_TARGET_MS))
+        const outcome = await collectUniprotSequenceBlast(job, {
+          // 段预算 = 剩余总预算与单靶点墙钟取小（保证单靶点不吞掉全部预算）
+          deadline: Math.min(deadline, Date.now() + UNIPROT_BACKFILL_PER_TARGET_MS),
+        })
+        if ('stillRunning' in outcome) { failed++; done++; onProgress?.(done, total, `${row.label.slice(0, 30)}（识别超预算）`); continue }
+        const uniHits = outcome.hits.filter(h => h.db !== 'other')
+        const best = bestCoverageHitLocal(uniHits.length ? uniHits : outcome.hits, seq.length)
+        const cacheable = (e: UniprotIdentCacheEntry) => {
+          if (uniprotIdentCache.size < UNIPROT_IDENT_CACHE_MAX) uniprotIdentCache.set(cacheKey, e)
+        }
+        if (best && best.hit.identity >= UNIPROT_BACKFILL_MIN_ID && best.hit.db !== 'other' && best.covFrac >= UNIPROT_BACKFILL_MIN_COV) {
+          const acc = best.hit.accession
+          const info = await fetchUniprotInfo(acc).catch(() => null)
+          row.uniprotId = acc
+          if (info?.proteinName) row.proteinName = info.proteinName.slice(0, 80)
+          if (info?.organism) row.organism = info.organism.slice(0, 60)
+          row.identifiedVia = `UniProt 序列匹配 ${Math.round(best.hit.identity)}%`
+          backfilled++
+          done++
+          // 确定性结论入缓存（元数据获取失败也缓存 acc — accession 本身已可信）
+          cacheable({ acc, proteinName: info?.proteinName, organism: info?.organism, identityPct: best.hit.identity })
+          onProgress?.(done, total, `${row.label.slice(0, 30)} → ${acc}（${Math.round(best.hit.identity)}%）`)
+        } else {
+          failed++
+          done++
+          const note = best ? `${row.label.slice(0, 30)}（最佳 ${Math.round(best.hit.identity)}% 未达阈值）` : `${row.label.slice(0, 30)}（无命中）`
+          // 明确未达阈值/无命中 = 确定性结论 — 入缓存避免重生成重复烧预算
+          cacheable({ identityPct: best ? best.hit.identity : 0 })
+          onProgress?.(done, total, note)
+        }
+      } catch {
+        failed++
+        done++
+        // 网络/超时异常 — 不入缓存（下次生成重试）
+        onProgress?.(done, total, `${row.label.slice(0, 30)}（识别失败跳过）`)
+      }
+    }
+  })
+  await Promise.all(workers)
+  return { tried: total, backfilled, failed, skippedByBudget, cacheHits }
 }
 
 /** v2.36：评估条目 ↔ 原始 Excel 行匹配（汇总报告「原表内容」列）。
@@ -1734,7 +1909,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 </div>
 
 ${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，评估正文经「完整报告」弹出页提供；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.filter(r => !r.fromArchive).length} 个靶点数据完整来自服务器。</div>` : ''}
-${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计${rows.some(r => r.importedFromFile && rowHasReportHtml(r)) ? '，「完整报告」弹出页内嵌导入的报告原文' : ''}）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && rowHasReportHtml(r)) ? '或「完整报告」弹出页' : ''}）` : ''}${rows.some(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile) ? `；${rows.filter(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile).length} 个的原文未能内嵌弹出页（超出体积预算或留存失败 — 可直接打开导入的报告文件查看完整原文）` : ''}。</div>` : ''}
+${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计${rows.some(r => r.importedFromFile && rowHasReportHtml(r)) ? '，「完整报告」弹出页内嵌导入的报告原文' : ''}）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && rowHasReportHtml(r)) ? '或「完整报告」弹出页' : ''}）` : ''}${rows.some(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile) ? `；${rows.filter(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile).length} 个的原文未能内嵌弹出页（超出体积预算或服务端留存不可用且本地留存未能自愈 — 完整原文可直接打开导入的报告文件查看；重新导入报告文件后「重新生成汇总报告」可恢复内嵌）` : ''}。</div>` : ''}
 
 ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 

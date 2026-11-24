@@ -244,6 +244,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             if (!entry) return
             if (e.stats) entry.stats = e.stats
             if (e.reportId) entry.reportId = e.reportId
+            // v2.81：原文浏览器本地留存键（生成前自愈重传 — 服务端留存丢失时凭此取回）
+            if (e.sourceSha) entry.reportSha = e.sourceSha
             // v2.70：原文留存失败计数（有源文件但没拿到 reportId — 上传失败/超 32MB）
             if (enrichItems[i]?.rep && !e.reportId) uploadMissed++
           })

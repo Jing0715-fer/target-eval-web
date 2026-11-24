@@ -26,6 +26,9 @@ export const dynamic = 'force-dynamic'
 /** 单份导入报告体积上限（字符 — 与 ht-dashboard 的 REPORT_HTML_MAX_BYTES 同口径） */
 const MAX_HTML_CHARS = 32_000_000
 
+/** GET 校验单批 id 数上限（URL 长度护栏 — cuid 25 字符 × 60） */
+const VERIFY_IDS_MAX = 60
+
 interface UploadBody {
   fileName?: unknown
   html?: unknown
@@ -88,4 +91,56 @@ export async function POST(req: Request) {
     console.error('[ht-imported-report] 留存失败：', err instanceof Error ? err.message : String(err))
     return NextResponse.json({ ok: false, error: '报告原文留存失败（不影响导入 — 汇总弹出页将降级）' }, { status: 500 })
   }
+}
+
+/**
+ * GET /api/evaluate/ht-imported-report?ids=a,b,c — v2.81：批量校验导入报告的
+ * 服务端留存是否仍可读（记录在 + 归属匹配 + 落盘文件存在）。
+ *
+ * 汇总报告生成前前端调用（ensureImportedRetention）：missing 的 id 由前端凭
+ * 本地留存（内容哈希键）重新上传自愈 — 弹出页原文内嵌不再取决于导入那一
+ * 瞬间的上传成败，也不再受 DB 重置/实例回收影响。
+ */
+export async function GET(req: Request) {
+  const owner = getOwner(req)
+  const url = new URL(req.url)
+  const idsParam = url.searchParams.get('ids')?.trim()
+  if (!idsParam) {
+    return NextResponse.json({ ok: false, error: '缺少 ids 参数' }, { status: 400 })
+  }
+  const ids = [...new Set(idsParam.split(',').map(s => s.trim()).filter(Boolean))].slice(0, VERIFY_IDS_MAX)
+  if (ids.length === 0) {
+    return NextResponse.json({ ok: false, error: 'ids 参数为空' }, { status: 400 })
+  }
+  try {
+    await ensureImportedReportTable()
+  } catch (err) {
+    console.error('[ht-imported-report] 表自愈失败（校验）:', err instanceof Error ? err.message : String(err))
+    return NextResponse.json({ ok: false, error: '报告留存表初始化失败' }, { status: 500 })
+  }
+  let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string }> = []
+  try {
+    recs = await db.importedReport.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, ownerKey: true, htmlPath: true },
+    })
+  } catch (err) {
+    console.error('[ht-imported-report] 留存校验读取失败：', err instanceof Error ? err.message : String(err))
+    return NextResponse.json({ ok: false, error: '留存记录读取失败' }, { status: 500 })
+  }
+  const recById = new Map(recs.map(r => [r.id, r]))
+  const missing: string[] = []
+  await Promise.all(ids.map(async id => {
+    const rec = recById.get(id)
+    // 缺判定：无记录 / 他人留存 / 无路径 / 文件不在（DB 有行但磁盘丢失 — v2.80
+    // 前的老留存常见；统一交前端自愈重传）
+    if (!rec || !rec.htmlPath) { missing.push(id); return }
+    if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) { missing.push(id); return }
+    try {
+      await fs.access(rec.htmlPath)
+    } catch {
+      missing.push(id)
+    }
+  }))
+  return NextResponse.json({ ok: true, missing })
 }

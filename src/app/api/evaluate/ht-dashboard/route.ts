@@ -33,6 +33,7 @@ import {
   buildImportedRows,
   loadImportedReportHtml,
   backfillImportedStats,
+  backfillImportedUniprot,
   computeHtStats,
   generateHtDashboardReport,
   renderHtDashboardHtml,
@@ -507,12 +508,13 @@ async function runDashboardGeneration(ctx: {
       data: { status: 'error', error: msg.slice(0, 500), progress: null, updatedAt: new Date() },
     }).catch(() => undefined)
   }
-  // v2.76：全局进度百分比（进度条）— v2.80 阶段权重（基础版先行落盘后重标定）：
-  //  数据加载 2→15 / 导入留存规划 16→20 / 导入统计补解析 21→30（逐个 tick）/
-  //  批次统计 31→35 / zip 链接 33→35 / **基础版落盘 36→62（逐行 tick — 确定性
-  //  产物先交付）** / LLM 增强 63→93（心跳渐近推进）/ 增强版重写 94→99（仅
-  //  AI 有产出时）。各阶段仅推进到本阶段起始值（实际耗时未知），下一阶段消息
-  //  携带自身起始百分比自然接续。
+  // v2.76：全局进度百分比（进度条）— v2.81 阶段权重（新增导入靶点 UniProt 识别
+  //  回填段后重标定）：数据加载 2→15 / 导入留存规划 16→20 / 导入统计补解析
+  //  21→30（逐个 tick）/ 批次统计 31→35 / zip 链接 33→35 / 基础版落盘 36→56
+  //  （逐行 tick — 确定性产物先交付）/ **导入靶点 UniProt 序列识别 57→68
+  //  （逐靶点 tick — v2.81 新增，仅有待识别行时出现）** / LLM 增强 69→93
+  //  （心跳渐近推进）/ 增强版重写 94→99（仅 AI 有产出时）。各阶段仅推进到本
+  //  阶段起始值（实际耗时未知），下一阶段消息携带自身起始百分比自然接续。
   try {
     // v2.69：报告原文体积预算（作业报告 + 导入留存共用 — 弹出页内嵌总量护栏；
     // v2.71 起按 stat 字节分配，内容写盘时逐份延迟读取）
@@ -587,7 +589,7 @@ async function runDashboardGeneration(ctx: {
     //  最终版 — 用户永远能在几分钟内拿到看板。
     const ruleVerdicts = statRows.map(r => ruleVerdict(r))
     const baseWriteProgress = (msg: string, frac?: number): void => {
-      progressWithPhase(msg, frac != null ? 36 + Math.round(frac * 26) : 36)
+      progressWithPhase(msg, frac != null ? 36 + Math.round(frac * 20) : 36)
     }
     await writeHtDashboardHtmlFile({
       title,
@@ -613,6 +615,26 @@ async function runDashboardGeneration(ctx: {
       console.warn(`[ht-dashboard] 基础版检查点落库失败（${dashboardId} — 恢复交付不受影响）：`, err instanceof Error ? err.message : String(err))
     })
 
+    // ── v2.81：导入靶点 UniProt 序列识别回填（用户实测「117 靶点中 28 个序列
+    //    没有回填出 UniProt ID」）— 基础版已落盘交付后、AI 增强前执行：载入且无
+    //    UniProt 且带提交序列（≥30 aa）的行经 EBI BLAST 直查 UniProtKB 补做一次
+    //    身份识别（原运行为旧版本/当时检索患病 → 快照里没有 uniprotId），达
+    //    「85% 一致性 + 40% 覆盖」阈值回填 ID + 蛋白名/种属，行内徽标标注
+    //    「UniProt 序列匹配 N%」。有界（6 分钟总预算 / 单靶点 150s / 并发 4，结论
+    //    进程内缓存 — 重生成秒回填）— 预算耗尽或 EBI 不可达时剩余行保持原状，
+    //    不阻塞 AI 增强与增强版落盘；回填结果进 AI 报告上下文与增强版主表
+    //    （基础版不含 — 恢复交付时该部分缺失，可「重新生成汇总报告」补齐）。──
+    const uniPendingRows = allRows.filter(r =>
+      r.imported && !r.uniprotId && typeof r.sequence === 'string' && r.sequence.replace(/[^A-Za-z]/g, '').length >= 30)
+    if (uniPendingRows.length > 0) {
+      progressWithPhase(`导入靶点 UniProt 序列识别（0/${uniPendingRows.length}）· 基础版已就绪…`, 57)
+      const uniT0 = Date.now()
+      const uniResult = await backfillImportedUniprot(uniPendingRows, {
+        onProgress: (d, n, note) => progressWithPhase(`导入靶点 UniProt 序列识别 ${d}/${n} · ${note} · 基础版已就绪…`, 57 + Math.round((d / n) * 11)),
+      })
+      console.log(`[ht-dashboard] 导入靶点 UniProt 识别回填：${uniResult.backfilled}/${uniResult.tried} 个回填成功（未达阈值/失败 ${uniResult.failed}，预算跳过 ${uniResult.skippedByBudget}，缓存命中 ${uniResult.cacheHits}）· 耗时 ${Math.round((Date.now() - uniT0) / 1000)}s`)
+    }
+
     // ── AI 增强（LLM 每靶点结论重写 + 整体可行性报告 — 失败/超时静默降级）──
     // v2.74：LLM 阶段心跳进度 — 每靶点结论（≤60s）+ 整体报告（≤120s）叠加限流重试
     //  （20s/40s/60s/90s/120s 退避）时可静默数分钟，心跳每 5s 写一次带已等待秒数
@@ -620,17 +642,18 @@ async function runDashboardGeneration(ctx: {
     //  → 进度窗口持续重置）；文案附「基础版已就绪」— 用户知道看板已安全。
     const llmT0 = Date.now()
     const llmHeartbeat = setInterval(() => {
-      // v2.76：百分比渐近推进（63→93 永不越界）— LLM 总时长不可知（限流重退
-      //  可静默数分钟），线性会提前到顶显得「假完成」，渐近曲线持续前进又不过冲
+      // v2.76：百分比渐近推进（69→93 永不越界 — v2.81 起始由 63 → 69，前移
+      //  57-68 段给 UniProt 识别回填）— LLM 总时长不可知（限流重退可静默数分钟），
+      //  线性会提前到顶显得「假完成」，渐近曲线持续前进又不过冲
       const elapsedSec = (Date.now() - llmT0) / 1000
       progressWithPhase(
         `AI 撰写整体可行性报告（${statRows.length} 个靶点）· 基础版已就绪 · 已 ${Math.round(elapsedSec)}s`,
-        63 + 30 * (1 - Math.exp(-elapsedSec / 90)),
+        69 + 24 * (1 - Math.exp(-elapsedSec / 90)),
       )
     }, 5_000)
     let generated
     try {
-      progressWithPhase(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 63)
+      progressWithPhase(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 69)
       generated = await generateHtDashboardReport(statRows, stats, goal)
     } finally {
       clearInterval(llmHeartbeat)

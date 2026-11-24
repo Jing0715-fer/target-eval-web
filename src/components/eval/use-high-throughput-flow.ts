@@ -48,7 +48,7 @@ import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
-import { enrichImportedReports, parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
+import { enrichImportedReports, ensureImportedRetention, parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -939,6 +939,51 @@ export function useHighThroughputFlow() {
     runState.dashboardPendingSince = Date.now()
     saveHTRun(runState)
     setRun(cloneRun(runState))
+    // ── v2.81：导入留存校验 + 自愈重传（用户实测「117 个靶点的原文未能内嵌弹出页」
+    //    根治）— 生成前向服务端批量校验 importedReportId 留存是否仍可读；缺失/
+    //    丢失（导入时上传失败 / DB 重置 / 实例回收）的源文件凭 importedReportSha
+    //    从浏览器本地留存（ht-import-cache）取回 HTML 重新上传，回写运行记录 —
+    //    弹出页原文内嵌不再取决于导入那一瞬间的上传成败。校验端点不可达 → 视同
+    //    全部存活（服务端不可用时生成本就无法进行，不盲目全量重传）。──
+    if (importedBare.length > 0) {
+      const healRefs: Array<{ item: HTGroupItemState; bare: (typeof importedBare)[number] }> = []
+      for (const g of runState.groups) {
+        for (const it of g.items) {
+          if (it.imported !== true && !(it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))) continue
+          const bare = importedBare.find(b => b.label === it.label)
+          if (bare && (it.importedReportSha || it.importedReportId)) healRefs.push({ item: it, bare })
+        }
+      }
+      if (healRefs.length > 0) {
+        try {
+          const heal = await ensureImportedRetention(
+            healRefs.map(r => ({ reportId: r.item.importedReportId, sha: r.item.importedReportSha })),
+            {
+              onProgress: msg => {
+                if (runState.dashboardProgress === msg) return
+                runState.dashboardProgress = msg
+                setRun(cloneRun(runState))
+              },
+            },
+          )
+          if (heal.fixed.size > 0) {
+            let healedItems = 0
+            for (const r of healRefs) {
+              const fresh = r.item.importedReportSha ? heal.fixed.get(r.item.importedReportSha) : undefined
+              if (fresh) { r.item.importedReportId = fresh; r.bare.reportId = fresh; healedItems++ }
+            }
+            if (healedItems > 0) {
+              console.log(`[ht-dashboard] 导入留存自愈：重新上传 ${heal.reuploaded} 份源文件（覆盖 ${healedItems} 个靶点）`)
+              saveHTRun(runState)
+            }
+          }
+          runState.dashboardProgress = undefined
+        } catch {
+          runState.dashboardProgress = undefined
+          /* 自愈失败不阻塞生成 — 沿用既有留存（服务端若仍保有则照常内嵌） */
+        }
+      }
+    }
     try {
       // v2.61：各序列靶点的提交序列（jobId → 全文 — 汇总表「复制序列」按钮与全靶点
       // 完整报告页展示；≤600 条、总量 600K 字符防载荷膨胀 — 超出部分静默丢弃）。
@@ -1150,6 +1195,7 @@ export function useHighThroughputFlow() {
               it.importedFile = rep.fileName
               it.importedStats = rep.stats
               it.importedReportId = rep.reportId
+              it.importedReportSha = rep.reportSha
             }
           }
         }
@@ -1166,6 +1212,7 @@ export function useHighThroughputFlow() {
               it.importedFile = rep.fileName
               it.importedStats = rep.stats
               it.importedReportId = rep.reportId
+              it.importedReportSha = rep.reportSha
             }
           }
         }
@@ -1456,6 +1503,8 @@ export function useHighThroughputFlow() {
         enrichedTargets.forEach((it, i) => {
           if (enriched[i]?.stats) it.importedStats = enriched[i]!.stats
           if (enriched[i]?.reportId) it.importedReportId = enriched[i]!.reportId
+          // v2.81：原文浏览器本地留存键（生成前自愈重传）
+          if (enriched[i]?.sourceSha) it.importedReportSha = enriched[i]!.sourceSha
         })
         // v2.70：原文留存失败计数（有源文件但没拿到 reportId — 上传失败/超 32MB）
         result.uploadMissed = enriched.reduce(

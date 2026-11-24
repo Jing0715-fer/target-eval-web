@@ -763,6 +763,24 @@ export async function uploadImportedReport(fileName: string, html: string): Prom
   }
 }
 
+/** v2.81：批量校验导入报告的服务端留存是否仍可读（记录在 + 归属匹配 + 落盘
+ *  文件存在）— 返回缺失的 id 列表。端点不可达/响应异常返回 null（调用方视同
+ *  全部存活 — 不盲目触发全量重传，服务端不可用时生成本就无法进行）。 */
+export async function verifyImportedReports(ids: string[]): Promise<{ missing: string[] } | null> {
+  if (ids.length === 0) return { missing: [] }
+  try {
+    const res = await fetch(`/api/evaluate/ht-imported-report?ids=${encodeURIComponent(ids.slice(0, 60).join(','))}`, {
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; missing?: unknown } | null
+    if (!data?.ok || !Array.isArray(data.missing)) return null
+    return { missing: data.missing.filter((x): x is string => typeof x === 'string') }
+  } catch {
+    return null
+  }
+}
+
 /** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告）
  *  v2.71：progress = 生成阶段进度文案（running 期间轮询回传 — 横幅实时展示）
  *  v2.76：progressPct = 全局百分比 0-100（进度条；服务端各阶段权重标定后编码回传） */
