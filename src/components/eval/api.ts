@@ -877,7 +877,11 @@ export async function generateHtDashboard(input: {
   const llm = getLlmEngineOverride()
   // v2.74：POST 瞬态重试 — dev server 重编译 / 网关瞬断窗口内 fetch 直接抛
   //  "Failed to fetch"（v2.73 及之前 POST 一次网络抖动即整体判死，而服务端实际
-  //  生成得好好的 — 用户实测报错根因之一）。最多 3 次 × 5s；4xx 业务错误不重试。
+  //  生成得好好的 — 用户实测报错根因之一）。最多 3 次 × 5s；业务 4xx 不重试。
+  //  v2.75：404/405 也纳入瞬态重试 — 本端点的 POST 处理器永不返回 404/405（业务
+  //  错误只有 400/409/500），出现即框架层路由未就绪（dev server 重启窗口 /
+  //  部署中），重试可自愈（用户实测「统计看板生成失败（HTTP 404）」根因）；
+  //  重试耗尽仍 404 时报错文案附指引。
   const postOnce = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>
     fetch('/api/evaluate/ht-dashboard', {
       method: 'POST',
@@ -889,7 +893,7 @@ export async function generateHtDashboard(input: {
     for (let i = 0; i < 3; i++) {
       try {
         const r = await postOnce(extra)
-        if (r.status >= 500 && i < 2) { await new Promise(rs => setTimeout(rs, 5000)); continue }
+        if ((r.status >= 500 || r.status === 404 || r.status === 405) && i < 2) { await new Promise(rs => setTimeout(rs, 5000)); continue }
         return r
       } catch (e) {
         lastErr = e
@@ -912,7 +916,13 @@ export async function generateHtDashboard(input: {
     data = (await res.json().catch(() => null)) as typeof data
   }
   if (!res.ok || !data?.ok || !data.dashboard) {
-    throw new Error(data?.error ?? `统计看板生成失败（HTTP ${res.status}）`)
+    // v2.75：404 附明确指引 — 本端点 POST 永不合法返回 404（见上 post 注释），
+    //  重试耗尽仍 404 说明服务长时间未就绪（部署中/异常重启），告知用户稍后重试
+    //  而非让「HTTP 404」不知所云（用户实测反馈无法理解该错误）。
+    const hint = res.status === 404 || res.status === 405
+      ? ' — 服务暂不可达，可能正在重启或部署中；运行结果已保留，稍后打开该运行会自动重试，或点击「重新生成汇总报告」'
+      : ''
+    throw new Error(data?.error ?? `统计看板生成失败（HTTP ${res.status}${hint}）`)
   }
   if (data.dashboard.status !== 'running') return data.dashboard
   // POST 应答携带的恢复/跳过信息（GET 状态不回传 — 轮询终态后合并回结果供调用方提示）
@@ -948,6 +958,13 @@ export async function generateHtDashboard(input: {
       continue
     }
     if (d?.dashboard && d.dashboard.status !== 'running') return { ...d.dashboard, ...recoverInfo }
+    // v2.75：GET 返回 JSON 错误体（无 dashboard 字段 — 处理器 404「看板不存在」等）
+    //  → 快速失败，不再空转 10 分钟等超时。看板记录已不在服务器（实例回收/数据
+    //  重置/归属变更）时生成永远无法完成，早失败 + 明确文案优于超时；框架层瞬态
+    //  404（HTML 体 → d=null）不在此列，继续轮询等自愈。
+    if (d && !d.dashboard && !d.ok && typeof (d as { error?: unknown }).error === 'string') {
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成失败（${(d as { error: string }).error} — 服务端看板数据已不存在；运行结果不受影响，可点击「重新生成汇总报告」重建）`, ...recoverInfo }
+    }
     if (d?.dashboard?.progress) {
       input.onProgress?.(d.dashboard.progress)
       if (d.dashboard.progress !== lastProgress) {

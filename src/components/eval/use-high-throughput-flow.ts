@@ -101,6 +101,23 @@ function cloneRun(run: HTRunState): HTRunState {
   return JSON.parse(JSON.stringify(run)) as HTRunState
 }
 
+/** v2.75：该运行是否有可生成汇总报告的数据源 — 评估完成靶点（jobId）或任何形态的
+ *  导入载入靶点（与 finalizeHtDashboard 的 entries/importedBare 收集口径一致：
+ *  importedJobId（DB 恢复完整统计行）/ importedReportId·importedStats（解析报告的
+ *  完整统计行）/ 纯 imported 标记（bare 降级行 — 主表呈现 + 完成口径））。
+ *  此前 regenerateDashboard 守卫只认前三者，纯 bare 载入运行（报告无法解析且
+ *  原文留存失败）会误拒「无法生成汇总报告」。 */
+function hasDashboardSource(r: HTRunState): boolean {
+  return r.groups.some((g) => g.items.some((it) =>
+    (it.status === 'done' && it.jobId) ||
+    it.importedJobId ||
+    it.importedReportId ||
+    it.importedStats ||
+    it.imported === true ||
+    (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入')),
+  ))
+}
+
 /** v2.38：靶点有变动待评估 → 组回可执行态 + 汇总看板作废（下次自然完成重生成） */
 function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
   if (g.status === 'done' || g.status === 'canceled') {
@@ -287,6 +304,10 @@ export function useHighThroughputFlow() {
   const runRef = useRef<HTRunState | null>(null)
   /** v2.36：finalizeHtDashboard 的稳定引用（openRunById 自动续生成用 — 声明先于函数体） */
   const finalizeHtDashboardRef = useRef<(() => Promise<void>) | null>(null)
+  /** v2.75：本会话内已自动重试过汇总生成的运行 id（打开失败横幅的运行时自动重试
+   *  一次 — 每会话每运行只试一次，失败后靠横幅中的「重新生成」手动重试，避免反复
+   *  打开运行时无谓消耗 LLM 配额） */
+  const dashboardAutoRetriedRef = useRef<Set<string>>(new Set())
   /** v2.25：一次高通量运行的自动下载统一目录前缀 — 默认下载目录下新建文件夹，
    *  同次运行的全部报告（每靶点独立报告 + 合并报告）都落在同一文件夹内。
    *  命名：TargetEval_HT_日期_Ng（恢复运行/openRunById 时按 run 元数据重建，
@@ -1444,7 +1465,7 @@ export function useHighThroughputFlow() {
       toast({ title: '汇总报告生成中', description: '请等待当前生成完成后重试。' })
       return
     }
-    if (!r.groups.some((g) => g.items.some((it) => (it.status === 'done' && it.jobId) || it.importedJobId || it.importedReportId || it.importedStats))) {
+    if (!hasDashboardSource(r)) {
       toast({ title: '无法生成汇总报告', description: '该运行没有成功完成的靶点（全部失败/被取消/被跳过）— 可「重跑失败/不完整项」补齐后自动重新生成。', variant: 'destructive' })
       return
     }
@@ -1503,6 +1524,21 @@ export function useHighThroughputFlow() {
       void backfillBatchReportCache(reportIds)
       // v2.36：打开时发现汇总报告生成被刷新中断（done + pending 且无结果）→ 自动续生成
       if (r.status === 'done' && r.dashboardPending && !r.dashboardId) void finalizeHtDashboardRef.current?.()
+      // v2.75：打开时发现汇总报告生成失败（错误横幅持久化在 localStorage）→ 自动重试
+      //  一次自愈。背景：用户实测「统计看板生成失败（HTTP 404）」后，失败状态永久
+      //  挂在横幅上（刷新/重开都还在），且纯导入运行的「重新生成」按钮被 doneTargets>0
+      //  门控隐藏（v2.75 已改 settledTargets）— 用户既看不懂也无处可点。网络类失败
+      //  （HTTP 4xx/5xx/Failed to fetch/超时）多为服务重启窗口的瞬态，服务恢复后
+      //  重试即成功；每会话每运行只自动试一次（防 LLM 配额无谓消耗），失败后横幅
+      //  「重新生成汇总报告」按钮仍可手动重试。
+      if (
+        r.status === 'done' && !r.dashboardId && !r.dashboardPending &&
+        r.dashboardError && r.dashboardError !== '__done__' &&
+        !dashboardAutoRetriedRef.current.has(id) && hasDashboardSource(r)
+      ) {
+        dashboardAutoRetriedRef.current.add(id)
+        void finalizeHtDashboardRef.current?.()
+      }
       if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
     },
     [],

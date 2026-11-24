@@ -880,7 +880,11 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     : <>{run.dashboardError}（运行结果不受影响；可重新生成或重新下载 zip 重试打包可用的看板）</>}
                 </p>
               </div>
-              {run.dashboardError !== '__done__' && doneTargets > 0 && (
+              {/* v2.75：改用 settledTargets（评估完成 + 载入）— 纯导入运行（0 评估、
+                  全部载入）此前 doneTargets=0 导致按钮被隐藏，生成失败后横幅提示「可
+                  重新生成」却没有任何入口（用户实测「汇总报告生成失败 HTTP 404」后无
+                  法重试，只能反复看着失败横幅） */}
+              {run.dashboardError !== '__done__' && settledTargets > 0 && (
                 <Button
                   type="button"
                   variant="outline"
@@ -953,8 +957,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     : `重跑失败/不完整项（${retryableTargets}）`}
                 </Button>
               )}
-              {/* v2.44：无汇总报告状态的兜底入口（旧运行/生成标记被清 — 横幅未渲染时） */}
-              {!run.dashboardId && !run.dashboardPending && !run.dashboardError && doneTargets > 0 && (
+              {/* v2.44：无汇总报告状态的兜底入口（旧运行/生成标记被清 — 横幅未渲染时）；
+                  v2.75：doneTargets → settledTargets（纯导入运行同样可生成汇总） */}
+              {!run.dashboardId && !run.dashboardPending && !run.dashboardError && settledTargets > 0 && (
                 <Button
                   type="button"
                   variant="outline"
