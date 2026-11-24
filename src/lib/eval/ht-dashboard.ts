@@ -1118,10 +1118,15 @@ export async function markStalledHtDashboards(ownerKey?: string): Promise<number
   }).catch(() => [] as Array<{ id: string }>)
   let marked = 0
   for (const s of stalled) {
+    // v2.79：写库失败记日志（v2.78 静默吞掉 — 数据库写入受阻时历史列表里的
+    //  僵尸 running 项无从排查；GET 单查路径另有内存态兜底，不依赖本标记落库）
     const n: number = await db.htDashboard.updateMany({
       where: { id: s.id, status: 'running' },
       data: { status: 'error', error: stalledHtDashboardError().slice(0, 500), progress: null, updatedAt: new Date() },
-    }).then(r => r.count).catch(() => 0)
+    }).then(r => r.count).catch((err: unknown) => {
+      console.warn(`[ht-dashboard] 僵死看板清扫标记失败（${s.id}）：`, err instanceof Error ? err.message : String(err))
+      return 0
+    })
     marked += n
   }
   return marked

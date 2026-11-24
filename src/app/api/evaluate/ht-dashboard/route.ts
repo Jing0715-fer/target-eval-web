@@ -27,6 +27,7 @@ import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
 import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { runWithLlmOverride, sanitizeLlmOverride, getEngineSummary } from '@/lib/eval/llm-provider'
 import type { HtDashboard } from '@prisma/client'
+import { APP_VERSION } from '@/lib/version'
 import {
   loadHtDashboardRows,
   buildImportedRows,
@@ -363,6 +364,11 @@ export async function POST(req: Request) {
   //  + entries 内导入作业的「载入」徽标集
   const importedBare = importedBareSanitized
   const importedJobIds = importedJobIdSet
+  // v2.79：.catch 进程死亡保险 — runDashboardGeneration 全程 try/catch 理论不
+  //  会 reject，但 void 下的未捕获 rejection 会直接杀死整个 Node 进程（用户
+  //  环境「服务进程已中断」的最坏形态，与生成卡滞同担后果）；AsyncLocalStorage
+  //  机制层异常等不可预见路径在此兜底：记日志 + 尽力落库 error 终态（带
+  //  status:'running' 条件 — 不覆盖生成器已写入的终态）。
   void runWithLlmOverride(llmOverride, () => runDashboardGeneration({
     dashboardId: record.id,
     entries: kept,
@@ -374,10 +380,22 @@ export async function POST(req: Request) {
     importedBare,
     importedJobIds,
     owner: { key: owner.key, ipKey: owner.ipKey },
-  }))
+  })).catch((err: unknown) => {
+    console.error(`[ht-dashboard] 生成任务异常退出（${record.id}）：`, err)
+    void db.htDashboard.updateMany({
+      where: { id: record.id, status: 'running' },
+      data: {
+        status: 'error',
+        error: `生成异常退出：${err instanceof Error ? err.message : String(err)}`.slice(0, 500),
+        progress: null,
+        updatedAt: new Date(),
+      },
+    }).catch(() => undefined)
+  })
 
   return NextResponse.json({
     ok: true,
+    v: APP_VERSION,
     dashboard: {
       id: record.id,
       status: 'running',
@@ -414,6 +432,9 @@ async function runDashboardGeneration(ctx: {
   const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob, importedBare, importedJobIds, owner } = ctx
   const startedAt = Date.now()
   const progress = makeHtDashboardProgressWriter(dashboardId)
+  // v2.79：生成开始落 console（用户环境排查「服务进程已中断」— dev 控制台可见
+  //  生成是否真的启动、卡在哪个阶段、是否走到终态）
+  console.log(`[ht-dashboard] 统计看板生成开始（${dashboardId}）：${entries.filter(e => e.jobId).length} 个作业条目 + ${importedBare?.length ?? 0} 个导入载入靶点`)
   // ── v2.77：全局阶段看门狗（根除「10 分钟无进展」误报的最后一环）──
   //  v2.74 的 LLM 心跳只覆盖 LLM 阶段；其余阶段（数据加载/导入留存规划/批次
   //  统计/zip 规划/shell 渲染）无逐项 tick 时进度静默，前端 10 分钟窗口照旧
@@ -461,6 +482,7 @@ async function runDashboardGeneration(ctx: {
   }, 5_000)
   const fail = async (msg: string) => {
     clearInterval(phaseWatchdog)
+    console.error(`[ht-dashboard] 统计看板生成失败（${dashboardId}）：${msg.slice(0, 300)}`)
     await db.htDashboard.update({
       where: { id: dashboardId },
       data: { status: 'error', error: msg.slice(0, 500), progress: null, updatedAt: new Date() },
@@ -643,14 +665,42 @@ export async function GET(req: Request) {
   //  现在立即标记「生成中断」error 终态 — 前端马上拿到明确失败并自动重试一次
   //  （api.ts 识别前缀），用户无感恢复。竞态安全：updateMany 带 status:'running'
   //  条件，若生成器恰好在此刻完成/失败，其终态写入先到则本标记败退（重读回落）。
+  //
+  //  v2.79 漏洞补齐：v2.78 的标记写库失败（磁盘满/SQLite 被占用/旧库列缺失）时
+  //  被 .catch(()=>0) 静默吞掉 — 重读仍返 running，前端继续盲等 10 分钟黑盒
+  //  （用户实测复现路径之一）。现在写库失败时 JSON 状态路径直接以内存终态应答
+  //  「生成中断」（本次响应不落库；DB 恢复后由清扫/终态写入自愈）— 轮询方
+  //  在 90s 内必然拿到明确失败并自动重试，不再依赖落库成功。updatedAt 停滞
+  //  >90s 已证明生成进程不在（活着每 5s 写库），不会误伤活生成器。
   if (record.status === 'running' && Date.now() - record.updatedAt.getTime() > HT_DASHBOARD_STALL_MS) {
-    await db.htDashboard.updateMany({
-      where: { id: record.id, status: 'running' },
-      data: { status: 'error', error: stalledHtDashboardError().slice(0, 500), progress: null, updatedAt: new Date() },
-    }).catch(() => 0)
-    console.warn(`[ht-dashboard] 检测到僵死看板（running 且写入停滞 >${Math.round(HT_DASHBOARD_STALL_MS / 1000)}s — 生成进程已不存在）：${record.id}，已标记为「生成中断」`)
+    const stallErr = stalledHtDashboardError().slice(0, 500)
+    let markFailed = false
+    try {
+      await db.htDashboard.updateMany({
+        where: { id: record.id, status: 'running' },
+        data: { status: 'error', error: stallErr, progress: null, updatedAt: new Date() },
+      })
+    } catch (err) {
+      markFailed = true
+      console.error(`[ht-dashboard] 僵死看板标记落库失败（数据库写入受阻 — 磁盘满/库被占用/旧库缺列？）：${record.id}`, err instanceof Error ? err.message : String(err))
+    }
+    console.warn(`[ht-dashboard] 检测到僵死看板（running 且写入停滞 >${Math.round(HT_DASHBOARD_STALL_MS / 1000)}s — 生成进程已不存在）：${record.id}${markFailed ? '（标记落库失败 — 本次响应以内存态告知轮询方）' : '，已标记为「生成中断」'}`)
     // 重读落库终态（本标记生效 → error；生成器竞态先完成 → done/error 原值）
-    record = (await db.htDashboard.findUnique({ where: { id } }).catch(() => null)) ?? record
+    const reread = await db.htDashboard.findUnique({ where: { id } }).catch(() => null)
+    if (reread) record = reread
+    if (record.status === 'running' && !htmlView) {
+      return NextResponse.json({
+        ok: true,
+        v: APP_VERSION,
+        dashboard: {
+          id: record.id,
+          status: 'error',
+          title: record.title ?? '',
+          error: stallErr,
+          createdAt: record.createdAt.toISOString(),
+        },
+      })
+    }
   }
 
   if (url.searchParams.get('inline') === '1' || url.searchParams.get('download') === '1') {
@@ -734,6 +784,7 @@ export async function GET(req: Request) {
   }
   return NextResponse.json({
     ok: true,
+    v: APP_VERSION,
     dashboard: {
       id: record.id,
       status: record.status === 'done' ? 'done' : record.status === 'error' ? 'error' : 'running',

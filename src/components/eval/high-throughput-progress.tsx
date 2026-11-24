@@ -903,7 +903,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                 {run.dashboardProgress
                   ? '正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；大批次（百级靶点）报告原文逐份流式写入可能需要数分钟，期间可自由查看各组结果。'
-                  : '服务端正在加载靶点数据并规划报告内嵌（首条进度数秒内到达）；若服务进程在生成期间中断，系统会在 90 秒内自动检测并重新生成一次，无需手动处理 — 运行结果不受影响。'}
+                  : '服务端正在加载靶点数据并规划报告内嵌（首条进度数秒内到达）；若服务进程在生成期间中断或进度长时间停更，系统会在 3 分钟内自动检测并重新生成，无需手动处理 — 运行结果不受影响。'}
               </p>
             </div>
           ) : (

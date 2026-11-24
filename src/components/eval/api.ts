@@ -25,6 +25,7 @@ import {
   type LocalEngineStore,
 } from './llm-store-migration'
 import { getCachedJobDetail } from './job-cache'
+import { APP_VERSION } from '@/lib/version'
 
 /** GET /api/jobs — 最近作业列表 */
 export async function fetchJobList(): Promise<JobListItem[]> {
@@ -891,6 +892,19 @@ export interface HtDashboardGenerateInput {
  *  文案变更需两处同步）。 */
 const HT_STALL_ERROR_PREFIX = '生成中断：'
 
+/** v2.79：无进度心跳判定窗口（ms）。v2.77+ 服务端看门狗每 5s 心跳写库 → 活生成
+ *  期间进度文本/百分比至多 ~8s（心跳 5s + 轮询 3s）不变；连续 3 分钟（20 倍余量）
+ *  无任何变化且轮询持续成功 = 生成进程已死或服务端写入受阻（旧版 v2.77 服务端
+ *  无僵死检测 / v2.78+ 标记落库失败两类场景 — 用户实测「10 分钟无进展」仅剩的
+ *  两条通路）→ 快速失败并自动重新生成一次，不再盲等 10 分钟黑盒。 */
+const PROGRESS_STALL_MS = 180_000
+
+/** v2.79：错误文案自标注部署版本 — 用户回报错误文本即可定位前后端实际运行的
+ *  代码版本（服务端版本来自 GET 状态轮询回传的 v 字段；未观测到时仅标前端）。
+ *  「统计看板生成超时」在 v2.77 与 v2.78 文案完全相同但行为不同 — 拿不到版本
+ *  就无法定位是哪一版的行为（此前页脚版本号更停留在 v2.60.0 从未更新）。 */
+const verTag = (serverV?: string): string => `（前端 ${APP_VERSION}${serverV ? ` · 服务端 ${serverV}` : ''}）`
+
 export async function generateHtDashboard(input: HtDashboardGenerateInput): Promise<HtDashboardInfo> {
   for (let attempt = 0; ; attempt++) {
     let result: HtDashboardInfo
@@ -905,11 +919,12 @@ export async function generateHtDashboard(input: HtDashboardGenerateInput): Prom
       continue
     }
     // v2.78：服务端「生成中断」（僵死检测 — 生成进程被服务重启/OOM 带走）或
-    //  轮询阶段失联（retryable）→ 自动重新生成一次；其余错误原样返回
+    //  轮询阶段失联（retryable — v2.79 起含 3 分钟无进度心跳停滞与服务响应异常）
+    //  → 自动重新生成一次；其余错误原样返回
     const stalled = result.status === 'error' && typeof result.error === 'string' && result.error.startsWith(HT_STALL_ERROR_PREFIX)
     const lostServer = result.status === 'error' && result.retryable === true
     if (attempt >= 1 || !(stalled || lostServer)) return result
-    input.onProgress?.(stalled ? '服务重启导致生成中断 — 正在自动重新生成…' : '与服务器连接中断 — 正在自动重新生成…', undefined)
+    input.onProgress?.(stalled ? '服务重启导致生成中断 — 正在自动重新生成…' : '生成停滞/与服务器连接中断 — 正在自动重新生成…', undefined)
     await new Promise(r => setTimeout(r, 2000))
   }
 }
@@ -989,23 +1004,29 @@ async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Prom
   //    1 分钟持续不可解析即快速失败并给出准确归因；
   //  ⑥ 进度百分比变化同样重置窗口（文本含已等待秒数通常同步变化，双保险）；
   //  ⑦ 超时文案重写：服务端各阶段每 5s 心跳汇报，出现本提示即说明服务进程已
-  //    中断/卡滞（真卡滞由服务端 20 分钟看门狗先一步落库 error — 前端会立刻拿到）。
+  //    中断/卡滞（真卡滞由服务端 20 分钟看门狗先一步落库 error — 前端会立刻拿到）；
+  //  v2.79 ⑧：无进度窗口 10 分钟 → 3 分钟（PROGRESS_STALL_MS）+ retryable 自动重试
+  //    — v2.78 后用户仍复现「10 分钟无进展」：服务端僵死标记落库失败（磁盘满/
+  //    库被占用）时 v2.78 静默吞掉继续盲等；服务端代码为 v2.77（未重启/未拉取）
+  //    时无僵死检测可依赖。活生成器每 5s 心跳（20 倍余量）不可能 3 分钟静默 —
+  //    快速失败重试优于黑盒等待；⑨ 错误文案自标注前后端版本（verTag）。
   const t0 = Date.now()
   let lastProgress = ''
   let lastPct: number | null | undefined = null
   let lastProgressAt = Date.now()
   let netFails = 0
   let badResp = 0
+  let serverV: string | undefined // v2.79：最近一次轮询回传的服务端版本（verTag 用）
   for (;;) {
     await new Promise(r => setTimeout(r, 3000))
-    let d: { ok?: boolean; dashboard?: HtDashboardInfo } | null = null
+    let d: { ok?: boolean; v?: string; dashboard?: HtDashboardInfo } | null = null
     try {
       // v2.77 ④：30s 请求级超时（与服务端 3s 间隔轮询节奏匹配 — 正常响应 <100ms）
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), 30_000)
       try {
         d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store', signal: ctrl.signal })
-          .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
+          .then(x => x.json().catch(() => null)) as { ok?: boolean; v?: string; dashboard?: HtDashboardInfo } | null
       } finally {
         clearTimeout(timer)
       }
@@ -1015,20 +1036,22 @@ async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Prom
       if (netFails >= 20) {
         // v2.78 retryable：失联多为服务重启窗口（生成进程大概率已死 — 记录僵死）
         //  → 外层自动重新生成一次，恢复后无感续上
-        return { id: data.dashboard.id, status: 'error' as const, error: '与服务器失去连接（约 1 分钟内请求持续失败 — 服务可能重启中；生成可能仍在后台进行，恢复后可从历史重试或刷新查看）', retryable: true, ...recoverInfo }
+        return { id: data.dashboard.id, status: 'error' as const, error: `与服务器失去连接（约 1 分钟内请求持续失败 — 服务可能重启中；生成可能仍在后台进行，恢复后可从历史重试或刷新查看）${verTag()}`, retryable: true, ...recoverInfo }
       }
       continue
     }
     if (d === null) {
       // v2.77 ⑤：请求成功但响应体不可解析（框架层 404 HTML / 重编译窗口 / 网关
-      //  异常页）— 与网络中断分开归因，持续 ≈1 分钟即快速失败。
+      //  异常页）— 与网络中断分开归因，持续 ≈1 分钟即快速失败；v2.79：纳入
+      //  retryable（dev 重编译窗口结束后自动重新生成可无感恢复 — 与失联同口径）。
       badResp++
       if (badResp >= 20) {
-        return { id: data.dashboard.id, status: 'error' as const, error: '服务响应异常（约 1 分钟内状态查询持续返回不可解析内容 — 服务可能正在重启或重编译；生成可能仍在后台进行，稍后可从历史重试或刷新查看）', ...recoverInfo }
+        return { id: data.dashboard.id, status: 'error' as const, error: `服务响应异常（约 1 分钟内状态查询持续返回不可解析内容 — 服务可能正在重启或重编译；生成可能仍在后台进行，稍后可从历史重试或刷新查看）${verTag()}`, retryable: true, ...recoverInfo }
       }
       continue
     }
     badResp = 0
+    if (typeof d.v === 'string') serverV = d.v
     if (d?.dashboard && d.dashboard.status !== 'running') return { ...d.dashboard, ...recoverInfo }
     // v2.75：GET 返回 JSON 错误体（无 dashboard 字段 — 处理器 404「看板不存在」等）
     //  → 快速失败，不再空转 10 分钟等超时。看板记录已不在服务器（实例回收/数据
@@ -1037,7 +1060,7 @@ async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Prom
     if (d && !d.dashboard && !d.ok && typeof (d as { error?: unknown }).error === 'string') {
       // v2.78 retryable：看板记录已不在服务器（实例回收/数据重置）— 重新 POST
       //  即可整体重建（409 时走缓存快照两阶段恢复），外层自动重试一次
-      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成失败（${(d as { error: string }).error} — 服务端看板数据已不存在；运行结果不受影响，可点击「重新生成汇总报告」重建）`, retryable: true, ...recoverInfo }
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成失败（${(d as { error: string }).error} — 服务端看板数据已不存在；运行结果不受影响，可点击「重新生成汇总报告」重建）${verTag(serverV)}`, retryable: true, ...recoverInfo }
     }
     if (d?.dashboard?.progress) {
       input.onProgress?.(d.dashboard.progress, d.dashboard.progressPct)
@@ -1050,11 +1073,14 @@ async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Prom
       }
     }
     const now = Date.now()
-    if (now - lastProgressAt > 600_000) {
-      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（10 分钟无进展 — 服务端各阶段每 5 秒心跳汇报进度，出现本提示说明服务进程已中断或卡滞；生成可能仍在后台进行，运行结果不受影响，可稍后从历史重试或刷新查看）', ...recoverInfo }
+    if (now - lastProgressAt > PROGRESS_STALL_MS) {
+      // v2.79：无进度心跳 3 分钟 → 快速失败 + retryable（外层自动重新生成一次）。
+      //  本文案仅在重试也失败后才会呈现给用户（重试成功时错误被外层拦截）—
+      //  故可如实描述「已自动重新生成仍未恢复」。
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成停滞（连续 3 分钟无进度心跳 — 生成进程已中断或服务端状态写入受阻；已自动重新生成一次仍未恢复。运行结果不受影响，可稍后从历史重试或刷新查看）${verTag(serverV)}`, retryable: true, ...recoverInfo }
     }
     if (now - t0 > 1_800_000) {
-      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（已等待 30 分钟 — 生成可能仍在后台进行，运行结果不受影响；可稍后从历史重试或刷新查看）', ...recoverInfo }
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成超时（已等待 30 分钟 — 生成可能仍在后台进行，运行结果不受影响；可稍后从历史重试或刷新查看）${verTag(serverV)}`, ...recoverInfo }
     }
   }
 }
