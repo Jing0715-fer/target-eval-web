@@ -455,8 +455,21 @@ async function runDashboardGeneration(ctx: {
     const allRows = [...statRows, ...bareRows]
     progress('汇总批次统计…')
     const stats = computeHtStats(statRows, Math.max(0, jobCount - droppedImported), bareRows.length)
-    progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`)
-    const generated = await generateHtDashboardReport(statRows, stats, goal)
+    // v2.74：LLM 阶段心跳进度 — 每靶点结论（≤60s）+ 整体报告（≤120s）叠加限流重试
+    //  （20s/40s/60s/90s/120s 退避）时可静默数分钟，前端无进展判定会把仍在正常
+    //  生成的运行误判超时；心跳每 5s 写一次带已等待秒数的进度文本（progress 写入器
+    //  自带 1.5s 节流 — 文本变化即落库，前端轮询可见 → 进度窗口持续重置）。
+    const llmT0 = Date.now()
+    const llmHeartbeat = setInterval(() => {
+      progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）· 已 ${Math.round((Date.now() - llmT0) / 1000)}s`)
+    }, 5_000)
+    let generated
+    try {
+      progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`)
+      generated = await generateHtDashboardReport(statRows, stats, goal)
+    } finally {
+      clearInterval(llmHeartbeat)
+    }
     const engineSummary = await getEngineSummary()
     // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）；
     // v2.60：缓存恢复行无服务器报告文件，zip 内无对应文件 — 不挂离线链接
@@ -551,11 +564,49 @@ export async function GET(req: Request) {
     try {
       // v2.71：流式回送（百级靶点全量内嵌的看板可达数百 MB — readFile 整读会
       //  在生成刚结束时再制造一次堆内存尖峰，与生成期间同样的 OOM 风险）。
-      //  注意：createReadStream 不带 encoding — 产出 Buffer（Uint8Array）块；
-      //  带 'utf-8' 会产出字符串块，违反 Response body 字节流规范 → 中途 ECONNRESET
+      //  v2.74：弃用 Readable.toWeb — 它给非对象模式流挂 ByteLengthQueuingStrategy
+      //  （size = chunk.byteLength，内部 enqueueValueWithSize 对非数值 size 抛
+      //  RangeError "The argument 'size' is invalid"→ uncaughtException + "failed
+      //  to pipe response" + 读文件句柄泄漏 — 用户实测流式预览期间进程级崩溃），
+      //  改手写适配器：默认策略（size 恒 1，无 size 计算 → 该类崩溃免疫）、
+      //  cancel/error 路径显式 destroy 释放 fd、enqueue/close/error 全兜底
+      //  （客户端中途取消不再可能产生未捕获异常）。Buffer → Uint8Array 拷贝
+      //  与 toWeb 同口径（脱离池缓冲，避免响应生命周期外引用池块）。
       const { createReadStream } = await import('node:fs')
-      const { Readable } = await import('node:stream')
-      const stream = Readable.toWeb(createReadStream(record.htmlPath)) as unknown as ReadableStream<Uint8Array>
+      const nodeStream = createReadStream(record.htmlPath)
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let ended = false
+          nodeStream.pause()
+          nodeStream.on('data', (chunk: Buffer | string) => {
+            if (ended) return
+            try {
+              controller.enqueue(typeof chunk === 'string' ? new Uint8Array(Buffer.from(chunk, 'utf-8')) : new Uint8Array(chunk))
+              if ((controller.desiredSize ?? 1) <= 0) nodeStream.pause()
+            } catch {
+              // 控制器已关闭/出错（消费端取消竞态）— 停止读取并释放底层句柄
+              ended = true
+              nodeStream.destroy()
+            }
+          })
+          nodeStream.on('end', () => {
+            if (ended) return
+            ended = true
+            try { controller.close() } catch { /* 已关闭 */ }
+          })
+          nodeStream.on('error', (err: Error) => {
+            if (ended) return
+            ended = true
+            try { controller.error(err) } catch { /* 已关闭 */ }
+          })
+        },
+        pull() {
+          nodeStream.resume()
+        },
+        cancel(reason) {
+          nodeStream.destroy(reason instanceof Error ? reason : undefined)
+        },
+      })
       if (url.searchParams.get('download') === '1') {
         const base = (record.title ?? '').replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || `TargetEval_Dashboard_${record.id.slice(0, 8)}`
         return new Response(stream, {

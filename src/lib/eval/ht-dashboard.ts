@@ -64,8 +64,10 @@
  *    堆内存，117×1.5MB 运行实测峰值 >1.2GB → OOM-kill；新链路压测峰值
  *    26MB 且更快；③ writeHtDashboardHtmlFile 流式落盘（shell MARKER 拆分 +
  *    载荷逐行分块，读盘失败行回退重建页变体）；④ GET inline/download 流式
- *    回送（createReadStream → Readable.toWeb，Buffer 块 — 带 'utf-8' 编码
- *    会产出字符串块导致中途 ECONNRESET）；ht-archive zip 打包改有界前缀读
+ *    回送（createReadStream + 手写 web 流适配器（v2.74 — 弃用 Readable.toWeb，
+ *    其 ByteLengthQueuingStrategy 的 size 计算可抛 RangeError uncaughtException
+ *    并泄漏读文件句柄）；Buffer 块 — 带 'utf-8' 编码会产出字符串块导致中途
+ *    ECONNRESET）；ht-archive zip 打包改有界前缀读
  *    取（≤2MB — 百靶点看板数百 MB 不再整读入堆）；⑤ 生成进度：HtDashboard
  *    .progress 列（自愈补列）+ 各阶段节流写入，GET 轮询回传，「生成中」
  *    横幅实时展示；⑥ 前端轮询超时 240s → 600s（对齐服务端 maxDuration —

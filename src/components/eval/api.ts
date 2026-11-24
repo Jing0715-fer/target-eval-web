@@ -875,12 +875,29 @@ export async function generateHtDashboard(input: {
   onProgress?: (msg: string) => void
 }): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
-  const post = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>
+  // v2.74：POST 瞬态重试 — dev server 重编译 / 网关瞬断窗口内 fetch 直接抛
+  //  "Failed to fetch"（v2.73 及之前 POST 一次网络抖动即整体判死，而服务端实际
+  //  生成得好好的 — 用户实测报错根因之一）。最多 3 次 × 5s；4xx 业务错误不重试。
+  const postOnce = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>
     fetch('/api/evaluate/ht-dashboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...input, ...(llm ? { llm } : {}), ...extra }),
     })
+  const post = async (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) => {
+    let lastErr: unknown = null
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = await postOnce(extra)
+        if (r.status >= 500 && i < 2) { await new Promise(rs => setTimeout(rs, 5000)); continue }
+        return r
+      } catch (e) {
+        lastErr = e
+        if (i < 2) await new Promise(rs => setTimeout(rs, 5000))
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error('无法连接服务器（网络中断）')
+  }
   let res = await post()
   let data = (await res.json().catch(() => null)) as {
     ok?: boolean
@@ -904,20 +921,46 @@ export async function generateHtDashboard(input: {
     ...(data.dashboard.droppedCount != null ? { droppedCount: data.dashboard.droppedCount } : {}),
     ...(data.dashboard.droppedLabels?.length ? { droppedLabels: data.dashboard.droppedLabels } : {}),
   }
-  // 轮询至终态（LLM 整体报告 ≤2 分钟；失败/超时均如实返回 — 调用方降级提示）。
-  //  v2.71：① 超时 240s → 600s（对齐服务端 maxDuration — 大批次 LLM 重试叠加
-  //  原文内嵌时可超 4 分钟，旧上限把仍在正常生成的运行误报为「超时」；
-  //  ② running 期间回传服务端阶段进度（生成中横幅实时展示，不再黑盒等待）；
-  //  ③ 服务端短暂重启（如部署/OOM 后自愈）期间 fetch 失败 → 继续轮询不中断。
+  // 轮询至终态。v2.74 三重容错（修复用户实测「Failed to fetch」误报与长等待误判超时）：
+  //  ① 轮询 fetch 网络异常（dev 重编译 / 网关瞬断 / 服务器短暂重启自愈）→ 不再直接
+  //    抛出（v2.73 及之前 `.then()` 不捕获 fetch rejection — 一次网络抖动即把整个
+  //    生成判死「Failed to fetch」）；连续 20 次（≈60s）全失败才判定网络中断；
+  //  ② 超时改「无进展判定」：进度文本变化即重置 10 分钟窗口（服务端 v2.74 起 LLM
+  //    长等待期间每 5s 写心跳进度 — 不再出现「LLM 限流重试期间进度静默被误判超时」）；
+  //    硬上限 30 分钟；
+  //  ③ running 期间回传服务端阶段进度（v2.71 起 — 生成中横幅实时展示）。
   const t0 = Date.now()
+  let lastProgress = ''
+  let lastProgressAt = Date.now()
+  let netFails = 0
   for (;;) {
     await new Promise(r => setTimeout(r, 3000))
-    const d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store' })
-      .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
+    let d: { ok?: boolean; dashboard?: HtDashboardInfo } | null = null
+    try {
+      d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store' })
+        .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
+      netFails = 0
+    } catch {
+      netFails++
+      if (netFails >= 20) {
+        return { id: data.dashboard.id, status: 'error' as const, error: '与服务器失去连接（约 1 分钟内请求持续失败 — 服务可能重启中；生成可能仍在后台进行，恢复后可从历史重试或刷新查看）', ...recoverInfo }
+      }
+      continue
+    }
     if (d?.dashboard && d.dashboard.status !== 'running') return { ...d.dashboard, ...recoverInfo }
-    if (d?.dashboard?.progress) input.onProgress?.(d.dashboard.progress)
-    if (Date.now() - t0 > 600_000) {
-      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（10 分钟 — 生成可能仍在后台进行，可稍后从历史重试或刷新查看）', ...recoverInfo }
+    if (d?.dashboard?.progress) {
+      input.onProgress?.(d.dashboard.progress)
+      if (d.dashboard.progress !== lastProgress) {
+        lastProgress = d.dashboard.progress
+        lastProgressAt = Date.now()
+      }
+    }
+    const now = Date.now()
+    if (now - lastProgressAt > 600_000) {
+      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（10 分钟无进展 — 生成可能仍在后台进行，可稍后从历史重试或刷新查看）', ...recoverInfo }
+    }
+    if (now - t0 > 1_800_000) {
+      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（已等待 30 分钟 — 生成可能仍在后台进行，可稍后从历史重试或刷新查看）', ...recoverInfo }
     }
   }
 }
