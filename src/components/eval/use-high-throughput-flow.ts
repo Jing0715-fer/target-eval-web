@@ -174,6 +174,41 @@ function resetFailedForRetry(r: HTRunState): number {
   return n
 }
 
+/** v2.82：载入靶点中「导入报告未回填 UniProt ID」的判定（用户规则：这类报告的
+ *  原评估未识别出靶点身份 — 可选择不载入、重新评估，由当前更强的身份级联
+ *  （PDB 同源回填 → BLAST nr → EBI UniProt 匹配 → 精确序列匹配）补识别）。
+ *  无统计快照（报告解析不出数据）同样视为未回填 — 一并提供重新评估选项。 */
+export function importedItemLacksUniprot(it: HTGroupItemState): boolean {
+  if (it.imported !== true) return false
+  return !it.importedStats?.uniprotId
+}
+
+/** v2.82：批量重置「载入但未回填 UniProt」的靶点为待评估（脱离载入口径，导入
+ *  数据一并作废 — 与 toggleSkipItem 恢复路径同构）— 返回重置数与靶点名样本。 */
+function resetImportedWithoutUniprot(r: HTRunState): { reset: number; labels: string[] } {
+  let n = 0
+  const labels: string[] = []
+  for (const g of r.groups) {
+    for (const it of g.items) {
+      if (!importedItemLacksUniprot(it)) continue
+      it.status = 'pending'
+      it.skipNote = undefined
+      it.error = undefined
+      it.imported = undefined
+      it.importedJobId = undefined
+      it.importedFile = undefined
+      it.importedStats = undefined
+      it.importedReportId = undefined
+      it.importedReportSha = undefined
+      it.jobId = undefined // 防御性清引用（载入项本无 jobId — 与 resetFailedForRetry 同口径）
+      n++
+      if (labels.length < 5) labels.push(it.label)
+    }
+    if (g.items.some((it) => it.status === 'pending')) touchGroupForRerun(g, r)
+  }
+  return { reset: n, labels }
+}
+
 /** v2.41：从终态作业详情推导「LLM 报告未完整生成」的备注（完整时 undefined）。
  *  新作业读 summary.reportLlmMissing；旧版本作业（无该字段）从终态日志快照
  *  推导（管线日志行「LLM 报告章节 X「…」 失败: …」）— 存量运行同样能标可重跑 */
@@ -1453,6 +1488,28 @@ export function useHighThroughputFlow() {
   }, [ensureEditable, resumeRun])
 
   /**
+   * v2.82：重新评估「载入但导入报告未回填 UniProt ID」的靶点（用户规则）—
+   * 批量脱离载入口径（导入数据作废）重置为待评估并自动继续运行；当前身份
+   * 级联（PDB 同源回填 → BLAST nr → EBI UniProt 匹配 → 精确序列匹配）重识别，
+   * 报告/汇总表回填 UniProt 列与身份证据（含 BLAST 检索结果展示）。
+   */
+  const retryImportedWithoutUniprot = useCallback(async (): Promise<StartResult> => {
+    if (!ensureEditable()) return { ok: false, error: '运行进行中' }
+    const r = runRef.current
+    if (!r) return { ok: false, error: '没有打开的运行' }
+    const { reset, labels } = resetImportedWithoutUniprot(r)
+    if (reset === 0) {
+      toast({ title: '没有可重新评估的载入靶点', description: '载入的报告均已回填 UniProt ID（或没有载入靶点）。' })
+      return { ok: false, error: '没有待重评估的载入靶点' }
+    }
+    toast({
+      title: `已取消载入 ${reset} 个未回填 UniProt 的靶点，改为重新评估`,
+      description: `${labels.join('、')}${reset > labels.length ? ` 等 ${reset} 个` : ''} — 正在继续运行（当前身份识别级联将重新检索 PDB 同源 / BLAST nr / UniProt 库补识别）。`,
+    })
+    return resumeRun()
+  }, [ensureEditable, resumeRun])
+
+  /**
    * v2.38→v2.44 导入既有报告（zip 归档 / 单独 HTML 文件，可多选批量）— 匹配到的
    * 未评估靶点标 skipped（报告已在用户手里，不重复评估、不占配额）。返回匹配数
    * + 未命中诊断（v2.49）；失败抛错。匹配循环在模块级 applyArchiveSkips
@@ -1749,6 +1806,8 @@ export function useHighThroughputFlow() {
     skipGroupPending,
     /** v2.38 全局重跑失败项并自动继续运行 */
     retryFailed,
+    /** v2.82 重新评估「载入但导入报告未回填 UniProt」的靶点（批量脱离载入 → 继续运行） */
+    retryImportedWithoutUniprot,
     /** v2.38 导入既有报告（zip / 单独 HTML，可多选；匹配到的未评估靶点标 skipped） */
     importArchive,
     /** v2.44 手动重新生成汇总报告（回看已完成运行时） */

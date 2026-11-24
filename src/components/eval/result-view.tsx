@@ -1574,6 +1574,16 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             <BlastNrTable hits={nrHits} />
           </motion.div>
         )}
+        {/* v2.82：EBI UniProt 库序列匹配命中（身份级联 v2.44 通道 — 检索证据展示） */}
+        {(summary.uniprotBlastHits?.length ?? 0) > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, ease: 'easeOut' }}
+          >
+            <BlastNrTable hits={summary.uniprotBlastHits!} variant="uniprot" />
+          </motion.div>
+        )}
       </motion.section>
 
       {/* 9. 文献列表 */}

@@ -598,6 +598,40 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         </div>
       )}
 
+      {/* v2.82：导入报告未回填 UniProt 的靶点 — 可一键不载入、改为重新评估（用户规则：
+          这类报告的原评估未识别出靶点身份；重新评估由当前更强的身份级联补识别） */}
+      {(() => {
+        const noUniKeys = new Set(importedEntries.filter((e) => !e.stats?.uniprotId).map((e) => e.key))
+        if (noUniKeys.size === 0) return null
+        return (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-2">
+            <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <span className="text-[11.5px] leading-relaxed text-amber-700 dark:text-amber-300">
+              {noUniKeys.size} 份匹配的报告未回填 UniProt ID（原评估未识别出靶点身份）— 可不载入这些报告，启动后重新评估补识别（PDB 同源回填 → BLAST nr → UniProt 库序列匹配，报告会展示检索结果并回填 UniProt 列）。
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                // 与手动重新勾选同构：移出 skipKeys + 清「导入」标记 → 启动时正常评估
+                onSkipKeysChange(skipKeys.filter((k) => !noUniKeys.has(k)))
+                onImportedEntriesChange(importedEntries.filter((e) => !noUniKeys.has(e.key)))
+                toast({
+                  title: `已取消载入 ${noUniKeys.size} 个未回填 UniProt 的报告`,
+                  description: '对应靶点恢复勾选 — 启动后将重新评估（当前身份识别级联重检索，回填 UniProt 与检索证据）。',
+                })
+              }}
+              className="ml-auto h-7 gap-1 rounded-lg border-amber-500/40 px-2.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400"
+              title={`恢复勾选这 ${noUniKeys.size} 个靶点（不载入其导入的报告）— 启动后重新评估`}
+            >
+              <RotateCcw className="size-3" aria-hidden />
+              不载入这些报告 · 改为重新评估（{noUniKeys.size}）
+            </Button>
+          </div>
+        )
+      })()}
+
       {/* 分组预览：每组一行（组号 + 靶点 chips + 复合物/单靶点徽章）；v2.23.1 序列兜底组；
           v2.38 每靶点勾选框（未勾选 = 启动时跳过，保留在记录里可恢复） */}
       {(parsed.groups.length > 0 || seqGroups.length > 0) && (

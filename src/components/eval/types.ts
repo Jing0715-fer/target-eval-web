@@ -233,6 +233,8 @@ export interface MergedTargetLite {
   rangeOutsideBlastHits?: BlastHit[]
   /** v2.59：BLAST nr 全库检索命中（BlastNrTable 展示；历史报告缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.82：EBI UniProt 库序列匹配命中（BlastNrTable uniprot 变体展示；历史报告缺省） */
+  uniprotBlastHits?: BlastNrHit[]
   /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
@@ -709,6 +711,9 @@ export interface JobSummary {
   /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档，≤20 条；
    *  结果页 BLAST 章节展示前 5 条 + 折叠；nr 未执行/历史作业缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联 v2.44 通道实际
+   *  执行且有命中时存档，≤20 条；结果页 BLAST 章节展示；历史作业缺省） */
+  uniprotBlastHits?: BlastNrHit[]
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+） */
   blast?: BlastStatusInfo

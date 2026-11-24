@@ -508,30 +508,46 @@ async function runDashboardGeneration(ctx: {
       data: { status: 'error', error: msg.slice(0, 500), progress: null, updatedAt: new Date() },
     }).catch(() => undefined)
   }
-  // v2.76：全局进度百分比（进度条）— v2.81 阶段权重（新增导入靶点 UniProt 识别
-  //  回填段后重标定）：数据加载 2→15 / 导入留存规划 16→20 / 导入统计补解析
-  //  21→30（逐个 tick）/ 批次统计 31→35 / zip 链接 33→35 / 基础版落盘 36→56
-  //  （逐行 tick — 确定性产物先交付）/ **导入靶点 UniProt 序列识别 57→68
-  //  （逐靶点 tick — v2.81 新增，仅有待识别行时出现）** / LLM 增强 69→93
-  //  （心跳渐近推进）/ 增强版重写 94→99（仅 AI 有产出时）。各阶段仅推进到本
-  //  阶段起始值（实际耗时未知），下一阶段消息携带自身起始百分比自然接续。
+  // v2.76：全局进度百分比（进度条）— v2.82 阶段权重（AI 增强与 UniProt 识别
+  // 改并发后重标定）：数据加载 2→15 / 导入留存规划 16→20 / 导入统计补解析
+  // 21→30（逐个 tick）/ 批次统计 31→35 / zip 链接 33→35 / 基础版落盘 36→56
+  // （逐行 tick — 确定性产物先交付）/ **并发段 57→93**（导入靶点 UniProt 序列
+  // 识别 57→68 逐靶点 tick 与 LLM 增强 69→93 心跳渐近同时推进 — 合并进度行
+  // 展示，百分比取两者最大不回退）/ 增强版·终版重写 94→99。各阶段仅推进到
+  // 本阶段起始值（实际耗时未知），下一阶段消息携带自身起始百分比自然接续。
   try {
     // v2.69：报告原文体积预算（作业报告 + 导入留存共用 — 弹出页内嵌总量护栏；
     // v2.71 起按 stat 字节分配，内容写盘时逐份延迟读取）
     const reportBudget = { total: 0 }
+    // ── v2.82：导入报告原文留存**先行规划**（全部载入靶点 — 含 DB 仍在的原作业）──
+    //  用户上传的报告文件是弹出页的权威内容（「原封不动嵌入」）：此前只有「DB
+    //  无原作业」的导入靶点读回上传件，原作业仍在服务器的载入行弹出页用的是
+    //  服务器旧作业的报告文件（或其回收后的重建页）— 用户重新上传的报告被
+    //  静默忽略（实测「查看完整报告还是不是重新上传的完整报告」）。现改为：
+    //  ① 上传件优先参与预算（用户明确提供的内容优先于服务器历史文件）；
+    //  ② buildImportedRows 的行继续用上传件（无变化）；
+    //  ③ DB 恢复行（loadHtDashboardRows）经 importedUploadByLabel 同样挂上传件，
+    //     其自身作业报告文件不再规划（同靶点不双份占预算）。
+    const allImported = importedBare ?? []
+    const reportPathById = owner
+      ? await loadImportedReportHtml(allImported, owner, reportBudget)
+      : new Map<string, string>()
+    const importedUploadByLabel = new Map<string, string>()
+    for (const t of allImported) {
+      const p = t.reportId ? reportPathById.get(t.reportId) : undefined
+      if (p) importedUploadByLabel.set(t.label.slice(0, 60), p)
+    }
     progressWithPhase(`加载 ${entries.filter(e => e.jobId).length} 个靶点的评估数据…`, 2)
-    const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob, importedJobIds, reportBudget)
+    const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob, importedJobIds, reportBudget, importedUploadByLabel)
     // v2.68→v2.69：导入载入靶点 — DB 命中（完整统计已从原作业恢复）的同名靶点剔除
     //  （以 DB 恢复行为准 — 数据更全），仅保留未命中的：stats 存在 → 完整统计行
     //  （解析自导入报告文件，不依赖 DB 保留期），否则降级行（label 与运行侧条目
-    //  同源 — 去重键可靠）
+    //  同源 — 去重键可靠）。v2.82：原文留存已在上方为**全部**载入靶点先行规划
+    //  （reportPathById 含 DB 恢复行的上传件 — 该行弹出页经 importedUploadByLabel
+    //  挂上传件），此处不再重复规划。
     const restoredLabels = new Set(rows.filter(r => r.imported).map(r => r.label))
-    const pendingImported = (importedBare ?? []).filter(t => !restoredLabels.has(t.label.slice(0, 60)))
-    if (pendingImported.length > 0) progressWithPhase(`规划 ${pendingImported.length} 个导入报告的原文留存…`, 16)
-    // v2.69：导入报告原文留存规划（归属校验 + 体积预算 — 弹出页内嵌报告原文）
-    const reportPathById = owner
-      ? await loadImportedReportHtml(pendingImported, owner, reportBudget)
-      : new Map<string, string>()
+    const pendingImported = allImported.filter(t => !restoredLabels.has(t.label.slice(0, 60)))
+    if (pendingImported.length > 0) progressWithPhase(`核对 ${pendingImported.length} 个导入报告的原文留存…`, 16)
     // v2.72：服务端补解析（客户端 enrich 解析失败的降级行兜底 — 修复「报告打开
     //  正常但表格评分列为空」：读留存原文前缀，同一解析器 + 提交序列 SHA/容差
     //  定位，命中即回填 stats → 完整统计行，与本次评估同权参与统计）
@@ -615,56 +631,88 @@ async function runDashboardGeneration(ctx: {
       console.warn(`[ht-dashboard] 基础版检查点落库失败（${dashboardId} — 恢复交付不受影响）：`, err instanceof Error ? err.message : String(err))
     })
 
-    // ── v2.81：导入靶点 UniProt 序列识别回填（用户实测「117 靶点中 28 个序列
-    //    没有回填出 UniProt ID」）— 基础版已落盘交付后、AI 增强前执行：载入且无
-    //    UniProt 且带提交序列（≥30 aa）的行经 EBI BLAST 直查 UniProtKB 补做一次
-    //    身份识别（原运行为旧版本/当时检索患病 → 快照里没有 uniprotId），达
-    //    「85% 一致性 + 40% 覆盖」阈值回填 ID + 蛋白名/种属，行内徽标标注
-    //    「UniProt 序列匹配 N%」。有界（6 分钟总预算 / 单靶点 150s / 并发 4，结论
-    //    进程内缓存 — 重生成秒回填）— 预算耗尽或 EBI 不可达时剩余行保持原状，
-    //    不阻塞 AI 增强与增强版落盘；回填结果进 AI 报告上下文与增强版主表
-    //    （基础版不含 — 恢复交付时该部分缺失，可「重新生成汇总报告」补齐）。──
+    // ── v2.82：AI 增强 与 导入靶点 UniProt 序列识别回填**并发执行**（两任务同时
+    //    开跑，AI 先完成即立即写增强版，回填结束再写终版）──
+    // 背景：v2.81 把 UniProt 回填（6 分钟预算）串行排在 AI 增强（数分钟）之前 —
+    //  进程不稳的环境里（用户实测生成期间反复被杀）AI 永远等不到执行窗口，基础
+    //  版恢复交付虽保住统计，但 AI 报告与回填双双缺失（「LLM 部分好像也没有
+    //  生成」+「部分序列没有回填出 UniProt ID」串行链路的直接症状）。并发后：
+    //  ① 总时长从两者相加（≈10 分钟）缩短为取大（≈6 分钟）— 进程死亡窗口减半；
+    //  ② AI 先完成即**立即原子写增强版** — 此后进程死亡，磁盘上已是含 AI 报告
+    //    的完整版本（回填进行到哪算哪，终版在两任务都结束后补写）；
+    //  ③ 回填有产出而 AI 失败时也写终版（基础版 + 回填的 UniProt 列）— v2.81
+    //    承认的缺口「基础版不含回填，恢复交付时缺失」一并补上。
+    // 两任务都是网络型负载（LLM API / EBI BLAST），互不抢占；row 对象的并发
+    //  变更（回填写 uniprotId）与逐行序列化在 JS 单线程下各自原子，写盘取到的
+    //  是写入瞬间的快照 — 不存在撕裂状态。
+    // 回填本体（v2.81）：载入且无 UniProt 且带提交序列（≥30 aa）的行经 EBI
+    //  BLAST 直查 UniProtKB 补做一次身份识别（85% 一致性 + 40% 覆盖阈值回填
+    //  ID + 蛋白名/种属；6 分钟总预算 / 单靶点 150s / 并发 4 / 结论进程内缓存）。
     const uniPendingRows = allRows.filter(r =>
       r.imported && !r.uniprotId && typeof r.sequence === 'string' && r.sequence.replace(/[^A-Za-z]/g, '').length >= 30)
-    if (uniPendingRows.length > 0) {
-      progressWithPhase(`导入靶点 UniProt 序列识别（0/${uniPendingRows.length}）· 基础版已就绪…`, 57)
-      const uniT0 = Date.now()
-      const uniResult = await backfillImportedUniprot(uniPendingRows, {
-        onProgress: (d, n, note) => progressWithPhase(`导入靶点 UniProt 序列识别 ${d}/${n} · ${note} · 基础版已就绪…`, 57 + Math.round((d / n) * 11)),
-      })
-      console.log(`[ht-dashboard] 导入靶点 UniProt 识别回填：${uniResult.backfilled}/${uniResult.tried} 个回填成功（未达阈值/失败 ${uniResult.failed}，预算跳过 ${uniResult.skippedByBudget}，缓存命中 ${uniResult.cacheHits}）· 耗时 ${Math.round((Date.now() - uniT0) / 1000)}s`)
+    const uniT0 = Date.now()
+    // 并发进度：两任务的阶段文本合并单行展示（百分比取两者最大 — 单调不回退；
+    //  看门狗以文本变化为准，AI 心跳每 5s 持续驱动）
+    let uniPhaseNote = ''
+    let aiPhaseNote = ''
+    let combinedPct = 57
+    let uniSettled = false
+    const pushCombinedProgress = (): void => {
+      const parts = [uniPhaseNote, aiPhaseNote].filter(Boolean)
+      progressWithPhase(
+        `${parts.length ? parts.join(' · ') : `AI 撰写整体可行性报告（${statRows.length} 个靶点）`} · 基础版已就绪`,
+        Math.round(combinedPct),
+      )
     }
+    const bumpPct = (p: number): void => { combinedPct = Math.max(combinedPct, Math.min(93, p)) }
+    // 任务 A：导入靶点 UniProt 识别回填（先启动不等待）
+    const uniTask: Promise<{ tried: number; backfilled: number; failed: number; skippedByBudget: number; cacheHits: number }> | null =
+      uniPendingRows.length > 0
+        ? (async () => {
+            try {
+              uniPhaseNote = `UniProt 识别 0/${uniPendingRows.length}`
+              pushCombinedProgress()
+              return await backfillImportedUniprot(uniPendingRows, {
+                onProgress: (d, n, note) => {
+                  uniPhaseNote = `UniProt 识别 ${d}/${n}（${note}）`
+                  bumpPct(57 + (d / n) * 11)
+                  pushCombinedProgress()
+                },
+              })
+            } finally {
+              uniSettled = true
+            }
+          })()
+        : null
 
-    // ── AI 增强（LLM 每靶点结论重写 + 整体可行性报告 — 失败/超时静默降级）──
-    // v2.74：LLM 阶段心跳进度 — 每靶点结论（≤60s）+ 整体报告（≤120s）叠加限流重试
-    //  （20s/40s/60s/90s/120s 退避）时可静默数分钟，心跳每 5s 写一次带已等待秒数
-    //  的进度文本（progress 写入器自带 1.5s 节流 — 文本变化即落库，前端轮询可见
-    //  → 进度窗口持续重置）；文案附「基础版已就绪」— 用户知道看板已安全。
+    // ── 任务 B：AI 增强（LLM 每靶点结论重写 + 整体可行性报告 — 失败/超时静默
+    //    降级）─ 心跳每 5s 写带已等待秒数的合并进度（LLM 限流退避可静默数分钟，
+    //    进度窗口持续重置；文案随并发任务动态组合）──
     const llmT0 = Date.now()
     const llmHeartbeat = setInterval(() => {
-      // v2.76：百分比渐近推进（69→93 永不越界 — v2.81 起始由 63 → 69，前移
-      //  57-68 段给 UniProt 识别回填）— LLM 总时长不可知（限流重退可静默数分钟），
-      //  线性会提前到顶显得「假完成」，渐近曲线持续前进又不过冲
       const elapsedSec = (Date.now() - llmT0) / 1000
-      progressWithPhase(
-        `AI 撰写整体可行性报告（${statRows.length} 个靶点）· 基础版已就绪 · 已 ${Math.round(elapsedSec)}s`,
-        69 + 24 * (1 - Math.exp(-elapsedSec / 90)),
-      )
+      aiPhaseNote = `AI 撰写整体可行性报告（${statRows.length} 个靶点）已 ${Math.round(elapsedSec)}s`
+      // v2.76 渐近推进（69→93 永不越界）— LLM 总时长不可知，线性会提前到顶
+      bumpPct(69 + 24 * (1 - Math.exp(-elapsedSec / 90)))
+      pushCombinedProgress()
     }, 5_000)
+    aiPhaseNote = `AI 撰写整体可行性报告（${statRows.length} 个靶点）`
+    pushCombinedProgress()
     let generated
     try {
-      progressWithPhase(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 69)
       generated = await generateHtDashboardReport(statRows, stats, goal)
     } finally {
       clearInterval(llmHeartbeat)
     }
 
-    // ── AI 有产出 → 增强版原子重写（任意时刻路径上都是完整文件）；全部失败 →
-    //  基础版文件即最终版（跳过重写 — 不因 AI 不可用多花一次全量落盘）──
+    // ── 写盘策略（v2.82 两段式）：AI 有产出且回填仍在跑 → **立即**写增强版（不
+    //  等回填 — 进程死亡时磁盘上已是含 AI 报告的版本）；回填先于 AI 完成（缓存
+    //  命中秒回填的常态）则跳过本段，由下方终版一次写入。全部失败（AI 无产出且
+    //  无回填）→ 基础版文件即最终版，不多花一次全量落盘。──
     const aiEnhanced = generated.ok || generated.verdicts.some(v => v.source === 'llm')
-    if (aiEnhanced) {
-      progressWithPhase('AI 增强完成 — 写入增强版看板…', 94)
-      const enhancedWriteProgress = (msg: string, frac?: number): void => {
+    let enhancedWritten = false
+    const writeEnhanced = async (label: string): Promise<void> => {
+      const writeProgress = (msg: string, frac?: number): void => {
         progressWithPhase(msg, frac != null ? 94 + Math.round(frac * 5) : 94)
       }
       await writeHtDashboardHtmlFile({
@@ -680,7 +728,28 @@ async function runDashboardGeneration(ctx: {
         origin: ctx.origin,
         generatedAt,
         excelRows,
-      }, htmlPath, enhancedWriteProgress)
+      }, htmlPath, writeProgress)
+      void label
+    }
+    if (aiEnhanced && !uniSettled) {
+      progressWithPhase('AI 增强完成 — 写入增强版看板（UniProt 识别仍在进行）…', 94)
+      await writeEnhanced('v1')
+      enhancedWritten = true
+    }
+    // 回填收尾：等任务 A 结束；有产出即写终版（AI 有产出 → 增强版 + 全部回填；
+    //  AI 失败 → 基础版 + 回填的 UniProt 列 — 补上 v2.81「AI 失败时回填不落盘」
+    //  的缺口；AI 失败且回填无产出 → 基础版即终版，不重写）
+    let uniBackfilled = 0
+    let uniLog = '无待识别载入靶点'
+    if (uniTask) {
+      const uniResult = await uniTask
+      uniBackfilled = uniResult.backfilled
+      uniLog = `${uniResult.backfilled}/${uniResult.tried} 个回填成功（未达阈值/失败 ${uniResult.failed}，预算跳过 ${uniResult.skippedByBudget}，缓存命中 ${uniResult.cacheHits}）`
+      console.log(`[ht-dashboard] 导入靶点 UniProt 识别回填：${uniLog} · 耗时 ${Math.round((Date.now() - uniT0) / 1000)}s`)
+    }
+    if (uniBackfilled > 0 || (aiEnhanced && !enhancedWritten)) {
+      progressWithPhase(uniBackfilled > 0 ? '写入终版看板（AI 增强 + UniProt 回填齐备）…' : 'AI 增强完成 — 写入增强版看板…', 94)
+      await writeEnhanced('final')
     }
     await db.htDashboard.update({
       where: { id: dashboardId },
@@ -698,7 +767,7 @@ async function runDashboardGeneration(ctx: {
       },
     })
     clearInterval(phaseWatchdog)
-    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· ${aiEnhanced ? `AI 增强${generated.ok ? '完整' : '部分'}` : '基础版（AI 不可用降级）'} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s${watchdogGivenUp ? '（看门狗曾判卡滞 — 本次完成已自愈覆盖）' : ''}`)
+    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· ${aiEnhanced ? `AI 增强${generated.ok ? '完整' : '部分'}` : '基础版（AI 不可用降级）'} · UniProt 识别回填 ${uniLog} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s${watchdogGivenUp ? '（看门狗曾判卡滞 — 本次完成已自愈覆盖）' : ''}`)
   } catch (err) {
     await fail(err instanceof Error ? err.message : String(err))
   }

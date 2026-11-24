@@ -54,6 +54,7 @@ import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import { EvalLogConsole } from './log-console'
 import { ProgressPanel } from './progress-panel'
 import type { BatchItem, BatchState } from './use-evaluation-flow'
+import { importedItemLacksUniprot } from './use-high-throughput-flow'
 import type { useHighThroughputFlow } from './use-high-throughput-flow'
 import type { HTGroupState, JobDetail } from './types'
 
@@ -210,6 +211,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const incompleteTargets = allItems.filter((it) => it.status === 'done' && it.reportIncomplete).length
   /** v2.41：全局重跑入口的靶点数（失败/中断 + 报告不完整） */
   const retryableTargets = failedTargets + incompleteTargets
+  /** v2.82：载入靶点中导入报告未回填 UniProt ID 的数（可批量不载入、重新评估 —
+   *  原评估未识别出靶点身份；当前身份级联更强，重评估可回填） */
+  const importedNoUniprotTargets = allItems.filter((it) => importedItemLacksUniprot(it)).length
   /** v2.73：恢复后仍需评估的靶点数（pending + canceled — 恢复时 canceled 重置为
    *  pending 重新评估）。0 = 全部靶点已了结（完成/载入/手动跳过），点击「继续
    *  运行」即刻完成并直接生成汇总报告。 */
@@ -482,6 +486,20 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   : `重跑失败/不完整项（${retryableTargets}）并继续`}
               </Button>
             )}
+            {/* v2.82：用户规则 — 载入但未回填 UniProt 的靶点可批量不载入、重新评估 */}
+            {importedNoUniprotTargets > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void flow.retryImportedWithoutUniprot()}
+                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，报告回填 UniProt 与检索证据`}
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                {`不载入未回填 UniProt 的报告 · 重新评估（${importedNoUniprotTargets}）`}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -542,6 +560,20 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 {incompleteTargets > 0 && failedTargets === 0
                   ? `重跑报告不完整项（${incompleteTargets}）并继续`
                   : `重跑失败/不完整项（${retryableTargets}）并继续`}
+              </Button>
+            )}
+            {/* v2.82：用户规则 — 载入但未回填 UniProt 的靶点可批量不载入、重新评估 */}
+            {importedNoUniprotTargets > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void flow.retryImportedWithoutUniprot()}
+                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，报告回填 UniProt 与检索证据`}
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                {`不载入未回填 UniProt 的报告 · 重新评估（${importedNoUniprotTargets}）`}
               </Button>
             )}
             <Button
@@ -864,6 +896,21 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 <RotateCcw className="size-3.5" aria-hidden />
                 重新生成
               </Button>
+              {/* v2.82：用户规则 — 载入但未回填 UniProt 的靶点可批量不载入、重新评估 */}
+              {importedNoUniprotTargets > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={run.dashboardPending}
+                  onClick={() => void flow.retryImportedWithoutUniprot()}
+                  className="h-8 gap-1.5 rounded-lg border-emerald-500/40 px-3 text-[12px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                  title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，评估完成后自动重新生成汇总报告`}
+                >
+                  <RotateCcw className="size-3.5" aria-hidden />
+                  {`不载入未回填 UniProt 的报告 · 重新评估（${importedNoUniprotTargets}）`}
+                </Button>
+              )}
             </>
           ) : run.dashboardPending ? (
             <div className="min-w-0 flex-1">

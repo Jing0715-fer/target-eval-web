@@ -410,6 +410,11 @@ export async function loadHtDashboardRows(
   sequencesByJob?: Map<string, string>,
   importedJobIds?: Set<string>,
   reportBudget?: { total: number },
+  /** v2.82：导入报告原文路径（运行条目标签 → 上传留存的磁盘路径）— 用户明确
+   *  上传的报告文件是弹出页的权威内容（「原封不动嵌入」）：DB 恢复行（原作业
+   *  仍在服务器）的弹出页也改用上传件，且不再为该作业规划自身的报告文件
+   *  （预算让给上传件 — 同一靶点不双份占用 192MB 总量）。 */
+  importedUploadByLabel?: Map<string, string>,
 ): Promise<{ rows: HtDashboardRow[]; jobCount: number }> {
   const rows: HtDashboardRow[] = []
   // v2.69：可选的外部预算（与导入报告原文留存共用总量 — 调用方传入；缺省独立预算）
@@ -422,12 +427,22 @@ export async function loadHtDashboardRows(
     : []
   const jobById = new Map(jobs.map(j => [j.id, j]))
   // v2.71：报告原文 — stat 预检 + 预算分配（条目顺序 = 旧版串行优先级；内容不读）
+  // v2.82：导入靶点已上传报告原文的 — 该作业自身的报告文件不再规划（弹出页用
+  //  上传件；预算省下 — 上传件已在 loadImportedReportHtml 侧优先分配）
   const seenJobIds = new Set<string>()
   const reportCandidates: Array<{ key: string; path: string }> = []
+  const uploadPathByJob = new Map<string, string>()
   for (const e of jobEntries) {
     const j = jobById.get(e.jobId)
     if (!j || j.status !== 'done' || !j.reportPath || seenJobIds.has(j.id)) continue
     seenJobIds.add(j.id)
+    const uploaded = importedJobIds?.has(j.id) && e.label
+      ? importedUploadByLabel?.get(e.label.slice(0, 60))
+      : undefined
+    if (uploaded) {
+      uploadPathByJob.set(j.id, uploaded)
+      continue
+    }
     reportCandidates.push({ key: j.id, path: j.reportPath })
   }
   const plan = await planReportFiles(reportCandidates, budget)
@@ -455,8 +470,10 @@ export async function loadHtDashboardRows(
         fromArchive: undefined,
         sequence: sequencesByJob?.get(job.id) ?? null,
         // v2.63：报告文件原文（与下载的单独报告完全一致）— 丢失/超预算时回退 markdown 重建页；
-        // v2.71：只传路径（延迟读取 — stat/预算预检通过才在此）
-        reportHtmlPath: reportPathByJob.get(job.id) ?? null,
+        // v2.71：只传路径（延迟读取 — stat/预算预检通过才在此）；
+        // v2.82：导入靶点带上传件时弹出页改用上传的报告原文（原封不动嵌入 —
+        //  用户上传的文件优先于服务器旧作业的报告文件；后者可能已回收/旧版本）
+        reportHtmlPath: uploadPathByJob.get(job.id) ?? reportPathByJob.get(job.id) ?? null,
         imported: importedJobIds?.has(job.id) ? true : undefined,
       })
       if (row) rows.push(row)
@@ -877,9 +894,11 @@ export function ruleVerdict(r: HtDashboardRow): HtVerdict {
 
 // ─── LLM 整体可行性报告 ───────────────────────────────────────────────────────
 
-/** 行摘要（LLM prompt 用 — 每行一段紧凑文本） */
+/** 行摘要（LLM prompt 用 — 每行一段紧凑文本）
+ *  v2.82：附 UniProt ID（回填/识别结论进入 AI 报告上下文 — 并发段回填到哪算哪，
+ *  缓存命中的行在 AI 调用前已就位） */
 function rowDigest(r: HtDashboardRow, verdict: HtVerdict): string {
-  return `- ${r.label}${r.range ? `（残基 ${r.range[0]}-${r.range[1]}）` : ''}：总分 ${r.overall}/10（X ${r.xray}/C ${r.cryoem}/N ${r.nmr}）；直接结构 ${r.directPdbCount}${r.blastHitCount ? `，同源 ${r.blastHitCount}` : ''}；覆盖 ${r.coverage}%${r.bestResolution != null ? `；最佳 ${r.bestResolution}Å` : ''}；结论：${verdict.line.slice(0, 60)}`
+  return `- ${r.label}${r.range ? `（残基 ${r.range[0]}-${r.range[1]}）` : ''}${r.uniprotId ? `（UniProt ${r.uniprotId}）` : ''}：总分 ${r.overall}/10（X ${r.xray}/C ${r.cryoem}/N ${r.nmr}）；直接结构 ${r.directPdbCount}${r.blastHitCount ? `，同源 ${r.blastHitCount}` : ''}；覆盖 ${r.coverage}%${r.bestResolution != null ? `；最佳 ${r.bestResolution}Å` : ''}；结论：${verdict.line.slice(0, 60)}`
 }
 
 export interface HtDashboardGeneration {
@@ -1909,7 +1928,7 @@ tr.mt-row:hover td{background:#fbfdfc}
 </div>
 
 ${recoveredCount > 0 ? `<div class="warn" style="margin:-14px 0 22px">数据恢复说明：${recoveredCount} 个靶点的统计数据来自浏览器本地缓存快照恢复（服务端作业已过期或实例回收）。这些靶点的评分、计数与结论完整可用，评估正文经「完整报告」弹出页提供；但在线/离线报告链接不可用（服务器无报告文件）。其余 ${rows.filter(r => !r.fromArchive).length} 个靶点数据完整来自服务器。</div>` : ''}
-${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计${rows.some(r => r.importedFromFile && rowHasReportHtml(r)) ? '，「完整报告」弹出页内嵌导入的报告原文' : ''}）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && rowHasReportHtml(r)) ? '或「完整报告」弹出页' : ''}）` : ''}${rows.some(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile) ? `；${rows.filter(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile).length} 个的原文未能内嵌弹出页（超出体积预算或服务端留存不可用且本地留存未能自愈 — 完整原文可直接打开导入的报告文件查看；重新导入报告文件后「重新生成汇总报告」可恢复内嵌）` : ''}。</div>` : ''}
+${stats.importedTargets > 0 ? `<div class="warn" style="margin:-14px 0 22px">载入说明：${stats.importedTargets} 个靶点已载入导入的既有报告（本次运行未重复评估）${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? ` — 其中 ${rows.filter(r => r.imported && !r.bare && !r.importedFromFile).length} 个的统计数据已从服务端原作业恢复（评分/结构/结论与本次评估同权，行内标「载入」${rows.some(r => r.imported && !r.bare && !r.importedFromFile && rowHasReportHtml(r)) ? '，「完整报告」弹出页内嵌导入时上传的报告原文' : ''}）` : ''}${rows.some(r => r.importedFromFile) ? `${rows.some(r => r.imported && !r.bare && !r.importedFromFile) ? '、' : ' — 其中 '}${rows.filter(r => r.importedFromFile).length} 个的评分与结论解析自导入的报告文件（与本次评估同权参与统计${rows.some(r => r.importedFromFile && rowHasReportHtml(r)) ? '，「完整报告」弹出页内嵌导入的报告原文' : ''}）` : ''}${rows.some(r => r.bare) ? `；${rows.filter(r => r.bare).length} 个报告无法解析出统计数据，以降级行呈现（评分列「—」，评分与结论见导入的报告文件${rows.some(r => r.bare && rowHasReportHtml(r)) ? '或「完整报告」弹出页' : ''}）` : ''}${rows.some(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile) ? `；${rows.filter(r => (r.importedFromFile || r.bare) && !rowHasReportHtml(r) && r.importedFile).length} 个的原文未能内嵌弹出页（超出体积预算或服务端留存不可用且本地留存未能自愈 — 完整原文可直接打开导入的报告文件查看；重新导入报告文件后「重新生成汇总报告」可恢复内嵌）` : ''}。</div>` : ''}
 
 ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="grid-column:1/-1"><b>客户目标</b> ${esc(input.goal.slice(0, 300))}</div></div>` : ''}
 

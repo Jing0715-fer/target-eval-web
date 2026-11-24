@@ -2412,6 +2412,10 @@ class SegmentRunner {
       /** v2.59：BLAST nr 全库检索命中（身份识别级联实际执行 nr 时携带 — 报告
        *  BLAST 章节与 PDB 库同款表格全量展示；未执行时缺省。v2.67：上限 20→50） */
       blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 50) : undefined,
+      /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联的 v2.44 通道 —
+       *  NCBI nr 患病/失败时的主力识别路径；此前只用于身份处理从不上报告，用户
+       *  「搜索了库但报告不显示检索结果」的直接缺块。≤20 条与 EBI MAX_HITS 同口径） */
+      uniprotBlastHits: st.upHits?.length ? st.upHits.slice(0, 20) : undefined,
       directPdbs: st.directPdbs,
       blastHits: st.blastHits,
       blastStatus: st.blastStatus,
@@ -2665,6 +2669,9 @@ class SegmentRunner {
       /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档；v2.67 ≤50 条
        *  — 结果页/报告与 PDB 库同款表格全量展示；nr 未执行/无命中/历史作业缺省） */
       blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 50) : undefined,
+      /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中存档（身份级联 v2.44 通道
+       *  实际执行且有命中时 — 结果页/合并报告/单独评估页展示；历史作业缺省） */
+      uniprotBlastHits: st.upHits?.length ? st.upHits.slice(0, 20) : undefined,
       blast: st.blastStatus,
       coverageText: st.coverageText || undefined,
       gapText: st.gapText || undefined,
