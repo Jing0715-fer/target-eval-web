@@ -87,7 +87,8 @@
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
  */
 import { db } from '@/lib/db'
-import { open, readFile, stat } from 'node:fs/promises'
+import * as path from 'node:path'
+import { open, readFile, stat, rename, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { llmChat } from './llm'
 import { getEngineSummary } from './llm-provider'
@@ -956,16 +957,35 @@ async function* htPayloadJsonChunks(
  *  shell 以 MARKER 模式渲染后拆分；载荷分块流式写入（每行读盘→序列化→写→释放）。
  *  无载荷行时退化为一次性写入（shell 本身 <1MB）。onProgress 报告阶段进度；
  *  v2.76：第二参数 frac（0-1 载荷写入完成率，仅逐行内嵌循环回传）— 调用方
- *  据此映射全局百分比（进度条）。 */
+ *  据此映射全局百分比（进度条）。
+ *  v2.80：**原子落盘** — 先写 `report.html.tmp` 再 rename 到目标路径：进程在写入
+ *  中途死亡（OOM/重启）时目标路径上要么是上一份完整版本（基础版→增强版升级场景）
+ *  要么不存在，**永远不会是截断的半个文件** — 僵死检测的「基础版恢复交付」
+ *  （见 htDashboardBaseFileReady）据此才能把磁盘上的文件当可信产物直接交付。 */
 export async function writeHtDashboardHtmlFile(
   input: RenderHtDashboardInput,
   htmlPath: string,
   onProgress?: (msg: string, frac?: number) => void,
 ): Promise<void> {
+  const tmpPath = `${htmlPath}.tmp`
+  try {
+    await writeHtDashboardHtmlFileInner(input, tmpPath, onProgress)
+    await rename(tmpPath, htmlPath) // 同目录原子替换 — 任意时刻 htmlPath 均为完整文件
+  } catch (err) {
+    await unlink(tmpPath).catch(() => undefined) // 半成品 tmp 清理（可能不存在）
+    throw err
+  }
+}
+
+async function writeHtDashboardHtmlFileInner(
+  input: RenderHtDashboardInput,
+  tmpPath: string,
+  onProgress?: (msg: string, frac?: number) => void,
+): Promise<void> {
   const anyBody = input.rows.some(r => rowHasReportHtml(r) || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
   if (!anyBody) {
     onProgress?.('写入看板 HTML…')
-    await (await import('node:fs/promises')).writeFile(htmlPath, renderHtDashboardHtml(input), 'utf-8')
+    await (await import('node:fs/promises')).writeFile(tmpPath, renderHtDashboardHtml(input), 'utf-8')
     return
   }
   onProgress?.('渲染看板版面…')
@@ -973,14 +993,14 @@ export async function writeHtDashboardHtmlFile(
   const at = shell.indexOf(HT_PAYLOAD_MARKER)
   if (at < 0) {
     // 无载荷（anyBody 判定与渲染一致时不会走到 — 兜底直写）
-    await (await import('node:fs/promises')).writeFile(htmlPath, shell, 'utf-8')
+    await (await import('node:fs/promises')).writeFile(tmpPath, shell, 'utf-8')
     return
   }
   const before = shell.slice(0, at)
   const after = shell.slice(at + HT_PAYLOAD_MARKER.length)
   const { createWriteStream } = await import('node:fs')
   await new Promise<void>((resolve, reject) => {
-    const ws = createWriteStream(htmlPath, { encoding: 'utf-8' })
+    const ws = createWriteStream(tmpPath, { encoding: 'utf-8' })
     ws.on('error', reject)
     const write = (chunk: string): Promise<void> => new Promise(res => {
       if (ws.write(chunk)) res()
@@ -1105,7 +1125,38 @@ export function stalledHtDashboardError(): string {
   return `${HT_DASHBOARD_STALL_PREFIX}服务进程在生成期间重启或退出，本次生成未完成 — 运行结果不受影响；正在自动重试，若稍后仍失败可打开运行自动重试或点击「重新生成汇总报告」`
 }
 
-/** v2.78：把僵死的 running 看板标记为 error（生成中断）。
+/** v2.80：基础版恢复交付的提示文案（落库 error 列但状态为 done — 前端 toast 呈现）
+ *  基础版 = 统计 + 每靶点规则结论 + 内嵌报告原文，先于 AI 增强落盘（见
+ *  runDashboardGeneration）— 进程在 AI 阶段死亡时僵死检测凭磁盘文件直接交付。 */
+export function recoveredHtDashboardNote(): string {
+  return '已交付基础版看板（评分统计、每靶点结论与内嵌报告完整；AI 整体可行性报告因服务重启未完成）— 如需 AI 增强版可点击「重新生成汇总报告」；运行结果不受影响'
+}
+
+/** v2.80：基础版看板文件是否已完整落盘 — 返回可交付的文件路径（null = 无）。
+ *  候选：① 记录的 htmlPath（检查点落库值）；② 按固定目录规则重建
+ *  `db/reports/{id}/report.html`（进程在「文件写完 → 检查点落库」间隙死亡时
+ *  htmlPath 列仍为空，但文件已在 — 重建路径可覆盖该竞态窗口）。
+ *  前提：writeHtDashboardHtmlFile v2.80 起原子落盘 — 路径上的文件必为完整版本。 */
+export async function htDashboardBaseFileReady(
+  htmlPath: string | null | undefined,
+  dashboardId?: string,
+): Promise<string | null> {
+  const candidates = [
+    htmlPath,
+    dashboardId ? path.join(process.cwd(), 'db', 'reports', dashboardId, 'report.html') : null,
+  ]
+  for (const p of candidates) {
+    if (!p) continue
+    try {
+      const st = await stat(p)
+      if (st.isFile() && st.size > 0) return p
+    } catch { /* 不存在或不可读 — 下一候选 */ }
+  }
+  return null
+}
+
+/** v2.78：把僵死的 running 看板标记为终态（v2.80 起带回恢复：基础版文件已落盘 →
+ *  直接标记 done 交付，error 列存提示文案；无文件 → 标记 error「生成中断」）。
  *  ownerKey 可选 — 限定只清理该用户的记录（多进程部署下不误伤其他实例的活跃
  *  生成器；单进程部署传空即全局清理）。updateMany 带 status:'running' 条件 —
  *  与生成器终态写入竞态时败者退出（先完成者生效）。返回标记条数。 */
@@ -1113,16 +1164,27 @@ export async function markStalledHtDashboards(ownerKey?: string): Promise<number
   const cutoff = new Date(Date.now() - HT_DASHBOARD_STALL_MS)
   const stalled = await db.htDashboard.findMany({
     where: { status: 'running', updatedAt: { lt: cutoff }, ...(ownerKey ? { ownerKey } : {}) },
-    select: { id: true },
+    select: { id: true, htmlPath: true },
     take: 50,
-  }).catch(() => [] as Array<{ id: string }>)
+  }).catch(() => [] as Array<{ id: string; htmlPath: string | null }>)
   let marked = 0
   for (const s of stalled) {
+    // v2.80：基础版恢复检测（原子落盘保证文件完整 — 见 htDashboardBaseFileReady）
+    const basePath = await htDashboardBaseFileReady(s.htmlPath, s.id).catch(() => null)
     // v2.79：写库失败记日志（v2.78 静默吞掉 — 数据库写入受阻时历史列表里的
     //  僵尸 running 项无从排查；GET 单查路径另有内存态兜底，不依赖本标记落库）
     const n: number = await db.htDashboard.updateMany({
       where: { id: s.id, status: 'running' },
-      data: { status: 'error', error: stalledHtDashboardError().slice(0, 500), progress: null, updatedAt: new Date() },
+      data: basePath
+        ? {
+            status: 'done',
+            error: recoveredHtDashboardNote().slice(0, 500),
+            progress: null,
+            updatedAt: new Date(),
+            // 竞态窗口（文件已落盘但检查点未及落库）补写 htmlPath — 恢复交付链路可用
+            ...(s.htmlPath ? {} : { htmlPath: basePath }),
+          }
+        : { status: 'error', error: stalledHtDashboardError().slice(0, 500), progress: null, updatedAt: new Date() },
     }).then(r => r.count).catch((err: unknown) => {
       console.warn(`[ht-dashboard] 僵死看板清扫标记失败（${s.id}）：`, err instanceof Error ? err.message : String(err))
       return 0

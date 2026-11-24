@@ -49,7 +49,7 @@ export async function GET(req: Request) {
       status: r.status as JobStatus,
       title: r.title ?? '未命名评估',
       uniprotId: r.uniprotId,
-      proteinName: summary?.uniprot.proteinName ? summary.uniprot.proteinName + nspSuffix : r.title ?? null,
+      proteinName: summary?.uniprot?.proteinName ? summary.uniprot.proteinName + nspSuffix : r.title ?? null,
       createdAt: r.createdAt.toISOString(),
       coverage: summary?.coverage ?? null,
       pdbCount: summary?.directPdbCount ?? null,

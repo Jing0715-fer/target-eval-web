@@ -1085,13 +1085,54 @@ async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Prom
   }
 }
 
-/** GET /api/evaluate/ht-archive — 一次高通量运行的全部报告打包 zip 下载
- *  （每组一个子文件夹 + 合并报告 + _README.txt 清单）。失败抛错。 */
+/** GET/POST /api/evaluate/ht-archive — 一次高通量运行的全部报告打包 zip 下载
+ *  （每组一个子文件夹 + 合并报告 + _README.txt 清单）。失败抛错。
+ *  v2.80「更稳妥的打包」：① entries 改走 POST JSON body（GET query 600 条目时
+ *  可达数百 KB — 部分网关/浏览器 414 或截断；GET 通道保留兼容）；② fetch 挂
+ *  300s 超时（服务端 zip 构建有界 — nodebuffer 全量缓冲后一次性响应，挂死多为
+ *  服务重启/网关瞬断，旧版无超时会永远转圈）；③ 瞬态重试 3×5s（网络失败/5xx/
+ *  404 均可能是重启窗口 — 与 ht-dashboard POST 同口径）。 */
 export async function downloadHtReportArchive(entries: HtArchiveEntry[], fallbackName = '报告'): Promise<void> {
   if (!entries.length) throw new Error('没有可下载的报告')
-  const res = await fetch(`/api/evaluate/ht-archive?entries=${encodeURIComponent(JSON.stringify(entries))}`, {
-    cache: 'no-store',
-  })
+  const postOnce = async (): Promise<Response> => {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 300_000)
+    try {
+      return await fetch('/api/evaluate/ht-archive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entries }),
+        cache: 'no-store',
+        signal: ctrl.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  let res: Response | null = null
+  let lastErr: unknown = null
+  for (let i = 0; i < 3 && !res; i++) {
+    try {
+      const r = await postOnce()
+      if ((r.status >= 500 || r.status === 404 || r.status === 405) && i < 2) {
+        await new Promise(rs => setTimeout(rs, 5000))
+        continue
+      }
+      res = r
+    } catch (e) {
+      lastErr = e
+      if (i < 2) await new Promise(rs => setTimeout(rs, 5000))
+    }
+  }
+  if (!res) {
+    throw new Error(
+      lastErr instanceof Error && lastErr.name === 'AbortError'
+        ? '批量下载超时（5 分钟无响应 — 服务可能正在重启或网络不通；运行结果不受影响，稍后可重试）'
+        : lastErr instanceof Error && lastErr.message
+          ? lastErr.message
+          : '无法连接服务器（网络中断 — 稍后可重试；运行结果不受影响）',
+    )
+  }
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null
     throw new Error(data?.error ?? `批量下载失败（HTTP ${res.status}）`)

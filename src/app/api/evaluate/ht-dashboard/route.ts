@@ -43,8 +43,11 @@ import {
   resolveZipHrefs,
   htDashboardTitle,
   attachExcelRows,
+  ruleVerdict,
   markStalledHtDashboards,
   stalledHtDashboardError,
+  recoveredHtDashboardNote,
+  htDashboardBaseFileReady,
   HT_DASHBOARD_STALL_MS,
   type ArchivedJobSnapshot,
   type HtDashboardEntry,
@@ -440,16 +443,19 @@ async function runDashboardGeneration(ctx: {
   //  统计/zip 规划/shell 渲染）无逐项 tick 时进度静默，前端 10 分钟窗口照旧
   //  超时误报。本看门狗对「任何阶段」生效：静默 ≥5s 即以「原文本 · 已 Ns」心跳
   //  写库（文本持续变化 → 前端窗口持续重置）；≥3min 附「耗时异常」提示；
-  //  ≥20min（PHASE_STALL_GIVEUP_MS — 各大阶段均有逐行/逐项 tick，LLM 有调
-  //  用方 60s/120s 硬预算，真实生成不可能静默这么久）判定真卡滞：落库 error
-  //  终态让前端立刻拿到明确失败（不再空转 30 分钟硬上限）；后台 promise 若
-  //  此后自行完成/失败，终态 update 仍会覆盖落库（自愈为 done）。
+  //  ≥10min（PHASE_STALL_GIVEUP_MS — v2.80：各阶段
+  //  均有逐行/逐项 tick，LLM 有调用方 60s/120s 硬预算，真实生成不可能静默这么
+  //  久；判定前先试基础版恢复）判定真卡滞：落库终态让前端立刻拿到明确结果
+  //  （不再空转 30 分钟硬上限）；后台 promise 若此后自行完成/失败，终态 update
+  //  仍会覆盖落库（自愈为 done）。
   let phaseBaseText = '准备生成…'
   let phaseBasePct: number | undefined
   let phaseStartAt = Date.now()
   let watchdogGivenUp = false
   const PHASE_STALL_NOTE_MS = 3 * 60_000
-  const PHASE_STALL_GIVEUP_MS = 20 * 60_000
+  // v2.80：20 分钟 → 10 分钟（基础版先行落盘后各阶段全带逐项 tick，真实生成不可能
+  //  静默这么久；判定卡滞前先试基础版恢复 — 文件已落盘则交付而非报错）
+  const PHASE_STALL_GIVEUP_MS = 10 * 60_000
   const progressWithPhase = (msg: string, pct?: number): void => {
     // 规范化：剥离调用方（LLM 心跳）已内嵌的「· 已 Ns」尾巴 — 看门狗追加自己的
     // 计时尾巴，避免静默子阶段期间出现「…· 已 187s · 已 12s」双重尾巴。
@@ -469,15 +475,28 @@ async function runDashboardGeneration(ctx: {
     if (silentMs >= PHASE_STALL_GIVEUP_MS) {
       watchdogGivenUp = true
       clearInterval(phaseWatchdog)
-      void db.htDashboard.update({
-        where: { id: dashboardId },
-        data: {
-          status: 'error',
-          error: `生成卡滞：${phaseBaseText} 阶段 ${Math.round(silentMs / 60_000)} 分钟无进展 — 已判定失败（运行结果不受影响，可点击「重新生成汇总报告」重试；若后台实际仍在完成，历史记录中会出现该看板）`.slice(0, 500),
-          progress: null,
-          updatedAt: new Date(),
-        },
-      }).catch(() => undefined)
+      // v2.80：判定卡滞前先试基础版恢复 — 基础版看板（统计 + 规则结论）已原子落盘
+      //  则直接交付（AI 增强标记未完成），而非报错让用户重新来过
+      void (async () => {
+        const basePath = await htDashboardBaseFileReady(undefined, dashboardId).catch(() => null)
+        await db.htDashboard.update({
+          where: { id: dashboardId },
+          data: basePath
+            ? {
+                status: 'done',
+                error: recoveredHtDashboardNote().slice(0, 500),
+                progress: null,
+                updatedAt: new Date(),
+                htmlPath: basePath,
+              }
+            : {
+                status: 'error',
+                error: `生成卡滞：${phaseBaseText} 阶段 ${Math.round(silentMs / 60_000)} 分钟无进展 — 已判定失败（运行结果不受影响，可点击「重新生成汇总报告」重试；若后台实际仍在完成，历史记录中会出现该看板）`.slice(0, 500),
+                progress: null,
+                updatedAt: new Date(),
+              },
+        }).catch(() => undefined)
+      })()
     }
   }, 5_000)
   const fail = async (msg: string) => {
@@ -488,12 +507,12 @@ async function runDashboardGeneration(ctx: {
       data: { status: 'error', error: msg.slice(0, 500), progress: null, updatedAt: new Date() },
     }).catch(() => undefined)
   }
-  // v2.76：全局进度百分比（进度条）— 阶段权重按典型耗时分布标定：
+  // v2.76：全局进度百分比（进度条）— v2.80 阶段权重（基础版先行落盘后重标定）：
   //  数据加载 2→15 / 导入留存规划 16→20 / 导入统计补解析 21→30（逐个 tick）/
-  //  批次统计 31→35 / LLM（每靶点结论 + 整体报告）36→60（心跳渐近推进 — 时长
-  //  不可知，限流重试可静默数分钟）/ zip 链接 61→65 / HTML 流式落盘 66→98
-  //  （百级靶点报告原文逐份读盘写入 — 主耗时阶段，逐行 tick）。各阶段仅推进到
-  //  本阶段起始值（实际耗时未知），下一阶段消息携带自身起始百分比自然接续。
+  //  批次统计 31→35 / zip 链接 33→35 / **基础版落盘 36→62（逐行 tick — 确定性
+  //  产物先交付）** / LLM 增强 63→93（心跳渐近推进）/ 增强版重写 94→99（仅
+  //  AI 有产出时）。各阶段仅推进到本阶段起始值（实际耗时未知），下一阶段消息
+  //  携带自身起始百分比自然接续。
   try {
     // v2.69：报告原文体积预算（作业报告 + 导入留存共用 — 弹出页内嵌总量护栏；
     // v2.71 起按 stat 字节分配，内容写盘时逐份延迟读取）
@@ -537,32 +556,13 @@ async function runDashboardGeneration(ctx: {
     const allRows = [...statRows, ...bareRows]
     progressWithPhase('汇总批次统计…', 31)
     const stats = computeHtStats(statRows, Math.max(0, jobCount - droppedImported), bareRows.length)
-    // v2.74：LLM 阶段心跳进度 — 每靶点结论（≤60s）+ 整体报告（≤120s）叠加限流重试
-    //  （20s/40s/60s/90s/120s 退避）时可静默数分钟，前端无进展判定会把仍在正常
-    //  生成的运行误判超时；心跳每 5s 写一次带已等待秒数的进度文本（progress 写入器
-    //  自带 1.5s 节流 — 文本变化即落库，前端轮询可见 → 进度窗口持续重置）。
-    const llmT0 = Date.now()
-    const llmHeartbeat = setInterval(() => {
-      // v2.76：百分比渐近推进（36→60 永不越界）— LLM 总时长不可知（限流重退
-      //  可静默数分钟），线性会提前到顶显得「假完成」，渐近曲线持续前进又不过冲
-      //  v2.77：改走 progressWithPhase — 与全局看门狗同一口径（心跳期间看门狗静默）
-      const elapsedSec = (Date.now() - llmT0) / 1000
-      progressWithPhase(
-        `AI 撰写整体可行性报告（${statRows.length} 个靶点）· 已 ${Math.round(elapsedSec)}s`,
-        36 + 24 * (1 - Math.exp(-elapsedSec / 90)),
-      )
-    }, 5_000)
-    let generated
-    try {
-      progressWithPhase(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 36)
-      generated = await generateHtDashboardReport(statRows, stats, goal)
-    } finally {
-      clearInterval(llmHeartbeat)
-    }
+
+    // ── v2.80：确定性准备（引擎摘要 / zip 链接 / 标题 / 原表匹配 / 目录）全部前移 —
+    //  后续「基础版落盘 → AI 增强 → 增强版重写」链路只依赖这些已就绪的确定性产物 ──
     const engineSummary = await getEngineSummary()
     // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）；
     // v2.60：缓存恢复行无服务器报告文件，zip 内无对应文件 — 不挂离线链接
-    progressWithPhase('规划离线包链接命名…', 61)
+    progressWithPhase('规划离线包链接命名…', 33)
     const zipHrefs = await resolveZipHrefs(entries)
     for (const r of allRows) r.zipHref = r.fromArchive || r.bare || r.importedFromFile ? undefined : zipHrefs.get(r.jobId)
 
@@ -575,26 +575,90 @@ async function runDashboardGeneration(ctx: {
     const dir = path.join(process.cwd(), 'db', 'reports', dashboardId)
     await fs.mkdir(dir, { recursive: true })
     const htmlPath = path.join(dir, 'report.html')
-    // v2.76：写盘子进度 → 全局百分比（shell 渲染 = 阶段头部 66；载荷逐行
-    //  70→98 — 百级靶点时该阶段占比最大，逐行 tick 让进度条持续前进）。
-    //  v2.77：经 progressWithPhase — 逐行 tick 持续重置看门狗静默计时。
-    const writeProgress = (msg: string, frac?: number): void => {
-      progressWithPhase(msg, frac != null ? 70 + Math.round(frac * 28) : 66)
+
+    // ── v2.80 基础版先行落盘（「更稳妥的打包」核心 — 确定性产物先于 AI 交付）──
+    //  背景：生成是寄生在 Node 进程上的后台 Promise，dev 重编译/OOM/容器回收
+    //  都会把它带走 — 旧流程（LLM → 落盘）死亡时机越晚损失越大，且死后除了
+    //  报错重试一无所有。新流程：统计 + 每靶点规则结论 + 内嵌报告原文 = 完整
+    //  可用的看板，**不依赖任何 AI 调用**，先原子落盘（tmp + rename — 任意时刻
+    //  路径上必是完整文件）并落库检查点；此后进程即使死亡，僵死检测（GET /
+    //  清扫）凭磁盘文件直接恢复交付（见 htDashboardBaseFileReady），zip 打包/
+    //  预览/下载立即可用。AI 仅是增强：成功则重写增强版，失败/超时则基础版即
+    //  最终版 — 用户永远能在几分钟内拿到看板。
+    const ruleVerdicts = statRows.map(r => ruleVerdict(r))
+    const baseWriteProgress = (msg: string, frac?: number): void => {
+      progressWithPhase(msg, frac != null ? 36 + Math.round(frac * 26) : 36)
     }
     await writeHtDashboardHtmlFile({
       title,
       goal,
       rows: allRows,
       stats,
-      verdicts: generated.verdicts,
-      markdown: generated.markdown,
-      llmOk: generated.ok,
-      llmErrors: generated.errors,
+      verdicts: ruleVerdicts,
+      markdown: '',
+      llmOk: false,
+      llmErrors: [],
       engineSummary,
       origin: ctx.origin,
       generatedAt,
       excelRows,
-    }, htmlPath, writeProgress)
+    }, htmlPath, baseWriteProgress)
+    // 检查点落库（status 仍 running）— 预览/下载/zip 打包链路立即可用；僵死
+    //  恢复与重试不再从零开始
+    await db.htDashboard.update({
+      where: { id: dashboardId },
+      data: { title, stats: JSON.stringify(stats), verdicts: JSON.stringify(ruleVerdicts), htmlPath, engine: engineSummary },
+    }).catch((err: unknown) => {
+      // 检查点失败不阻断生成 — 文件已原子落盘，恢复链路按固定目录规则也能找到
+      console.warn(`[ht-dashboard] 基础版检查点落库失败（${dashboardId} — 恢复交付不受影响）：`, err instanceof Error ? err.message : String(err))
+    })
+
+    // ── AI 增强（LLM 每靶点结论重写 + 整体可行性报告 — 失败/超时静默降级）──
+    // v2.74：LLM 阶段心跳进度 — 每靶点结论（≤60s）+ 整体报告（≤120s）叠加限流重试
+    //  （20s/40s/60s/90s/120s 退避）时可静默数分钟，心跳每 5s 写一次带已等待秒数
+    //  的进度文本（progress 写入器自带 1.5s 节流 — 文本变化即落库，前端轮询可见
+    //  → 进度窗口持续重置）；文案附「基础版已就绪」— 用户知道看板已安全。
+    const llmT0 = Date.now()
+    const llmHeartbeat = setInterval(() => {
+      // v2.76：百分比渐近推进（63→93 永不越界）— LLM 总时长不可知（限流重退
+      //  可静默数分钟），线性会提前到顶显得「假完成」，渐近曲线持续前进又不过冲
+      const elapsedSec = (Date.now() - llmT0) / 1000
+      progressWithPhase(
+        `AI 撰写整体可行性报告（${statRows.length} 个靶点）· 基础版已就绪 · 已 ${Math.round(elapsedSec)}s`,
+        63 + 30 * (1 - Math.exp(-elapsedSec / 90)),
+      )
+    }, 5_000)
+    let generated
+    try {
+      progressWithPhase(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 63)
+      generated = await generateHtDashboardReport(statRows, stats, goal)
+    } finally {
+      clearInterval(llmHeartbeat)
+    }
+
+    // ── AI 有产出 → 增强版原子重写（任意时刻路径上都是完整文件）；全部失败 →
+    //  基础版文件即最终版（跳过重写 — 不因 AI 不可用多花一次全量落盘）──
+    const aiEnhanced = generated.ok || generated.verdicts.some(v => v.source === 'llm')
+    if (aiEnhanced) {
+      progressWithPhase('AI 增强完成 — 写入增强版看板…', 94)
+      const enhancedWriteProgress = (msg: string, frac?: number): void => {
+        progressWithPhase(msg, frac != null ? 94 + Math.round(frac * 5) : 94)
+      }
+      await writeHtDashboardHtmlFile({
+        title,
+        goal,
+        rows: allRows,
+        stats,
+        verdicts: generated.verdicts,
+        markdown: generated.markdown,
+        llmOk: generated.ok,
+        llmErrors: generated.errors,
+        engineSummary,
+        origin: ctx.origin,
+        generatedAt,
+        excelRows,
+      }, htmlPath, enhancedWriteProgress)
+    }
     await db.htDashboard.update({
       where: { id: dashboardId },
       data: {
@@ -611,7 +675,7 @@ async function runDashboardGeneration(ctx: {
       },
     })
     clearInterval(phaseWatchdog)
-    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· AI 报告 ${generated.ok ? '成功' : '降级'} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s${watchdogGivenUp ? '（看门狗曾判卡滞 — 本次完成已自愈覆盖）' : ''}`)
+    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· ${aiEnhanced ? `AI 增强${generated.ok ? '完整' : '部分'}` : '基础版（AI 不可用降级）'} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s${watchdogGivenUp ? '（看门狗曾判卡滞 — 本次完成已自愈覆盖）' : ''}`)
   } catch (err) {
     await fail(err instanceof Error ? err.message : String(err))
   }
@@ -661,45 +725,90 @@ export async function GET(req: Request) {
   // ── v2.78：僵死检测（前端轮询路径的核心修复）──
   //  running 且 updatedAt 停滞 >90s = 生成后台任务已不在（服务重启/OOM 被杀/
   //  进程退出把 promise 带走 — 看门狗每 5s 心跳写库，活着不可能停滞这么久）。
-  //  旧实现此时前端只能盲等 10 分钟拿误导性「无进展超时」且进度条全程空转；
-  //  现在立即标记「生成中断」error 终态 — 前端马上拿到明确失败并自动重试一次
-  //  （api.ts 识别前缀），用户无感恢复。竞态安全：updateMany 带 status:'running'
-  //  条件，若生成器恰好在此刻完成/失败，其终态写入先到则本标记败退（重读回落）。
   //
-  //  v2.79 漏洞补齐：v2.78 的标记写库失败（磁盘满/SQLite 被占用/旧库列缺失）时
-  //  被 .catch(()=>0) 静默吞掉 — 重读仍返 running，前端继续盲等 10 分钟黑盒
-  //  （用户实测复现路径之一）。现在写库失败时 JSON 状态路径直接以内存终态应答
-  //  「生成中断」（本次响应不落库；DB 恢复后由清扫/终态写入自愈）— 轮询方
-  //  在 90s 内必然拿到明确失败并自动重试，不再依赖落库成功。updatedAt 停滞
-  //  >90s 已证明生成进程不在（活着每 5s 写库），不会误伤活生成器。
+  //  v2.80：**恢复优先于报错** — 基础版看板（统计 + 规则结论，不依赖 AI）已
+  //  先行原子落盘（见 runDashboardGeneration）：僵死只意味着「AI 增强未完成」
+  //  而非「一无所有」。检测到僵死时先查磁盘：基础版文件在 → 直接标记 done
+  //  交付（error 列存降级提示文案），前端轮询立刻拿到成功并自动下载 — 用户
+  //  几分钟内必然拿到看板，不再依赖「报错 → 自动重试 → 又被同一环境因素杀
+  //  死」的循环（用户实测 v2.79 重试后仍失败 — 重试新记录被再次杀死）。
+  //  文件不在（进程死于基础版落盘前的早期阶段）→ 维持 v2.78 行为：标记
+  //  「生成中断」error 终态，前端自动重试重建。
+  //
+  //  竞态安全：updateMany 带 status:'running' 条件，若生成器恰好在此刻完成/
+  //  失败，其终态写入先到则本标记败退（重读回落）；恢复标记 done 后生成器
+  //  若实际仍活着并完成，其终态 update 仍会覆盖（自愈为完整 done）。
   if (record.status === 'running' && Date.now() - record.updatedAt.getTime() > HT_DASHBOARD_STALL_MS) {
-    const stallErr = stalledHtDashboardError().slice(0, 500)
-    let markFailed = false
-    try {
-      await db.htDashboard.updateMany({
-        where: { id: record.id, status: 'running' },
-        data: { status: 'error', error: stallErr, progress: null, updatedAt: new Date() },
-      })
-    } catch (err) {
-      markFailed = true
-      console.error(`[ht-dashboard] 僵死看板标记落库失败（数据库写入受阻 — 磁盘满/库被占用/旧库缺列？）：${record.id}`, err instanceof Error ? err.message : String(err))
-    }
-    console.warn(`[ht-dashboard] 检测到僵死看板（running 且写入停滞 >${Math.round(HT_DASHBOARD_STALL_MS / 1000)}s — 生成进程已不存在）：${record.id}${markFailed ? '（标记落库失败 — 本次响应以内存态告知轮询方）' : '，已标记为「生成中断」'}`)
-    // 重读落库终态（本标记生效 → error；生成器竞态先完成 → done/error 原值）
-    const reread = await db.htDashboard.findUnique({ where: { id } }).catch(() => null)
-    if (reread) record = reread
-    if (record.status === 'running' && !htmlView) {
-      return NextResponse.json({
-        ok: true,
-        v: APP_VERSION,
-        dashboard: {
-          id: record.id,
-          status: 'error',
-          title: record.title ?? '',
-          error: stallErr,
-          createdAt: record.createdAt.toISOString(),
-        },
-      })
+    const stalled = stalledHtDashboardError().slice(0, 500)
+    const basePath = await htDashboardBaseFileReady(record.htmlPath, record.id).catch(() => null)
+    if (basePath) {
+      // 基础版恢复交付 — done + 降级提示（写入 htmlPath 兜底「文件已落盘但
+      //  检查点未及落库」的竞态窗口）
+      let recoverFailed = false
+      try {
+        await db.htDashboard.updateMany({
+          where: { id: record.id, status: 'running' },
+          data: {
+            status: 'done',
+            error: recoveredHtDashboardNote().slice(0, 500),
+            progress: null,
+            updatedAt: new Date(),
+            ...(record.htmlPath ? {} : { htmlPath: basePath }),
+          },
+        })
+      } catch (err) {
+        recoverFailed = true
+        console.error(`[ht-dashboard] 僵死看板恢复标记落库失败（数据库写入受阻 — 磁盘满/库被占用/旧库缺列？）：${record.id}`, err instanceof Error ? err.message : String(err))
+      }
+      console.warn(`[ht-dashboard] 检测到僵死看板（running 且写入停滞 >${Math.round(HT_DASHBOARD_STALL_MS / 1000)}s — 生成进程已不存在）：${record.id}，基础版看板已落盘 — 恢复交付（AI 增强标记未完成）${recoverFailed ? '（标记落库失败 — 本次响应以内存态告知轮询方）' : ''}`)
+      const reread = await db.htDashboard.findUnique({ where: { id } }).catch(() => null)
+      if (reread) record = reread
+      if (record.status === 'running') {
+        // 标记落库失败或竞态败退 — 以内存 done 态应答（文件已确认存在，可信）
+        record = { ...record, status: 'done', htmlPath: record.htmlPath ?? basePath, error: recoveredHtDashboardNote().slice(0, 500) }
+        if (!htmlView) {
+          return NextResponse.json({
+            ok: true,
+            v: APP_VERSION,
+            dashboard: {
+              id: record.id,
+              status: 'done',
+              title: record.title ?? '',
+              error: record.error,
+              createdAt: record.createdAt.toISOString(),
+            },
+          })
+        }
+      }
+    } else {
+      // 无基础版文件 — 维持 v2.78 行为：标记「生成中断」让前端自动重试
+      let markFailed = false
+      try {
+        await db.htDashboard.updateMany({
+          where: { id: record.id, status: 'running' },
+          data: { status: 'error', error: stalled, progress: null, updatedAt: new Date() },
+        })
+      } catch (err) {
+        markFailed = true
+        console.error(`[ht-dashboard] 僵死看板标记落库失败（数据库写入受阻 — 磁盘满/库被占用/旧库缺列？）：${record.id}`, err instanceof Error ? err.message : String(err))
+      }
+      console.warn(`[ht-dashboard] 检测到僵死看板（running 且写入停滞 >${Math.round(HT_DASHBOARD_STALL_MS / 1000)}s — 生成进程已不存在）：${record.id}${markFailed ? '（标记落库失败 — 本次响应以内存态告知轮询方）' : '，已标记为「生成中断」'}`)
+      // 重读落库终态（本标记生效 → error；生成器竞态先完成 → done/error 原值）
+      const reread = await db.htDashboard.findUnique({ where: { id } }).catch(() => null)
+      if (reread) record = reread
+      if (record.status === 'running' && !htmlView) {
+        return NextResponse.json({
+          ok: true,
+          v: APP_VERSION,
+          dashboard: {
+            id: record.id,
+            status: 'error',
+            title: record.title ?? '',
+            error: stalled,
+            createdAt: record.createdAt.toISOString(),
+          },
+        })
+      }
     }
   }
 

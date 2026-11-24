@@ -997,9 +997,15 @@ export function useHighThroughputFlow() {
         const importedTail = importedBare.length + importedJobIds.size > 0
           ? `已包含 ${importedJobIds.size + importedBare.length} 个导入载入的靶点（${importedJobIds.size} 个恢复了完整统计${parsedImportedCount ? `、${parsedImportedCount} 个已解析导入报告的评分与结论` : ''}${importedBare.length - parsedImportedCount > 0 ? `、${importedBare.length - parsedImportedCount} 个以载入行呈现（报告无法解析）` : ''}）；`
           : ''
+        // v2.80：服务端 done 但携带提示（基础版恢复交付 / AI 部分降级 — error 列
+        //  在 done 终态下存的是降级说明而非错误）— toast 如实呈现，用户知道拿到
+        //  的是哪个版本、如何升级
+        const noteTail = typeof dash.error === 'string' && dash.error.trim()
+          ? `；${dash.error.trim()}`
+          : ''
         toast({
           title: '统计看板已生成',
-          description: `${recoverTail}${dropTail}${importedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
+          description: `${recoverTail}${dropTail}${importedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。${noteTail}`,
         })
       } else {
         runState.dashboardError = dash.error ?? '统计看板生成失败'

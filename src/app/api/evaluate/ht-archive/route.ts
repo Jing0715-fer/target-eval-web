@@ -12,6 +12,10 @@
  * zip 用 jszip（纯内存；单报告 HTML 截断 2MB，份数上限 600 对齐高通量上限）。
  * v2.38：附 _TargetEval_manifest.json（每报告的靶点元数据 + zip 路径）— 用户把 zip
  * 导回新建运行时精确匹配已完成的靶点直接跳过（见 ht-archive-import.ts）。
+ * v2.80：POST /api/evaluate/ht-archive（body: {entries}）— 条目改走 JSON body，
+ *  解除 GET query 的 URL 长度上限（600 条目含标签/元数据时 query 可达数百 KB，
+ *  部分网关/浏览器直接 414 或截断 — 前端「批量下载全部」改走 POST；GET 保留
+ *  兼容旧链接/手动拼接场景）。「更稳妥的打包」配套：前端 fetch 附超时 + 瞬态重试。
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
@@ -102,6 +106,28 @@ export async function GET(req: Request) {
       ...mergedIds.map(mergedId => ({ mergedId })),
     ].slice(0, MAX_ENTRIES)
   }
+  return buildArchiveResponse(entries, owner)
+}
+
+/** v2.80：POST — entries 走 JSON body（解除 GET query 的 URL 长度上限：600 条目
+ *  × 每条含标签/元数据的 JSON 在部分网关/浏览器直接 414 或被截断；前端「批量
+ *  下载全部」改走本通道，GET 保留兼容旧链接）。 */
+export async function POST(req: Request) {
+  const owner = getOwner(req)
+  let entries: ArchiveEntryInput[] = []
+  try {
+    const body = await req.json() as { entries?: unknown }
+    if (Array.isArray(body?.entries)) {
+      entries = (body.entries as ArchiveEntryInput[])
+        .filter(x => x && (x.jobId || x.mergedId || x.dashboardId))
+        .slice(0, MAX_ENTRIES)
+    }
+  } catch { /* 解析失败 → 空列表 → 422 */ }
+  return buildArchiveResponse(entries, owner)
+}
+
+/** v2.80：条目 → zip 响应（GET/POST 共用核心 — 原单 GET 处理器主体平移） */
+async function buildArchiveResponse(entries: ArchiveEntryInput[], owner: ReturnType<typeof getOwner>): Promise<Response> {
   if (entries.length === 0) {
     return NextResponse.json({ ok: false, error: '未提供要下载的报告（jobIds/mergedIds 为空）' }, { status: 422 })
   }
