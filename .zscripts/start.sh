@@ -98,10 +98,16 @@ if [ -f "./next-service-dist/server.js" ]; then
     # - 首次启动即失败：watchdog 直接退出（保持「启动失败」语义，
     #   交给平台健康检查暴露问题，不做无意义的重试）
     # - 运行期崩溃退出：2 秒后自动重拉，避免整实例失联只能重新部署
+    # - bun --smol：JSC 省内存模式（更激进 GC、收紧缓存）。v2.71 流式
+    #   链路堆峰值 26MB 远离实例上限；此为防御纵深——若未来出现内存
+    #   泄漏，bun 高压回收而非吃光实例内存触发容器级 OOM-kill（连
+    #   watchdog 一起灭掉、网关 502 持续，即 2026-11-24 线上「生成
+    #   汇总报告崩溃」的形态——进程级 watchdog 对 cgroup 级 OOM 无
+    #   能为力，根治靠 v2.71 内存修复，本防线降低复发烈度）
     (
         first_run=1
         while :; do
-            bun server.js
+            bun --smol server.js
             code=$?
             if [ "$first_run" -eq 1 ] && [ "$code" -ne 0 ]; then
                 echo "❌ Next.js 首次启动失败 (code=$code)，watchdog 退出"
