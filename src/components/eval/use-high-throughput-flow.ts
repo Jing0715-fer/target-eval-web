@@ -129,6 +129,7 @@ function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
     r.dashboardError = undefined
     r.dashboardPending = false
     r.dashboardProgress = undefined
+    r.dashboardProgressPct = undefined
   }
 }
 
@@ -959,15 +960,18 @@ export function useHighThroughputFlow() {
         imported: importedBare.length ? importedBare : undefined,
         importedJobIds: importedJobIds.size ? [...importedJobIds] : undefined,
         // v2.71：running 期间轮询回传阶段进度（生成中横幅实时展示 — 不落盘，
-        //  仅文本变化时刷新视图避免重渲染抖动）
-        onProgress: (msg) => {
-          if (runState.dashboardProgress === msg) return
+        //  仅文本变化时刷新视图避免重渲染抖动）；v2.76：附带全局百分比 pct
+        //  （进度条 — 百分比前移同样触发刷新，条平滑推进）
+        onProgress: (msg, pct) => {
+          if (runState.dashboardProgress === msg && runState.dashboardProgressPct === pct) return
           runState.dashboardProgress = msg
+          runState.dashboardProgressPct = pct
           setRun(cloneRun(runState))
         },
       })
       runState.dashboardPending = false
       runState.dashboardProgress = undefined
+      runState.dashboardProgressPct = undefined
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
         runState.dashboardError = undefined
@@ -1005,6 +1009,7 @@ export function useHighThroughputFlow() {
     } catch (e) {
       runState.dashboardPending = false
       runState.dashboardProgress = undefined
+      runState.dashboardProgressPct = undefined
       runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
       toast({
         title: '统计看板生成失败',
@@ -1472,6 +1477,7 @@ export function useHighThroughputFlow() {
     r.dashboardId = undefined
     r.dashboardError = undefined
     r.dashboardProgress = undefined
+    r.dashboardProgressPct = undefined
     snapshot()
     await finalizeHtDashboardRef.current?.()
   }, [snapshot])

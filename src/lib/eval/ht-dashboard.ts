@@ -954,11 +954,13 @@ async function* htPayloadJsonChunks(
 
 /** v2.71：看板 HTML 流式落盘（服务端生成链路专用 — 内存安全）。
  *  shell 以 MARKER 模式渲染后拆分；载荷分块流式写入（每行读盘→序列化→写→释放）。
- *  无载荷行时退化为一次性写入（shell 本身 <1MB）。onProgress 报告阶段进度。 */
+ *  无载荷行时退化为一次性写入（shell 本身 <1MB）。onProgress 报告阶段进度；
+ *  v2.76：第二参数 frac（0-1 载荷写入完成率，仅逐行内嵌循环回传）— 调用方
+ *  据此映射全局百分比（进度条）。 */
 export async function writeHtDashboardHtmlFile(
   input: RenderHtDashboardInput,
   htmlPath: string,
-  onProgress?: (msg: string) => void,
+  onProgress?: (msg: string, frac?: number) => void,
 ): Promise<void> {
   const anyBody = input.rows.some(r => rowHasReportHtml(r) || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
   if (!anyBody) {
@@ -993,7 +995,7 @@ export async function writeHtDashboardHtmlFile(
           const now = Date.now()
           if (now - lastTick > 2_000 || done === total) {
             lastTick = now
-            onProgress?.(`内嵌报告原文 ${done}/${total} 份（逐份读取写入 — 内存安全）…`)
+            onProgress?.(`内嵌报告原文 ${done}/${total} 份（逐份读取写入 — 内存安全）…`, done / total)
           }
         })) {
           await write(chunk)
@@ -1038,20 +1040,41 @@ export function ensureHtDashboardProgressColumn(): Promise<void> {
   return htProgressColumnEnsured
 }
 
+/** v2.76：进度文本编码 — 「#P{pct}# 阶段文本」存 progress 列（GET 状态轮询解析为
+ *  progressPct 回传，前端渲染百分比进度条）。无 pct 的纯文本（v2.71 旧格式）不带
+ *  前缀 — 读取端正则不命中即按无百分比处理，新旧双向兼容。 */
+export function encodeHtDashboardProgress(msg: string, pct?: number): string {
+  if (pct == null || !Number.isFinite(pct)) return msg
+  const p = Math.max(0, Math.min(100, Math.round(pct)))
+  return `#P${p}# ${msg}`
+}
+
+/** v2.76：解析 progress 列编码（「#P{pct}# 文本」→ { text, pct }；旧格式纯文本 →
+ *  仅 text）。GET 状态轮询用 — 回传 progress（展示文本）+ progressPct（进度条）。 */
+export function parseHtDashboardProgress(raw: string): { text: string; pct?: number } {
+  const m = /^#P(\d{1,3})# ([\s\S]*)$/.exec(raw)
+  if (!m) return { text: raw }
+  const pct = Number(m[1])
+  return { text: m[2] || raw, pct: Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : undefined }
+}
+
 /** v2.71：看板生成进度写入器（节流 fire-and-forget — 同文本 1.5s 内不重复写；
  *  仅 running 期间有意义，终态由调用方覆盖）。进度让前端「汇总报告生成中」横幅
- *  从黑盒等待变为实时阶段展示（用户实测超时场景下可区分卡在哪一步）。 */
-export function makeHtDashboardProgressWriter(dashboardId: string): (msg: string) => void {
+ *  从黑盒等待变为实时阶段展示（用户实测超时场景下可区分卡在哪一步）。
+ *  v2.76：第二参数 pct（0-100 全局百分比，可选）— 编码进 progress 文本（见
+ *  encodeHtDashboardProgress），前端横幅据此渲染进度条（无 pct 时保持纯文本）。 */
+export function makeHtDashboardProgressWriter(dashboardId: string): (msg: string, pct?: number) => void {
   let last = ''
   let lastAt = 0
-  return (msg: string) => {
+  return (msg: string, pct?: number) => {
+    const text = encodeHtDashboardProgress(msg, pct).slice(0, 200)
     const now = Date.now()
-    if (msg === last && now - lastAt < 1_500) return
-    last = msg
+    if (text === last && now - lastAt < 1_500) return
+    last = text
     lastAt = now
     void db.htDashboard.update({
       where: { id: dashboardId },
-      data: { progress: msg.slice(0, 200) },
+      data: { progress: text },
     }).catch(() => undefined) // 进度写失败不影响生成
   }
 }

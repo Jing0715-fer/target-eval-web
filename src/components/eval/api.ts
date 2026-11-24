@@ -763,7 +763,8 @@ export async function uploadImportedReport(fileName: string, html: string): Prom
 }
 
 /** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告）
- *  v2.71：progress = 生成阶段进度文案（running 期间轮询回传 — 横幅实时展示） */
+ *  v2.71：progress = 生成阶段进度文案（running 期间轮询回传 — 横幅实时展示）
+ *  v2.76：progressPct = 全局百分比 0-100（进度条；服务端各阶段权重标定后编码回传） */
 export interface HtDashboardInfo {
   id: string
   status: 'running' | 'done' | 'error'
@@ -772,6 +773,8 @@ export interface HtDashboardInfo {
   createdAt?: string
   /** v2.71：生成阶段进度（仅 running 期间返回 — 前端「生成中」横幅实时展示） */
   progress?: string
+  /** v2.76：全局进度百分比 0-100（仅 running 期间返回 — 前端「生成中」横幅进度条） */
+  progressPct?: number
   /** v2.60：本次生成从浏览器本地缓存快照恢复的靶点数（服务端作业已过期/实例回收） */
   recoveredCount?: number
   /** v2.60：无数据副本被跳过的靶点数（服务端已过期且本地缓存无快照） */
@@ -871,8 +874,9 @@ export async function generateHtDashboard(input: {
   }>
   /** v2.68：导入报告携带的原作业 id（entries 中对应行标「载入」徽标 — 与本次评估行区分） */
   importedJobIds?: string[]
-  /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示） */
-  onProgress?: (msg: string) => void
+  /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示）；
+   *  v2.76：第二参数 pct = 全局百分比 0-100（进度条，旧服务端无此字段时 undefined） */
+  onProgress?: (msg: string, pct?: number) => void
 }): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
   // v2.74：POST 瞬态重试 — dev server 重编译 / 网关瞬断窗口内 fetch 直接抛
@@ -966,7 +970,7 @@ export async function generateHtDashboard(input: {
       return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成失败（${(d as { error: string }).error} — 服务端看板数据已不存在；运行结果不受影响，可点击「重新生成汇总报告」重建）`, ...recoverInfo }
     }
     if (d?.dashboard?.progress) {
-      input.onProgress?.(d.dashboard.progress)
+      input.onProgress?.(d.dashboard.progress, d.dashboard.progressPct)
       if (d.dashboard.progress !== lastProgress) {
         lastProgress = d.dashboard.progress
         lastProgressAt = Date.now()

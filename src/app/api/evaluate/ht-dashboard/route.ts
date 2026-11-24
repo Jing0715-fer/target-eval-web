@@ -38,6 +38,7 @@ import {
   writeHtDashboardHtmlFile,
   ensureHtDashboardProgressColumn,
   makeHtDashboardProgressWriter,
+  parseHtDashboardProgress,
   resolveZipHrefs,
   htDashboardTitle,
   attachExcelRows,
@@ -406,6 +407,12 @@ async function runDashboardGeneration(ctx: {
   const { dashboardId, entries, archivedByJob, goal, excelRows, sequencesByJob, importedBare, importedJobIds, owner } = ctx
   const startedAt = Date.now()
   const progress = makeHtDashboardProgressWriter(dashboardId)
+  // v2.76：全局进度百分比（进度条）— 阶段权重按典型耗时分布标定：
+  //  数据加载 2→15 / 导入留存规划 16→20 / 导入统计补解析 21→30（逐个 tick）/
+  //  批次统计 31→35 / LLM（每靶点结论 + 整体报告）36→60（心跳渐近推进 — 时长
+  //  不可知，限流重试可静默数分钟）/ zip 链接 61→65 / HTML 流式落盘 66→98
+  //  （百级靶点报告原文逐份读盘写入 — 主耗时阶段，逐行 tick）。各阶段仅推进到
+  //  本阶段起始值（实际耗时未知），下一阶段消息携带自身起始百分比自然接续。
   const fail = async (msg: string) => {
     await db.htDashboard.update({
       where: { id: dashboardId },
@@ -416,7 +423,7 @@ async function runDashboardGeneration(ctx: {
     // v2.69：报告原文体积预算（作业报告 + 导入留存共用 — 弹出页内嵌总量护栏；
     // v2.71 起按 stat 字节分配，内容写盘时逐份延迟读取）
     const reportBudget = { total: 0 }
-    progress(`加载 ${entries.filter(e => e.jobId).length} 个靶点的评估数据…`)
+    progress(`加载 ${entries.filter(e => e.jobId).length} 个靶点的评估数据…`, 2)
     const { rows, jobCount } = await loadHtDashboardRows(entries, archivedByJob, sequencesByJob, importedJobIds, reportBudget)
     // v2.68→v2.69：导入载入靶点 — DB 命中（完整统计已从原作业恢复）的同名靶点剔除
     //  （以 DB 恢复行为准 — 数据更全），仅保留未命中的：stats 存在 → 完整统计行
@@ -424,7 +431,7 @@ async function runDashboardGeneration(ctx: {
     //  同源 — 去重键可靠）
     const restoredLabels = new Set(rows.filter(r => r.imported).map(r => r.label))
     const pendingImported = (importedBare ?? []).filter(t => !restoredLabels.has(t.label.slice(0, 60)))
-    if (pendingImported.length > 0) progress(`规划 ${pendingImported.length} 个导入报告的原文留存…`)
+    if (pendingImported.length > 0) progress(`规划 ${pendingImported.length} 个导入报告的原文留存…`, 16)
     // v2.69：导入报告原文留存规划（归属校验 + 体积预算 — 弹出页内嵌报告原文）
     const reportPathById = owner
       ? await loadImportedReportHtml(pendingImported, owner, reportBudget)
@@ -435,9 +442,9 @@ async function runDashboardGeneration(ctx: {
     const backfillPending = pendingImported.filter(t =>
       !t.stats && t.reportId && reportPathById.has(t.reportId)).length
     if (backfillPending > 0) {
-      progress(`解析导入报告统计（待补 ${backfillPending} 个）…`)
+      progress(`解析导入报告统计（待补 ${backfillPending} 个）…`, 21)
       const backfilled = await backfillImportedStats(pendingImported, reportPathById, (d, n) => {
-        progress(`解析导入报告统计 ${d}/${n}…`)
+        progress(`解析导入报告统计 ${d}/${n}…`, 21 + Math.round((d / n) * 9))
       })
       if (backfilled > 0) {
         console.log(`[ht-dashboard] 导入报告统计服务端补解析：${backfilled}/${backfillPending} 个降级行已回填为完整统计行`)
@@ -453,7 +460,7 @@ async function runDashboardGeneration(ctx: {
       ? [...importedJobIds].filter(id => !restoredJobIds.has(id)).length
       : 0
     const allRows = [...statRows, ...bareRows]
-    progress('汇总批次统计…')
+    progress('汇总批次统计…', 31)
     const stats = computeHtStats(statRows, Math.max(0, jobCount - droppedImported), bareRows.length)
     // v2.74：LLM 阶段心跳进度 — 每靶点结论（≤60s）+ 整体报告（≤120s）叠加限流重试
     //  （20s/40s/60s/90s/120s 退避）时可静默数分钟，前端无进展判定会把仍在正常
@@ -461,11 +468,17 @@ async function runDashboardGeneration(ctx: {
     //  自带 1.5s 节流 — 文本变化即落库，前端轮询可见 → 进度窗口持续重置）。
     const llmT0 = Date.now()
     const llmHeartbeat = setInterval(() => {
-      progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）· 已 ${Math.round((Date.now() - llmT0) / 1000)}s`)
+      // v2.76：百分比渐近推进（36→60 永不越界）— LLM 总时长不可知（限流重退
+      //  可静默数分钟），线性会提前到顶显得「假完成」，渐近曲线持续前进又不过冲
+      const elapsedSec = (Date.now() - llmT0) / 1000
+      progress(
+        `AI 撰写整体可行性报告（${statRows.length} 个靶点）· 已 ${Math.round(elapsedSec)}s`,
+        36 + 24 * (1 - Math.exp(-elapsedSec / 90)),
+      )
     }, 5_000)
     let generated
     try {
-      progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`)
+      progress(`AI 撰写整体可行性报告（${statRows.length} 个靶点）…`, 36)
       generated = await generateHtDashboardReport(statRows, stats, goal)
     } finally {
       clearInterval(llmHeartbeat)
@@ -473,7 +486,7 @@ async function runDashboardGeneration(ctx: {
     const engineSummary = await getEngineSummary()
     // zip 相对链接（与 ht-archive 命名同源 — 解压后 G01/xxx.html 可点）；
     // v2.60：缓存恢复行无服务器报告文件，zip 内无对应文件 — 不挂离线链接
-    progress('规划离线包链接命名…')
+    progress('规划离线包链接命名…', 61)
     const zipHrefs = await resolveZipHrefs(entries)
     for (const r of allRows) r.zipHref = r.fromArchive || r.bare || r.importedFromFile ? undefined : zipHrefs.get(r.jobId)
 
@@ -486,6 +499,11 @@ async function runDashboardGeneration(ctx: {
     const dir = path.join(process.cwd(), 'db', 'reports', dashboardId)
     await fs.mkdir(dir, { recursive: true })
     const htmlPath = path.join(dir, 'report.html')
+    // v2.76：写盘子进度 → 全局百分比（shell 渲染 = 阶段头部 66；载荷逐行
+    //  70→98 — 百级靶点时该阶段占比最大，逐行 tick 让进度条持续前进）
+    const writeProgress = (msg: string, frac?: number): void => {
+      progress(msg, frac != null ? 70 + Math.round(frac * 28) : 66)
+    }
     await writeHtDashboardHtmlFile({
       title,
       goal,
@@ -499,7 +517,7 @@ async function runDashboardGeneration(ctx: {
       origin: ctx.origin,
       generatedAt,
       excelRows,
-    }, htmlPath, progress)
+    }, htmlPath, writeProgress)
     await db.htDashboard.update({
       where: { id: dashboardId },
       data: {
@@ -629,7 +647,15 @@ export async function GET(req: Request) {
     }
   }
 
-  // JSON 状态（前端轮询）— v2.71 附带生成阶段进度（running 期间横幅实时展示）
+  // JSON 状态（前端轮询）— v2.71 附带生成阶段进度（running 期间横幅实时展示）；
+  //  v2.76 progress 列编码「#P{pct}# 文本」（见 encodeHtDashboardProgress）—
+  //  解析后回传 progress（展示文本）+ progressPct（0-100 进度条）；旧格式纯文本
+  //  不带前缀，无 progressPct（前端进度条退化为不确定态动画）
+  let progressPayload: { progress: string; progressPct?: number } | undefined
+  if (record.status !== 'done' && record.status !== 'error' && record.progress) {
+    const { text, pct } = parseHtDashboardProgress(record.progress)
+    progressPayload = { progress: text, ...(pct != null ? { progressPct: pct } : {}) }
+  }
   return NextResponse.json({
     ok: true,
     dashboard: {
@@ -637,7 +663,7 @@ export async function GET(req: Request) {
       status: record.status === 'done' ? 'done' : record.status === 'error' ? 'error' : 'running',
       title: record.title ?? '',
       error: record.error ?? null,
-      ...(record.status !== 'done' && record.status !== 'error' && record.progress ? { progress: record.progress } : {}),
+      ...(progressPayload ?? {}),
       createdAt: record.createdAt.toISOString(),
     },
   })

@@ -255,3 +255,13 @@
   border-radius: 2px;
   background: #5e6ad2;
 }
+
+/* v2.76 汇总报告生成中 — 进度条不确定态滑动块（服务端百分比未回传前兜底动画；
+ * 宽度 40%（w-2/5），位移百分比相对自身宽度：-110% 完全滑出左侧 → 255% 完全滑出右侧） */
+.ht-progress-indeterminate {
+  animation: ht-progress-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes ht-progress-indeterminate {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(255%); }
+}

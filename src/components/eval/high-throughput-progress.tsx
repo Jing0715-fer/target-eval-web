@@ -46,6 +46,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Progress } from '@/components/ui/progress'
 import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDuration } from './format'
@@ -856,15 +857,34 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
             </>
           ) : run.dashboardPending ? (
             <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-semibold text-foreground">汇总报告生成中…</p>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                <p className="text-[13px] font-semibold text-foreground">汇总报告生成中…</p>
+                {/* v2.76：全局百分比（服务端各阶段权重标定回传 — 进度条主指标） */}
+                {run.dashboardProgressPct != null && (
+                  <span className="font-mono text-[12px] font-semibold tabular-nums text-primary">
+                    {Math.round(run.dashboardProgressPct)}%
+                  </span>
+                )}
+              </div>
+              {/* v2.76 进度条：有百分比 → 确定性（Radix 过渡平滑推进）；无（旧服务
+                  端纯文本进度 / 首条进度落库前）→ 不确定态滑动动画，不再黑盒等待 */}
+              <div className="mt-2" aria-hidden>
+                {run.dashboardProgressPct != null ? (
+                  <Progress value={run.dashboardProgressPct} className="h-1.5" />
+                ) : (
+                  <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-primary/15">
+                    <div className="ht-progress-indeterminate absolute inset-y-0 left-0 w-2/5 rounded-full bg-primary" />
+                  </div>
+                )}
+              </div>
               {/* v2.71：服务端阶段进度实时展示（running 期间轮询回传 — 生成不再黑盒等待） */}
               {run.dashboardProgress ? (
-                <p className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                <p className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
                   <LoaderCircle className="size-3 shrink-0 animate-spin" aria-hidden />
                   <span className="truncate">{run.dashboardProgress}</span>
                 </p>
               ) : null}
-              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                 正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；大批次（百级靶点）报告原文逐份流式写入可能需要数分钟，期间可自由查看各组结果。
               </p>
             </div>

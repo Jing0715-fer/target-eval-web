@@ -1071,6 +1071,10 @@ export interface HTRunState {
   /** v2.71：汇总报告生成阶段进度（running 期间轮询回传 — 生成中横幅实时展示；
    *  纯展示字段，终态后由 dashboardId/dashboardError 接替清空） */
   dashboardProgress?: string
+  /** v2.76：汇总报告生成全局进度百分比 0-100（与 dashboardProgress 同一次轮询
+   *  回传 — 生成中横幅进度条；纯展示字段，终态后清空。旧服务端无编码时 undefined，
+   *  横幅退化为不确定态动画条） */
+  dashboardProgressPct?: number
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；导入时留存）。v2.68：seqs =
    *  该行序列单元格的原文（与 text 中 [序列 N aa] 标记按出现顺序对应 — 汇总主表
    *  序列标记处的一键复制按钮数据源；旧快照无此字段则不渲染按钮） */
