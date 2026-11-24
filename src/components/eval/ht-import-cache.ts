@@ -36,8 +36,21 @@ interface CachedSource {
   at: number
 }
 
-/** 内存缓存（sha → 源文件）— 同会话内零延迟命中 */
+/** 内存缓存（sha → 源文件）— 同会话内零延迟命中。
+ *  v2.83：有界 LRU（旧版无界 — 117 份 × 1.1MB ≈ 128MB 常驻是渲染进程 OOM 的
+ *  第二根源；IndexedDB 才是持久层，内存层只为同会话自愈加速，容量 8 足够） */
+const MEM_CACHE_MAX = 8
 const memCache = new Map<string, CachedSource>()
+
+function memCacheSet(sha: string, entry: CachedSource): void {
+  memCache.delete(sha)
+  while (memCache.size >= MEM_CACHE_MAX) {
+    const oldest = memCache.keys().next().value
+    if (oldest === undefined) break
+    memCache.delete(oldest)
+  }
+  memCache.set(sha, entry)
+}
 
 // ─── IndexedDB（best-effort — 打开失败静默降级为纯内存）───────────────────────
 
@@ -94,28 +107,57 @@ async function idbGet(sha: string): Promise<CachedSource | null> {
   }
 }
 
-/** 总量超限时按写入时间淘汰最旧条目（best-effort — 失败不影响本次写入） */
+/** v2.83：IDB 总量近似值（-1 = 未知需扫描初始化）。避免每写一份就全库游标扫描
+ *  ——内存计数器只在跨过 150MB 阈值时才触发真正的淘汰扫描） */
+let approxIdbChars = -1
+
+/** 总量超限时按写入时间淘汰最旧条目（best-effort — 失败不影响本次写入）。
+ *  v2.83：**游标流式扫描**（旧版 getAll 把全库条目整读进 JS 堆 — 117 份 × 1.1MB
+ *  的留存每写一份就 getAll 一次 = 128MB 级瞬态 × 117 次，V8 回收跟不上 →
+ *  渲染进程 JS 堆飙到 678MB / 总 RSS 2.4GB 被内核 OOM 杀死，实测定位）。
+ *  游标逐条流过只累计 {sha, 时间, 长度}，任意时刻至多驻留单份原文。 */
 async function idbTrimIfNeeded(incomingChars: number): Promise<void> {
+  // v2.83：已知总量且未超限 → 纯内存计数，零扫描（百份导入的主路径）
+  if (approxIdbChars >= 0 && approxIdbChars + incomingChars <= IDB_TOTAL_MAX_CHARS) {
+    approxIdbChars += incomingChars
+    return
+  }
   const db = await openIdb()
   if (!db) return
   try {
-    const store = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE)
-    const all = (await idbReq(store.getAll())) as Array<CachedSource & { sha: string }> | null
-    if (!all) return
     let total = incomingChars
-    for (const e of all) total += e.html.length
+    const entries: Array<{ sha: string; at: number; chars: number }> = []
+    await new Promise<void>(resolve => {
+      const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).openCursor()
+      req.onsuccess = () => {
+        const cur = req.result
+        if (!cur) return resolve()
+        const v = cur.value as (CachedSource & { sha?: string }) | null
+        const sha = typeof v?.sha === 'string' ? v.sha : (cur.key as string)
+        const chars = typeof v?.html?.length === 'number' ? v.html.length : 0
+        total += chars
+        entries.push({ sha, at: typeof v?.at === 'number' ? v.at : 0, chars })
+        cur.continue()
+      }
+      req.onerror = () => resolve()
+    })
+    approxIdbChars = total // 缓存近似总量（淘汰后同步扣减）
     if (total <= IDB_TOTAL_MAX_CHARS) return
-    const sorted = [...all].sort((a, b) => a.at - b.at)
+    const sorted = [...entries].sort((a, b) => a.at - b.at)
     const victims: string[] = []
-    let cur = total
+    let curTotal = total
     for (const e of sorted) {
-      if (cur <= IDB_TOTAL_MAX_CHARS || victims.length >= IDB_TRIM_SCAN_LIMIT) break
-      cur -= e.html.length
+      if (curTotal <= IDB_TOTAL_MAX_CHARS || victims.length >= IDB_TRIM_SCAN_LIMIT) break
+      curTotal -= e.chars
       victims.push(e.sha)
     }
     if (!victims.length) return
     const tx = db.transaction(IDB_STORE, 'readwrite')
     for (const sha of victims) tx.objectStore(IDB_STORE).delete(sha)
+    for (const v of victims) {
+      const e = entries.find(x => x.sha === v)
+      if (e) approxIdbChars -= e.chars
+    }
     await new Promise<void>(resolve => { tx.oncomplete = () => resolve(); tx.onerror = () => resolve(); tx.onabort = () => resolve() })
   } catch { /* 静默 */ }
 }
@@ -146,7 +188,7 @@ async function sourceSha(html: string): Promise<string> {
 export async function saveImportedSource(fileName: string, html: string): Promise<string> {
   const sha = await sourceSha(html)
   const entry: CachedSource = { fileName: fileName.slice(0, 120), html, at: Date.now() }
-  memCache.set(sha, entry)
+  memCacheSet(sha, entry)
   if (html.length <= IDB_SINGLE_MAX_CHARS) {
     await idbPut({ ...entry, sha }).catch(() => undefined)
     void idbTrimIfNeeded(html.length).catch(() => undefined)
@@ -159,6 +201,6 @@ export async function getImportedSource(sha: string): Promise<CachedSource | nul
   const mem = memCache.get(sha)
   if (mem) return mem
   const hit = await idbGet(sha)
-  if (hit) memCache.set(sha, hit)
+  if (hit) memCacheSet(sha, hit)
   return hit
 }

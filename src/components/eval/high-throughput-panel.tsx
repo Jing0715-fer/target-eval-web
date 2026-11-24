@@ -165,6 +165,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
   // ── v2.38 报告导入（zip 归档 / v2.44 单独 HTML，可多选批量；既有报告匹配 → 自动取消勾选） ──
   const zipInputRef = useRef<HTMLInputElement>(null)
   const [importingZip, setImportingZip] = useState(false)
+  /** v2.83：导入进度（逐份解析/校验/上传 — 百份级导入可达分钟级，无反馈像卡死） */
+  const [importProgress, setImportProgress] = useState<string | null>(null)
   const [zipMeta, setZipMeta] = useState<{ name: string; reports: number; matched: number } | null>(null)
   /** v2.70：本次导入中原文未能留存/内嵌的靶点数（超 32MB 或上传失败 — toast 提示） */
   const importUploadMissedRef = useRef(0)
@@ -172,6 +174,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
     const list = files ? Array.from(files) : []
     if (list.length === 0 || importingZip) return
     setImportingZip(true)
+    setImportProgress(null)
     importUploadMissedRef.current = 0
     try {
       const importParsed = await parseHtImportFiles(list)
@@ -237,7 +240,10 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         //  stats 随启动载荷入运行记录（不依赖 DB 保留期，旧版报告也能整合进汇总
         //  表格）；reportId 供汇总弹出页内嵌报告原文。任一失败独立降级，不阻塞导入
         try {
-          const enriched = await enrichImportedReports(enrichItems, importParsed)
+          const enriched = await enrichImportedReports(enrichItems, importParsed, {
+            // v2.83：百份级导入进度（按钮实时反馈 — 无反馈时分钟级等待像卡死）
+            onProgress: msg => setImportProgress(msg.length > 60 ? msg.slice(0, 60) : msg),
+          })
           let uploadMissed = 0
           enriched.forEach((e, i) => {
             const entry = nextImported.get(enrichKeys[i]!)
@@ -252,6 +258,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           importUploadMissedRef.current = uploadMissed
         } catch {
           /* enrich 失败（网络/解析）→ 降级「载入」行，导入匹配本身不受影响 */
+        } finally {
+          setImportProgress(null)
         }
         onImportedEntriesChange([...nextImported.values()].filter((e) => next.has(e.key)))
       }
@@ -295,6 +303,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
     } finally {
       setImportingZip(false)
+      setImportProgress(null)
       if (zipInputRef.current) zipInputRef.current.value = ''
     }
   }
@@ -453,7 +462,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           {importingZip
             ? <LoaderCircle className="size-3 animate-spin" aria-hidden />
             : <FileArchive className="size-3" aria-hidden />}
-          {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+          {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
         </Button>
         <span className="font-mono text-[10px] text-muted-foreground/85">
           .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 序列行逐行成组（同链多靶点同组 · 抗体链忽略 · 同源多聚体只计 1 条 · 跨行完全同源 ≥95% 并为一组） · 导入会替换当前输入

@@ -933,7 +933,7 @@ export function useHighThroughputFlow() {
     //     存在时直接构建完整统计行（不依赖 DB 保留期，旧版报告也能整合进表格）；
     //     reportId（原文服务端留存 id）供弹出页内嵌报告原文；两者都缺时降级行兜底。
     //     DB 命中时服务端按 label 去重（以 DB 恢复行为准 — 数据更全）
-    const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string; reportId?: string; range?: [number, number]; stats?: HTGroupItemState['importedStats'] }> = []
+    const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string; reportId?: string; sourceSha?: string; range?: [number, number]; stats?: HTGroupItemState['importedStats'] }> = []
     const importedJobIds = new Set<string>()
     for (const g of runState.groups) {
       for (const it of g.items) {
@@ -946,6 +946,8 @@ export function useHighThroughputFlow() {
             sequence: it.sequence?.slice(0, 50_000),
             fileName: it.importedFile,
             reportId: it.importedReportId,
+            // v2.83：内容哈希随载荷上传 — reportId 死亡/丢失时服务端按内容找回同内容留存
+            sourceSha: it.importedReportSha,
             range: it.range,
             stats: it.importedStats,
           })
@@ -1008,7 +1010,7 @@ export function useHighThroughputFlow() {
               if (fresh) { r.item.importedReportId = fresh; r.bare.reportId = fresh; healedItems++ }
             }
             if (healedItems > 0) {
-              console.log(`[ht-dashboard] 导入留存自愈：重新上传 ${heal.reuploaded} 份源文件（覆盖 ${healedItems} 个靶点）`)
+              console.log(`[ht-dashboard] 导入留存自愈：采纳/重传 ${healedItems} 个靶点的留存（重传 ${heal.reuploaded} 份 · 零重传采纳 ${heal.adopted} 份）`)
               saveHTRun(runState)
             }
           }
@@ -1516,7 +1518,7 @@ export function useHighThroughputFlow() {
    * （react-hooks/immutability：直接在 useCallback 内改 runRef 会被 React 编译器拦，
    * 模块函数不受限）。
    */
-  const importArchive = useCallback(async (files: File | File[]): Promise<ArchiveSkipResult> => {
+  const importArchive = useCallback(async (files: File | File[], opts: { onProgress?: (msg: string) => void } = {}): Promise<ArchiveSkipResult> => {
     if (!ensureEditable()) throw new Error('运行进行中，请先暂停或停止')
     const r = runRef.current
     if (!r) throw new Error('没有打开的运行')
@@ -1556,7 +1558,10 @@ export function useHighThroughputFlow() {
         }
       }
       try {
-        const enriched = await enrichImportedReports(enrichItems, parsed)
+        const enriched = await enrichImportedReports(enrichItems, parsed, {
+          // v2.83：百份级导入进度透传（调用方按钮实时反馈）
+          onProgress: opts.onProgress,
+        })
         enrichedTargets.forEach((it, i) => {
           if (enriched[i]?.stats) it.importedStats = enriched[i]!.stats
           if (enriched[i]?.reportId) it.importedReportId = enriched[i]!.reportId

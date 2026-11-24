@@ -781,6 +781,28 @@ export async function verifyImportedReports(ids: string[]): Promise<{ missing: s
   }
 }
 
+/** v2.83：按内容哈希批量校验服务端留存 — 返回「哈希 → 存活留存 id」映射与
+ *  仍缺失的哈希清单。同内容已有任何可读留存即命中（重复导入/历史批次同样
+ *  采纳，无需重传）。端点不可达/响应异常返回 null（调用方自定降级策略）。 */
+export async function verifyImportedSources(shas: string[]): Promise<{ retained: Record<string, string>; missing: string[] } | null> {
+  if (shas.length === 0) return { retained: {}, missing: [] }
+  try {
+    const res = await fetch(`/api/evaluate/ht-imported-report?shas=${encodeURIComponent(shas.slice(0, 60).join(','))}`, {
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; retained?: unknown; missing?: unknown } | null
+    if (!data?.ok || typeof data.retained !== 'object' || data.retained == null || !Array.isArray(data.missing)) return null
+    const retained: Record<string, string> = {}
+    for (const [k, v] of Object.entries(data.retained as Record<string, unknown>)) {
+      if (typeof v === 'string') retained[k] = v
+    }
+    return { retained, missing: data.missing.filter((x): x is string => typeof x === 'string') }
+  } catch {
+    return null
+  }
+}
+
 /** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告）
  *  v2.71：progress = 生成阶段进度文案（running 期间轮询回传 — 横幅实时展示）
  *  v2.76：progressPct = 全局百分比 0-100（进度条；服务端各阶段权重标定后编码回传） */
@@ -895,6 +917,8 @@ export interface HtDashboardGenerateInput {
     sequence?: string
     fileName?: string
     reportId?: string
+    /** v2.83：原文内容哈希（reportId 死亡/丢失时服务端按内容找回同内容留存） */
+    sourceSha?: string
     range?: [number, number]
     stats?: ImportedReportStats
   }>

@@ -32,6 +32,7 @@ import {
   loadHtDashboardRows,
   buildImportedRows,
   loadImportedReportHtml,
+  resolveImportedReportPath,
   backfillImportedStats,
   backfillImportedUniprot,
   computeHtStats,
@@ -148,13 +149,16 @@ function sanitizeImported(v: unknown): HtImportedTarget[] {
     if (!e || typeof e !== 'object' || out.length >= 600) continue
     const o = e as {
       label?: unknown; group?: unknown; sequence?: unknown; fileName?: unknown
-      reportId?: unknown; range?: unknown; stats?: unknown
+      reportId?: unknown; sourceSha?: unknown; range?: unknown; stats?: unknown
     }
     const label = typeof o.label === 'string' ? o.label.trim().slice(0, 60) : ''
     if (!label) continue
     const group = typeof o.group === 'number' && Number.isFinite(o.group) && o.group > 0 && o.group <= 999 ? Math.round(o.group) : undefined
     const fileName = typeof o.fileName === 'string' && o.fileName.trim() ? o.fileName.trim().slice(0, 80) : undefined
     const reportId = typeof o.reportId === 'string' && /^[a-z0-9]{20,40}$/i.test(o.reportId) ? o.reportId : undefined
+    // v2.83：原文内容哈希（与 ht-import-cache sourceSha 同口径 — reportId 死亡时
+    //  按内容找回同内容留存；哈希无密钥性，仅作内容寻址键，非安全凭证）
+    const sourceSha = typeof o.sourceSha === 'string' && /^[a-z0-9]{6,64}$/i.test(o.sourceSha) ? o.sourceSha.toLowerCase() : undefined
     const rv = o.range
     const range = Array.isArray(rv) && rv.length === 2 && Number(rv[0]) >= 1 && Number(rv[1]) >= Number(rv[0])
       ? [Number(rv[0]), Number(rv[1])] as [number, number]
@@ -210,6 +214,7 @@ function sanitizeImported(v: unknown): HtImportedTarget[] {
       ...(sequence ? { sequence } : {}),
       ...(fileName ? { fileName } : {}),
       ...(reportId ? { reportId } : {}),
+      ...(sourceSha ? { sourceSha } : {}),
       ...(range ? { range } : {}),
       ...(stats ? { stats } : {}),
     })
@@ -532,9 +537,10 @@ async function runDashboardGeneration(ctx: {
     const reportPathById = owner
       ? await loadImportedReportHtml(allImported, owner, reportBudget)
       : new Map<string, string>()
+    // v2.83：多键解析（reportId → sha 兑底）— DB 恢复行的弹出页同样挂上传件
     const importedUploadByLabel = new Map<string, string>()
     for (const t of allImported) {
-      const p = t.reportId ? reportPathById.get(t.reportId) : undefined
+      const p = resolveImportedReportPath(reportPathById, t)
       if (p) importedUploadByLabel.set(t.label.slice(0, 60), p)
     }
     progressWithPhase(`加载 ${entries.filter(e => e.jobId).length} 个靶点的评估数据…`, 2)
@@ -552,7 +558,7 @@ async function runDashboardGeneration(ctx: {
     //  正常但表格评分列为空」：读留存原文前缀，同一解析器 + 提交序列 SHA/容差
     //  定位，命中即回填 stats → 完整统计行，与本次评估同权参与统计）
     const backfillPending = pendingImported.filter(t =>
-      !t.stats && t.reportId && reportPathById.has(t.reportId)).length
+      !t.stats && resolveImportedReportPath(reportPathById, t) != null).length
     if (backfillPending > 0) {
       progressWithPhase(`解析导入报告统计（待补 ${backfillPending} 个）…`, 21)
       const backfilled = await backfillImportedStats(pendingImported, reportPathById, (d, n) => {

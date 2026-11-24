@@ -120,14 +120,16 @@ model HtDashboard {
 // 上传原文，汇总报告生成时服务端读回：解析统计构建完整统计行（不依赖
 // EvaluationJob 保留期）+「完整报告」弹出页内嵌报告原文（与下载版一致）
 model ImportedReport {
-  id        String   @id @default(cuid())
-  fileName  String // 来源文件名（展示/下载命名参考）
-  htmlPath  String // 磁盘 HTML 路径（db/reports/imports/{id}.html）
-  size      Int // 字节数（体积监控/排障）
-  ownerKey  String? // 上传者归属键（读取时校验 — 与 EvaluationJob 一致）
-  ownerMask String? // 上传者来源 IP 掩码（仅排障展示）
-  createdAt DateTime @default(now())
+  id         String   @id @default(cuid())
+  fileName   String // 来源文件名（展示/下载命名参考）
+  htmlPath   String // 磁盘 HTML 路径（db/reports/imports/{id}.html）
+  size       Int // 字节数（体积监控/排障）
+  ownerKey   String? // 上传者归属键（读取时校验 — 与 EvaluationJob 一致）
+  ownerMask  String? // 上传者来源 IP 掩码（仅排障展示）
+  contentSha String? // v2.83：内容哈希（sha256 UTF-8 前 32 hex — 同内容去重回 id + 汇总生成按 sha 兜底恢复内嵌）
+  createdAt  DateTime @default(now())
 
   @@index([createdAt])
   @@index([ownerKey, createdAt])
+  @@index([contentSha])
 }

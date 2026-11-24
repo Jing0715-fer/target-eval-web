@@ -227,6 +227,9 @@ export interface HtImportedTarget {
   fileName?: string
   /** v2.69：导入报告原文的服务端留存 id（弹出页内嵌原文） */
   reportId?: string
+  /** v2.83：原文内容哈希（sha256 前 32 hex — reportId 死亡/丢失时按内容兜底
+   *  找回同内容留存，弹出页内嵌不再依赖 reportId 单链接） */
+  sourceSha?: string
   /** v2.69：运行侧评估区间（完整统计行的展示列） */
   range?: [number, number]
   /** v2.69：客户端解析的统计快照（存在即构建完整统计行） */
@@ -521,7 +524,9 @@ export function buildImportedRows(
   const rows: HtDashboardRow[] = []
   const bareRows: HtDashboardRow[] = []
   imported.forEach((t, i) => {
-    const reportHtmlPath = t.reportId ? reportPathById.get(t.reportId) : undefined
+    // v2.83：多键解析（reportId 直查 → 内容哈希兑底 — reportId 死亡/丢失时
+    //  同内容留存仍在即可内嵌原文）
+    const reportHtmlPath = resolveImportedReportPath(reportPathById, t)
     if (t.stats) {
       const s = t.stats
       rows.push({
@@ -586,21 +591,40 @@ export function buildImportedRows(
   return { rows, bareRows }
 }
 
+/** v2.83：多键路径解析（reportId 直查 → 内容哈希兜底）。loadImportedReportHtml
+ *  的映射对每份原文同时登记 reportId 与 `sha:{sourceSha}` 两个键（同一磁盘路径），
+ *  reportId 死亡/丢失的靶点凭内容哈希仍能取到同内容留存的路径。 */
+export function resolveImportedReportPath(
+  m: Map<string, string>,
+  t: { reportId?: string; sourceSha?: string },
+): string | undefined {
+  if (t.reportId) {
+    const p = m.get(t.reportId)
+    if (p) return p
+  }
+  if (t.sourceSha) return m.get(`sha:${t.sourceSha}`)
+  return undefined
+}
+
 /** v2.69：规划导入报告原文的服务端留存读取（ht-imported-report 上传的文件）。
  *  归属校验（仅上传者可读）+ 体积护栏（与作业报告原文同预算 — 超出仅丢失
  *  「完全一致」内嵌，统计与降级行不受影响）。
  *  v2.70：① 使用前自愈补建 ImportedReport 表；② 预算优先级 — 无 stats 的降级
  *  行先读（弹出页除原文外一无所有）；③ 查询失败记日志。
  *  v2.71：**只规划不读内容** — 返回 reportId → 磁盘路径（写盘时逐份延迟读取，
- *  与作业报告同内存安全口径；stat 预检 + 预算分配，超限文件不入 Map）。 */
+ *  与作业报告同内存安全口径；stat 预检 + 预算分配，超限文件不入 Map）。
+ *  v2.83：**内容寻址兜底** — reportId 无记录/死亡/丢失的靶点按 sourceSha
+ *  （内容哈希）找回同内容留存（重新导入/自愈重传产生的重复记录同样命中）。
+ *  映射为多键：reportId 与 `sha:{sourceSha}` 都指向同一磁盘路径；预算按
+ *  **路径去重**分配（同内容的重复记录不重复占用 192MB 总量）。 */
 export async function loadImportedReportHtml(
   imported: HtImportedTarget[],
   owner: { key: string; ipKey: string },
   budget: { total: number },
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>()
-  const withId = imported.filter((t): t is HtImportedTarget & { reportId: string } => Boolean(t.reportId))
-  if (withId.length === 0) return out
+  const withKey = imported.filter(t => Boolean(t.reportId || t.sourceSha))
+  if (withKey.length === 0) return out
   try {
     await ensureImportedReportTable()
   } catch (err) {
@@ -608,35 +632,95 @@ export async function loadImportedReportHtml(
     return out
   }
   // v2.70 预算优先级：无 stats 的降级行优先（弹出页唯一内容来源）
-  const ordered = [...withId.filter((t) => !t.stats), ...withId.filter((t) => t.stats)]
-  const ids = [...new Set(ordered.map((t) => t.reportId))]
-  let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string }> = []
+  const ordered = [...withKey.filter((t) => !t.stats), ...withKey.filter((t) => t.stats)]
+  const ids = [...new Set(ordered.map((t) => t.reportId).filter((x): x is string => Boolean(x)))]
+  const shas = [...new Set(ordered.map((t) => t.sourceSha).filter((x): x is string => Boolean(x)))]
+  let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string; contentSha: string | null }> = []
   try {
     recs = await db.importedReport.findMany({
-      where: { id: { in: ids.slice(0, 600) } },
-      select: { id: true, ownerKey: true, htmlPath: true },
+      where: {
+        OR: [
+          ...(ids.length ? [{ id: { in: ids.slice(0, 600) } }] : []),
+          ...(shas.length ? [{ contentSha: { in: shas.slice(0, 600) } }] : []),
+        ],
+      },
+      select: { id: true, ownerKey: true, htmlPath: true, contentSha: true },
+      orderBy: { createdAt: 'desc' }, // v2.83：同内容多条取最新（先见即最新）
     })
   } catch (err) {
     console.error('[ht-dashboard] 导入报告留存读取失败（弹出页将降级）：', err instanceof Error ? err.message : String(err))
     return out
   }
   const recById = new Map(recs.map(r => [r.id, r]))
-  const candidates: Array<{ key: string; path: string }> = []
-  // v2.81 诊断计数（用户环境「全部未能内嵌」排查 — dev 控制台一眼定位缺在哪一环）
-  let diagNoRecord = 0, diagOwnerMismatch = 0
-  for (const id of ids) {
-    const rec = recById.get(id)
-    if (!rec || !rec.htmlPath) { diagNoRecord++; continue }
-    if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) { diagOwnerMismatch++; continue } // 他人留存 — 不采信
-    candidates.push({ key: id, path: rec.htmlPath })
+  // v2.83：sha → 最新可读候选记录（同内容多条时取 createdAt 最新；文件在否
+  //  交给 stat 预检 — 此处只过滤归属与空路径）
+  const recsBySha = new Map<string, { id: string; htmlPath: string }>()
+  for (const rec of recs) {
+    if (!rec.contentSha || !rec.htmlPath) continue
+    if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) continue // 他人留存 — 不采信
+    const prev = recsBySha.get(rec.contentSha)
+    if (!prev) recsBySha.set(rec.contentSha, { id: rec.id, htmlPath: rec.htmlPath })
   }
-  if (diagNoRecord > 0 || diagOwnerMismatch > 0 || candidates.length < ids.length) {
-    console.warn(`[ht-dashboard] 导入报告留存规划：请求 ${ids.length} 份，可用 ${candidates.length} 份（无记录/无路径 ${diagNoRecord}，归属不匹配 ${diagOwnerMismatch}）${candidates.length === 0 && ids.length > 0 ? ' — 弹出页将全部降级（前端 v2.81 会在生成前校验并自愈重传；若仍全部缺失请检查 db/reports/imports 目录与 ImportedReport 表）' : ''}`)
+  // v2.81 诊断计数（用户环境「全部未能内嵌」排查 — dev 控制台一眼定位缺在哪一环）
+  let diagNoRecord = 0, diagOwnerMismatch = 0, diagShaHealed = 0
+  const candidates: Array<{ key: string; path: string }> = []
+  const seenPaths = new Set<string>()
+  const pushCandidate = (key: string, path: string) => {
+    if (!path || out.has(key)) return
+    candidates.push({ key, path })
+  }
+  for (const t of ordered) {
+    // ① reportId 直查（v2.69 原路径）
+    let path: string | undefined
+    let idRecord = t.reportId ? recById.get(t.reportId) : undefined
+    if (t.reportId && !idRecord) {
+      // 记录缺失 — 与归属不匹配合并计数细分由下方 sha 兜底是否成功区分
+    }
+    if (idRecord) {
+      if (idRecord.ownerKey && idRecord.ownerKey !== owner.key && idRecord.ownerKey !== owner.ipKey) {
+        diagOwnerMismatch++
+        idRecord = undefined
+      } else if (!idRecord.htmlPath) {
+        diagNoRecord++
+        idRecord = undefined
+      }
+    }
+    if (idRecord?.htmlPath) {
+      path = idRecord.htmlPath
+      if (t.reportId) pushCandidate(t.reportId, path)
+    }
+    // ② 内容哈希兜底（v2.83 — reportId 死亡/丢失时同内容留存仍在即可内嵌）。
+    //    只登记 sha 键：reportId 键可能被多个不同内容的靶点共用（报告 id 唯一
+    //    指向内容，但「死亡 id」可能被载荷里多个靶点重复携带）— 若在此登记
+    //    reportId 键，后一个靶点的兜底路径会劫持前一个的解析（实测复现）。
+    //    resolveImportedReportPath 先查 reportId（未命中）再查 sha — 语义不变。
+    if (!path && t.sourceSha) {
+      const shaRec = recsBySha.get(t.sourceSha)
+      if (shaRec) {
+        path = shaRec.htmlPath
+        diagShaHealed++
+      }
+    }
+    // 多键登记：sha 键指向该靶点最终解析到的路径（reportId 命中时与 ① 同路径）
+    if (path && t.sourceSha) pushCandidate(`sha:${t.sourceSha}`, path)
+    if (!path) {
+      if (t.reportId && !recById.get(t.reportId)) diagNoRecord++
+      // 有记录但路径空/归属不符已在上面计数
+    }
+  }
+  if (diagNoRecord > 0 || diagOwnerMismatch > 0 || diagShaHealed > 0) {
+    console.warn(`[ht-dashboard] 导入报告留存规划：${ordered.length} 个靶点（无记录/无路径 ${diagNoRecord}，归属不匹配 ${diagOwnerMismatch}，sha 兜底找回 ${diagShaHealed}）`)
   }
   // v2.71：stat 预检（丢失/超限不出队）→ 预算分配（降级行优先）→ 只返回路径
-  const plan = await planReportFiles(candidates, budget)
-  if (plan.selected.length < candidates.length) {
-    console.warn(`[ht-dashboard] 导入报告预算分配：候选 ${candidates.length} 份，入嵌 ${plan.selected.length} 份（丢失 ${candidates.length - plan.foundCount}，超单份上限/总量预算 ${plan.foundCount - plan.selected.length}）`)
+  // v2.83：候选先按磁盘路径去重（同内容重复记录不重复占预算）
+  const dedupedCandidates = candidates.filter(c => {
+    if (seenPaths.has(c.path)) return false
+    seenPaths.add(c.path)
+    return true
+  })
+  const plan = await planReportFiles(dedupedCandidates, budget)
+  if (plan.selected.length < dedupedCandidates.length) {
+    console.warn(`[ht-dashboard] 导入报告预算分配：候选 ${dedupedCandidates.length} 份，入嵌 ${plan.selected.length} 份（丢失 ${dedupedCandidates.length - plan.foundCount}，超单份上限/总量预算 ${plan.foundCount - plan.selected.length}）`)
   }
   for (const s of plan.selected) out.set(s.key, s.path)
   return out
@@ -1414,13 +1498,14 @@ export async function backfillImportedStats(
   reportPathById: Map<string, string>,
   onTick?: (done: number, total: number) => void,
 ): Promise<number> {
+  // v2.83：多键解析（reportId → sha 兑底）— 降级行同样受益于内容寻址找回
   const pending = imported.filter(t =>
-    !t.stats && t.reportId && reportPathById.get(t.reportId) != null)
+    !t.stats && resolveImportedReportPath(reportPathById, t) != null)
   if (pending.length === 0) return 0
   let done = 0
   let backfilled = 0
   await runBounded(pending, FILE_READ_CONCURRENCY, async (t) => {
-    const path = reportPathById.get(t.reportId!)!
+    const path = resolveImportedReportPath(reportPathById, t)!
     try {
       const fh = await open(path, 'r')
       try {

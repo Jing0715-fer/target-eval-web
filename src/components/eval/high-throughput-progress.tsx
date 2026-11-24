@@ -179,6 +179,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const [logDialogGroup, setLogDialogGroup] = useState<number | null>(null)
   /** v2.38 报告 zip 导入（非 running 阶段） */
   const [importingZip, setImportingZip] = useState(false)
+  /** v2.83：导入进度（百份级导入可达分钟级 — 按钮实时反馈） */
+  const [importProgress, setImportProgress] = useState<string | null>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
 
   /** v2.78：汇总报告生成中横幅「已等待 Ns」本地计时（每秒重渲染 — 服务端进度
@@ -243,8 +245,11 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
     const list = files ? Array.from(files) : []
     if (list.length === 0 || importingZip) return
     setImportingZip(true)
+    setImportProgress(null)
     try {
-      const result = await flow.importArchive(list)
+      const result = await flow.importArchive(list, {
+        onProgress: msg => setImportProgress(msg.length > 60 ? msg.slice(0, 60) : msg),
+      })
       // v2.49 逐文件诊断文本（未命中原因 + 已完成提示）
       const missTail = result.missLines.length > 0
         ? `\n未命中文件原因：\n${result.missLines.slice(0, 5).join('\n')}${result.missLines.length > 5 ? `\n…等共 ${result.missLines.length} 个文件` : ''}`
@@ -291,6 +296,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
     } finally {
       setImportingZip(false)
+      setImportProgress(null)
       if (zipInputRef.current) zipInputRef.current.value = ''
     }
   }
@@ -510,7 +516,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+              {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
               保留记录并返回输入
@@ -586,7 +592,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+              {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
               保留记录并返回输入
@@ -1067,7 +1073,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的未评估靶点标跳过（用于补齐清单后重跑剩余靶点）"
               >
                 {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-                {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+                {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
               </Button>
             </>
           )}
