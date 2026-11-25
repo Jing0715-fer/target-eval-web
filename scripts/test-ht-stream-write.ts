@@ -134,10 +134,17 @@ async function main(): Promise<void> {
     check('markdown 重建行两路径一致（a 逐字节）', wBy.get('job-aaaaaaaaaaaaaaaaaaaa3')?.a === sBy.get('job-aaaaaaaaaaaaaaaaaaaa3')?.a)
     check('bare 载入行两路径一致（a 逐字节）', wBy.get('impb-1')?.a === sBy.get('impb-1')?.a)
     // 路径行：流式嵌原文（与磁盘文件一致）；整串降级 a 变体（fixture 链路不读盘）
+    // v2.86：原文进共享池（r[i].sk 引用 + RP.s 池）— 断言解引后与磁盘文件比对
     const f1Src = fs.readFileSync(f1, 'utf-8')
     const f2Src = fs.readFileSync(f2, 'utf-8')
-    check('靶点A 路径原文已内嵌且与磁盘文件一致（延迟读取生效）', sBy.get('job-aaaaaaaaaaaaaaaaaaaa1')?.html === f1Src)
-    check('靶点E 导入留存原文已内嵌且与磁盘文件一致', sBy.get('imp-1')?.html === f2Src)
+    const skHtml = (p: typeof sp, job: string): string | undefined => {
+      const row = p.r.find(x => x.j === job)
+      if (!row) return undefined
+      if (typeof row.html === 'string') return row.html
+      return row.sk != null && p.s && typeof p.s[row.sk] === 'string' ? p.s[row.sk] : undefined
+    }
+    check('靶点A 路径原文已内嵌且与磁盘文件一致（延迟读取生效 — v2.86 sk 共享池）', skHtml(sp, 'job-aaaaaaaaaaaaaaaaaaaa1') === f1Src)
+    check('靶点E 导入留存原文已内嵌且与磁盘文件一致（v2.86 sk 共享池）', skHtml(sp, 'imp-1') === f2Src)
     check('整串链路路径行降级重建页变体（a 字段 — fixture 语义）', typeof wBy.get('job-aaaaaaaaaaaaaaaaaaaa1')?.a === 'string' && !wBy.get('job-aaaaaaaaaaaaaaaaaaaa1')?.html)
     // 丢文件行：流式回退 a 变体；重建页样式 c 已内嵌（保守判定）
     check('靶点F 文件丢失回退重建页变体（a 字段 — 写盘时降级）', typeof sBy.get('job-aaaaaaaaaaaaaaaaaaaa4')?.a === 'string' && !sBy.get('job-aaaaaaaaaaaaaaaaaaaa4')?.html)

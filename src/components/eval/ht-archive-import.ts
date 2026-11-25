@@ -66,6 +66,7 @@
 import JSZip from 'jszip'
 import type { ImportedReportStats } from '@/lib/eval/types'
 import {
+  extractImportedStatsFromSummary,
   extractImportedStatsSections as extractImportedStatsSectionsShared,
   pickImportedStats as pickImportedStatsShared,
   toCleanImportedStats,
@@ -635,6 +636,53 @@ function sanitizeMetaEntry(e: Partial<TargetMetaEntry>): Partial<TargetMetaEntry
 }
 
 /**
+ * v2.86：汇总报告展开为逐靶点可匹配条目（kind='job' — 与单靶点报告同通道）。
+ *
+ * 载荷行的字段映射：uniprotId→uniprot（acc 通道）/ range→range（区间严格
+ * 相等）/ seqRaw→seqSha（WebCrypto 精确通道）/ metaSeqLength→seqLength /
+ * label→stem（「标签 · Naa」格式 — normLabel 归一后走 planArchiveSkips
+ * 标签兕底通道，与单靶点条目同口径）。证据全无的区段不产出（宁重跑不误跳）。
+ */
+async function expandDashboardReport(html: string, path: string): Promise<HtArchiveReport[]> {
+  let sections: ImportedStatsSection[]
+  try {
+    sections = extractImportedStatsFromSummary(html)
+  } catch {
+    return []
+  }
+  if (sections.length === 0) return []
+  const out: HtArchiveReport[] = []
+  const seen = new Set<string>()
+  for (const s of sections) {
+    const uniprot = s.uniprotId
+    const seqSha = s.seqRaw ? await sha256Hex16(s.seqRaw) : undefined
+    const seqLength = s.metaSeqLength ?? s.seqRaw?.length
+    const range = s.range
+    const alignedSpan = s.alignedSpan ?? (range ? range[1] - range[0] + 1 : undefined)
+    // 证据全无 → 不产出（防误匹配）
+    if (!uniprot && !seqSha && seqLength == null) continue
+    // 同证据条目去重（同文件内同 acc+区间的重复行只留一条 — 匹配语义不受影响）
+    const dedup = `${uniprot ?? ''}|${seqSha ?? ''}|${range?.[0] ?? ''}-${range?.[1] ?? ''}|${seqLength ?? ''}`
+    if (seen.has(dedup)) continue
+    seen.add(dedup)
+    const label = s.metaLabel?.trim()
+    out.push({
+      kind: 'job',
+      path,
+      uniprot,
+      range,
+      seqSha,
+      seqLength,
+      alignedSpan,
+      // 序列靶点条目 stem 按靶点标签格式（reportLabelKey 归一后与运行侧标签键
+      // 严格相等 — 标签兕底通道）；无标签时仅用长度段
+      stem: label ? (seqLength != null ? `${label} · ${seqLength}aa` : label) : (seqLength != null ? `${seqLength}aa` : path.replace(/\.html?$/i, '')),
+    })
+  }
+  return out
+}
+
+/**
  * v2.44→v2.45：解析一份**单独的报告 HTML 文件**（单靶点报告 / 组合并报告 / 统计看板）。
  *
  * 用户诉求：除 zip 归档外，支持导入单个报告文件（如浏览器下载的
@@ -671,8 +719,16 @@ export async function parseHtReportFile(file: File): Promise<HtArchiveReport[]> 
   const stem = file.name.replace(/\.html?$/i, '')
   const title = /<title>([^<]*)<\/title>/i.exec(capped)?.[1] ?? ''
 
-  // ① 统计看板（汇总件 — 不参与靶点匹配）
+  // ① 统计看板（汇总件）
   if (title.includes('高通量评估汇总报告') || /^00_统计看板/.test(stem)) {
+    // v2.86：汇总报告展开为逐靶点可匹配条目 — 用户把「汇总报告」当导入件上传
+    // （Excel 清单 + 历史汇总件 → 载入既有评估结果，修复「无法将上传的 html
+    // 完整载入/嵌入汇总报告」）。载荷（ht-rpt-data）每行弹出页数据解析出
+    // acc/区间/提交长度/完整序列（SHA）/标签 → kind='job' 条目参与匹配与
+    // enrich（下游 planArchiveSkips/上传留存/弹出页内嵌全链路自动工作）。
+    // 展开失败（旧版/被改动/无载荷）回落原语义（dashboard 条目 — 不参与匹配）。
+    const expanded = await expandDashboardReport(capped, file.name)
+    if (expanded.length > 0) return expanded
     return [{ kind: 'dashboard', path: file.name, stem }]
   }
 
@@ -1033,6 +1089,11 @@ export async function enrichImportedReports(
     const text = await parsed.readSource(entry.rep).catch(() => null)
     if (text) {
       entry.sections = extractImportedStatsSectionsShared(text)
+      // v2.86：汇总载荷行携带完整提交序列（data-seq）→ 补算 SHA 填充定位链
+      // ①通道（同序列即同靶点 — 汇总件展开场景的主定位通道）
+      for (const s of entry.sections) {
+        if (!s.seqSha && s.seqRaw) s.seqSha = await sha256Hex16(s.seqRaw)
+      }
       // v2.70：上传按 32MB 上限独立门控（超大文件统计照常解析，仅不内嵌原文 —
       //  readSource 的 33M 切片不会作为原文上传，此处长度检查双重保险）
       if (text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
