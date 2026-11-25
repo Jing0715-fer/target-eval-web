@@ -49,6 +49,7 @@ import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getL
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
 import { enrichImportedReports, ensureImportedRetention, parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
+import { getImportedSource, getSessionSource, getSessionSourceShaByFileName } from './ht-import-cache'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -939,6 +940,9 @@ export function useHighThroughputFlow() {
     //  的结果不再黑盒：无键靶点数 + 自愈不可达源文件数都有明确反馈）
     let importedNoRetKeyCount = 0
     let healUnreachableSources = 0
+    // v2.87：直传载荷（留存未确认可用的导入原文 — 随生成请求携带）与份数
+    let passThroughSources: Array<{ sha: string; fileName: string; html: string }> = []
+    let ptOfferedCount = 0
     for (const g of runState.groups) {
       for (const it of g.items) {
         if (it.status === 'done' && it.jobId) {
@@ -1035,6 +1039,60 @@ export function useHighThroughputFlow() {
           /* 自愈失败不阻塞生成 — 沿用既有留存（服务端若仍保有则照常内嵌） */
         }
       }
+      // ── v2.87：导入报告原文直传（「上传的报告还是没有嵌入到汇总报告中」根治层）──
+      //  留存未确认可用的源文件（heal 未采纳/未重传成功的 + 无键条目按 fileName
+      //  反查的）从会话源/IndexedDB 取出，随生成请求**直接携带** — 服务端同一
+      //  请求内落库并内嵌（写入与读取同端点、同 owner、同时刻：导入时上传失败 /
+      //  留存丢失 / 归属键漂移 / 自愈重传失败等全部历史故障环节被收敛掉）。
+      //  预算：≤128 份 · 单份 ≤8M 字符 · 总量 ≤32M 字符（与服务端同口径）。
+      //  无键条目补回的 sha 同步回写运行记录（后续重新生成走标准键通道）。
+      const liveShaKeys = new Set<string>()
+      for (const b of importedBare) {
+        if (b.sourceSha && b.reportId) liveShaKeys.add(b.sourceSha)
+      }
+      const importedSources: Array<{ sha: string; fileName: string; html: string }> = []
+      const ptSeen = new Set<string>()
+      const PT_BUDGET_CHARS = 32_000_000
+      const PT_SINGLE_MAX = 8_000_000
+      let ptChars = 0
+      let ptShaBackfilled = 0
+      const itemByLabel = new Map<string, HTGroupItemState>()
+      for (const g of runState.groups) {
+        for (const it of g.items) {
+          if ((it.imported === true || (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))) && !itemByLabel.has(it.label)) {
+            itemByLabel.set(it.label, it)
+          }
+        }
+      }
+      for (const t of importedBare) {
+        if (ptChars >= PT_BUDGET_CHARS || importedSources.length >= 128) break
+        let sha = t.sourceSha
+        if (!sha && t.fileName) {
+          // 无键条目（旧运行记录 / v2.83 回归期产物）— 本会话导入过同名源文件的
+          // 按 fileName 反查补回 sha 键（直传落库后服务端口径回写载荷，弹出页
+          // 嵌入与后续重新生成均走标准键通道）
+          const byName = getSessionSourceShaByFileName(t.fileName)
+          if (byName) {
+            sha = byName
+            t.sourceSha = byName
+            ptShaBackfilled++
+            const it = itemByLabel.get(t.label)
+            if (it && !it.importedReportSha) it.importedReportSha = byName
+          }
+        }
+        if (!sha || liveShaKeys.has(sha) || ptSeen.has(sha)) continue
+        ptSeen.add(sha)
+        const src = getSessionSource(sha) ?? await getImportedSource(sha)
+        if (!src || !src.html || src.html.length > PT_SINGLE_MAX || ptChars + src.html.length > PT_BUDGET_CHARS) continue
+        importedSources.push({ sha, fileName: src.fileName, html: src.html })
+        ptChars += src.html.length
+      }
+      if (ptShaBackfilled > 0) saveHTRun(runState)
+      if (importedSources.length > 0) {
+        console.log(`[ht-dashboard] 导入原文直传：${importedSources.length} 份源文件随生成请求携带（${(ptChars / 1024).toFixed(0)}KB${ptShaBackfilled > 0 ? ` · ${ptShaBackfilled} 个无键条目补回 sha` : ''}）`)
+      }
+      ptOfferedCount = importedSources.length
+      passThroughSources = importedSources
     }
     try {
       // v2.61：各序列靶点的提交序列（jobId → 全文 — 汇总表「复制序列」按钮与全靶点
@@ -1058,6 +1116,9 @@ export function useHighThroughputFlow() {
         sequences,
         imported: importedBare.length ? importedBare : undefined,
         importedJobIds: importedJobIds.size ? [...importedJobIds] : undefined,
+        // v2.87：导入报告原文直传（留存未确认可用的源文件 — 服务端同一请求内
+        //  落库并内嵌；预算 32MB 内不膨胀载荷）
+        ...(passThroughSources.length > 0 ? { importedSources: passThroughSources } : {}),
         // v2.71：running 期间轮询回传阶段进度（生成中横幅实时展示 — 不落盘，
         //  仅文本变化时刷新视图避免重渲染抖动）；v2.76：附带全局百分比 pct
         //  （进度条 — 百分比前移同样触发刷新，条平滑推进）
@@ -1099,11 +1160,25 @@ export function useHighThroughputFlow() {
         //  - 无键 / 自愈不可达的靶点弹出页回退「载入说明 + 评分统计」页，toast
         //    明示数量与恢复方式（重新导入报告文件 — 浏览器本地凭 sha 留存了源文件
         //    副本的，重新生成时已自动重传，无需用户处理）。
+        //  v2.87：直传结果并入 — 留存未确认可用的源文件已随生成请求**直接携带**
+        //  （服务端同一请求内落库并内嵌），「无键/自愈不可达」不再必然降级；
+        //  ptStored（服务端实测落库份数）与 ptError（落库失败原因 — 环境问题
+        //  定位）均如实呈现。
         const importedWithKey = importedBare.filter(t => Boolean(t.reportId || t.sourceSha)).length
+        const ptStoredCount = dash.ptStored ?? 0
+        // v2.87：直传落库判定 — 一份源可覆盖多个靶点（汇总件 1 份 → 114 行），
+        //  「全部内嵌」的条件是所有靶点都有留存键（含直传补回的）且直传的源
+        //  全部落库成功（ptStored ≥ ptOffered）
+        const ptTail = ptOfferedCount > 0
+          ? ptStoredCount >= ptOfferedCount
+            ? `已直传 ${ptStoredCount} 份导入报告原文随本次生成留存（同请求内嵌）；`
+            : `直传 ${ptStoredCount}/${ptOfferedCount} 份导入报告原文${dash.ptError ? `（首份失败原因：${dash.ptError}）` : ''}；`
+          : ''
+        const allKeyedAndStored = importedWithKey === importedBare.length && (ptOfferedCount === 0 || ptStoredCount >= ptOfferedCount)
         const embedTail = importedBare.length > 0
-          ? importedWithKey === importedBare.length
-            ? `全部 ${importedBare.length} 个载入靶点的报告原文已内嵌弹出页（与原报告字节级一致）；`
-            : `报告原文内嵌 ${importedWithKey}/${importedBare.length} 个载入靶点${importedNoRetKeyCount > 0 ? `（${importedNoRetKeyCount} 个靶点缺少原文留存键${healUnreachableSources > 0 ? `、${healUnreachableSources} 份源文件服务端与浏览器本地均无留存` : ''}）` : healUnreachableSources > 0 ? `（${healUnreachableSources} 份源文件服务端与浏览器本地均无留存）` : ''} — 未内嵌的靶点弹出页将显示载入说明与已解析评分，重新导入对应报告文件并重新生成可恢复原文；`
+          ? allKeyedAndStored
+            ? `全部 ${importedBare.length} 个载入靶点的报告原文已内嵌弹出页（与原报告字节级一致${ptTail ? `；${ptTail}` : ''}）；`
+            : `报告原文内嵌 ${importedWithKey}/${importedBare.length} 个载入靶点${importedNoRetKeyCount > 0 ? `（${importedNoRetKeyCount} 个靶点缺少原文留存键${healUnreachableSources > 0 ? `、${healUnreachableSources} 份源文件服务端与浏览器本地均无留存` : ''}）` : healUnreachableSources > 0 ? `（${healUnreachableSources} 份源文件服务端与浏览器本地均无留存）` : ''}${ptTail ? `；${ptTail}` : ''} — 未内嵌的靶点弹出页将显示载入说明与已解析评分，重新导入对应报告文件并重新生成可恢复原文；`
           : ''
         // v2.80：服务端 done 但携带提示（基础版恢复交付 / AI 部分降级 — error 列
         //  在 done 终态下存的是降级说明而非错误）— toast 如实呈现，用户知道拿到

@@ -26,6 +26,7 @@ import { db } from '@/lib/db'
 import { getOwner, isOwnedBy, notFound } from '@/lib/eval/request-guard'
 import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { runWithLlmOverride, sanitizeLlmOverride, getEngineSummary } from '@/lib/eval/llm-provider'
+import { storeImportedReportHtml } from '@/lib/eval/imported-report-store'
 import type { HtDashboard } from '@prisma/client'
 import { APP_VERSION } from '@/lib/version'
 import {
@@ -76,6 +77,33 @@ interface DashboardBody {
   archived?: unknown
   /** v2.60：允许部分生成（仍缺失的靶点计入 dropped 跳过，不整单失败） */
   allowPartial?: boolean
+  /** v2.87：导入报告原文直传（客户端随生成请求携带 — 留存未确认可用的源文件；
+   *  服务端同一请求内落库后由生成器读取内嵌，导入时上传/自愈重传全部失效也不影响） */
+  importedSources?: unknown
+}
+
+/** v2.87：importedSources 消毒（生成时原文直传 — 预算同客户端口径：
+ *  ≤128 份 · 单份 ≤32M 字符 · 总量 ≤32M 字符；sha 为客户端内容键（http 环境
+ *  FNV 兑底 — 服务端落库时重算 sha256 并校正载荷条目的 sourceSha） */
+function sanitizeImportedSources(v: unknown): Array<{ sha: string; fileName: string; html: string }> {
+  if (!Array.isArray(v)) return []
+  const out: Array<{ sha: string; fileName: string; html: string }> = []
+  let total = 0
+  const MAX_ITEMS = 128
+  const MAX_TOTAL_CHARS = 32_000_000
+  const MAX_HTML_CHARS = 32_000_000
+  for (const e of v) {
+    if (!e || typeof e !== 'object' || out.length >= MAX_ITEMS) continue
+    const o = e as { sha?: unknown; fileName?: unknown; html?: unknown }
+    const sha = typeof o.sha === 'string' && /^[a-z0-9]{6,64}$/i.test(o.sha) ? o.sha.toLowerCase() : ''
+    const html = typeof o.html === 'string' ? o.html : ''
+    if (!sha || !html.trim() || html.length > MAX_HTML_CHARS) continue
+    if (total + html.length > MAX_TOTAL_CHARS) continue // 预算耗尽 — 后续丢弃（客户端已按同口径预算，正常不触达）
+    const fileName = typeof o.fileName === 'string' ? o.fileName : ''
+    out.push({ sha, fileName, html })
+    total += html.length
+  }
+  return out
 }
 
 /** v2.60：archived 快照消毒（≤600 条；summary 必须是非空对象且含 scores 对象 —
@@ -345,6 +373,44 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: '没有已完成的评估作业（统计看板需要至少 1 个成功靶点）' }, { status: 400 })
   }
 
+  // ── v2.87：导入报告原文直传留存（用户实测「上传的报告还是没有嵌入到汇总报告中」
+  //    跨 v2.69–v2.86 多版复现的根治层）──
+  //  客户端在生成请求里直接携带「留存未确认可用」的导入报告原文；此处**同一请求
+  //  上下文**内落库（内容寻址去重 — 重复到达零成本），生成器随后的
+  //  loadImportedReportHtml 即可读到 → 弹出页内嵌。导入时上传失败 / 留存丢失 /
+  //  归属键漂移 / 上传端点异常等全部历史故障环节被收敛掉：写入与读取同端点、
+  //  同 owner、同时刻。失败不阻塞生成（降级 + console 留痕 + 响应回传原因 —
+  //  toast 可见）。sha 校正：http 环境浏览器 crypto.subtle 不可用时前端用 FNV
+  //  兜底哈希，与服务端 sha256 口径不一致 — 以服务端重算值回写载荷条目的
+  //  sourceSha，sha 键兜底通道在该环境同样可用。
+  const importedSources = sanitizeImportedSources(body.importedSources)
+  let ptStored = 0
+  let ptFirstError: string | undefined
+  if (importedSources.length > 0) {
+    const shaFix = new Map<string, string>() // 客户端 sha → 服务端 sha256
+    for (let i = 0; i < importedSources.length; i++) {
+      const s = importedSources[i]!
+      const stored = await storeImportedReportHtml(owner, s.fileName, s.html)
+      if (stored.ok) {
+        ptStored++
+        if (stored.contentSha !== s.sha) shaFix.set(s.sha, stored.contentSha)
+      } else {
+        ptFirstError ??= stored.error
+        console.error(`[ht-dashboard] 导入原文直传留存失败（第 ${i + 1}/${importedSources.length} 份）：`, stored.error)
+      }
+    }
+    if (shaFix.size > 0) {
+      let fixed = 0
+      for (const t of importedBareSanitized) {
+        if (t.sourceSha && shaFix.has(t.sourceSha)) {
+          t.sourceSha = shaFix.get(t.sourceSha)!
+          fixed++
+        }
+      }
+      if (fixed > 0) console.log(`[ht-dashboard] 直传 sha 口径校正：${fixed} 个载荷条目的 sourceSha 已对齐服务端 sha256（http 环境前端 FNV 兜底哈希）`)
+    }
+  }
+
   // v2.71：progress 列自愈（本地部署未 db:push 时 Prisma create 返回全列 → P2021）
   await ensureHtDashboardProgressColumn().catch((err: unknown) => {
     console.error('[ht-dashboard] progress 列自愈失败（不影响生成 — 进度展示将缺省）：', err instanceof Error ? err.message : String(err))
@@ -411,6 +477,8 @@ export async function POST(req: Request) {
       jobIds: keptJobIds,
       ...(recoveredCount > 0 ? { recoveredCount } : {}),
       ...(droppedEntries.length > 0 ? { droppedCount: droppedEntries.length, droppedLabels } : {}),
+      // v2.87：直传统计（前端完成 toast 呈现 — offered 客户端已知，stored 服务端实测）
+      ...(importedSources.length > 0 ? { ptOffered: importedSources.length, ...(ptStored > 0 ? { ptStored } : {}), ...(ptFirstError ? { ptError: ptFirstError.slice(0, 200) } : {}) } : {}),
     },
   })
 }

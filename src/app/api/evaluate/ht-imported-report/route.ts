@@ -21,18 +21,13 @@
  * 留存 → 弹出页原文内嵌不再依赖「导入那一瞬间拿到的 reportId 恰好还活着」。
  */
 import { NextResponse } from 'next/server'
-import { createHash } from 'node:crypto'
-import * as fs from 'node:fs/promises'
-import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { getOwner } from '@/lib/eval/request-guard'
 import { ensureImportedReportTable } from '@/lib/eval/imported-report-table'
+import { storeImportedReportHtml } from '@/lib/eval/imported-report-store'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-
-/** 单份导入报告体积上限（字符 — 与 ht-dashboard 的 REPORT_HTML_MAX_BYTES 同口径） */
-const MAX_HTML_CHARS = 32_000_000
 
 /** GET 校验单批 id/sha 数上限（URL 长度护栏 — cuid 25 字符 / sha 32 hex × 60） */
 const VERIFY_KEYS_MAX = 60
@@ -42,16 +37,12 @@ interface UploadBody {
   html?: unknown
 }
 
-/** 内容哈希（sha256 UTF-8 前 32 hex — 与前端 ht-import-cache sourceSha 同口径） */
-function contentShaOf(html: string): string {
-  return createHash('sha256').update(html, 'utf-8').digest('hex').slice(0, 32)
-}
-
 /** 记录是否本人可读（归属匹配 + 落盘文件存在 — 供去重/校验共用） */
 async function recordAlive(rec: { ownerKey: string | null; htmlPath: string }, ownerKey: string, ipKey: string): Promise<boolean> {
   if (rec.ownerKey && rec.ownerKey !== ownerKey && rec.ownerKey !== ipKey) return false
   if (!rec.htmlPath) return false
   try {
+    const fs = await import('node:fs/promises')
     await fs.access(rec.htmlPath)
     return true
   } catch {
@@ -69,72 +60,20 @@ export async function POST(req: Request) {
   }
   const html = typeof body.html === 'string' ? body.html : ''
   if (!html.trim()) return NextResponse.json({ ok: false, error: '报告内容为空' }, { status: 400 })
+  // v2.87：写入逻辑抽至共享模块 imported-report-store（与 ht-dashboard 生成时
+  //  原文直传共用 — 内容寻址去重/归属/落盘同口径）；本路由仅保留 413 快速
+  //  分支（直传侧由共享模块内联判定，同文案）
+  const MAX_HTML_CHARS = 32_000_000
   if (html.length > MAX_HTML_CHARS) {
     return NextResponse.json({ ok: false, error: '报告内容超出体积上限（32MB）— 该报告将以载入降级行呈现' }, { status: 413 })
   }
-  const fileName = (typeof body.fileName === 'string' ? body.fileName : '')
-    .replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 120) || '导入报告.html'
-
-  // v2.70：表自愈（本地部署未 db:push 时自动补建 — 此前直接 P2021 → 500，
-  //  上传全失败 → 汇总弹出页全部降级为重建页）
-  try {
-    await ensureImportedReportTable()
-  } catch (err) {
-    console.error('[ht-imported-report] 表自愈失败：', err instanceof Error ? err.message : String(err))
-    return NextResponse.json({ ok: false, error: '报告留存表初始化失败（不影响导入 — 汇总弹出页将降级）' }, { status: 500 })
+  const fileName = typeof body.fileName === 'string' ? body.fileName : ''
+  const stored = await storeImportedReportHtml(owner, fileName, html)
+  if (!stored.ok) {
+    console.error('[ht-imported-report] 留存失败：', stored.error)
+    return NextResponse.json({ ok: false, error: `${stored.error}（不影响导入 — 汇总弹出页将降级）` }, { status: 500 })
   }
-
-  // v2.83：内容寻址去重 — 同归属人同内容已有可读留存 → 直接回既有 id
-  // （重新导入 117 份不再重复上传落盘 128MB；自愈重传同理秒回）
-  const contentSha = contentShaOf(html)
-  try {
-    const dup = await db.importedReport.findMany({
-      where: { contentSha },
-      select: { id: true, ownerKey: true, htmlPath: true },
-      take: 8,
-    })
-    for (const rec of dup) {
-      if (await recordAlive(rec, owner.key, owner.ipKey)) {
-        return NextResponse.json({ ok: true, id: rec.id, deduped: true })
-      }
-    }
-  } catch (err) {
-    console.error('[ht-imported-report] 内容去重查询失败（继续走新建）：', err instanceof Error ? err.message : String(err))
-  }
-
-  let record: { id: string }
-  try {
-    record = await db.importedReport.create({
-      data: {
-        fileName,
-        ownerKey: owner.key,
-        ownerMask: owner.mask,
-        // 先建行拿 id，再落盘（路径以 id 命名 — 无用户可控路径成分）
-        htmlPath: '',
-        contentSha,
-        size: Buffer.byteLength(html, 'utf-8'),
-      },
-    })
-  } catch (err) {
-    console.error('[ht-imported-report] 留存记录创建失败：', err instanceof Error ? err.message : String(err))
-    return NextResponse.json({ ok: false, error: '报告留存记录创建失败（不影响导入 — 汇总弹出页将降级）' }, { status: 500 })
-  }
-  try {
-    const dir = path.join(process.cwd(), 'db', 'reports', 'imports')
-    await fs.mkdir(dir, { recursive: true })
-    const htmlPath = path.join(dir, `${record.id}.html`)
-    await fs.writeFile(htmlPath, html, 'utf-8')
-    await db.importedReport.update({ where: { id: record.id }, data: { htmlPath } })
-    return NextResponse.json({ ok: true, id: record.id })
-  } catch (err) {
-    // 落盘失败 → 清掉空行（不留死记录）
-    await db.importedReport.delete({ where: { id: record.id } }).catch(() => undefined)
-    console.error('[ht-imported-report] 留存失败：', err instanceof Error ? err.message : String(err))
-    return NextResponse.json({ ok: false, error: '报告原文留存失败（不影响导入 — 汇总弹出页将降级）' }, { status: 500 })
-  }
+  return NextResponse.json({ ok: true, id: stored.id, ...(stored.deduped ? { deduped: true } : {}) })
 }
 
 /**

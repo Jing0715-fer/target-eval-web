@@ -73,7 +73,7 @@ import {
   type ImportedStatsSection,
 } from '@/lib/eval/imported-stats'
 import { uploadImportedReport, verifyImportedReports, verifyImportedSources } from './api'
-import { saveImportedSource, getImportedSource } from './ht-import-cache'
+import { saveImportedSource, getImportedSource, registerSessionSource } from './ht-import-cache'
 
 /** 导入的 zip/文件内一份可匹配的报告 */
 export interface HtArchiveReport {
@@ -1099,6 +1099,9 @@ export async function enrichImportedReports(
       if (text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
         // v2.81：浏览器本地留存（上传失败/事后丢失均可凭 sha 自愈重传）
         entry.sourceSha = await saveImportedSource(entry.fileName, text).catch(() => undefined)
+        // v2.87：会话源登记（生成时原文直传的取数源 — 同会话导入→生成主路径；
+        //  IndexedDB 不可用（隐私模式）时仍可工作）
+        if (entry.sourceSha) registerSessionSource(entry.sourceSha, entry.fileName, text)
       }
     }
   }
