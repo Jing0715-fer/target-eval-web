@@ -51,8 +51,17 @@ export function SlidingTabsList({
     const ro = new ResizeObserver(measure)
     ro.observe(list)
     window.addEventListener('resize', measure)
+    // v2.91 修复：切换标签时 pill 不跟随。根因：Radix 切换只改 trigger 的
+    //  data-state 属性 — 本组件不消费 Tabs 上下文不会 re-render，容器尺寸也
+    //  不变 → measure 再无触发时机，pill 停在初始位置（用户实测「输入方式的
+    //  标签切换的 UI 有问题」）。MutationObserver 监听 data-state 变化重测：
+    //  attributeFilter 限定 data-state（pill 自身 style 内联属性更新不会回环
+    //  触发）；回调在微任务队列中先于浏览器绘制执行 — 切换无闪烁。
+    const mo = new MutationObserver(measure)
+    mo.observe(list, { subtree: true, attributes: true, attributeFilter: ['data-state'] })
     return () => {
       ro.disconnect()
+      mo.disconnect()
       window.removeEventListener('resize', measure)
     }
   }, [measure])

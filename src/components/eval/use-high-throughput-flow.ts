@@ -1044,7 +1044,11 @@ export function useHighThroughputFlow() {
       //  反查的）从会话源/IndexedDB 取出，随生成请求**直接携带** — 服务端同一
       //  请求内落库并内嵌（写入与读取同端点、同 owner、同时刻：导入时上传失败 /
       //  留存丢失 / 归属键漂移 / 自愈重传失败等全部历史故障环节被收敛掉）。
-      //  预算：≤128 份 · 单份 ≤8M 字符 · 总量 ≤32M 字符（与服务端同口径）。
+      //  预算（v2.91 改字节口径）：≤128 份 · 单份 ≤16MB 字节 · 总量 ≤64MB 字节
+      //  （与服务端同口径）。旧字符口径的陷阱：32M 字符的 CJK 报告 UTF-8 编码后
+      //  可达 96MB，超过 Next 16 dev 代理默认请求体上限 10MiB 时被框架层静默截断
+      //  → 「请求体不是合法 JSON」→ 看板整单失败（用户实测根因）。字节口径与
+      //  传输层约束严格对齐。
       //  无键条目补回的 sha 同步回写运行记录（后续重新生成走标准键通道）。
       const liveShaKeys = new Set<string>()
       for (const b of importedBare) {
@@ -1052,9 +1056,13 @@ export function useHighThroughputFlow() {
       }
       const importedSources: Array<{ sha: string; fileName: string; html: string }> = []
       const ptSeen = new Set<string>()
-      const PT_BUDGET_CHARS = 32_000_000
-      const PT_SINGLE_MAX = 8_000_000
-      let ptChars = 0
+      const PT_BUDGET_BYTES = 64_000_000
+      const PT_SINGLE_MAX_BYTES = 16_000_000
+      // UTF-8 字节长度（与请求体实际传输口径一致 — 字符数在 CJK 下会低估 3 倍；
+      // 编码器单例复用，encode 仅为长度计的瞬时分配）
+      const ptEncoder = new TextEncoder()
+      const strBytes = (s: string): number => ptEncoder.encode(s).length
+      let ptBytes = 0
       let ptShaBackfilled = 0
       const itemByLabel = new Map<string, HTGroupItemState>()
       for (const g of runState.groups) {
@@ -1065,7 +1073,7 @@ export function useHighThroughputFlow() {
         }
       }
       for (const t of importedBare) {
-        if (ptChars >= PT_BUDGET_CHARS || importedSources.length >= 128) break
+        if (ptBytes >= PT_BUDGET_BYTES || importedSources.length >= 128) break
         let sha = t.sourceSha
         if (!sha && t.fileName) {
           // 无键条目（旧运行记录 / v2.83 回归期产物）— 本会话导入过同名源文件的
@@ -1083,13 +1091,15 @@ export function useHighThroughputFlow() {
         if (!sha || liveShaKeys.has(sha) || ptSeen.has(sha)) continue
         ptSeen.add(sha)
         const src = getSessionSource(sha) ?? await getImportedSource(sha)
-        if (!src || !src.html || src.html.length > PT_SINGLE_MAX || ptChars + src.html.length > PT_BUDGET_CHARS) continue
+        if (!src || !src.html) continue
+        const srcBytes = strBytes(src.html)
+        if (srcBytes > PT_SINGLE_MAX_BYTES || ptBytes + srcBytes > PT_BUDGET_BYTES) continue
         importedSources.push({ sha, fileName: src.fileName, html: src.html })
-        ptChars += src.html.length
+        ptBytes += srcBytes
       }
       if (ptShaBackfilled > 0) saveHTRun(runState)
       if (importedSources.length > 0) {
-        console.log(`[ht-dashboard] 导入原文直传：${importedSources.length} 份源文件随生成请求携带（${(ptChars / 1024).toFixed(0)}KB${ptShaBackfilled > 0 ? ` · ${ptShaBackfilled} 个无键条目补回 sha` : ''}）`)
+        console.log(`[ht-dashboard] 导入原文直传：${importedSources.length} 份源文件随生成请求携带（${(ptBytes / 1_048_576).toFixed(1)}MiB${ptShaBackfilled > 0 ? ` · ${ptShaBackfilled} 个无键条目补回 sha` : ''}）`)
       }
       ptOfferedCount = importedSources.length
       passThroughSources = importedSources
@@ -1117,7 +1127,8 @@ export function useHighThroughputFlow() {
         imported: importedBare.length ? importedBare : undefined,
         importedJobIds: importedJobIds.size ? [...importedJobIds] : undefined,
         // v2.87：导入报告原文直传（留存未确认可用的源文件 — 服务端同一请求内
-        //  落库并内嵌；预算 32MB 内不膨胀载荷）
+        //  落库并内嵌）；v2.91 预算改字节口径（总量 64MB · 单份 16MB — 与传输
+        //  层请求体上限严格对齐，防字符口径低估 CJK 体积）
         ...(passThroughSources.length > 0 ? { importedSources: passThroughSources } : {}),
         // v2.71：running 期间轮询回传阶段进度（生成中横幅实时展示 — 不落盘，
         //  仅文本变化时刷新视图避免重渲染抖动）；v2.76：附带全局百分比 pct

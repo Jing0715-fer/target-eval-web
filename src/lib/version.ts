@@ -266,5 +266,29 @@
  *  - 内存预检：大 HTML（≥4MB，实测 10MB 看板 Chromium 峰值 2.4GB RSS）渲染前
  *    检查系统余量，<1.2GB 快速失败并给出「稍后重试 / 下载 HTML 浏览器打印」
  *    指引，不让渲染跑 90s 后被 OOM 击杀连带浏览器死亡。
+ *
+ * v2.91：汇总报告生成「请求体不是合法 JSON」根治 + 输入方式切换 pill 修复：
+ *  - ① 根因（框架层请求体上限截断）：v2.88 导入原文直传把源文件 HTML 随汇总
+ *    报告生成请求携带，多份报告合计 >10MiB 时 — Next 16 dev 代理默认
+ *    proxyClientMaxBodySize = 10,485,760 字节，超限的请求体被框架层**静默截断**
+ *    → route 内 req.json() 必抛 → 400「请求体不是合法 JSON」→ 看板整单失败
+ *    （用户实测：汇总报告生成失败，且与「导入报告未嵌入」同根 — 生成请求
+ *    本身就没送达）。沙盒实测二分定位：10.4MB 正常 / 10.5MB+ 必现；修复：
+ *    next.config.ts experimental.proxyClientMaxBodySize 提至 200MiB（覆盖直传
+ *    最坏口径 + 归档快照 + 余量）；
+ *  - ② 预算口径统一改字节（客户端 TextEncoder / 服务端 Buffer.byteLength）：
+ *    旧字符口径（32M 字符）在 CJK 报告下 UTF-8 体积可达 3 倍（96MB）— 与传输
+ *    层字节约束错位是本次事故的放大器；现两端同口径 ≤128 份 · 单份 ≤16MB
+ *    字节 · 总量 ≤64MB 字节，与请求体上限严格对齐；
+ *  - ③ 服务端 req.json() 失败精确归因：Content-Length >16MB 且解析失败 ≈ 框架
+ *    截断（报错附载荷体积与调参指引）；否则附解析异常原文 — 不再让「请求体
+ *    不是合法 JSON」黑盒；
+ *  - ④ 输入方式滑动胶囊 pill 不随切换移动（用户实测 UI 问题）：Radix 切换只
+ *    改 trigger 的 data-state 属性，segmented-tabs 组件不消费 Tabs 上下文不
+ *    re-render、容器尺寸不变 → measure 无触发时机，pill 停在初始位置。修复：
+ *    MutationObserver 监听 data-state 变化重测（attributeFilter 限定，微任务
+ *    先于绘制 — 无闪烁）；
+ *  - 回归：scripts/test-v291-large-passthrough.ts（12MiB 直传全链路 6/6 —
+ *    POST 落库 ptStored=1 → 生成 done → 字节级内嵌）+ v2.86 汇总件导入 15/15。
  */
-export const APP_VERSION = 'v2.90.0'
+export const APP_VERSION = 'v2.91.0'
