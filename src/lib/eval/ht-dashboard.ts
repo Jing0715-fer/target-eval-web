@@ -100,6 +100,7 @@ import { submitUniprotSequenceBlast, collectUniprotSequenceBlast } from './unipr
 import { fetchUniprotInfo } from './uniprot'
 import type { HtExcelRowSnapshot } from './ht-excel'
 import type { ImportedReportStats, PdbEntry, BlastHit } from './types'
+import { APP_VERSION } from '@/lib/version'
 
 // ─── 数据行 ───────────────────────────────────────────────────────────────────
 
@@ -1227,6 +1228,7 @@ async function* htPayloadJsonChunks(
   const meta: string[] = []
   if (needFallbackCss) meta.push(`"c":${j(HT_TARGET_REPORT_CSS)}`)
   meta.push(
+    `"v":${j(esc(APP_VERSION))}`,
     `"g":${j(esc(generatedAt.length > 48 ? generatedAt.slice(0, 48) + '…' : generatedAt))}`,
     `"m":${j(esc(input.title.length > 46 ? input.title.slice(0, 46) + '…' : input.title))}`,
     `"e":${j(esc(engineSummary.length > 60 ? engineSummary.slice(0, 60) + '…' : engineSummary))}`,
@@ -1735,7 +1737,7 @@ function buildHtReportPayload(input: {
   generatedAt: string
   engineSummary: string
   origin: string
-}): { c?: string; g: string; m: string; e: string; r: Array<{ tt: string; j: string; fn: string; sk?: string; html?: string; h?: string; a?: string }>; s?: Record<string, string> } {
+}): { c?: string; v: string; g: string; m: string; e: string; r: Array<{ tt: string; j: string; fn: string; sk?: string; html?: string; h?: string; a?: string }>; s?: Record<string, string> } {
   const verdictByJob = new Map(input.verdicts.map(v => [v.jobId, v]))
   // v2.71：重建页样式内嵌判定 — 任何行无内存原文即内嵌（保守正确：路径行的
   //  文件可能在写盘时丢失回退重建页，样式必须已在）
@@ -1772,6 +1774,7 @@ function buildHtReportPayload(input: {
   return {
     // 共享样式仅在有重建页条目时才内嵌（原文报告自带完整样式，无需共享）
     c: needFallbackCss ? HT_TARGET_REPORT_CSS : undefined,
+    v: esc(APP_VERSION),
     g: esc(input.generatedAt.length > 48 ? input.generatedAt.slice(0, 48) + '…' : input.generatedAt),
     m: esc(input.title.length > 46 ? input.title.slice(0, 46) + '…' : input.title),
     e: esc(input.engineSummary.length > 60 ? input.engineSummary.slice(0, 60) + '…' : input.engineSummary),
@@ -1900,6 +1903,7 @@ ${r.bare
 
   return `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="targeteval:version" content="${esc(APP_VERSION)}">
 <title>${esc(input.title)}</title>
 <style>
 :root{--ink:#1c1917;--sub:#57534e;--faint:#a8a29e;--line:#e7e5e4;--hairline:#efedeb;--accent:#065f46;--accent-2:#047857;--accent-bg:#f0fdf7;--bg:#fcfcfb;--paper:#fff;
@@ -2064,6 +2068,7 @@ tr.mt-row:hover td{background:#fbfdfc}
   <div class="rpt-subtitle">高通量评估汇总报告 — 统计看板 · 全靶点结论总表 · AI 整体可行性分析 · 单文件离线自包含</div>
   <div class="meta-grid">
     <div><b>生成时间</b> ${esc(input.generatedAt)}</div>
+    <div><b>报告版本</b> <span class="mv">${esc(APP_VERSION)}</span></div>
     ${input.durationSec ? `<div><b>运行时长</b> ${Math.round(input.durationSec / 60)} 分钟</div>` : ''}
     <div><b>评估引擎</b> <span class="mv">${esc(engineSummary)}</span></div>
     <div><b>靶点规模</b> ${stats.totalTargets} 个（成功 ${stats.loadedTargets}${stats.importedTargets ? ` · 载入 ${stats.importedTargets}` : ''}${stats.failedTargets ? ` · 失败 ${stats.failedTargets}` : ''}）</div>
@@ -2302,7 +2307,7 @@ ${rptPayload}
       + '<div class="rpt-head"><div class="rpt-eyebrow">TargetEval · Target Full Report</div>'
       + '<h1 class="rpt-title">' + r.h + '</h1>'
       + '<div class="rpt-subtitle">单靶点完整评估报告（重建页）— 服务端报告文件不可用，由缓存数据重建 · 离线自包含</div>'
-      + '<div class="meta-grid"><div><b>生成时间</b> ' + RP.g + '</div><div><b>母报告</b> ' + RP.m + '</div><div><b>评估引擎</b> ' + RP.e + '</div>' + (r.j ? '<div><b>作业 ID</b> <span class="mono">' + r.j + '</span></div>' : '') + '</div></div>'
+      + '<div class="meta-grid"><div><b>生成时间</b> ' + RP.g + '</div><div><b>报告版本</b> ' + (RP.v || '—') + '</div><div><b>母报告</b> ' + RP.m + '</div><div><b>评估引擎</b> ' + RP.e + '</div>' + (r.j ? '<div><b>作业 ID</b> <span class="mono">' + r.j + '</span></div>' : '') + '</div></div>'
       + r.a
       + '<div class="note">本页为重建页（服务端报告文件已回收 — 原文报告不可内嵌时由缓存 markdown 与统计数据拼装）。序列块为该靶点的完整提交序列（一键复制）。</div>'
       + '<button type="button" class="backtop no-print" id="backtop" aria-label="回到顶部" title="回到顶部">↑</button>'

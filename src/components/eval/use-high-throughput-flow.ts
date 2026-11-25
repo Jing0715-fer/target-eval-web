@@ -50,6 +50,7 @@ import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } f
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
 import { enrichImportedReports, ensureImportedRetention, parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
 import { getImportedSource, getSessionSource, getSessionSourceShaByFileName } from './ht-import-cache'
+import { APP_VERSION } from '@/lib/version'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -1199,7 +1200,7 @@ export function useHighThroughputFlow() {
           : ''
         toast({
           title: '统计看板已生成',
-          description: `${recoverTail}${dropTail}${importedTail}${embedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。${noteTail}`,
+          description: `${recoverTail}${dropTail}${importedTail}${embedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。${noteTail}（本报告由 ${APP_VERSION} 生成）`,
         })
       } else {
         runState.dashboardError = dash.error ?? '统计看板生成失败'
