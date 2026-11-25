@@ -52,6 +52,9 @@ export interface ImportedStatsSection extends ImportedReportStats {
   /** v2.72：meta 标记的构建标签头 / 运行侧标签（标签消歧通道） */
   metaHeader?: string
   metaLabel?: string
+  /** v2.86：汇总报告载荷行携带的完整提交序列（弹出页重建页 data-seq — 调用方
+   *  可算 SHA 填 seqSha 增强定位；纯函数无 crypto 依赖，SHA 由调用方计算） */
+  seqRaw?: string
 }
 
 const H1_TITLE_RE = /<h1 class="rpt-title"[^>]*>([^<]+)<\/h1>/g
@@ -192,7 +195,13 @@ export function extractImportedStatsSections(html: string): ImportedStatsSection
   H1_TITLE_RE.lastIndex = 0
   let m: RegExpExecArray | null
   while ((m = H1_TITLE_RE.exec(capped))) h1s.push({ title: m[1].trim(), at: m.index })
-  if (h1s.length === 0) return []
+  if (h1s.length === 0) {
+    // v2.86：无 h1 区段 → 尝试汇总报告载荷（ht-rpt-data）——用户把「汇总报告」
+    // 当导入件上传时（v2.71+ 流式版汇总报告：主表格 + JSON 载荷，无 h1.rpt-title
+    // 区段结构），从载荷每行的弹出页数据（原文/重建页）提取统计，117 靶点级
+    // 汇总件由此从 0 区段 → N 完整统计区段。
+    return extractImportedStatsFromSummary(capped)
+  }
   const sections: ImportedStatsSection[] = []
   for (let i = 0; i < h1s.length; i++) {
     const from = h1s[i].at
@@ -201,8 +210,173 @@ export function extractImportedStatsSections(html: string): ImportedStatsSection
     const s = parseStatsSection(h1s[i].title, sec)
     if (s) sections.push(s)
   }
+  if (sections.length === 0) {
+    // v2.86：h1 存在但全部区段无评分证据（汇总报告的总标题 h1 ≠ 靶点区段）→
+    // 同样落入汇总报告载荷解析（实测用户 117 靶点件：2 个总标题 h1 + 0 评分区段）
+    return extractImportedStatsFromSummary(capped)
+  }
   if (sections.length > 0) alignMetaToSections(sections, parseImportedTargetMeta(capped))
   return sections
+}
+
+// ─── v2.86：汇总报告载荷解析（ht-rpt-data JSON → 每行弹出页数据）─────────────
+
+/** 汇总报告数据载荷容器（v2.61+ 所有版本同 id；type=application/json） */
+const HT_RPT_DATA_RE = /<script type="application\/json" id="ht-rpt-data">([\s\S]*?)<\/script>/
+
+/** 载荷行结构（payloadRowJson 输出 — html=原文嵌入行 / a=重建页行，两者互斥） */
+interface HtRptDataRow {
+  tt?: string
+  h?: string
+  j?: string
+  fn?: string
+  html?: string
+  a?: string
+}
+
+/**
+ * v2.86：从汇总报告的 ht-rpt-data 载荷提取每靶点统计。
+ *
+ * 用户将「汇总报告」作为导入件上传（修复前：0 区段 → 全部降级行）。v2.71+
+ * 汇总报告结构：主表（tr.mt-row 行级 data-* 属性）+ JSON 载荷（每行弹出页
+ * 数据）。载荷行两种形态：
+ *  - r[i].html = 单靶点报告原文（与下载的单独报告完全一致）→ 递归走
+ *    extractImportedStatsSections（单靶点 = 1 区段），同时保留原文行内标记；
+ *  - r[i].a = renderTargetArticle 重建页（tg-meta 刊头/评分/结论/提交序列）→
+ *    正则提取（总分/三方法评分/直接结构/同源/最佳分辨率/覆盖率/acc/限定
+ *    区间/方法结构计数/完整提交序列 data-seq）。
+ *
+ * tt（弹出页标题）补充定位字段：label / 提交长度（「· 338aa」）/ 残基区间。
+ */
+export function extractImportedStatsFromSummary(html: string): ImportedStatsSection[] {
+  const m = HT_RPT_DATA_RE.exec(html)
+  if (!m) return []
+  let RP: { r?: HtRptDataRow[] }
+  try {
+    RP = JSON.parse(m[1]) as { r?: HtRptDataRow[] }
+  } catch {
+    return []
+  }
+  if (!RP || !Array.isArray(RP.r) || RP.r.length === 0) return []
+  const out: ImportedStatsSection[] = []
+  for (const row of RP.r) {
+    const s = parseSummaryDataRow(row)
+    if (s) out.push(s)
+  }
+  return out
+}
+
+/** 单行载荷 → 统计区段（html 原文行递归区段解析；a 重建行正则提取） */
+function parseSummaryDataRow(row: HtRptDataRow): ImportedStatsSection | undefined {
+  // ① 原文行（完整单靶点报告 — 递归区段解析，单靶点 = 1 区段）
+  if (typeof row.html === 'string' && row.html.length > 200) {
+    const sections = extractImportedStatsSections(row.html)
+    if (sections.length > 0) {
+      const first = sections[0]!
+      if (typeof row.tt === 'string') attachTtHints(first, row.tt)
+      return first
+    }
+  }
+  // ② 重建行（article.tg — renderTargetArticle 输出）
+  if (typeof row.a === 'string') {
+    const s = parseSummaryArticle(row.a)
+    if (s && typeof row.tt === 'string') attachTtHints(s, row.tt)
+    return s
+  }
+  return undefined
+}
+
+/** tt（弹出页标题）补充定位字段：label / 提交长度 / 残基区间。
+ *  形如「refine_coot-1·链1 · 338aa 残基 488-722 · 完整评估报告」——分隔符为
+ *  带空格的「 · 」，label 内部的间隔号（无空格）不受影响；旧版标题无提交
+ *  长度段 — 各段独立可选。 */
+function attachTtHints(s: ImportedStatsSection, tt: string): void {
+  const parts = tt.trim().split(/\s+·\s+/)
+  if (parts.length < 2) return
+  const tail = parts[parts.length - 1]!.trim()
+  if (!/^完整评估报告$/.test(tail)) return
+  const mid = parts.length >= 3 ? parts[parts.length - 2]!.trim() : ''
+  const label = parts.slice(0, parts.length >= 3 ? parts.length - 2 : parts.length - 1).join(' · ').trim()
+  if (label && label.length >= 2 && !s.metaLabel) {
+    s.metaLabel = label.slice(0, 90)
+    if (s.proteinName == null) s.proteinName = label
+  }
+  const lenM = mid ? /^(\d{2,6})\s*aa/.exec(mid) : null
+  if (lenM && s.metaSeqLength == null) {
+    const len = Number(lenM[1])
+    if (Number.isFinite(len) && len >= 10 && len <= 100000) s.metaSeqLength = len
+  }
+  const rangeM = mid ? /残基\s*(\d{1,5})\s*[-–]\s*(\d{1,5})/.exec(mid) : null
+  if (rangeM && s.range == null) {
+    const r0 = Number(rangeM[1])
+    const r1 = Number(rangeM[2])
+    if (r0 >= 1 && r1 >= r0) {
+      s.range = [r0, r1]
+      if (s.alignedSpan == null) s.alignedSpan = r1 - r0 + 1
+    }
+  }
+}
+
+/** 重建页 article.tg → 统计区段（刊头 meta 行 + 结论行 + 提交序列块） */
+function parseSummaryArticle(a: string): ImportedStatsSection | undefined {
+  // ── 评分行：总分 10 + X-ray 5 · Cryo-EM 10 · NMR 1 ──
+  const scoreM = /总分\s*<b class="score[^"]*">\s*(\d+(?:\.\d+)?)\s*<\/b>/.exec(a)
+  const methodsM = /X-ray\s*(\d+)\s*·\s*Cryo-EM\s*(\d+)\s*·\s*NMR\s*(\d+)/.exec(a)
+  if (!scoreM && !methodsM) return undefined
+  const overall = scoreM ? Math.round(Number(scoreM[1])) : undefined
+  if (overall == null || !Number.isFinite(overall) || overall < 0 || overall > 10) return undefined
+
+  // ── 结构/覆盖行：直接结构 2 · 同源 58 · 最佳 2.21Å · 覆盖 100% ──
+  const structM = /直接结构\s*(\d+)\s*·\s*同源\s*(\d+)/.exec(a)
+  const bestM = /最佳\s*(\d+(?:\.\d+)?)\s*[ÅA]/.exec(a)
+  const covM = /覆盖\s*(\d+(?:\.\d+)?)\s*%/.exec(a)
+
+  // ── 结论行（tg-verdict vl）：限定 488-722 + X-ray 0 / Cryo-EM 2（结构计数）──
+  const rangeM = /限定\s*(\d{1,5})\s*[-–]\s*(\d{1,5})/.exec(a)
+  const methodCountM = /直接结构（\s*X-ray\s*(\d+)\s*\/\s*Cryo-EM\s*(\d+)(?:\s*\/\s*NMR\s*(\d+))?\s*）/.exec(a)
+
+  // ── 身份：UniProt 链接 acc + 刊头 span 蛋白名/物种 ──
+  const uniM = /uniprotkb\/([A-Z0-9-]+)"/.exec(a)
+  const uniprotId = uniM ? (UNIPROT_ACC_RE.test(uniM[1]!) ? uniM[1]!.toUpperCase() : undefined) : undefined
+  const metaSpans = /<div class="tg-meta">([\s\S]*?)<\/div>/.exec(a)
+  let proteinName: string | undefined
+  let organism: string | undefined
+  if (metaSpans) {
+    const spans = [...metaSpans[1]!.matchAll(/<span>([^<]+)<\/span>/g)].map(x => unescapeHtml(x[1]!).trim())
+    // 首个 tg-meta 行的 span 序：[载入徽标?, 蛋白名, 物种]（uni-id 是 <a> 不在 span 内）
+    const plain = spans.filter(x => x && x !== '—')
+    if (plain.length >= 1 && plain[0]!.length >= 2) proteinName = plain[0]!.slice(0, 80)
+    if (plain.length >= 2) organism = plain[1]!.slice(0, 80)
+  }
+
+  // ── 提交序列（弹出页重建页 seqbox data-seq — SHA 定位通道的原始材料）──
+  const seqM = /data-seq="([A-Za-z]+)"/.exec(a)
+  const seqRaw = seqM && seqM[1]!.length >= 10 ? seqM[1] : undefined
+
+  const range = rangeM && Number(rangeM[1]) >= 1 && Number(rangeM[2]) >= Number(rangeM[1])
+    ? [Number(rangeM[1]), Number(rangeM[2])] as [number, number]
+    : undefined
+
+  return {
+    overall,
+    xray: methodsM ? Number(methodsM[1]) : 0,
+    cryoem: methodsM ? Number(methodsM[2]) : 0,
+    nmr: methodsM ? Number(methodsM[3]) : 0,
+    pdbCount: structM ? Number(structM[1]) : 0,
+    blastHitCount: structM ? Number(structM[2]) : 0,
+    literatureCount: 0,
+    methodXrayCount: methodCountM ? Number(methodCountM[1]) : 0,
+    methodCryoemCount: methodCountM ? Number(methodCountM[2]) : 0,
+    methodNmrCount: methodCountM && methodCountM[3] != null ? Number(methodCountM[3]) : 0,
+    bestResolution: bestM ? Number(bestM[1]) : null,
+    coverage: covM ? Math.round(Number(covM[1])) : 0,
+    ...(proteinName ? { proteinName } : {}),
+    ...(organism ? { organism } : {}),
+    ...(uniprotId ? { uniprotId } : {}),
+    ...(range ? { range } : {}),
+    ...(seqRaw ? { metaSeqLength: seqRaw.length, seqRaw } : {}),
+    ...(range ? { alignedSpan: range[1] - range[0] + 1 } : {}),
+  }
 }
 
 /** 单区段解析（题目 + 区段 HTML → 统计快照；无任何评分证据 → null） */
@@ -364,6 +538,6 @@ export function pickImportedStats(
 
 /** 剥离内部定位字段的干净快照（持久化/载荷用 — 只保留 ImportedReportStats 字段） */
 export function toCleanImportedStats(s: ImportedStatsSection): ImportedReportStats {
-  const { alignedSpan: _a, seqSha: _b, metaSeqLength: _c, metaHeader: _d, metaLabel: _e, ...clean } = s
+  const { alignedSpan: _a, seqSha: _b, metaSeqLength: _c, metaHeader: _d, metaLabel: _e, seqRaw: _f, ...clean } = s
   return clean
 }

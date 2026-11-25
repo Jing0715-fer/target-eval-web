@@ -1171,6 +1171,12 @@ function embedJsonScript(id: string, data: unknown): string {
 /** 载荷占位标记（NUL 包围 — 正文 HTML 不含 NUL，拆分定位零歧义） */
 const HT_PAYLOAD_MARKER = '\u0000__HT_RPT_PAYLOAD__\u0000'
 
+/** v2.86：弹出页原文共享池的内存行去重指纹（长度 + 头部窗口含 <title> —
+ *  fixture/内存场景；路径行用路径键绝对可靠，内存行同指纹视为同内容） */
+function sharedHtmlKey(src: string): string {
+  return `${src.length}:${src.slice(0, 400)}`
+}
+
 /** 主表行排序（总分降序 — shell 与载荷分块共用，保证 data-i 索引一致） */
 function sortHtDashboardRows(rows: HtDashboardRow[]): HtDashboardRow[] {
   return [...rows].sort((a, b) => b.overall - a.overall)
@@ -1178,11 +1184,16 @@ function sortHtDashboardRows(rows: HtDashboardRow[]): HtDashboardRow[] {
 
 /** 载荷行 JSON（与 embedJsonScript 全量 stringify 的单行输出同构 — esc 口径与
  *  buildHtReportPayload 完全一致，`<` 转义阻断 script 提前闭合）。html 缺省时
- *  弹出页回退重建页变体（与 buildHtReportPayload 一致） */
-function payloadRowJson(r: HtDashboardRow, verdictByJob: Map<string, HtVerdict>, generatedAt: string, origin: string, html?: string): string {
+ *  弹出页回退重建页变体（与 buildHtReportPayload 一致）；v2.86：html + shareKey
+ *  时输出共享引用 sk（同一份原文多行共享时载荷只存一份 — 117 靶点共享同一份
+ *  上传件不再 117×重复内嵌） */
+function payloadRowJson(r: HtDashboardRow, verdictByJob: Map<string, HtVerdict>, generatedAt: string, origin: string, html?: string, shareKey?: string): string {
   const j = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
   const tt = esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`)
   const fn = esc(reportFileName(r, generatedAt))
+  if (html != null && shareKey != null) {
+    return j({ tt, j: esc(r.jobId), fn, sk: shareKey })
+  }
   if (html != null) {
     return j({ tt, j: esc(r.jobId), fn, html })
   }
@@ -1222,18 +1233,34 @@ async function* htPayloadJsonChunks(
   )
   yield `{${meta.join(',')},"r":[`
   let embedded = 0
+  // v2.86：共享原文池（同内容同键 — 路径行按路径去重、内存行按内容指纹；
+  //  117 靶点共享同一份上传件时只存一份，产物体积不再随行数线性膨胀）
+  const sharedKeys = new Map<string, string>()
+  const sharedJson: string[] = []
   for (let i = 0; i < sorted.length; i++) {
     const r = sorted[i]!
     let html: string | undefined
+    let shareKey: string | undefined
     if (rowHasReportHtml(r)) {
       const src = r.reportHtml ?? (r.reportHtmlPath ? await readFile(r.reportHtmlPath, 'utf-8').catch(() => null) : null)
-      if (src && src.length <= REPORT_HTML_MAX_BYTES) { html = src; embedded++ }
+      if (src && src.length <= REPORT_HTML_MAX_BYTES) {
+        html = src
+        embedded++
+        const dk = r.reportHtmlPath != null ? `p:${r.reportHtmlPath}` : `m:${sharedHtmlKey(src)}`
+        let k = sharedKeys.get(dk)
+        if (k == null) {
+          k = `k${sharedKeys.size}`
+          sharedKeys.set(dk, k)
+          sharedJson.push(`"${k}":${j(src)}`)
+        }
+        shareKey = k
+      }
     }
-    yield `${i > 0 ? ',' : ''}${payloadRowJson(r, verdictByJob, generatedAt, origin, html)}`
+    yield `${i > 0 ? ',' : ''}${payloadRowJson(r, verdictByJob, generatedAt, origin, html, shareKey)}`
     onRow?.(i + 1, sorted.length)
   }
   onEmbedded?.(embedded, sorted.length)
-  yield ']}'
+  yield sharedJson.length ? `],"s":{${sharedJson.join(',')}}}` : ']}'
 }
 
 /** v2.71：看板 HTML 流式落盘（服务端生成链路专用 — 内存安全）。
@@ -1524,7 +1551,16 @@ export async function backfillImportedStats(
           const seqSha = t.sequence
             ? createHash('sha256').update(t.sequence).digest('hex').slice(0, 16)
             : undefined
-          const hit = pickImportedStats(extractImportedStatsSections(html), {
+          const sections = extractImportedStatsSections(html)
+          // v2.86：汇总报告载荷行携带完整提交序列（data-seq）→ 补算 SHA 填充
+          // pickImportedStats ①通道（汇总件展开场景的主定位通道 — 客户端 enrich
+          // 同口径已填，此处覆盖客户端解析失败/未运行的降级行）
+          for (const s of sections) {
+            if (!s.seqSha && s.seqRaw) {
+              s.seqSha = createHash('sha256').update(s.seqRaw).digest('hex').slice(0, 16)
+            }
+          }
+          const hit = pickImportedStats(sections, {
             length: t.sequence?.length,
             seqSha,
             range: t.range,
@@ -1699,34 +1735,48 @@ function buildHtReportPayload(input: {
   generatedAt: string
   engineSummary: string
   origin: string
-}): { c?: string; g: string; m: string; e: string; r: Array<{ tt: string; j: string; fn: string; html?: string; h?: string; a?: string }> } {
+}): { c?: string; g: string; m: string; e: string; r: Array<{ tt: string; j: string; fn: string; sk?: string; html?: string; h?: string; a?: string }>; s?: Record<string, string> } {
   const verdictByJob = new Map(input.verdicts.map(v => [v.jobId, v]))
   // v2.71：重建页样式内嵌判定 — 任何行无内存原文即内嵌（保守正确：路径行的
   //  文件可能在写盘时丢失回退重建页，样式必须已在）
   const needFallbackCss = input.rows.some(r => !r.reportHtml)
+  // v2.86：共享原文池（与流式写入器同构 — 同内容同键；同一份原文多行共享
+  //  时只存一份，行条目引用 sk）
+  const sharedKeys = new Map<string, string>()
+  const sharedEntries: Array<[string, string]> = []
+  const rows = input.rows.map(r => {
+    const fn = esc(reportFileName(r, input.generatedAt))
+    if (r.reportHtml) {
+      // 原文报告自带 <title>，tt 仅作 Blob 打不开时的索引提示；
+      // v2.71：仅内存原文走此分支 — 路径行（reportHtmlPath）在整串渲染链路
+      //  降级为重建页变体（服务端链路由流式写入器延迟读盘嵌入原文）；
+      //  v2.86：内存原文进共享池，行条目输出 sk 引用
+      const dk = `m:${sharedHtmlKey(r.reportHtml)}`
+      let k = sharedKeys.get(dk)
+      if (k == null) {
+        k = `k${sharedKeys.size}`
+        sharedKeys.set(dk, k)
+        sharedEntries.push([k, r.reportHtml])
+      }
+      return { tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`), j: esc(r.jobId), fn, sk: k }
+    }
+    const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
+    return {
+      tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`),
+      h: `${esc(r.label)}${r.range ? `<span class="tg-range"> · 残基 ${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用，正文与统计完整保留">缓存恢复</span>' : ''}`,
+      j: esc(r.jobId),
+      fn,
+      a: renderTargetArticle(r, v, input.origin),
+    }
+  })
   return {
     // 共享样式仅在有重建页条目时才内嵌（原文报告自带完整样式，无需共享）
     c: needFallbackCss ? HT_TARGET_REPORT_CSS : undefined,
     g: esc(input.generatedAt.length > 48 ? input.generatedAt.slice(0, 48) + '…' : input.generatedAt),
     m: esc(input.title.length > 46 ? input.title.slice(0, 46) + '…' : input.title),
     e: esc(input.engineSummary.length > 60 ? input.engineSummary.slice(0, 60) + '…' : input.engineSummary),
-    r: input.rows.map(r => {
-      const fn = esc(reportFileName(r, input.generatedAt))
-      if (r.reportHtml) {
-        // 原文报告自带 <title>，tt 仅作 Blob 打不开时的索引提示；
-        // v2.71：仅内存原文走此分支 — 路径行（reportHtmlPath）在整串渲染链路
-        //  降级为重建页变体（服务端链路由流式写入器延迟读盘嵌入原文）
-        return { tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`), j: esc(r.jobId), fn, html: r.reportHtml }
-      }
-      const v = verdictByJob.get(r.jobId) ?? ruleVerdict(r)
-      return {
-        tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`),
-        h: `${esc(r.label)}${r.range ? `<span class="tg-range"> · 残基 ${r.range[0]}-${r.range[1]}</span>` : ''}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用，正文与统计完整保留">缓存恢复</span>' : ''}`,
-        j: esc(r.jobId),
-        fn,
-        a: renderTargetArticle(r, v, input.origin),
-      }
-    }),
+    r: rows,
+    ...(sharedEntries.length ? { s: Object.fromEntries(sharedEntries) } : {}),
   }
 }
 
@@ -2166,7 +2216,11 @@ ${rptPayload}
     try {
       var rs = RP && RP.r ? RP.r : [];
       var emb = 0;
-      for (var ri = 0; ri < rs.length; ri++) if (typeof rs[ri].html === 'string' && rs[ri].html.length > 1000) emb++;
+      for (var ri = 0; ri < rs.length; ri++) {
+        var rh = rs[ri].html;
+        if (rh == null && rs[ri].sk && RP.s && typeof RP.s[rs[ri].sk] === 'string') rh = RP.s[rs[ri].sk];
+        if (typeof rh === 'string' && rh.length > 1000) emb++;
+      }
       nEl.textContent = rs.length ? (emb + ' / ' + rs.length + ' 个靶点' + (emb >= rs.length ? '（全部原文内嵌 — 与原报告一致）' : '（未内嵌行为重建页/载入说明页）')) : '无弹出页载荷';
     } catch (e) { nEl.textContent = '统计不可用'; }
   })();
@@ -2233,6 +2287,11 @@ ${rptPayload}
   // v2.65：弹出与下载共用同一份 HTML 源 — 原文条目直接返回 r.html（与下载的
   // 单独报告字节级一致）；重建页由 markdown + 统计数据拼装（共享样式 RP.c）
   function buildReportHtml(r){
+    var sh = (r.sk && RP && RP.s && typeof RP.s[r.sk] === 'string') ? RP.s[r.sk] : null;
+    if (sh) {
+      // v2.86：共享池原文 — 与上传的导入件/原报告完全一致（多行共享同一份时载荷只存一份）
+      return sh;
+    }
     if (typeof r.html === 'string' && r.html) {
       // v2.63：报告文件原文 — 与下载的单独报告完全一致（含全部图表与脚本）
       return r.html;
