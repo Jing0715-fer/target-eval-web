@@ -1,8 +1,25 @@
 /**
- * 报告 HTML → PDF（服务端 Chromium print-to-PDF · 连续长页不分页）— v2.88
+ * 报告 HTML → PDF（服务端 Chromium print-to-PDF · 连续长页不分页）— v2.88 · v2.89
+ *
+ *  v2.89（实测反馈修复 — 看板 PDF 偶发一次失败后**所有**导出永久不可用）：
+ *  - 浏览器单例自愈：Chromium 进程死亡（沙箱 OOM 击杀/崩溃）后，旧单例把指向死
+ *    浏览器的 promise 永久缓存 — 后续导出全部 187ms 秒败「browser has been
+ *    closed」直到重启服务（与用户反复反馈的「服务进程反复死亡」同类根源）。
+ *    现监听 disconnected 事件清空单例，下次调用自动重拉新浏览器；
+ *  - 透明重试：渲染中浏览器死亡统一识别 → 清死单例 → 新浏览器重试一次（用户
+ *    无感；两次都死才报错，报错前再清一次保证服务后续可用）；
+ *  - load 事件 best-effort：外部子资源（Google Fonts 等）偶发悬挂时 load 不
+ *    触发，旧版 setContent 90s 硬失败 — 现 best-effort 继续（文档解析完成度由
+ *    readyState 10s 显式确认），字体悬挂由字体竞速兜底；
+ *  - 字体就绪竞速 15s：document.fonts.ready 在网络悬挂时永不 resolve，旧版
+ *    evaluate 无超时会永久卡死串行队列 — 现 Promise.race 限时后回退系统
+ *    CJK 字体继续出稿；
+ *  - 内存预检：大 HTML（≥ 4MB）渲染需 Chromium 数倍内存（实测 10MB 看板峰值
+ *    可达 2.4GB RSS，本沙箱总共 3.9GB）— 余量 < 1.2GB 时快速失败并给出指引，
+ *    不让渲染跑 90s 后被 OOM 击杀连带浏览器死亡。
  *
  *  用户需求（v2.87 新增 PDF 导出后的实测反馈）：「pdf 能完全不分页吗？格式尽量
- *  和 html 保持一致」。本版把 PDF 从「A4 分页打印版」改为「连续长页」：
+ *  和 html 保持一致」。v2.88 把 PDF 从「A4 分页打印版」改为「连续长页」：
  *  - 单页连续：纸张尺寸 = 内容实测尺寸（宽 = .page 版心、高 = 全文高度）+
  *    pageRanges '1' + 高度 8px 裕量 — 整份报告一页装下，零页断点、零页码；
  *  - 版式 = 网页版：page.emulateMedia('screen') 让 print-to-PDF 按**屏幕媒体**
@@ -31,6 +48,7 @@
  *    load → 图片解码 → fonts.ready → 落定的等待策略。
  *  HTML 下载后的浏览器 Ctrl/Cmd+P 仍是 A4 分页版（打印归档场景由它承担）。
  */
+import * as fs from 'node:fs'
 import type { ReadableStream as WebReadableStream } from 'node:stream/web'
 
 // ── Playwright 类型（最小面 — 只声明用到的 API，避免整包类型耦合）─────────────
@@ -57,6 +75,8 @@ interface PdfPageLike {
 interface PdfBrowserLike {
   newPage(): Promise<PdfPageLike>
   close(): Promise<void>
+  /** v2.89：浏览器进程退出/崩溃/被 OOM 击杀时触发 — 单例自愈的信号源 */
+  on(event: 'disconnected', fn: () => void): void
 }
 interface PdfChromiumLike {
   launch(opts: { args: string[] }): Promise<PdfBrowserLike>
@@ -65,14 +85,66 @@ interface PdfChromiumLike {
 const pwPdfGlobal = globalThis as unknown as { __rptPdfBrowser?: Promise<PdfBrowserLike> }
 
 async function getBrowser(): Promise<PdfBrowserLike> {
+  if (pwPdfGlobal.__rptPdfBrowser) return pwPdfGlobal.__rptPdfBrowser
   const mod = (await import('playwright')) as unknown as { chromium: PdfChromiumLike }
   const p = mod.chromium.launch({
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   })
   // 毒丸清理（alphafold.ts 同款）：launch 失败不把被拒 promise 永久缓在单例里
-  pwPdfGlobal.__rptPdfBrowser ??= p
+  pwPdfGlobal.__rptPdfBrowser = p
   p.catch(() => { if (pwPdfGlobal.__rptPdfBrowser === p) pwPdfGlobal.__rptPdfBrowser = undefined })
-  return pwPdfGlobal.__rptPdfBrowser
+  // v2.89 单例自愈：浏览器进程死亡（OOM 击杀/崩溃）时清空单例 — 后续调用重新拉起。
+  //  仅当单例仍是本浏览器时清空（防旧实例的迟到断连事件误清新实例）。
+  p.then(browser => {
+    browser.on('disconnected', () => {
+      void pwPdfGlobal.__rptPdfBrowser?.then(cached => {
+        if (cached === browser) {
+          pwPdfGlobal.__rptPdfBrowser = undefined
+          console.warn('[report-pdf] 浏览器进程已退出 — 单例已清空，下次导出自动重拉')
+        }
+      }).catch(() => undefined)
+    })
+  }).catch(() => undefined)
+  return p
+}
+
+/** 浏览器已死错误形态（进程被 OOM 击杀/崩溃后，一切调用统一抛此形态） */
+function isBrowserDead(err: unknown): boolean {
+  return /Target (?:page|context or browser) has been closed|Browser(?: process)? has been closed|Target closed/i
+    .test(err instanceof Error ? err.message : String(err))
+}
+
+/** v2.89：浏览器死亡后透明重试一次（清死单例 → 新浏览器重跑；再死报错前再清一次） */
+async function withBrowserRetry<T>(task: () => Promise<T>): Promise<T> {
+  try {
+    return await task()
+  } catch (err) {
+    if (!isBrowserDead(err)) throw err
+    pwPdfGlobal.__rptPdfBrowser = undefined
+    console.warn('[report-pdf] 渲染中浏览器进程死亡（OOM/崩溃）— 重新拉起并重试一次')
+    try {
+      return await task()
+    } catch (err2) {
+      if (isBrowserDead(err2)) pwPdfGlobal.__rptPdfBrowser = undefined
+      throw err2
+    }
+  }
+}
+
+/** v2.89 内存预检：大 HTML（≥4MB）渲染需 Chromium 数倍内存 — 余量不足时快速失败。
+ *  /proc/meminfo 不可读（非 Linux）时跳过，不影响正常环境。 */
+function assertMemoryForRender(htmlBytes: number): void {
+  if (htmlBytes < 4 * 1024 * 1024) return
+  let availKb = -1
+  try {
+    const m = /MemAvailable:\s+(\d+) kB/.exec(fs.readFileSync('/proc/meminfo', 'utf-8'))
+    if (m) availKb = Number(m[1])
+  } catch {
+    return // 不可读 — 放行（交给渲染自身成败）
+  }
+  if (availKb > 0 && availKb < 1_200_000) {
+    throw new Error(`系统可用内存不足（${(availKb / 1024 / 1024).toFixed(1)}GB）— 大报告 PDF 渲染需要数倍内存，请稍后重试；或下载 HTML 后在浏览器 Ctrl/Cmd+P 另存 PDF`)
+  }
 }
 
 // ── 串行队列（同时只渲染一份 PDF）───────────────────────────────────────────
@@ -170,7 +242,9 @@ export async function renderReportPdf(html: string, opts: RenderReportPdfOptions
   if (htmlBytes > PDF_HTML_MAX_BYTES) {
     throw new ReportPdfTooLargeError(htmlBytes)
   }
-  return enqueue(async () => {
+  // v2.89：大报告内存预检（快速失败优于 OOM 击杀后连带浏览器死亡）
+  assertMemoryForRender(htmlBytes)
+  return enqueue(() => withBrowserRetry(async () => {
     const browser = await getBrowser()
     let page: PdfPageLike | null = null
     try {
@@ -180,7 +254,18 @@ export async function renderReportPdf(html: string, opts: RenderReportPdfOptions
       // ① 屏幕媒体 + 桌面基准视口 — 版式与浏览器打开 HTML 一致（@media print 规则全部不参与）
       await page.emulateMedia({ media: 'screen' })
       await page.setViewportSize({ width: MEASURE_VIEWPORT_W, height: 900 })
-      await page.setContent(html, { waitUntil: 'load', timeout: Math.min(timeoutMs, 90_000) })
+      // v2.89：load 事件 best-effort — 外部子资源（Google Fonts 等）偶发悬挂时 load
+      //  不触发，旧版硬失败 90s 超时；现继续走后续显式等待（图片/字体各自限时兜底）
+      try {
+        await page.setContent(html, { waitUntil: 'load', timeout: Math.min(timeoutMs, 90_000) })
+      } catch (e) {
+        console.warn(`[report-pdf] load 等待超时（best-effort 继续）：${String(e instanceof Error ? e.message : e).slice(0, 120)}`)
+      }
+      // 文档解析完成度显式确认（load 超时路径下 readyState 可能仍 loading — 等
+      // interactive 再量测，10s 仍卡则接受当前状态继续出稿）
+      await page
+        .waitForFunction('document.readyState !== "loading"', null, { timeout: 10_000, polling: 250 })
+        .catch(() => console.warn('[report-pdf] 文档解析 10s 未完成 — 按当前状态继续'))
       // ② 懒加载图转立即（打印管线强制加载全部图，屏幕媒体不会 — 连续长页下方图不缺失）
       await page
         .evaluate(() => {
@@ -191,8 +276,14 @@ export async function renderReportPdf(html: string, opts: RenderReportPdfOptions
       await page
         .waitForFunction('Array.from(document.images).every(function(i){return i.complete})', null, { timeout: 30_000, polling: 250 })
         .catch(() => console.warn('[report-pdf] 图片等待超时（best-effort 继续）'))
-      // 字体就绪（Google Fonts 网络字体；失败回退系统 CJK 字体不影响成稿）
-      await page.evaluate(() => (document as unknown as { fonts?: { ready: Promise<unknown> } }).fonts?.ready).catch(() => undefined)
+      // 字体就绪（Google Fonts 网络字体；v2.89 竞速 15s — 网络悬挂时 fonts.ready 永不
+      //  resolve，旧版 evaluate 无超时会永久卡死串行队列；超时回退系统 CJK 字体不影响成稿）
+      await page
+        .evaluate(() => Promise.race([
+          (document as unknown as { fonts?: { ready: Promise<unknown> } }).fonts?.ready ?? Promise.resolve(),
+          new Promise(r => setTimeout(r, 15_000)),
+        ]))
+        .catch(() => undefined)
       // 布局落定（字体替换/图片解码引起的再排）
       await new Promise(r => setTimeout(r, 300))
       // ④ 版心实测（.page 宽度/内边距 + body 字号）→ 注入连续版式 CSS + 展开折叠面板
@@ -262,7 +353,7 @@ export async function renderReportPdf(html: string, opts: RenderReportPdfOptions
     } finally {
       try { await page?.close() } catch { /* ignore */ }
     }
-  })
+  }))
 }
 
 // ── 看板（HT Dashboard）打印分页规则（浏览器 Ctrl+P 归档路径）────────────────

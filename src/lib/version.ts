@@ -252,5 +252,19 @@
  *  - 前端文案同步：下载菜单 PDF 项「连续长页 · 不分页 · 版式同网页版」、
  *    生成中/完成 toast、合并报告 pdfNote「全部靶点视图展开」；HTML 下载后的
  *    浏览器 Ctrl/Cmd+P 仍为 A4 分页版（打印归档场景由它承担）。
+ * v2.90：PDF 导出可靠性加固（v2.89 连续长页版实测：统计看板 PDF 偶发一次失败后，
+ *  **所有**导出永久 187ms 秒败「browser has been closed」直到重启服务）：
+ *  - 浏览器单例自愈：Chromium 进程死亡（沙箱 3.9GB 内存 OOM 击杀/崩溃）后，旧
+ *    单例把指向死浏览器的 promise 永久缓存 — 现监听 disconnected 事件清空单例，
+ *    下次调用自动重拉新浏览器（与「服务进程反复死亡」同类根源的根治）；
+ *  - 透明重试：渲染中浏览器死亡的错误形态统一识别 → 清死单例 → 新浏览器重试
+ *    一次（用户无感）；两次都死才报错，报错前再清一次保证服务后续可用；
+ *  - load 事件 best-effort：Google Fonts 等外部子资源偶发悬挂时 load 不触发，
+ *    旧版 setContent 90s 硬失败 — 现 best-effort 继续（readyState 10s 显式确认
+ *    解析完成度）；字体就绪改 15s 竞速（网络悬挂时 fonts.ready 永不 resolve，
+ *    旧版 evaluate 无超时会永久卡死串行队列 — 超时回退系统 CJK 字体出稿）；
+ *  - 内存预检：大 HTML（≥4MB，实测 10MB 看板 Chromium 峰值 2.4GB RSS）渲染前
+ *    检查系统余量，<1.2GB 快速失败并给出「稍后重试 / 下载 HTML 浏览器打印」
+ *    指引，不让渲染跑 90s 后被 OOM 击杀连带浏览器死亡。
  */
-export const APP_VERSION = 'v2.89.0'
+export const APP_VERSION = 'v2.90.0'
