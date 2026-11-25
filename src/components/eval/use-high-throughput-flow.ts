@@ -980,14 +980,17 @@ export function useHighThroughputFlow() {
     //    根治）— 生成前向服务端批量校验 importedReportId 留存是否仍可读；缺失/
     //    丢失（导入时上传失败 / DB 重置 / 实例回收）的源文件凭 importedReportSha
     //    从浏览器本地留存（ht-import-cache）取回 HTML 重新上传，回写运行记录 —
-    //    弹出页原文内嵌不再取决于导入那一瞬间的上传成败。校验端点不可达 → 视同
-    //    全部存活（服务端不可用时生成本就无法进行，不盲目全量重传）。──
+    //    弹出页原文内嵌不再取决于导入那一瞬间的上传成败。v2.84：端点不可达时
+    //    也尽力重传（POST 幂等去重 — 见 ensureImportedRetention 头注释）。──
     if (importedBare.length > 0) {
       const healRefs: Array<{ item: HTGroupItemState; bare: (typeof importedBare)[number] }> = []
       for (const g of runState.groups) {
         for (const it of g.items) {
           if (it.imported !== true && !(it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))) continue
-          const bare = importedBare.find(b => b.label === it.label)
+          // v2.84：组内标签优先匹配（旧版仅按 label 全局 find — 跨组同名标签
+          //  （如两组各有一条「model·链1」）会错配到别组的 bare 载荷条目）
+          const bare = importedBare.find(b => b.label === it.label && b.group === g.index + 1)
+            ?? importedBare.find(b => b.label === it.label)
           if (bare && (it.importedReportSha || it.importedReportId)) healRefs.push({ item: it, bare })
         }
       }

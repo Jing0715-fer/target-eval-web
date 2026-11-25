@@ -1070,16 +1070,17 @@ export async function enrichImportedReports(
     }
   }
   // ── 逐项组装（同一源文件的多个靶点各自定位自己的子页）──
-  const entryOfRep = new Map<HtArchiveReport, { sections: ImportedStatsSection[]; sourceSha?: string }>()
-  for (const [key, entry] of bySource) {
-    if (!entryOfRep.has(entry.rep)) entryOfRep.set(entry.rep, { sections: entry.sections, sourceSha: entry.sourceSha })
-    void key
-  }
+  // v2.84 修复：按 sourceKey 查回源条目（v2.83 误改为按 rep 对象引用查 Map —
+  //  同一合并报告文件的多靶点各自匹配到**不同的**报告条目对象（meta 条目 /
+  //  h1 条目 / 组号通道条目互不相同），只有首个靶点的 rep 恰好是 entry.rep，
+  //  其余靶点 entryOfRep.get(rep) 全部落空 → 静默丢失 stats/sourceSha/reportId
+  //  — 用户实测 117 靶点导入 24 个次链（链2/链3）齐齐退化为 bare 降级行、
+  //  UniProt ID 与评分一并消失（v2.82 按 key 查找无此问题 — 回归修复）。
   for (let i = 0; i < items.length; i++) {
     const it = items[i]!
     const rep = it.rep
     if (!rep || rep.kind === 'dashboard') continue
-    const entry = entryOfRep.get(rep)
+    const entry = bySource.get(parsed.sourceKey(rep))
     if (!entry) continue
     const stats = pickImportedStatsShared(entry.sections, it)
     if (stats) out[i]!.stats = toCleanImportedStats(stats)
@@ -1107,9 +1108,17 @@ export interface RetentionCheckItem {
  * 有源文件的重新上传拿新 id；返回 sha → reportId 映射（含采纳与重传，调用方
  * 回写运行记录持久化自愈结果）。
  *
+ * v2.84 修复（用户实测「留存校验暂不可用 — 沿用既有服务端留存」后 117/117
+ * 原文全部未内嵌）：旧逻辑把「端点成功应答但服务端一份都没留住」（retained
+ * 为空 = 实例回收/DB 重置后的常态）误判为「端点不可达」→ 提前返回跳过自愈
+ * 重传 → 弹出页全降级。且真不可达时「视同全部存活」同样脆弱（GET 失败但
+ * POST 可用的网关场景 — 如 URL 长度限制）。现在：
+ *  - 端点可达且全部存活 → 零重传采纳（不变）；
+ *  - 端点可达但有缺失 → 缺失项从本地缓存重传（不变 — 但不再被误判短路）；
+ *  - 端点不可达 → 也尽力重传（POST 幂等 — 服务端内容寻址去重，同内容已有
+ *    留存直接回既有 id，不重复落盘；服务端真不可用时逐份快速失败不阻塞）。
+ *
  * 设计边界：
- *  - 校验端点不可达 → 返回空映射（视同全部存活 — 服务端不可用时生成本就
- *    无法进行，不盲目触发上百 MB 重传）；
  *  - 本地缓存也没有（旧版运行记录无 sha / IndexedDB 被清）且服务端无同内容
  *    留存 → 该源文件保持现状（确实丢失则弹出页降级 — 与 v2.80 行为一致）；
  *  - 单份重传失败 → 跳过继续（尽力而为，不阻塞汇总生成）。
@@ -1126,14 +1135,21 @@ export async function ensureImportedRetention(
   const uniqueIds = [...new Set(items.map(i => i.reportId).filter((x): x is string => Boolean(x)))]
   const uniqueShas = [...new Set(items.map(i => i.sha).filter((x): x is string => Boolean(x)))]
   if (uniqueIds.length === 0 && uniqueShas.length === 0) return { fixed, reuploaded: 0, adopted: 0, stillMissing: 0 }
-  // ① 内容哈希批量校验（v2.83 — 60 sha/请求；命中即采纳零重传）
+  // ① 内容哈希批量校验（v2.83 — 60 sha/请求；命中即采纳零重传）。
+  //  v2.84：verifyReached 区分「端点不可达」与「应答成功但无留存」— 后者是
+  //  实例回收/DB 重置后的正常应答（retained 空 + missing 全量），绝非不可达。
   const liveSha = new Map<string, string>() // sha → 存活 id
+  let verifyReached = false
   if (uniqueShas.length > 0) {
     onProgress?.(`校验 ${uniqueShas.length} 份导入报告的服务端留存…`)
     for (let i = 0; i < uniqueShas.length; i += 60) {
       const r = await verifyImportedSources(uniqueShas.slice(i, i + 60))
-      if (!r) break // 端点不可达 — 视同存活（沿用既有留存，不盲目重传）
+      if (!r) break // 端点不可达 — 状态未知，全部按缺失走重传（POST 幂等去重）
+      verifyReached = true
       for (const [sha, id] of Object.entries(r.retained)) liveSha.set(sha, id)
+    }
+    if (!verifyReached) {
+      onProgress?.(`留存校验端点暂不可达 — 尝试从本地留存重传 ${uniqueShas.length} 份报告（服务端幂等去重，已留存的不会重复落盘）…`)
     }
   }
   // ② 无 sha 仅 reportId 的项按 id 校验（v2.81 前旧运行记录兼容路径）
@@ -1148,7 +1164,9 @@ export async function ensureImportedRetention(
       for (const m of r.missing) missingIds.add(m)
     }
   }
-  // ③ 逐项判定：采纳 / 重传 / 缺失
+  // ③ 逐项判定：采纳 / 重传 / 缺失。
+  //  v2.84：端点不可达时也全部标记重传（旧版「视同存活」提前返回 = 用户实测
+  //  117/117 原文未内嵌的直接原因之一 — POST 幂等去重下重传是安全的兜底）。
   let reuploaded = 0
   let adopted = 0
   let stillMissing = 0
@@ -1164,12 +1182,7 @@ export async function ensureImportedRetention(
       adopted++
       continue
     }
-    brokenShas.add(it.sha) // sha 校验未命中（端点不可达时不落入 — liveSha 为空但视同存活）
-  }
-  if (liveSha.size === 0 && uniqueShas.length > 0) {
-    // shas 端点整体不可达 — 与旧版语义一致：视同全部存活，不重传
-    onProgress?.('留存校验暂不可用 — 沿用既有服务端留存')
-    return { fixed, reuploaded: 0, adopted: 0, stillMissing: 0 }
+    brokenShas.add(it.sha) // 端点可达：确实缺失；不可达：状态未知 — 均走重传
   }
   if (brokenShas.size === 0) return { fixed, reuploaded, adopted, stillMissing }
   // ④ 从本地留存取回并重传（限并发 — 百份 × MB 级不能全量齐发）
