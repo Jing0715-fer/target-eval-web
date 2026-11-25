@@ -2,6 +2,7 @@
 
 import { STAGE_DEFS } from '@/lib/eval/types'
 import {
+  Check,
   CircleCheckBig,
   CircleDashed,
   Hourglass,
@@ -151,7 +152,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
       )}
 
       {/* ── 主进度卡：消息 + 进度条 + 元数据条 ── */}
-      <Card className="gap-0 rounded-xl border-border bg-card shadow-none">
+      <Card className="gap-0 rounded-xl border-border bg-card studio-card">
         <CardContent className="flex flex-col gap-3.5 px-5 py-4">
           <div className="flex items-center gap-3">
             {isQueued ? (
@@ -161,18 +162,21 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
             )}
             <span className="min-w-0 flex-1 truncate text-sm text-foreground/80">{message}</span>
             {!isQueued && (
-              <span className="shrink-0 font-mono text-lg font-semibold tabular-nums text-primary">
+              <span className="num-glow shrink-0 font-mono text-lg font-semibold tabular-nums text-primary">
                 {percent}%
               </span>
             )}
           </div>
-          <Progress value={isQueued ? 0 : percent} className="h-1 bg-muted" />
+          <Progress
+            value={isQueued ? 0 : percent}
+            className="h-1 bg-muted [&_[data-slot=progress-indicator]]:rounded-full [&_[data-slot=progress-indicator]]:bg-gradient-to-r [&_[data-slot=progress-indicator]]:from-[#5e6ad2] [&_[data-slot=progress-indicator]]:to-[#8b5cf6]"
+          />
 
           {/* 元数据条（旧版计时/百分比重复两处，收敛到此一行） */}
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-border/70 pt-3 font-mono text-[11px] tabular-nums text-muted-foreground">
             <span className="inline-flex items-center gap-1.5">
               <span className="lin-eyebrow text-muted-foreground/80">已用时</span>
-              <span className="font-medium text-foreground/80">{formatDuration(elapsedSec)}</span>
+              <span className="num-glow font-medium text-foreground/80">{formatDuration(elapsedSec)}</span>
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="lin-eyebrow text-muted-foreground/80">阶段</span>
@@ -229,7 +233,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
 
       {/* ── 双栏：阶段时间线 + 日志控制台 ── */}
       <div className="grid gap-5 lg:grid-cols-[1fr_1.25fr]">
-        <Card className="gap-3 rounded-xl border-border bg-card shadow-none">
+        <Card className="gap-3 rounded-xl border-border bg-card studio-card">
           <CardContent className="flex flex-col gap-3 px-5 py-4">
             <div className="flex items-center justify-between">
               <h3 className="lin-eyebrow text-muted-foreground">评估阶段 · Stages</h3>
@@ -251,9 +255,13 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
                       {String(i + 1).padStart(2, '0')}
                     </span>
                     {s.state === 'done' ? (
-                      <CircleCheckBig className="mt-1 size-4 text-primary" />
+                      <span className="mt-1 flex size-4 items-center justify-center rounded-full bg-gradient-to-br from-[#6d74e0] to-[#7a5ce4] shadow-[0_1px_3px_rgb(94_106_210/0.4)]">
+                        <Check className="size-2.5 text-white" strokeWidth={3} />
+                      </span>
                     ) : s.state === 'active' ? (
-                      <LoaderCircle className="mt-1 size-4 animate-spin text-primary" />
+                      <span className="pulse-ring mt-1 flex size-4 items-center justify-center rounded-full">
+                        <LoaderCircle className="size-4 animate-spin text-primary" />
+                      </span>
                     ) : (
                       <CircleDashed className="mt-1 size-4 text-muted-foreground/40" />
                     )}
@@ -302,7 +310,7 @@ export function ProgressPanel({ job, elapsedSec, networkIssue, canceling, onCanc
           variant="outline"
           onClick={onCancel}
           disabled={canceling}
-          className="h-9 gap-2 rounded-lg text-muted-foreground text-xs hover:border-red-400/60 hover:bg-red-500/[0.06] hover:text-red-600"
+          className="h-9 gap-2 rounded-lg text-muted-foreground text-xs hover:border-red-400/60 hover:bg-red-500/[0.06] hover:text-red-600 active:scale-[0.97]"
         >
           <XCircle className="size-3.5" />
           {canceling ? '正在取消…' : '取消评估'}

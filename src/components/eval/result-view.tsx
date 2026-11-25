@@ -86,7 +86,7 @@ function SpecCell({
     <div className={cn('flex flex-col gap-1 bg-card px-4 py-3.5', className)}>
       <span className="lin-eyebrow text-muted-foreground/85">{label}</span>
       <span className="flex flex-wrap items-baseline gap-2">
-        <span className="text-xl font-semibold tabular-nums tracking-[-0.02em] text-foreground">
+        <span className="num-glow text-xl font-semibold tabular-nums tracking-[-0.02em] text-foreground">
           {value}
         </span>
         {badge}
@@ -112,7 +112,7 @@ function ScoreBar({ label, item, delay = 0, delta = 0 }: { label: string; item: 
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium text-foreground/90">{label}</span>
         <span className="flex items-center gap-2">
-          <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
+          <span className="num-glow font-mono text-sm font-semibold tabular-nums text-foreground">
             {Number(item.score.toFixed(1))}
             <span className="text-[11px] font-normal text-muted-foreground"> /{maxScore}</span>
           </span>
@@ -328,7 +328,7 @@ function ReportFrame({
   }, [loaded, syncHeight])
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border bg-card shadow-none">
+    <div className="relative overflow-hidden rounded-xl border border-border bg-card studio-card">
       {!loaded && (
         <div className="absolute inset-0 z-10 flex min-h-72 flex-col items-center justify-center gap-3 bg-card">
           <Loader2 className="size-6 animate-spin text-primary" aria-hidden />
@@ -454,12 +454,12 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   if (!summary?.uniprot) {
     return (
       <div className="flex flex-col gap-6">
-        <Card className="rounded-xl border-border bg-card shadow-none">
+        <Card className="rounded-xl border-border bg-card studio-card">
           <CardContent className="flex flex-col items-center gap-3 px-6 py-10 text-center">
             <p className="text-sm text-muted-foreground">
               该作业已完成，但暂无摘要数据（可能由后端数据不完整导致）。
             </p>
-            <Button variant="outline" onClick={onNewEvaluation} className="gap-2 rounded-lg">
+            <Button variant="outline" onClick={onNewEvaluation} className="gap-2 rounded-lg transition-all hover:border-primary/40 active:scale-[0.98]">
               <RotateCcw className="size-4" />
               返回新评估
             </Button>
@@ -739,7 +739,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.06, ease: 'easeOut' }}
-        className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-3 lg:grid-cols-6"
+        className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border studio-card sm:grid-cols-3 lg:grid-cols-6"
       >
         <SpecCell
           label="PDB 结构"
@@ -800,7 +800,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 variant="outline"
                 size="sm"
                 onClick={openPreview}
-                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
               >
                 <Eye className="size-3.5" />
                 全屏预览
@@ -809,7 +809,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 variant="outline"
                 size="sm"
                 onClick={() => reportFrameRef.current?.contentWindow?.print()}
-                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
               >
                 <Printer className="size-3.5" />
                 打印
@@ -818,7 +818,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 variant="outline"
                 size="sm"
                 onClick={() => window.open(`/api/jobs/${job.id}/report`, '_blank')}
-                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
               >
                 <ExternalLink className="size-3.5" />
                 新窗口
@@ -827,7 +827,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 variant="outline"
                 size="sm"
                 onClick={downloadReport}
-                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
               >
                 <Download className="size-3.5" />
                 下载 HTML
@@ -840,7 +840,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                   onClick={() => setRegenOpen(true)}
                   disabled={regenerating}
                   title="沿用本作业既有数据（结构/同源/文献/评分不重收集），仅 LLM 分析章节重新生成（通常 1-3 分钟）"
-                  className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                  className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
                 >
                   <RefreshCw className={cn('size-3.5', regenerating && 'animate-spin')} aria-hidden />
                   {regenerating ? '重新生成中…' : '重新生成报告'}
@@ -883,7 +883,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             count={scores ? `${Number(scores.overall.score.toFixed(1))}/10 综合${oligo ? ' · 含聚集形式调整' : ''}${llmA ? (llmA.applied ? ' · AI 复核微调' : ' · AI 复核确认') : ''}` : undefined}
           />
         </div>
-        <Card className="gap-0 rounded-xl border-border bg-card shadow-none">
+        <Card className="gap-0 rounded-xl border-border bg-card studio-card">
           <CardContent className="flex flex-col gap-5 px-5 py-5">
             <div className="grid gap-5 sm:grid-cols-2">
               {scores && (
@@ -1233,8 +1233,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
       >
         <div className="flex items-center gap-3">
           <div className={cn(
-            'flex size-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground',
-            reportDeferred ? 'bg-violet-600 dark:bg-violet-700' : reportLlmFailed ? 'bg-amber-600 dark:bg-amber-700' : 'bg-primary'
+            'flex size-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground shadow-[0_2px_8px_-2px_rgb(22_23_29/0.18)]',
+            reportDeferred ? 'bg-violet-600 dark:bg-violet-700' : reportLlmFailed ? 'bg-amber-600 dark:bg-amber-700' : 'bg-gradient-to-br from-[#5e6ad2] to-[#7a5ce4]'
           )}>
             {reportDeferred ? <Layers className="size-4.5" /> : reportLlmFailed ? <AlertTriangle className="size-4.5" /> : <FileCheck2 className="size-4.5" />}
           </div>
@@ -1253,7 +1253,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           <div className="flex flex-wrap gap-2 sm:ml-auto">
             <Button
               onClick={openPreview}
-              className="h-10 gap-2 rounded-lg bg-primary px-4 font-medium text-primary-foreground hover:bg-[#7a84dc] dark:hover:bg-[#828fff]"
+              className="btn-brand h-10 gap-2 rounded-lg px-4 font-medium text-primary-foreground"
             >
               <Eye className="size-4" />
               在线预览报告
@@ -1261,7 +1261,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             <Button
               variant="outline"
               onClick={downloadReport}
-              className="h-10 gap-2 rounded-lg bg-card px-4"
+              className="h-10 gap-2 rounded-lg bg-card px-4 transition-all hover:border-primary/40 active:scale-[0.98]"
             >
               <Download className="size-4" />
               下载 HTML
@@ -1272,7 +1272,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 onClick={() => setRegenOpen(true)}
                 disabled={regenerating}
                 title="沿用本作业既有数据（结构/同源/文献/评分不重收集），仅 LLM 分析章节重新生成（通常 1-3 分钟）"
-                className="h-10 gap-2 rounded-lg bg-card px-4"
+                className="h-10 gap-2 rounded-lg bg-card px-4 transition-all hover:border-primary/40 active:scale-[0.98]"
               >
                 <RefreshCw className={cn('size-4', regenerating && 'animate-spin')} aria-hidden />
                 {regenerating ? '重新生成中…' : '重新生成报告'}
@@ -1305,7 +1305,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           </div>
         )}
         {reportDeferred ? (
-          <Card className="rounded-xl border-violet-500/30 bg-card shadow-none">
+          <Card className="rounded-xl border-violet-500/30 bg-card studio-card">
             <CardContent className="flex flex-col items-center gap-2.5 px-6 py-8 text-center">
               <Layers className="size-5 text-violet-500 dark:text-violet-400" aria-hidden />
               <p className="text-sm text-foreground/80">
@@ -1318,7 +1318,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             </CardContent>
           </Card>
         ) : reportMd ? (
-          <Card className="rounded-xl border-border bg-card shadow-none">
+          <Card className="rounded-xl border-border bg-card studio-card">
             <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
               <div className="mb-4 flex items-center gap-2 text-muted-foreground/85">
                 <BookOpenText className="size-3.5" aria-hidden />
@@ -1330,7 +1330,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             </CardContent>
           </Card>
         ) : (
-          <Card className="rounded-xl border-border bg-card shadow-none">
+          <Card className="rounded-xl border-border bg-card studio-card">
             <CardContent className="flex flex-col items-center gap-2.5 px-6 py-8 text-center">
               <BookOpenText className="size-5 text-muted-foreground/40" aria-hidden />
               <p className="text-sm text-muted-foreground">
@@ -1426,7 +1426,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
           </div>
           <div className="grid gap-3.5 md:grid-cols-2">
             {ligands.map(l => !l.ok ? (
-              <Card key={`${l.raw}-fail`} className="gap-0 rounded-xl border-dashed border-amber-500/40 bg-amber-500/[0.04] shadow-none">
+              <Card key={`${l.raw}-fail`} className="gap-0 rounded-xl border-dashed border-amber-500/40 bg-amber-500/[0.04] studio-card">
                 <CardContent className="flex flex-col gap-1.5 px-4.5 py-4">
                   <div className="text-sm font-semibold text-foreground">{l.raw.length > 44 ? l.raw.slice(0, 43) + '…' : l.raw}</div>
                   <p className="text-xs text-amber-600 dark:text-amber-400">未能归一 — {l.error ?? '未知原因'}</p>
@@ -1434,7 +1434,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               </Card>
             ) : !l.compId ? (
               /* v2.2：PubChem 已识别但 PDB 无对应组分（如 Resmetirom）→ CID 详情卡（v2.7 + 结构式/性质） */
-              <Card key={`${l.raw}-pc`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
+              <Card key={`${l.raw}-pc`} className="gap-0 overflow-hidden rounded-xl border-border bg-card studio-card">
                 <CardContent className="flex gap-3.5 px-4.5 py-4">
                   {l.detail?.structure2d && (
                     /* v2.7.5：缩略图点击放大（Dialog 预览 + 原始分辨率） */
@@ -1477,7 +1477,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 </CardContent>
               </Card>
             ) : (
-              <Card key={`${l.raw}-ok`} className="gap-0 overflow-hidden rounded-xl border-border bg-card shadow-none">
+              <Card key={`${l.raw}-ok`} className="gap-0 overflow-hidden rounded-xl border-border bg-card studio-card">
                 <CardContent className="flex gap-3.5 px-4.5 py-4">
                   {l.detail?.structure2d && (
                     /* v2.7.5：缩略图点击放大（Dialog 预览 + 原始分辨率） */
@@ -1507,7 +1507,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                             'inline-flex min-h-7 items-center rounded-md border px-2 font-mono text-[11px] font-semibold transition-colors',
                             s.alsoTarget
                               ? 'border-primary/40 bg-primary/[0.08] text-primary hover:bg-primary/[0.14]'
-                              : 'border-border bg-muted/60 text-foreground/80 hover:border-ring/60 hover:text-primary',
+                              : 'border-border bg-muted/60 text-foreground/80 hover:border-primary/40 hover:text-primary',
                           )}
                         >
                           {s.pdbId}{s.resolution != null && <span className="ml-1.5 font-normal text-muted-foreground/85">{s.resolution.toFixed(1)}</span>}
@@ -1627,7 +1627,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
         <Button
           variant="outline"
           onClick={onNewEvaluation}
-          className="h-10 gap-2 rounded-lg px-6"
+          className="h-10 gap-2 rounded-lg px-6 transition-all hover:border-primary/40 active:scale-[0.98]"
         >
           <RotateCcw className="size-4" />
           返回新评估
@@ -1654,7 +1654,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 variant="outline"
                 size="sm"
                 onClick={() => iframeRef.current?.contentWindow?.print()}
-                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
               >
                 <Printer className="size-3.5" />
                 打印
@@ -1663,7 +1663,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 variant="outline"
                 size="sm"
                 onClick={() => window.open(`/api/jobs/${job.id}/report`, '_blank')}
-                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px]"
+                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
               >
                 <ExternalLink className="size-3.5" />
                 新窗口
@@ -1684,7 +1684,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                         size="sm"
                         variant="outline"
                         onClick={() => window.open(`/api/jobs/${job.id}/report`, '_blank')}
-                        className="h-8 gap-1.5 rounded-lg"
+                        className="h-8 gap-1.5 rounded-lg transition-all hover:border-primary/40 active:scale-[0.98]"
                       >
                         <ExternalLink className="size-3.5" />
                         新窗口打开
@@ -1693,7 +1693,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                         size="sm"
                         variant="outline"
                         onClick={downloadReport}
-                        className="h-8 gap-1.5 rounded-lg"
+                        className="h-8 gap-1.5 rounded-lg transition-all hover:border-primary/40 active:scale-[0.98]"
                       >
                         <Download className="size-3.5" />
                         下载
@@ -1738,12 +1738,12 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             LLM 引擎使用当前配置（顶栏引擎徽标所示）；可在顶栏「引擎设置」中切换后再重新生成。评分与结构化数据区块保持原值。
           </p>
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setRegenOpen(false)} className="h-9 rounded-lg px-4 text-xs">
+            <Button variant="outline" onClick={() => setRegenOpen(false)} className="h-9 rounded-lg px-4 text-xs transition-all hover:border-primary/40 active:scale-[0.98]">
               取消
             </Button>
             <Button
               onClick={() => void runRegen()}
-              className="h-9 gap-1.5 rounded-lg bg-primary px-4 text-xs font-medium text-primary-foreground"
+              className="btn-brand h-9 gap-1.5 rounded-lg px-4 text-xs font-medium text-primary-foreground"
             >
               <RefreshCw className="size-3.5" />
               开始重新生成

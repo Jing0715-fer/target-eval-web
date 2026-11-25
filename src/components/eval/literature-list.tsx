@@ -38,8 +38,8 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
   const visible = collapsed ? items.slice(0, COLLAPSED_COUNT) : items
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
-      <ol className="divide-y divide-border/60">
+    <div className="studio-card overflow-hidden rounded-xl border border-border bg-card">
+      <ol className="flex flex-col gap-2.5 p-3 sm:p-4">
         {visible.map((it, i) => {
           const linked = pdbsByPmid.get(String(it.pmid ?? '').trim()) ?? []
           return (
@@ -50,7 +50,7 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
               transition={{ duration: 0.25, delay: Math.min(i * 0.03, 0.3), ease: 'easeOut' }}
               className="group relative"
             >
-              <div className="flex items-start gap-3 px-4 py-3.5 transition-colors hover:bg-accent/50 sm:px-5">
+              <div className="studio-card studio-card-hover flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3.5 sm:px-5">
                 {/* 序号 */}
                 <span className="mt-0.5 w-6 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground/40">
                   {String(i + 1).padStart(2, '0')}
@@ -60,7 +60,7 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
                     href={it.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${it.pmid}/` : undefined}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-sm leading-snug font-medium text-foreground underline-offset-2 transition-colors hover:text-primary hover:underline"
+                    className="text-sm leading-snug font-semibold text-foreground underline-offset-2 transition-colors hover:text-primary hover:underline"
                   >
                     {it.title || '无标题文献'}
                   </a>
@@ -73,7 +73,7 @@ export function LiteratureList({ items, pdbs }: LiteratureListProps) {
                       </span>
                     )}
                     {it.pmid && (
-                      <span className="rounded-sm border border-border px-1.5 py-px font-mono text-[10px] text-muted-foreground">
+                      <span className="rounded-sm border border-primary/30 bg-primary/[0.06] px-1.5 py-px font-mono text-[10px] font-semibold text-primary">
                         PMID {it.pmid}
                       </span>
                     )}

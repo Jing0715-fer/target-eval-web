@@ -58,14 +58,14 @@ export function AssetGallery({ assets }: { assets: AssetItem[] }) {
                     animate={{ opacity: 1, scale: 1 }}
                     transition={{ duration: 0.25, delay, ease: 'easeOut' }}
                     onClick={() => setActive(a)}
-                    className="group overflow-hidden rounded-lg border border-border bg-card text-left shadow-none transition-colors hover:border-ring/60 focus-visible:ring-[3px] focus-visible:ring-ring/30 focus-visible:outline-none"
+                    className="group studio-card studio-card-hover overflow-hidden rounded-lg border border-border bg-card text-left focus-visible:ring-[3px] focus-visible:ring-ring/30 focus-visible:outline-none"
                   >
                     <div className="relative h-36 w-full overflow-hidden bg-muted">
                       <img
                         src={a.dataUri ?? `/api/assets/${a.id}`}
                         alt={a.caption || KIND_SECTION_TITLE[a.kind] || '实验图片'}
                         loading="lazy"
-                        className="size-full object-contain transition-transform duration-300 group-hover:scale-105"
+                        className="size-full object-contain transition-transform duration-300 ease-out group-hover:scale-[1.03]"
                       />
                       {a.vlmKind && (
                         <span

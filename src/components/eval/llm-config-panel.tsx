@@ -306,10 +306,10 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                         onClick={() => selectProvider(p)}
                         aria-pressed={selected}
                         className={cn(
-                          'flex min-h-[60px] flex-col items-start gap-0.5 rounded-lg border p-2.5 text-left outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/30',
+                          'flex min-h-[60px] flex-col items-start gap-0.5 rounded-lg border p-2.5 text-left outline-none transition-all duration-200 focus-visible:ring-[3px] focus-visible:ring-ring/30',
                           selected
-                            ? 'border-primary bg-primary/[0.06] ring-1 ring-primary'
-                            : 'border-border bg-card hover:border-ring/60',
+                            ? 'border-primary/40 bg-primary/[0.06] ring-1 ring-primary/30'
+                            : 'border-border bg-card hover:-translate-y-px hover:border-primary/30 hover:bg-accent/50',
                         )}
                       >
                         <span className={cn(
@@ -350,7 +350,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                       value={baseUrl}
                       onChange={(e) => setBaseUrl(e.target.value)}
                       placeholder="https://api.example.com/v1"
-                      className="h-10 rounded-lg font-mono text-xs"
+                      className="h-10 rounded-lg font-mono text-xs focus-visible:ring-ring/20"
                       spellCheck={false}
                       autoComplete="off"
                     />
@@ -368,7 +368,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
                         placeholder={provider?.needsKey ? '必填（仅保存在你的浏览器本地）' : '可选'}
-                        className="h-10 rounded-lg pr-10 font-mono text-xs"
+                        className="h-10 rounded-lg pr-10 font-mono text-xs focus-visible:ring-ring/20"
                         spellCheck={false}
                         autoComplete="off"
                       />
@@ -376,7 +376,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                         type="button"
                         onClick={() => setShowKey(v => !v)}
                         aria-label={showKey ? '隐藏 API Key' : '显示 API Key'}
-                        className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
+                        className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded p-1 text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/20"
                       >
                         {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                       </button>
@@ -402,7 +402,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                         }}
                         onFocus={() => { if (models.length) setModelsOpen(true) }}
                         placeholder={provider?.defaultModel || '模型名，如 gpt-4o'}
-                        className="h-10 rounded-lg font-mono text-xs"
+                        className="h-10 rounded-lg font-mono text-xs focus-visible:ring-ring/20"
                         spellCheck={false}
                         autoComplete="off"
                       />
@@ -424,7 +424,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                       {modelsOpen && (modelsLoading || modelsError || models.length > 0) && (
                       // v2.20.2：max-h-52→max-h-80 — 拉高视口让常见 9~16 条列表一屏全见；
                       // 更长列表仍可滚动（配合 scrollModelIntoView 自动定位当前模型）
-                        <div className="eval-scroll absolute top-full right-0 left-0 z-10 mt-1.5 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-lg">
+                        <div className="eval-scroll anim-fade-up absolute top-full right-0 left-0 z-10 mt-1.5 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover py-1 elev-2">
                           {modelsLoading && (
                             <div className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground">
                               <LoaderCircle className="size-3.5 animate-spin" />
@@ -456,7 +456,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                                   }}
                                   className={cn(
                                     'flex w-full items-center justify-between px-3 py-1.5 text-left font-mono text-xs transition-colors hover:bg-accent',
-                                    m === model ? 'text-primary' : 'text-foreground/80',
+                                    m === model ? 'bg-primary/[0.06] text-primary' : 'text-foreground/80',
                                   )}
                                 >
                                   <span className="min-w-0 truncate">{m}</span>
@@ -551,7 +551,7 @@ export function LlmConfigPanel({ open, onOpenChange, onEngineChange }: LlmConfig
                   size="sm"
                   onClick={() => void save()}
                   disabled={saving || (isBuiltin ? false : !canSave)}
-                  className="h-9 rounded-lg bg-primary px-4 text-xs font-semibold text-primary-foreground hover:bg-[#7a84dc] sm:ml-auto dark:hover:bg-[#828fff]"
+                  className="btn-brand h-9 rounded-lg px-4 text-xs font-semibold text-primary-foreground sm:ml-auto disabled:opacity-50 disabled:shadow-none"
                 >
                   {saving
                     ? <LoaderCircle className="size-3.5 animate-spin" />

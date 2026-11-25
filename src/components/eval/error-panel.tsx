@@ -28,7 +28,10 @@ export function ErrorPanel({ job, submitting, onRetry, onReset, submitError }: E
         </h1>
       </header>
 
-      <Alert variant="destructive" className="rounded-lg bg-card text-red-700 shadow-none dark:bg-card dark:text-red-400">
+      <Alert
+        variant="destructive"
+        className="rounded-xl bg-card text-red-700 studio-card has-[>svg]:grid-cols-[calc(var(--spacing)*8)_1fr] [&>svg]:size-8 [&>svg]:translate-y-0 [&>svg]:rounded-xl [&>svg]:border [&>svg]:border-red-500/25 [&>svg]:bg-red-500/[0.07] [&>svg]:p-2 dark:bg-card dark:text-red-400 dark:[&>svg]:bg-red-500/[0.12] dark:[&>svg]:border-red-500/30"
+      >
         <CircleAlert />
         <AlertTitle className="text-sm font-semibold">执行出错</AlertTitle>
         <AlertDescription className="text-red-700/90 dark:text-red-400/90">
@@ -43,7 +46,7 @@ export function ErrorPanel({ job, submitting, onRetry, onReset, submitError }: E
         <Button
           onClick={onRetry}
           disabled={submitting}
-          className="h-10 gap-2 rounded-lg bg-primary font-medium text-primary-foreground hover:bg-[#7a84dc] dark:hover:bg-[#828fff]"
+          className="h-10 gap-2 rounded-lg bg-primary font-medium text-primary-foreground transition-all hover:-translate-y-px hover:bg-[#7a84dc] active:translate-y-0 dark:hover:bg-[#828fff]"
         >
           {submitting ? (
             <LoaderCircle className="size-4 animate-spin" />
@@ -52,7 +55,7 @@ export function ErrorPanel({ job, submitting, onRetry, onReset, submitError }: E
           )}
           {submitting ? '正在重新提交…' : '重试评估'}
         </Button>
-        <Button variant="outline" onClick={onReset} className="h-10 gap-2 rounded-lg">
+        <Button variant="outline" onClick={onReset} className="h-10 gap-2 rounded-lg transition-all hover:border-primary/40 active:scale-[0.98]">
           <Undo2 className="size-4" />
           返回修改输入
         </Button>

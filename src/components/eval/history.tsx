@@ -53,10 +53,10 @@ function JobRow({
         }
       }}
       className={cn(
-        'group cursor-pointer items-center gap-2.5 outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/30',
+        'group cursor-pointer items-center gap-2.5 outline-none transition-all duration-200 focus-visible:ring-[3px] focus-visible:ring-ring/30',
         dense
-          ? 'flex min-h-11 rounded-lg px-2.5 py-1.5 hover:bg-accent'
-          : 'flex min-h-14 rounded-lg border border-border bg-card px-4 py-3 hover:border-ring/50 hover:bg-accent/50',
+          ? 'flex min-h-11 rounded-lg px-2.5 py-1.5 hover:-translate-y-px hover:bg-accent/80'
+          : 'flex min-h-14 rounded-lg border border-border bg-card px-4 py-3 studio-card studio-card-hover hover:bg-accent/50',
       )}
     >
       <div className="min-w-0 flex-1">
@@ -66,9 +66,9 @@ function JobRow({
         )}>
           {job.proteinName || job.title || job.uniprotId || '未命名评估'}
         </div>
-        <div className="mt-px flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-muted-foreground">
+        <div className="mt-px flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] tabular-nums text-muted-foreground">
           {job.uniprotId && <span className="font-mono">{job.uniprotId}</span>}
-          <span>{formatDateTime(job.createdAt)}</span>
+          <span className="font-mono tabular-nums">{formatDateTime(job.createdAt)}</span>
           {job.pdbCount != null && <span>· {job.pdbCount} PDB</span>}
           {job.coverage != null && <span>· 覆盖 {formatPercent(job.coverage)}</span>}
         </div>
@@ -83,7 +83,7 @@ function JobRow({
           </span>
         )}
         {job.overallScore != null && (
-          <span className="text-[13px] font-semibold tabular-nums text-foreground">
+          <span className="num-glow text-[13px] font-semibold tabular-nums text-foreground">
             {Number(job.overallScore.toFixed(1))}
           </span>
         )}
@@ -119,12 +119,12 @@ function EmptyHistoryState({ compact = false }: { compact?: boolean }) {
   return (
     <div
       className={cn(
-        'flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border text-center',
+        'flex flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-border/80 bg-muted/30 text-center',
         compact ? 'py-8' : 'py-12'
       )}
     >
-      <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-        <History className="size-5 text-muted-foreground/80" />
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/[0.07] ring-1 ring-primary/15 ring-inset">
+        <History className="size-5 text-primary/70" />
       </div>
       <p className="text-sm font-medium text-muted-foreground">暂无评估记录</p>
       <p className="text-xs text-muted-foreground/85">
@@ -174,14 +174,14 @@ function BatchReportRow({
         }
       }}
       className={cn(
-        'group cursor-pointer items-center gap-2.5 outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/30',
+        'group cursor-pointer items-center gap-2.5 outline-none transition-all duration-200 focus-visible:ring-[3px] focus-visible:ring-ring/30',
         dense
-          ? 'flex min-h-11 rounded-lg px-2.5 py-1.5 hover:bg-accent'
-          : 'flex min-h-14 rounded-lg border border-border bg-card px-4 py-3 hover:border-violet-500/40 hover:bg-accent/50',
+          ? 'flex min-h-11 rounded-lg px-2.5 py-1.5 hover:-translate-y-px hover:bg-accent/80'
+          : 'flex min-h-14 rounded-lg border border-border bg-card px-4 py-3 studio-card studio-card-hover hover:bg-accent/50',
       )}
     >
       <div className={cn(
-        'flex shrink-0 items-center justify-center rounded-md bg-violet-500/10 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400',
+        'flex shrink-0 items-center justify-center rounded-md bg-violet-500/10 text-violet-600 transition-colors dark:bg-violet-500/15 dark:text-violet-400',
         dense ? 'size-7' : 'size-9',
       )}>
         <Layers className={dense ? 'size-3.5' : 'size-4'} />
@@ -193,9 +193,9 @@ function BatchReportRow({
         )}>
           {report.title}
         </div>
-        <div className="mt-px flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-muted-foreground">
+        <div className="mt-px flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] tabular-nums text-muted-foreground">
           <span>{report.jobIds.length} 个靶点</span>
-          <span>{formatDateTime(report.createdAt)}</span>
+          <span className="font-mono tabular-nums">{formatDateTime(report.createdAt)}</span>
           {report.status === 'running' && <span className="text-amber-600">· 生成中</span>}
           {report.status === 'error' && <span className="text-red-500">· 生成失败</span>}
         </div>
@@ -282,7 +282,8 @@ export function HistoryDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[82vh] w-full flex-col gap-3 overflow-hidden rounded-xl sm:max-w-xl">
         <DialogHeader className="text-left">
-          <DialogTitle className="flex items-center gap-2 text-lg font-semibold tracking-[-0.015em]">
+          <p className="lin-eyebrow text-primary">History · 评估记录</p>
+          <DialogTitle className="mt-1.5 flex items-center gap-2 text-lg font-semibold tracking-[-0.015em]">
             <History className="size-4 text-primary" />
             历史评估
             <PrivacyBadge className="ml-1" />
@@ -296,7 +297,7 @@ export function HistoryDialog({
           {loading && jobs === null ? (
             <div className="flex flex-col gap-2">
               {[0, 1, 2].map((i) => (
-                <Skeleton key={i} className="h-14 w-full rounded-lg" />
+                <Skeleton key={i} className="shimmer animate-none h-14 w-full rounded-lg" />
               ))}
             </div>
           ) : error ? (
@@ -313,7 +314,7 @@ export function HistoryDialog({
               {/* 合并报告（批量评估历史） */}
               {batches && batches.length > 0 && (
                 <div className="mb-4">
-                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold tracking-wider text-violet-600 uppercase dark:text-violet-400">
+                  <div className="lin-eyebrow mb-2 flex items-center gap-1.5 text-violet-600 dark:text-violet-400">
                     <Layers className="size-3.5" />
                     合并报告（{batches.length}）
                   </div>
@@ -330,7 +331,7 @@ export function HistoryDialog({
               ) : jobs && jobs.length > 0 ? (
                 <div>
                   {batches && batches.length > 0 && (
-                    <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
+                    <div className="lin-eyebrow mb-2 flex items-center gap-1.5 text-muted-foreground">
                       <History className="size-3.5" />
                       单靶点评估（{jobs.length}）
                     </div>
@@ -509,18 +510,20 @@ export function RecentEvaluations({
       {jobs === null || batches === null ? (
         <div className="flex flex-col gap-2 px-3 py-2">
           {[0, 1, 2].map((i) => (
-            <Skeleton key={i} className="h-10 w-full rounded-lg" />
+            <Skeleton key={i} className="shimmer animate-none h-10 w-full rounded-lg" />
           ))}
         </div>
       ) : empty ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-1.5 px-4 py-6 text-center">
-          <div className="flex size-8 items-center justify-center rounded-full bg-muted">
-            <History className="size-4 text-muted-foreground/80" />
+        <div className="flex flex-1 flex-col items-center justify-center px-4 py-6">
+          <div className="flex w-full max-w-[280px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border/80 bg-muted/30 px-4 py-7 text-center">
+            <div className="flex size-9 items-center justify-center rounded-xl bg-primary/[0.07] ring-1 ring-primary/15 ring-inset">
+              <History className="size-4 text-primary/70" />
+            </div>
+            <p className="text-[12.5px] font-medium text-muted-foreground">暂无评估记录</p>
+            <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+              完成第一次靶点评估后，记录将显示在此处
+            </p>
           </div>
-          <p className="text-[12.5px] font-medium text-muted-foreground">暂无评估记录</p>
-          <p className="text-[11px] text-muted-foreground/85">
-            完成第一次靶点评估后，记录将显示在此处
-          </p>
         </div>
       ) : (
         <div className="eval-scroll eval-scroll-fade min-h-0 flex-1 overflow-y-auto px-2 pb-2">
@@ -552,7 +555,7 @@ export function RecentEvaluations({
         <button
           type="button"
           onClick={onOpenHistory}
-          className="flex min-h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[11.5px] font-medium text-muted-foreground transition-colors outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30"
+          className="flex min-h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[11.5px] font-medium text-muted-foreground transition-all duration-200 outline-none hover:-translate-y-px hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/30"
         >
           <History className="size-3.5" aria-hidden />
           查看全部历史评估

@@ -43,8 +43,8 @@ function SharedTable({ list }: { list: InteractionSharedPdb[] }) {
   return (
     <div className="eval-scroll overflow-x-auto rounded-lg border border-border">
       <Table className="w-full border-collapse text-xs">
-        <TableHeader className="bg-muted/60">
-          <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+        <TableHeader className="bg-muted/70">
+          <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
             <TableHead className={cxTh}>PDB ID</TableHead>
             <TableHead className={cxTh}>方法</TableHead>
             <TableHead className={cxTh}>分辨率</TableHead>
@@ -58,7 +58,7 @@ function SharedTable({ list }: { list: InteractionSharedPdb[] }) {
         </TableHeader>
         <TableBody>
           {list.map(s => (
-            <TableRow key={s.pdbId} className="border-border/60 hover:bg-accent/50">
+            <TableRow key={s.pdbId} className="border-border/60 hover:bg-muted/50">
               <TableCell className="px-2.5 py-2 font-mono text-[11px]">
                 <a
                   href={`https://www.rcsb.org/structure/${s.pdbId}`}
@@ -122,8 +122,8 @@ function SoloTable({ list }: { list: PdbEntry[] }) {
   return (
     <div className="eval-scroll overflow-x-auto rounded-md border border-border">
       <Table className="w-full border-collapse text-xs">
-        <TableHeader className="bg-muted/60/80">
-          <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+        <TableHeader className="bg-muted/70">
+          <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
             <TableHead className={cxTh}>PDB ID</TableHead>
             <TableHead className={cxTh}>方法</TableHead>
             <TableHead className={cxTh}>分辨率</TableHead>
@@ -135,7 +135,7 @@ function SoloTable({ list }: { list: PdbEntry[] }) {
         </TableHeader>
         <TableBody>
           {list.map(p => (
-            <TableRow key={p.pdbId} className="border-border/60 hover:bg-accent/50">
+            <TableRow key={p.pdbId} className="border-border/60 hover:bg-muted/50">
               <TableCell className="px-2.5 py-2 font-mono text-[11px]">
                 <a
                   href={`https://www.rcsb.org/structure/${p.pdbId}`}
@@ -203,7 +203,7 @@ function ComplexCard({ c }: { c: InteractionComplexInfo }) {
     .filter(g => g.list.length > 0 || (g.comp.soloPdbCount ?? 0) > 0)
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 sm:p-5">
+    <div className="studio-card studio-card-hover flex flex-col gap-3 rounded-xl border border-border bg-card p-4 sm:p-5">
       {/* 头部：badge + CPX 名称 + chips */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-flex items-center rounded-md bg-teal-600 px-2.5 py-1 font-mono text-[10.5px] font-bold tracking-wide text-white dark:bg-teal-700">
@@ -250,13 +250,13 @@ function ComplexCard({ c }: { c: InteractionComplexInfo }) {
       <div className="eval-scroll overflow-x-auto rounded-md border border-border">
         <Table className="w-full border-collapse text-xs">
           <TableHeader>
-            <TableRow className="bg-muted/60/80">
-              <TableHead className="eval-eyebrow text-left">组分</TableHead>
-              <TableHead className="eval-eyebrow w-24 text-left">UniProt</TableHead>
-              <TableHead className="eval-eyebrow w-14 text-left">计量</TableHead>
-              <TableHead className="eval-eyebrow w-20 text-right">分子量</TableHead>
-              <TableHead className="eval-eyebrow w-14 text-right">共有</TableHead>
-              <TableHead className="eval-eyebrow w-14 text-right">单独</TableHead>
+            <TableRow className="border-input bg-muted/70 hover:bg-muted/70 dark:hover:bg-muted/70">
+              <TableHead className="eval-eyebrow h-9 text-left text-muted-foreground">组分</TableHead>
+              <TableHead className="eval-eyebrow h-9 w-24 text-left text-muted-foreground">UniProt</TableHead>
+              <TableHead className="eval-eyebrow h-9 w-14 text-left text-muted-foreground">计量</TableHead>
+              <TableHead className="eval-eyebrow h-9 w-20 text-right text-muted-foreground">分子量</TableHead>
+              <TableHead className="eval-eyebrow h-9 w-14 text-right text-muted-foreground">共有</TableHead>
+              <TableHead className="eval-eyebrow h-9 w-14 text-right text-muted-foreground">单独</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -386,7 +386,7 @@ export function InteractionStructures({ itx }: InteractionStructuresProps) {
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline gap-2">
         <h3 className="text-sm font-bold text-foreground">互作复合物组分结构</h3>
-        <span className="font-mono text-[10.5px] text-muted-foreground/85">
+        <span className="lin-eyebrow text-muted-foreground/85">
           Complex Portal curated · {itx.complexes.length} 个复合物
         </span>
       </div>

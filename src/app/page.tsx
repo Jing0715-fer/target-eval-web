@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { LoaderCircle } from 'lucide-react'
+import { LoaderCircle, PenLine, Globe2, Sparkles, FileCheck2 } from 'lucide-react'
 import { AppHeader } from '@/components/eval/app-shell'
 import { AppFooter } from '@/components/eval/app-footer'
 import { Stepper } from '@/components/eval/stepper'
@@ -33,13 +33,16 @@ function isAnalysisStage(stage: string | null | undefined): boolean {
   return /score|rating|llm|report|generat|summary/i.test(stage ?? '')
 }
 
-/** 首屏主视觉（Linear 式）：mono 眉题 + 紧字距标题 + 一句话导引 */
+/** 首屏主视觉（v2.86 Refined Studio）：mono 眉题 + 渐变强调大标题 + 导引 + 能力 chips */
 function StudioHero() {
   return (
-    <div className="shrink-0">
+    <div className="relative shrink-0">
+      {/* 环境光晕 + 点阵网格（装饰层，不拦截交互） */}
+      <div aria-hidden className="studio-ambient absolute -inset-x-8 -top-10 bottom-0 -z-10" />
+      <div aria-hidden className="studio-grid absolute -inset-x-8 -top-10 bottom-0 -z-10" />
       <div className="min-w-0 max-w-3xl xl:max-w-4xl">
-        <div className="flex items-center gap-2.5">
-          <span className="lin-eyebrow text-primary">
+        <div className="anim-fade-up flex items-center gap-2.5">
+          <span className="lin-eyebrow rounded-md border border-primary/25 bg-primary/[0.05] px-1.5 py-0.5 text-primary">
             Evaluation Studio
           </span>
           <span
@@ -50,29 +53,50 @@ function StudioHero() {
             结构解析可行性
           </span>
         </div>
-        <h1 className="mt-2 text-[24px] leading-[1.12] font-semibold tracking-[-0.02em] text-foreground sm:text-[27px] xl:text-[30px]">
+        <h1
+          className="anim-fade-up mt-2.5 text-[26px] leading-[1.1] font-semibold tracking-[-0.025em] text-foreground sm:text-[30px] xl:text-[34px]"
+          style={{ animationDelay: '60ms' }}
+        >
           开始一次
-          <span className="text-primary">靶点评估</span>
+          <span className="text-gradient-brand">靶点评估</span>
         </h1>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground sm:text-[13.5px]">
+        <p
+          className="anim-fade-up mt-2 max-w-xl text-[13px] leading-relaxed text-muted-foreground sm:text-[13.5px]"
+          style={{ animationDelay: '120ms' }}
+        >
           输入靶点与配体，自动汇集结构、文献与同源数据，生成
           <span className="font-medium text-foreground/80">
             {' '}X-ray · Cryo-EM · NMR{' '}
           </span>
           三方法可行性报告与实验策略建议。
         </p>
+        {/* v2.86 能力 chips：一眼看清平台能力入口 */}
+        <div
+          className="anim-fade-up mt-3.5 flex flex-wrap items-center gap-1.5"
+          style={{ animationDelay: '180ms' }}
+        >
+          {['多靶点批量', '高通量逐组', 'Word 评估表导入', 'LLM 综合分析', '报告原文内嵌'].map((chip) => (
+            <span
+              key={chip}
+              className="rounded-md border border-border bg-card/80 px-2 py-0.5 text-[10.5px] font-medium text-muted-foreground shadow-[0_1px_2px_rgb(22_23_29/0.03)] dark:bg-card/60"
+            >
+              {chip}
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   )
 }
 
-/** 右栏 · 评估管线导引（Linear 表面阶梯卡）：提交后自动执行的四个阶段 + 数据源 */
+/** 右栏 · 评估管线导引（v2.86 Claude 式）：语义色图标色块（welcome-stat-badge 模式）+
+ *  悬浮缩放 + 连线轨道 + 数据源徽标 — 四步骤各配参考项目语义色 */
 function WorkflowGuide() {
   const steps = [
-    { no: '01', title: '输入', desc: 'UniProt · 序列 · 评估表' },
-    { no: '02', title: '数据收集', desc: '结构 · 文献 · 同源检索' },
-    { no: '03', title: '分析生成', desc: '配体归一 · LLM 综合分析' },
-    { no: '04', title: '报告', desc: '三方法可行性 · 实验策略' },
+    { no: '01', title: '输入', desc: 'UniProt · 序列 · 评估表', icon: PenLine, color: '#5e6ad2', tint: 'var(--accent-light)' },
+    { no: '02', title: '数据收集', desc: '结构 · 文献 · 同源检索', icon: Globe2, color: '#2d8f8f', tint: 'var(--cryoem-bg)' },
+    { no: '03', title: '分析生成', desc: '配体归一 · LLM 综合分析', icon: Sparkles, color: '#7c5cbf', tint: 'var(--xray-bg)' },
+    { no: '04', title: '报告', desc: '三方法可行性 · 实验策略', icon: FileCheck2, color: '#c9872e', tint: 'var(--nmr-bg)' },
   ]
   const sources = ['UniProt', 'RCSB PDB', 'PDBe', 'PubMed', 'NCBI BLAST', 'AlphaFold DB']
   return (
@@ -81,28 +105,37 @@ function WorkflowGuide() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, delay: 0.08, ease: 'easeOut' }}
       aria-label="评估工作流"
-      className="relative shrink-0 overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgb(22_23_29/0.04)] dark:shadow-[0_1px_2px_rgb(0_0_0/0.4)]"
+      className="studio-card relative shrink-0 overflow-hidden rounded-xl border border-border bg-card"
     >
-      <header className="flex items-baseline gap-2 px-4 pt-3.5 pb-2">
+      {/* 顶部渐变发丝线 — 品牌质感 */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent"
+      />
+      <header className="flex items-center gap-2 px-4 pt-3.5 pb-2">
         <span className="lin-eyebrow text-primary">Workflow</span>
         <h2 className="text-[13px] font-semibold tracking-[-0.01em] text-foreground">评估管线</h2>
         <span className="ml-auto font-mono text-[10px] text-muted-foreground/60">提交后自动执行</span>
       </header>
       <ol className="flex flex-col px-4 pb-3">
         {steps.map((s, i) => (
-          <li key={s.no} className="flex gap-3">
+          <li key={s.no} className="group flex gap-3">
             <div className="flex flex-col items-center" aria-hidden>
-              <span className="font-mono text-[13px] leading-[1.3] font-semibold text-primary tabular-nums">
-                {s.no}
+              {/* 参考项目 welcome-stat-badge：色块容器 + hover 缩放 110% */}
+              <span
+                className="flex size-7 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-110"
+                style={{ backgroundColor: s.tint }}
+              >
+                <s.icon className="size-3.5" style={{ color: s.color }} />
               </span>
               {i < steps.length - 1 && (
-                <span className="my-1.5 w-px flex-1 bg-primary/25" />
+                <span className="my-1 w-px flex-1 bg-gradient-to-b from-border to-border/40" />
               )}
             </div>
             <div
               className={cn(
                 'flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2',
-                i < steps.length - 1 && 'pb-3',
+                i < steps.length - 1 && 'pb-3.5',
               )}
             >
               <span className="text-[12.5px] font-medium text-foreground">{s.title}</span>
@@ -117,7 +150,7 @@ function WorkflowGuide() {
           {sources.map((s) => (
             <span
               key={s}
-              className="rounded-md border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+              className="rounded-md border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors duration-200 hover:border-primary/30 hover:text-foreground"
             >
               {s}
             </span>
@@ -290,7 +323,7 @@ export default function Home() {
                     >
                       <WorkflowGuide />
                       {/* 最近评估（常驻右栏，workflow 下方；内部滚动；宽屏放开高度上限充分利用纵向空间） */}
-                      <div className="flex max-h-[400px] min-h-[220px] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgb(22_23_29/0.04)] xl:max-h-none xl:flex-1 dark:shadow-[0_1px_2px_rgb(0_0_0/0.4)]">
+                      <div className="studio-card flex max-h-[400px] min-h-[220px] flex-col overflow-hidden rounded-xl border border-border bg-card xl:max-h-none xl:flex-1">
                         <RecentEvaluations
                           refreshKey={historyKey}
                           onOpenJob={openHistoryJob}

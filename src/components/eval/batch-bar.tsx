@@ -45,7 +45,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
 
   return (
     <div
-      className="flex flex-col gap-2.5 rounded-xl border border-border bg-card px-4 py-3.5"
+      className="flex flex-col gap-2.5 rounded-xl border border-border bg-card px-4 py-3.5 studio-card"
       role="group"
       aria-label="批量评估靶点切换"
     >
@@ -62,7 +62,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
         <span className="ml-auto flex min-w-24 items-center gap-1.5" aria-hidden>
           <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
             <span
-              className="block h-full rounded-full bg-primary transition-all"
+              className="block h-full rounded-full bg-gradient-to-r from-[#5e6ad2] to-[#8b5cf6] transition-all"
               style={{ width: `${Math.round((batch.items.length / batch.total) * 100)}%` }}
             />
           </span>
@@ -184,10 +184,10 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
             onClick={onShowMerged}
             title="查看本批次的合并评估报告（含靶点关系分析）"
             className={cn(
-              'flex min-h-9 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30',
+              'flex min-h-9 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition-all outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30 active:scale-[0.98]',
               mergedActive
-                ? 'border-violet-600 bg-violet-600 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.15)] dark:bg-violet-700'
-                : 'border-violet-500/40 bg-violet-500/[0.06] text-violet-700 hover:border-violet-500/70 dark:text-violet-300',
+                ? 'border-violet-600 bg-violet-600 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_10px_-2px_rgb(139_92_246/0.5)] dark:bg-violet-700'
+                : 'border-violet-500/40 bg-violet-500/[0.06] text-violet-700 hover:-translate-y-px hover:border-violet-500/70 hover:shadow-[0_2px_8px_-2px_rgb(139_92_246/0.3)] dark:text-violet-300',
             )}
           >
             <FileStack className="size-3.5 shrink-0" aria-hidden />
@@ -213,11 +213,11 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
                       : `点击切换查看 ${item.label} 的评估结果`
               }
               className={cn(
-                'flex min-h-9 items-center gap-1.5 rounded-lg border px-3 font-mono text-xs transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-default',
+                'flex min-h-9 items-center gap-1.5 rounded-lg border px-3 font-mono text-xs transition-all outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-default',
                 active
-                  ? 'border-primary bg-primary font-bold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_0_0_1px_rgb(94_106_210/0.25)]'
+                  ? 'border-primary/40 bg-primary/[0.08] font-bold text-primary shadow-[0_1px_2px_rgb(94_106_210/0.15),0_0_0_1px_rgb(94_106_210/0.22)]'
                   : clickable
-                    ? 'border-border bg-card font-semibold text-foreground/80 hover:border-ring/60 hover:text-primary'
+                    ? 'border-border bg-card font-semibold text-foreground/80 hover:-translate-y-px hover:border-primary/40 hover:text-primary'
                     : 'border-border bg-muted/60 text-muted-foreground/80'
               )}
             >
@@ -233,7 +233,7 @@ export function BatchBar({ batch, currentJobId, onSelect, onShowMerged, currentJ
                 <XCircle className="size-3.5 shrink-0 text-red-400" aria-hidden />
               )}
               {item.label}
-              {active && <span className="rounded bg-white/25 px-1 text-[10px] font-sans font-semibold">查看中</span>}
+              {active && <span className="rounded-md bg-primary/[0.14] px-1 text-[10px] font-sans font-semibold text-primary">查看中</span>}
             </button>
           )
         })}

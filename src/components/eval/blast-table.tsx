@@ -21,11 +21,11 @@ export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]
   const visible = collapsed ? hits.slice(0, COLLAPSED_COUNT) : hits
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
+    <div className="studio-card overflow-hidden rounded-xl border border-border bg-card">
       <div className="eval-scroll overflow-auto">
         <Table>
-          <TableHeader className="sticky top-0 z-10 bg-muted/60">
-            <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+          <TableHeader className="sticky top-0 z-10 bg-muted/70">
+            <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
               <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">PDB ID</TableHead>
               <TableHead className="eval-eyebrow h-9 min-w-44 text-muted-foreground">描述</TableHead>
               <TableHead className="eval-eyebrow h-9 text-muted-foreground">Identity</TableHead>
@@ -42,7 +42,7 @@ export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]
             {visible.map((h, i) => (
               <TableRow
                 key={`${h.pdbId}-${i}`}
-                className="border-border/60 hover:bg-accent/50"
+                className="border-border/60 hover:bg-muted/50"
               >
                 <TableCell className="pl-4">
                   <a
@@ -118,7 +118,7 @@ export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]
             <div className="eval-scroll overflow-auto">
               <Table>
                 <TableHeader className="sticky top-0 z-10 bg-muted/70">
-                  <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+                  <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
                     <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">PDB ID</TableHead>
                     <TableHead className="eval-eyebrow h-9 min-w-44 text-muted-foreground">描述</TableHead>
                     <TableHead className="eval-eyebrow h-9 text-muted-foreground">Identity</TableHead>
@@ -230,7 +230,7 @@ export function BlastNrTable({ hits, variant = 'nr' }: { hits: BlastNrHit[]; var
   const rows = (list: BlastNrHit[]) => list.map((h, i) => {
     const isUniprot = h.db !== 'other' && /^[A-Z0-9]{6,10}$/.test(h.accession)
     return (
-      <TableRow key={`${h.accession}-${i}`} className="border-border/60 hover:bg-accent/50">
+      <TableRow key={`${h.accession}-${i}`} className="border-border/60 hover:bg-muted/50">
         <TableCell className="pl-4 align-top">
           {isUniprot ? (
             <a
@@ -293,15 +293,15 @@ export function BlastNrTable({ hits, variant = 'nr' }: { hits: BlastNrHit[]; var
   })
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
+    <div className="studio-card overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/70 bg-muted/40 px-4 py-2.5">
         <p className="text-xs font-semibold text-foreground">{isUni ? 'UniProt 库序列匹配' : 'BLAST nr 全库检索'}</p>
         <p className="font-mono text-[10px] tracking-wide text-muted-foreground/85">{isUni ? `EBI BLAST · Swiss-Prot · ${hits.length} hits · 靶点身份识别` : `NCBI nr · ${hits.length} hits · 靶点身份识别`}</p>
       </div>
       <div className="eval-scroll overflow-auto">
         <Table>
-          <TableHeader className="sticky top-0 z-10 bg-muted/60">
-            <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+          <TableHeader className="sticky top-0 z-10 bg-muted/70">
+            <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
               <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">UniProt / 编号</TableHead>
               <TableHead className="eval-eyebrow h-9 min-w-44 text-muted-foreground">描述</TableHead>
               <TableHead className="eval-eyebrow h-9 text-muted-foreground">Identity</TableHead>
