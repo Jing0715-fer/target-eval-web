@@ -322,5 +322,34 @@
  *      （本轮「07:30 旧文件」误判的痛点根治）。
  *  - 用户恢复指引（存量受损运行）：打开历史运行 → 重新导入 117 份报告文件
  *    （刷新浏览器本地留存 + 服务端留存）→ 重新生成汇总报告 → 原文内嵌恢复。
+ *
+ * v2.93：PDF 导出「格式不对」根治 — 内容压缩成大页正中的一条 A4 窄条（用户
+ *  实测 TargetEval_P00533_2026-11-25.pdf：单页 918×9042pt，全部内容挤在中段
+ *  954px 窄条、前后大片空白、底部硬截断）：
+ *  - 根因（逐点实证定位）：报告模板内嵌 @page{size:A4;margin:12mm 10mm 14mm}
+ *    （单靶点 PRINT_PAGE_CSS / 看板 DASHBOARD_PRINT_CSS — 浏览器 Ctrl+P 归档
+ *    场景）。Chromium m143（Playwright 1.57）起 printToPDF 的**版面几何**改由
+ *    文档 @page 主导：page.pdf() API 传的 width/height 只决定输出纸面，排版
+ *    页框仍取 @page 尺寸并**居中放置**在纸面上 — 1224×12056px 大纸上出现一块
+ *    居中的 A4 内容区，内容按 A4 高度分页 + pageRanges '1' 只留首页 → 整份
+ *    报告被压成纸面正中的一条 A4 窄条。像素级复核：用户坏件墨迹范围
+ *    x 189-727 / y 4163-4878pt 与「A4 页框居中 + @page 边距」预测（x 190-728 /
+ *    y 4168-4217 内界）误差 ≤1pt。旧 Chromium preferCSSPageSize:false 令 API
+ *    尺寸完全获胜，v2.90 实测曾通过；环境升级 Chromium 后行为变化、导出代码
+ *    零改动 —「代码没变但坏了」的根源（教训：@page 与 printToPDF 参数的胜负
+ *    规则跨版本不契约化，必须显式钉死）；
+ *  - 修复（renderReportPdf 中央根治 — 单页/长条两路径同护，三条路由全收敛）：
+ *    测得内容尺寸后注入同尺寸 @page{size:<w>px<h>px;margin:0}（级联后于模板
+ *    规则取胜），版面几何与纸面严格一致；两值与 page.pdf 的 width/height 完全
+ *    相同 — 旧版（API 获胜）/新版（@page 获胜）Chromium 结果一致，前向兼容；
+ *  - 验证：媒体探针复现（PROBE-MEDIA-SCREEN/MQ-BASE/VH-900 三探针定位版面
+ *    分歧）→ 生产函数复测（重建 EGFR 1224×10160px 报告 2.6s 出稿、内容铺满
+ *    全页）→ 看板路径（applyDashboardPrintCss + @page A4 同命中，54KB 看板
+ *    修复后内容 45-1663pt/1730pt 铺满）→ agent-browser 全链路 E2E（真实
+ *    P00533 评估 66.6s → 结果页「下载报告 → PDF 报告」→ 4.6s 出稿 4.1MB，
+ *    服务端日志 @page 钉死 1224×11036，PDF 1 页 918×8277pt、内容 45-8246pt
+ *    铺满、执行摘要/PDB 清单/BLAST/关键文献全章节完整、VLM 视觉复核排版
+ *    正常、0 控制台错误）；诊断脚本保留：scripts/repro-pdf-layout.ts（复现
+ *    + 媒体探针）/ verify-pdf-v293.ts / verify-dash-v293.ts。
  */
-export const APP_VERSION = 'v2.92.0'
+export const APP_VERSION = 'v2.93.0'

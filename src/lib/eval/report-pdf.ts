@@ -1,5 +1,21 @@
 /**
- * 报告 HTML → PDF（服务端 Chromium print-to-PDF · 连续长页不分页）— v2.88 · v2.89
+ * 报告 HTML → PDF（服务端 Chromium print-to-PDF · 连续长页不分页）— v2.88 · v2.89 · v2.93
+ *
+ *  v2.93（用户实测「导出 PDF 格式不对」根治 — 内容压缩成大页正中的 A4 窄条）：
+ *  - 根因：报告模板内嵌 @page{size:A4;margin:12mm 10mm 14mm}（单靶点
+ *    PRINT_PAGE_CSS / 看板 DASHBOARD_PRINT_CSS — 浏览器 Ctrl+P 归档用）。
+ *    Chromium m143（Playwright 1.57）起 printToPDF 的**版面几何**改由文档
+ *    @page 主导：API 传的 width/height 只决定输出纸面，排版页框仍取 @page
+ *    尺寸并**居中放置**在纸面上 — 于是 1224×12056px 大纸上出现一块居中的
+ *    A4 内容区（≈595×768pt），内容按 A4 分页 + pageRanges '1' 只留首页 →
+ *    整份报告被压成页面正中的一条 A4 窄条（实测逐点吻合：墨迹范围与
+ *    「A4 页框居中 + @page 边距」预测误差 ≤1pt）。旧 Chromium 中
+ *    preferCSSPageSize:false 令 API 尺寸完全获胜，故 v2.90 实测曾通过；
+ *    升级 Chromium 后行为变化而代码零改动 — 「代码没变但坏了」的根源。
+ *  - 修复：测得内容尺寸后注入**同尺寸** @page{size:<w>px<h>px;margin:0}
+ *    （级联后于模板规则 — 取胜），版面几何与纸面严格一致；两值与 page.pdf
+ *    的 width/height 完全相同，旧/新 Chromium 行为均一致（旧版 API 获胜、
+ *    新版 @page 获胜 — 结果相同）。单页与 19008px 长条两路径同护。
  *
  *  v2.89（实测反馈修复 — 看板 PDF 偶发一次失败后**所有**导出永久不可用）：
  *  - 浏览器单例自愈：Chromium 进程死亡（沙箱 OOM 击杀/崩溃）后，旧单例把指向死
@@ -316,19 +332,33 @@ export async function renderReportPdf(html: string, opts: RenderReportPdfOptions
         return Math.ceil(Math.max(de.scrollHeight, b ? b.scrollHeight : 0))
       })
       const w = Math.max(400, Math.min(m.pw || MEASURE_VIEWPORT_W, 4096))
+      // ⑤' v2.93 @page 版面几何钉死：见文件头注释 — 模板内嵌 @page{size:A4} 在
+      //  Chromium m143+ 的 printToPDF 中主导排版页框（API 尺寸只定纸面、A4 页框居中
+      //  放置），必须注入与打印尺寸一致的 @page（级联在后取胜）+ margin:0，
+      //  否则整份报告被压成大纸正中的一条 A4 窄条。两值与 page.pdf 的
+      //  width/height 严格相同 — 旧版（API 获胜）/新版（@page 获胜）Chromium 结果一致。
+      const printH = Math.min(h + 8, PDF_MAX_PAGE_PX)
+      await page
+        .evaluate((c: string) => {
+          const st = document.createElement('style')
+          st.setAttribute('data-marker', 'rpt-cont-page-v1')
+          st.textContent = c
+          document.head.appendChild(st)
+        }, `@page { size: ${w}px ${printH}px; margin: 0; }`)
+        .catch(() => console.warn('[report-pdf] @page 版面钉死注入失败（best-effort 继续）'))
       const mb = { top: '0px', bottom: '0px', left: '0px', right: '0px' }
       let buf: Buffer
       if (h <= PDF_MAX_PAGE_PX) {
         // ⑥ 单页连续：纸张 = 内容尺寸（+8px 裕量防舍入溢页；pageRanges '1' 兜底截断 1px 溢条）
         buf = await page.pdf({
           width: `${w}px`,
-          height: `${Math.min(h + 8, PDF_MAX_PAGE_PX)}px`,
+          height: `${printH}px`,
           printBackground: true,
           preferCSSPageSize: false,
           pageRanges: '1',
           margin: mb,
         })
-        console.info(`[report-pdf] 连续长页 ${w}×${h}px · 单页 · HTML ${(htmlBytes / 1024 / 1024).toFixed(1)}MB`)
+        console.info(`[report-pdf] 连续长页 ${w}×${h}px · 单页 · @page 钉死 ${w}×${printH} · HTML ${(htmlBytes / 1024 / 1024).toFixed(1)}MB`)
       } else {
         // ⑥' 物理极限兜底：19008px 连续长条 × 最少页数（断点避让 — 行/图不腰斩）
         await page
@@ -342,12 +372,12 @@ export async function renderReportPdf(html: string, opts: RenderReportPdfOptions
         await new Promise(r => setTimeout(r, 150))
         buf = await page.pdf({
           width: `${w}px`,
-          height: `${PDF_MAX_PAGE_PX}px`,
+          height: `${printH}px`,
           printBackground: true,
           preferCSSPageSize: false,
           margin: mb,
         })
-        console.info(`[report-pdf] 连续长条 ${w}×${PDF_MAX_PAGE_PX}px × ${Math.ceil(h / PDF_MAX_PAGE_PX)} 页（内容 ${h}px 超单页物理上限）· HTML ${(htmlBytes / 1024 / 1024).toFixed(1)}MB`)
+        console.info(`[report-pdf] 连续长条 ${w}×${printH}px × ${Math.ceil(h / PDF_MAX_PAGE_PX)} 页（内容 ${h}px 超单页物理上限）· @page 钉死 · HTML ${(htmlBytes / 1024 / 1024).toFixed(1)}MB`)
       }
       return new Uint8Array(buf)
     } finally {
