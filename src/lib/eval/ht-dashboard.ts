@@ -1198,10 +1198,13 @@ function payloadRowJson(r: HtDashboardRow, verdictByJob: Map<string, HtVerdict>,
 
 /** v2.71：载荷 JSON 分块生成器 — 逐份延迟读盘（内存安全），顺序与 shell 主表
  *  （sortHtDashboardRows）一致。读盘失败/超限的行回退重建页变体（与旧版「文件
- *  丢失→markdown 重建页」降级语义一致）。onRow 每行回调（进度展示用）。 */
+ *  丢失→markdown 重建页」降级语义一致）。onRow 每行回调（进度展示用）；
+ *  v2.85：onEmbedded 写盘完成后回调（成功内嵌原文的行数，总行数）— 服务端
+ *  完成日志与前端结果反馈的真实数据源（不再让「没嵌入」静默发生）。 */
 async function* htPayloadJsonChunks(
   input: RenderHtDashboardInput,
   onRow?: (done: number, total: number) => void,
+  onEmbedded?: (embedded: number, total: number) => void,
 ): AsyncGenerator<string> {
   const { rows, verdicts, generatedAt, engineSummary, origin } = input
   const verdictByJob = new Map(verdicts.map(v => [v.jobId, v]))
@@ -1218,16 +1221,18 @@ async function* htPayloadJsonChunks(
     `"e":${j(esc(engineSummary.length > 60 ? engineSummary.slice(0, 60) + '…' : engineSummary))}`,
   )
   yield `{${meta.join(',')},"r":[`
+  let embedded = 0
   for (let i = 0; i < sorted.length; i++) {
     const r = sorted[i]!
     let html: string | undefined
     if (rowHasReportHtml(r)) {
       const src = r.reportHtml ?? (r.reportHtmlPath ? await readFile(r.reportHtmlPath, 'utf-8').catch(() => null) : null)
-      if (src && src.length <= REPORT_HTML_MAX_BYTES) html = src
+      if (src && src.length <= REPORT_HTML_MAX_BYTES) { html = src; embedded++ }
     }
     yield `${i > 0 ? ',' : ''}${payloadRowJson(r, verdictByJob, generatedAt, origin, html)}`
     onRow?.(i + 1, sorted.length)
   }
+  onEmbedded?.(embedded, sorted.length)
   yield ']}'
 }
 
@@ -1244,10 +1249,12 @@ export async function writeHtDashboardHtmlFile(
   input: RenderHtDashboardInput,
   htmlPath: string,
   onProgress?: (msg: string, frac?: number) => void,
+  /** v2.85：写盘完成后回调（成功内嵌原文的行数，总行数）— 完成日志/结果反馈用 */
+  onEmbedded?: (embedded: number, total: number) => void,
 ): Promise<void> {
   const tmpPath = `${htmlPath}.tmp`
   try {
-    await writeHtDashboardHtmlFileInner(input, tmpPath, onProgress)
+    await writeHtDashboardHtmlFileInner(input, tmpPath, onProgress, onEmbedded)
     await rename(tmpPath, htmlPath) // 同目录原子替换 — 任意时刻 htmlPath 均为完整文件
   } catch (err) {
     await unlink(tmpPath).catch(() => undefined) // 半成品 tmp 清理（可能不存在）
@@ -1259,6 +1266,7 @@ async function writeHtDashboardHtmlFileInner(
   input: RenderHtDashboardInput,
   tmpPath: string,
   onProgress?: (msg: string, frac?: number) => void,
+  onEmbedded?: (embedded: number, total: number) => void,
 ): Promise<void> {
   const anyBody = input.rows.some(r => rowHasReportHtml(r) || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
   if (!anyBody) {
@@ -1295,7 +1303,7 @@ async function writeHtDashboardHtmlFileInner(
             lastTick = now
             onProgress?.(`内嵌报告原文 ${done}/${total} 份（逐份读取写入 — 内存安全）…`, done / total)
           }
-        })) {
+        }, onEmbedded)) {
           await write(chunk)
         }
         await write('</script>')
@@ -2009,6 +2017,7 @@ tr.mt-row:hover td{background:#fbfdfc}
     ${input.durationSec ? `<div><b>运行时长</b> ${Math.round(input.durationSec / 60)} 分钟</div>` : ''}
     <div><b>评估引擎</b> <span class="mv">${esc(engineSummary)}</span></div>
     <div><b>靶点规模</b> ${stats.totalTargets} 个（成功 ${stats.loadedTargets}${stats.importedTargets ? ` · 载入 ${stats.importedTargets}` : ''}${stats.failedTargets ? ` · 失败 ${stats.failedTargets}` : ''}）</div>
+    <div><b>报告原文内嵌</b> <span class="mv" id="embed-stat-n">统计中…</span></div>
   </div>
 </div>
 
@@ -2148,6 +2157,19 @@ ${rptPayload}
   var rptEl = document.getElementById('ht-rpt-data');
   var RP = null;
   try { RP = JSON.parse(rptEl ? rptEl.textContent : 'null'); } catch (e) {}
+  // v2.85：头部「报告原文内嵌」统计徽标 — 读真实载荷行数（html 字段在场即原文
+  //  内嵌成功），打开看板一眼可见嵌入状态（用户核心关切「原封不动嵌入」—
+  //  生成端 toast 与服务端完成日志之外的第三处、也是用户最常看的确认点）
+  (function(){
+    var nEl = document.getElementById('embed-stat-n');
+    if (!nEl) return;
+    try {
+      var rs = RP && RP.r ? RP.r : [];
+      var emb = 0;
+      for (var ri = 0; ri < rs.length; ri++) if (typeof rs[ri].html === 'string' && rs[ri].html.length > 1000) emb++;
+      nEl.textContent = rs.length ? (emb + ' / ' + rs.length + ' 个靶点' + (emb >= rs.length ? '（全部原文内嵌 — 与原报告一致）' : '（未内嵌行为重建页/载入说明页）')) : '无弹出页载荷';
+    } catch (e) { nEl.textContent = '统计不可用'; }
+  })();
   function rptPageInit(){
     function copyText(t, btn){
       var done = function(){

@@ -935,6 +935,10 @@ export function useHighThroughputFlow() {
     //     DB 命中时服务端按 label 去重（以 DB 恢复行为准 — 数据更全）
     const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string; reportId?: string; sourceSha?: string; range?: [number, number]; stats?: HTGroupItemState['importedStats'] }> = []
     const importedJobIds = new Set<string>()
+    // v2.85：原文内嵌状态统计（完成 toast 明示 — 「上传进度显示了但最终没嵌入」
+    //  的结果不再黑盒：无键靶点数 + 自愈不可达源文件数都有明确反馈）
+    let importedNoRetKeyCount = 0
+    let healUnreachableSources = 0
     for (const g of runState.groups) {
       for (const it of g.items) {
         if (it.status === 'done' && it.jobId) {
@@ -994,6 +998,11 @@ export function useHighThroughputFlow() {
           if (bare && (it.importedReportSha || it.importedReportId)) healRefs.push({ item: it, bare })
         }
       }
+      // v2.85：无留存键的载入靶点（既无 reportId 也无 sourceSha — 弹出页必降级）。
+      //  历史成因：v2.83 enrich 组装 rep 引用回归（次链靶点丢留存键）/ 更早版本
+      //  导入的旧运行记录。这些靶点本地浏览器也无源文件副本（凭 sha 才能存取），
+      //  无法自动自愈 — 完成 toast 明示数量与恢复方式（重新导入报告文件）。
+      importedNoRetKeyCount = importedBare.filter(b => !b.reportId && !b.sourceSha).length
       if (healRefs.length > 0) {
         try {
           const heal = await ensureImportedRetention(
@@ -1017,6 +1026,9 @@ export function useHighThroughputFlow() {
               saveHTRun(runState)
             }
           }
+          // v2.85：自愈后仍无可用留存的源文件数（服务端无同内容 + 浏览器本地
+          //  IndexedDB 也无副本 — 这些靶点弹出页必降级；toast 明示）
+          healUnreachableSources = heal.stillMissing
           runState.dashboardProgress = undefined
         } catch {
           runState.dashboardProgress = undefined
@@ -1082,6 +1094,17 @@ export function useHighThroughputFlow() {
         const importedTail = importedBare.length + importedJobIds.size > 0
           ? `已包含 ${importedJobIds.size + importedBare.length} 个导入载入的靶点（${importedJobIds.size} 个恢复了完整统计${parsedImportedCount ? `、${parsedImportedCount} 个已解析导入报告的评分与结论` : ''}${importedBare.length - parsedImportedCount > 0 ? `、${importedBare.length - parsedImportedCount} 个以载入行呈现（报告无法解析）` : ''}）；`
           : ''
+        // v2.85：报告原文内嵌状态（用户核心关切「原封不动嵌入」— 成败与缺口可见）
+        //  - 有留存键的靶点 = 服务端将内嵌弹出页的（自愈重传后重算 — 含采纳/重传）；
+        //  - 无键 / 自愈不可达的靶点弹出页回退「载入说明 + 评分统计」页，toast
+        //    明示数量与恢复方式（重新导入报告文件 — 浏览器本地凭 sha 留存了源文件
+        //    副本的，重新生成时已自动重传，无需用户处理）。
+        const importedWithKey = importedBare.filter(t => Boolean(t.reportId || t.sourceSha)).length
+        const embedTail = importedBare.length > 0
+          ? importedWithKey === importedBare.length
+            ? `全部 ${importedBare.length} 个载入靶点的报告原文已内嵌弹出页（与原报告字节级一致）；`
+            : `报告原文内嵌 ${importedWithKey}/${importedBare.length} 个载入靶点${importedNoRetKeyCount > 0 ? `（${importedNoRetKeyCount} 个靶点缺少原文留存键${healUnreachableSources > 0 ? `、${healUnreachableSources} 份源文件服务端与浏览器本地均无留存` : ''}）` : healUnreachableSources > 0 ? `（${healUnreachableSources} 份源文件服务端与浏览器本地均无留存）` : ''} — 未内嵌的靶点弹出页将显示载入说明与已解析评分，重新导入对应报告文件并重新生成可恢复原文；`
+          : ''
         // v2.80：服务端 done 但携带提示（基础版恢复交付 / AI 部分降级 — error 列
         //  在 done 终态下存的是降级说明而非错误）— toast 如实呈现，用户知道拿到
         //  的是哪个版本、如何升级
@@ -1090,7 +1113,7 @@ export function useHighThroughputFlow() {
           : ''
         toast({
           title: '统计看板已生成',
-          description: `${recoverTail}${dropTail}${importedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。${noteTail}`,
+          description: `${recoverTail}${dropTail}${importedTail}${embedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。${noteTail}`,
         })
       } else {
         runState.dashboardError = dash.error ?? '统计看板生成失败'

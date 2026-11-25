@@ -610,6 +610,16 @@ async function runDashboardGeneration(ctx: {
     //  预览/下载立即可用。AI 仅是增强：成功则重写增强版，失败/超时则基础版即
     //  最终版 — 用户永远能在几分钟内拿到看板。
     const ruleVerdicts = statRows.map(r => ruleVerdict(r))
+    // v2.85：弹出页原文内嵌计数（写盘时逐行读盘的真实成功数 — 基础版/增强版
+    //  每次写入都回传，后写覆盖先写 = 终版真实值）。
+    //  背景：用户 4 轮反馈「上传的报告没有原封嵌入」而服务端静默 — 嵌入成败
+    //  无任何可观测信号（日志/前端反馈均无）。「没嵌入」从此必在完成日志可见。
+    let embeddedCount = 0
+    let embeddedTotal = 0
+    const trackEmbedded = (n: number, total: number): void => {
+      embeddedCount = n
+      embeddedTotal = total
+    }
     const baseWriteProgress = (msg: string, frac?: number): void => {
       progressWithPhase(msg, frac != null ? 36 + Math.round(frac * 20) : 36)
     }
@@ -626,7 +636,7 @@ async function runDashboardGeneration(ctx: {
       origin: ctx.origin,
       generatedAt,
       excelRows,
-    }, htmlPath, baseWriteProgress)
+    }, htmlPath, baseWriteProgress, trackEmbedded)
     // 检查点落库（status 仍 running）— 预览/下载/zip 打包链路立即可用；僵死
     //  恢复与重试不再从零开始
     await db.htDashboard.update({
@@ -734,7 +744,7 @@ async function runDashboardGeneration(ctx: {
         origin: ctx.origin,
         generatedAt,
         excelRows,
-      }, htmlPath, writeProgress)
+      }, htmlPath, writeProgress, trackEmbedded)
       void label
     }
     if (aiEnhanced && !uniSettled) {
@@ -773,7 +783,7 @@ async function runDashboardGeneration(ctx: {
       },
     })
     clearInterval(phaseWatchdog)
-    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· ${aiEnhanced ? `AI 增强${generated.ok ? '完整' : '部分'}` : '基础版（AI 不可用降级）'} · UniProt 识别回填 ${uniLog} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s${watchdogGivenUp ? '（看门狗曾判卡滞 — 本次完成已自愈覆盖）' : ''}`)
+    console.log(`[ht-dashboard] 统计看板生成完成（${dashboardId}）：${statRows.length + bareRows.length} 个靶点（含载入 ${bareRows.length + statRows.filter(r => r.imported).length}，其中解析导入报告 ${statRows.filter(r => r.importedFromFile).length}）· 弹出页原文内嵌 ${embeddedCount}/${embeddedTotal} 份${embeddedCount < allRows.length && allRows.length > 0 ? '（未内嵌行回退重建页/载入说明页）' : ''} · ${aiEnhanced ? `AI 增强${generated.ok ? '完整' : '部分'}` : '基础版（AI 不可用降级）'} · UniProt 识别回填 ${uniLog} · 耗时 ${Math.round((Date.now() - startedAt) / 1000)}s${watchdogGivenUp ? '（看门狗曾判卡滞 — 本次完成已自愈覆盖）' : ''}`)
   } catch (err) {
     await fail(err instanceof Error ? err.message : String(err))
   }
