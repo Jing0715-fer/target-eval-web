@@ -212,9 +212,10 @@
 /* ── 头部（Claude 式三件套）────────────────────────────── */
 
 /* 渐变描边：底边发丝线，中央主色、两端渐隐 — 精致分层感 */
-.header-gradient-border {
-  position: relative;
-}
+/* v2.87 修复：原 position:relative 会压过 Tailwind 分层工具类 .sticky
+   （无层自定义样式在级联中胜过 @layer utilities）→ 顶栏吸顶失效（滚页后头
+   部跟内容一起滚走）。删除后：顶栏 position:sticky（同为定位值，::after 渐
+   变描边锚定不变）；页脚改由元素上的 Tailwind relative 类提供锚定。 */
 .header-gradient-border::after {
   content: "";
   position: absolute;
@@ -231,6 +232,13 @@
     transparent
   );
   pointer-events: none;
+}
+
+/* 页脚变体：描边改顶边（与顶栏底边描边上下呼应 — v2.86 设计意图，
+   v2.87 补上：此前共用 bottom:0 落在页底成游离线） */
+footer.header-gradient-border::after {
+  top: 0;
+  bottom: auto;
 }
 
 /* 对角微染背景：白底上叠 4-6% 主色的斜向渐变 — 远看不空，近看不脏 */

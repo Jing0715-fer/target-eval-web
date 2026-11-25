@@ -1,6 +1,8 @@
 /**
  * GET /api/jobs/[id]/report — 评估报告 HTML（独立文件）
  * ?download=1 → 触发浏览器下载
+ * ?format=pdf → A4 PDF 导出（v2.87：Chromium print-to-PDF，与服务端 HTML 同源
+ *   @media print 分页规则 — 卡片/表格行不腰斩、标题不孤行尾；页脚带页码）
  * 公网加固：仅创建者可取报告；他人 404（报告含评估表提取的客户目标等敏感内容）。
  */
 import { NextResponse } from 'next/server'
@@ -9,6 +11,7 @@ import { db } from '@/lib/db'
 import { getOwner, isOwnedBy } from '@/lib/eval/request-guard'
 import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
+import { renderReportPdf, pdfResponse, pdfDisposition, pdfErrorResponse } from '@/lib/eval/report-pdf'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -41,6 +44,17 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   html = applyTableFilterUpgrade(html)
   const url = new URL(req.url)
   const download = url.searchParams.get('download') === '1'
+  // v2.87：PDF 导出（与服务端 HTML 同一份文件 + 同一套打印分页规则）
+  if (url.searchParams.get('format') === 'pdf') {
+    try {
+      const bytes = await renderReportPdf(html)
+      const base = (job.uniprotId || (job.title ?? 'target') || 'target').replace(/[^\w-]+/g, '_').slice(0, 40)
+      const date = new Date().toISOString().slice(0, 10)
+      return pdfResponse(bytes, pdfDisposition(`TargetEval_${base}_${date}`, `TargetEval_${base}_${date}`))
+    } catch (err) {
+      return pdfErrorResponse(err, `单靶点报告（${id}）`)
+    }
+  }
   const headers: Record<string, string> = {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',

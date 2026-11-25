@@ -1219,6 +1219,54 @@ export async function downloadHtReportArchive(entries: HtArchiveEntry[], fallbac
   setTimeout(() => URL.revokeObjectURL(url), 30_000)
 }
 
+// ─── 报告 PDF 导出（v2.87）──────────────────────────────────────
+
+/** 报告 PDF 导出：fetch blob → 另存（服务端 Chromium print-to-PDF — 与 HTML 下载
+ *  同一份文件、同一套 @media print A4 分页规则：卡片/表格行不腰斩、标题不孤行尾、
+ *  页脚页码；合并报告视图全展开 + 每靶点新起一页）。
+ *  url：报告接口相对路径（不含 format 参数，本函数追加）；fallbackName：响应缺
+ *  Content-Disposition 时的兜底文件名。渲染耗时数秒到数十秒 — 240s 超时；失败抛错。 */
+export async function downloadReportPdf(url: string, fallbackName = 'TargetEval_Report'): Promise<void> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 240_000)
+  let res: Response
+  try {
+    res = await fetch(`${url}${url.includes('?') ? '&' : '?'}format=pdf`, { cache: 'no-store', signal: ctrl.signal })
+  } catch (e) {
+    throw new Error(
+      e instanceof Error && e.name === 'AbortError'
+        ? 'PDF 导出超时（4 分钟无响应 — 报告可能过大；可下载 HTML 后在浏览器中 Ctrl/Cmd+P 打印为 PDF，版式相同）'
+        : '无法连接服务器（网络中断 — 稍后可重试）',
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(data?.error ?? `PDF 导出失败（HTTP ${res.status}）`)
+  }
+  const blob = await res.blob()
+  if (blob.size < 512) {
+    throw new Error('PDF 导出失败（返回内容异常）— 可下载 HTML 后在浏览器中 Ctrl/Cmd+P 打印为 PDF，版式相同')
+  }
+  // filename* 优先（RFC 5987 中文报告题目），回退 filename=，再回退兜底名
+  const cd = res.headers.get('content-disposition') ?? ''
+  const star = /filename\*=(?:UTF-8'')?([^;\n]+)/i.exec(cd)
+  const plain = /filename="?([^";\n]+)/i.exec(cd)
+  let filename = star?.[1]?.trim() || plain?.[1]?.trim() || ''
+  try { filename = decodeURIComponent(filename) } catch { /* 保留原文 */ }
+  if (!filename.toLowerCase().endsWith('.pdf')) filename = `${filename || fallbackName}.pdf`
+  const objectUrl = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = objectUrl
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000)
+}
+
 // ─── LLM 引擎配置 ──────────────────────────────────────────────
 
 /** GET /api/llm/config — 供应商列表（v2.19：引擎配置在浏览器 localStorage，服务端无激活配置；

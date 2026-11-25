@@ -53,6 +53,7 @@ import { formatDuration } from './format'
 import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import { EvalLogConsole } from './log-console'
 import { ProgressPanel } from './progress-panel'
+import { ReportDownloadMenu } from './report-download-menu'
 import type { BatchItem, BatchState } from './use-evaluation-flow'
 import { importedItemLacksUniprot } from './use-high-throughput-flow'
 import type { useHighThroughputFlow } from './use-high-throughput-flow'
@@ -890,6 +891,16 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 <Gauge className="size-3.5" aria-hidden />
                 打开汇总报告
               </a>
+              {/* v2.87：汇总报告下载菜单（HTML / PDF — PDF 为统计+总表+AI 分析的 A4 分页紧凑版，
+                  卡片/表行不腰斩、页脚页码；服务端 Chromium 渲染，报告大时需数秒到一分钟） */}
+              <ReportDownloadMenu
+                size="sm"
+                label="下载报告"
+                onDownloadHtml={() => window.open(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(run.dashboardId ?? '')}&download=1`, '_blank')}
+                pdfUrl={`/api/evaluate/ht-dashboard?id=${encodeURIComponent(run.dashboardId ?? '')}`}
+                pdfFallbackName={`TargetEval_Dashboard_${new Date().toISOString().slice(0, 10)}`}
+                pdfNote="统计 + 总表 + AI 分析"
+              />
               {/* v2.44：回看已完成运行时可手动重新生成汇总报告（重跑后刷新 / 旧报告过期） */}
               <Button
                 type="button"

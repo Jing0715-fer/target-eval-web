@@ -251,7 +251,10 @@ export default function Home() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col bg-background text-foreground">
+    // v2.87：overflow-x-clip — Hero 环境层（studio-grid/ambient -inset-x-8 出血）
+    // 在窄屏把文档撑出横向滚动条（390px 视口实测 406px）；clip（非 hidden）
+    // 不创建滚动容器，粘性顶栏/页脚不受影响
+    <div className="flex min-h-dvh flex-col overflow-x-clip bg-background text-foreground">
       {/* 顶部应用栏（v1.3：恢复原顶栏布局 — 功能在顶部，历史记录在 workflow 下方） */}
       <AppHeader
         onOpenHistory={() => setHistoryOpen(true)}
@@ -322,8 +325,10 @@ export default function Home() {
                       aria-label="评估管线与最近评估"
                     >
                       <WorkflowGuide />
-                      {/* 最近评估（常驻右栏，workflow 下方；内部滚动；宽屏放开高度上限充分利用纵向空间） */}
-                      <div className="studio-card flex max-h-[400px] min-h-[220px] flex-col overflow-hidden rounded-xl border border-border bg-card xl:max-h-none xl:flex-1">
+                      {/* 最近评估（常驻右栏，workflow 下方；内部滚动；宽屏放开高度上限充分利用纵向空间）
+                          v2.87：高度上限放开从 xl 提前到 lg — lg 档 max-h-400 与左栏拉伸高度
+                          不匹配，卡底到栏底留出 ~100px 空洞（右侧排版被扰乱）；lg 起即随栏伸展填满 */}
+                      <div className="studio-card flex max-h-[400px] min-h-[220px] flex-col overflow-hidden rounded-xl border border-border bg-card lg:max-h-none lg:flex-1">
                         <RecentEvaluations
                           refreshKey={historyKey}
                           onOpenJob={openHistoryJob}

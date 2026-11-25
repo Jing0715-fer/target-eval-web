@@ -41,6 +41,7 @@ import { LiteratureList } from './literature-list'
 import { AssetGallery } from './asset-gallery'
 import { Ligand2dFigure } from './ligand-2d'
 import { InteractionStructures } from './interaction-structures'
+import { ReportDownloadMenu } from './report-download-menu'
 import type { BlastStatusCode, JobDetail, LigandDetail, ScoreItem } from './types'
 import { regenerateJobReport } from './api'
 
@@ -502,6 +503,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
   /** v2.51：报告 LLM 原地重跑可用（服务端单靶点报告 + v2.51 后完成的作业才有快照；
    *  旧作业无快照时接口返回明确错误引导重新评估，按钮仍展示让用户知道能力存在） */
   const canRegen = job.status === 'done' && !reportDeferred && !job.fromCache && !job.stateless && job.reportAvailable === true
+  /** v2.87：服务端 PDF 导出可用（服务端报告文件在 — 缓存副本/无状态内联无服务端文件不提供） */
+  const reportPdfUrl = !job.fromCache && !inlineReportHtml && job.reportAvailable === true ? `/api/jobs/${job.id}/report?download=1` : null
 
   const downloadReport = () => {
     // v2.36：缓存副本无服务端文件 → 导出 markdown 文本（另存 .md）
@@ -823,15 +826,13 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 <ExternalLink className="size-3.5" />
                 新窗口
               </Button>
-              <Button
-                variant="outline"
+              {/* v2.87：下载报告菜单（HTML / PDF 双格式 — 服务端报告提供 PDF） */}
+              <ReportDownloadMenu
                 size="sm"
-                onClick={downloadReport}
-                className="h-8 gap-1.5 rounded-lg bg-card px-2.5 font-mono text-[11px] transition-all hover:border-primary/40 active:scale-[0.98]"
-              >
-                <Download className="size-3.5" />
-                下载 HTML
-              </Button>
+                onDownloadHtml={downloadReport}
+                pdfUrl={reportPdfUrl}
+                pdfFallbackName={`TargetEval_${(job.uniprotId || job.id).replace(/[^\w-]/g, '_')}_${new Date().toISOString().slice(0, 10)}`}
+              />
               {/* v2.51：报告 LLM 原地重跑（内嵌报告工具条主入口 — 正常路径恒可见） */}
               {canRegen && (
                 <Button
@@ -1258,14 +1259,13 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <Eye className="size-4" />
               在线预览报告
             </Button>
-            <Button
-              variant="outline"
-              onClick={downloadReport}
-              className="h-10 gap-2 rounded-lg bg-card px-4 transition-all hover:border-primary/40 active:scale-[0.98]"
-            >
-              <Download className="size-4" />
-              下载 HTML
-            </Button>
+            {/* v2.87：下载报告菜单（HTML / PDF 双格式） */}
+            <ReportDownloadMenu
+              size="default"
+              onDownloadHtml={downloadReport}
+              pdfUrl={reportPdfUrl}
+              pdfFallbackName={`TargetEval_${(job.uniprotId || job.id).replace(/[^\w-]/g, '_')}_${new Date().toISOString().slice(0, 10)}`}
+            />
             {canRegen && (
               <Button
                 variant="outline"

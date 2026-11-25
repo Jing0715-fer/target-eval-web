@@ -168,7 +168,43 @@
  *  E2E 验证：明/暗双主题 + 桌面/移动双断点 + 滑动胶囊切换 + 对话框开合
  *  零报错；VLM 视觉评审 8/10（渐变字标/胶囊控件/紫调画布三要素确认）。
  *
- * v2.87：汇总报告导入原文嵌入根治层 — **生成时原文直传**（用户实测「上传的
+ * v2.87：结果导出 PDF + 主页排版修复（用户指令：「结果除了 html 外，增加导出
+ *  pdf 的选项，（主页）分页不要扰乱排版」）：
+ *  - ① PDF 导出（服务端 Chromium print-to-PDF）：新增 report-pdf.ts（Playwright
+ *    chromium 单例 + 毒丸清理 + 串行队列把内存峰值封在单份 + 160MB 体积护栏
+ *    超限给出浏览器打印指引）；与 HTML 下载同一份文件、同一套 @media print
+ *    A4 分页规则 — 所见即所得；页脚居中「N / M」页码（Noto Sans SC 回退）；
+ *    等待策略 load → 全图片解码（data URI 为主 best-effort）→ fonts.ready →
+ *    300ms 落定；实测 1.5MB 报告 2.1s / 12MB 看板 3.1s 出稿；
+ *  - ② 三路由接入 ?format=pdf：单靶点 /api/jobs/{id}/report、合并报告
+ *    /api/evaluate/batch-report、统计看板 /api/evaluate/ht-dashboard（看板
+ *    先注入专用打印分页 CSS — 看板模板原生无 @page 规则；弹出页载荷为
+ *    script 数据不参与打印，PDF 即统计+总表+AI 分析紧凑版）；
+ *  - ③ 前端「下载报告 ▾」下拉（新组件 report-download-menu）：HTML（即时
+ *    下载）/ PDF（fetch blob 另存 + 全程反馈：生成中 toast → 完成含保存位置
+ *    → 失败给出浏览器打印降级指引）双选项；本地缓存副本/无状态内联报告无
+ *    服务端文件时自动退化为单按钮（不出现死选项）；单靶点结果页工具条 +
+ *    报告卡、合并报告工具条 + 预览降级路径、高通量看板横幅五处统一接入；
+ *    RFC 5987 filename* 解析 — 中文报告题目完整保留为 PDF 文件名；
+ *  - ④ 分页避让强化（打印标记 rpt-pr-v1 → v2，历史报告经 applyUxUpgrade
+ *    幂等补增量块）：表格行不腰斩（tr avoid）、图片不跨页、一切标题不孤行
+ *    尾（h1-h5 break-after avoid）、网格卡片整卡避让（glance/fig/lig/meta
+ *    网格 + tgt-card/rel-box/qa-ans/note）— VLM 逐页核验 24 靶点看板 PDF
+ *    六页零切断零溢出；合并报告视图全展开 + 每靶点新起一页（既有力为 print
+ *    CSS，Chromium print-to-PDF 原生应用）；
+ *  - ⑤ 主页排版修复：lg 档（1024-1280px）「最近评估」卡 max-h-400 与左栏
+ *    拉伸高度不匹配 → 卡底到栏底 ~100px 空洞（xl 才放开）；高度上限放开从
+ *    xl 提前到 lg（lg:max-h-none lg:flex-1）— 实测卡底与左栏底部像素级齐平；
+ *  - ⑥ 两处 v2.86 回归修复（均为主页排版扰乱）：a) 顶栏吸顶失效 —
+ *    .header-gradient-border 的 position:relative（无层自定义样式）在级联中
+ *    压过 Tailwind @layer utilities 的 .sticky → 滚页后头部跟内容一起滚走；
+ *    删除该行（sticky 本身即定位值，::after 描边锚定不变），页脚描边锚定
+ *    改由元素 relative 类承担 + 描边落位顶边（v2.86 设计意图，此前 bottom:0
+ *    游离在页底）；b) 移动端横向溢出 — Hero 环境层 studio-grid/ambient 的
+ *    -inset-x-8 出血把 390px 视口文档撑到 406px；根容器加 overflow-x-clip
+ *    （clip 不创建滚动容器，不影响 sticky）。
+ *
+ * v2.88：汇总报告导入原文嵌入根治层 — **生成时原文直传**（用户实测「上传的
  *  报告还是没有嵌入到汇总报告中」跨 v2.69–v2.86 多版复现，沙盒全链路复现
  *  正常 → 判定为用户环境在「导入时上传/留存」环节持续失败且无感知）：
  *  - 客户端：enrich 解析源文件时顺手登记**会话源注册表**（内存 Map，96MB 上
@@ -189,6 +225,7 @@
  *  - 完成 toast 并入直传统计（ptStored 服务端实测 + ptError 首个失败原因 —
  *    环境问题如实呈现定位）；上传路由瞬态重试一次（3s — 服务重启窗口）；
  *  - E2E：v2.86 汇总件导入 15/15 回归 + 浏览器 UI 全链路（多文件导入 → 运行
- *    → 汇总）sk 池字节级内嵌确认 + 直传链路专项验证。
+ *    → 汇总）sk 池字节级内嵌确认 + 直传链路专项验证（屏蔽上传端点模拟用户
+ *    故障 — 直传同请求落库内嵌如常）。
  */
-export const APP_VERSION = 'v2.87.0'
+export const APP_VERSION = 'v2.88.0'
