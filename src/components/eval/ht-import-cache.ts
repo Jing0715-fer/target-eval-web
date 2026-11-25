@@ -204,3 +204,66 @@ export async function getImportedSource(sha: string): Promise<CachedSource | nul
   if (hit) memCacheSet(sha, hit)
   return hit
 }
+
+// ─── v2.87：会话级源文件注册表（生成时原文直传的数据源）────────────────────────
+//
+// 动机（用户实测「上传的报告还是没有嵌入到汇总报告中」跨 v2.69–v2.86 多版复现）：
+// 导入时上传 → reportId → 运行记录持久化 → 生成前自愈重传 → 服务端留存读取 —
+// 环节多且任一失败都静默降级。v2.87 在汇总生成请求里**直接携带原文**（同一请求
+// 内落库并内嵌 — 链路环节全部收敛掉）。本注册表是直传的取数来源之一：
+//  - enrich 解析每份源文件时顺手登记（同会话导入 → 生成的主路径，浏览器
+//    IndexedDB 不可用（隐私模式等）也照常工作）；
+//  - 跨会话（导入后隔天生成）由 IndexedDB（getImportedSource 按 sha）覆盖；
+//  - 无 sha 键的旧运行记录条目可按 fileName 在本表反查（仅同会话）。
+//
+// 体积护栏：单份 >8MB 不登记（与 IndexedDB 同口径）；会话总量 96MB（百份级
+// 报告全量覆盖；超出按 FIFO 弃最旧 — 直传侧还有 32MB 请求预算兜底）。
+
+const SESSION_SOURCES_MAX_CHARS = 96_000_000
+const SESSION_SINGLE_MAX_CHARS = 8_000_000
+const sessionSources = new Map<string, CachedSource>() // sha → {fileName, html, at}
+const sessionByName = new Map<string, string>() // fileName（小写）→ sha
+let sessionChars = 0
+
+/** v2.87：登记一份会话源文件（enrich 解析时调用 — 生成时直传取数） */
+export function registerSessionSource(sha: string, fileName: string, html: string): void {
+  if (!sha || html.length > SESSION_SINGLE_MAX_CHARS) return
+  if (sessionSources.has(sha)) return
+  while (sessionChars + html.length > SESSION_SOURCES_MAX_CHARS) {
+    const oldest = sessionSources.keys().next().value
+    if (oldest === undefined) break
+    const v = sessionSources.get(oldest)
+    sessionSources.delete(oldest)
+    if (v) {
+      sessionChars -= v.html.length
+      for (const [k, s] of sessionByName) {
+        if (s === oldest) { sessionByName.delete(k); break }
+      }
+    }
+  }
+  if (sessionChars + html.length > SESSION_SOURCES_MAX_CHARS) return
+  const entry: CachedSource = { fileName: fileName.slice(0, 120), html, at: Date.now() }
+  sessionSources.set(sha, entry)
+  sessionChars += html.length
+  sessionByName.set(fileName.trim().toLowerCase(), sha)
+}
+
+/** v2.87：按 sha 取会话源文件（内存 — 不触 IndexedDB） */
+export function getSessionSource(sha: string): CachedSource | null {
+  return sessionSources.get(sha) ?? null
+}
+
+/** v2.87：按文件名反查会话源 sha（无留存键的旧条目 — 前缀 80 字符匹配吸收切片差异） */
+export function getSessionSourceShaByFileName(fileName: string): string | null {
+  const key = fileName.trim().toLowerCase().slice(0, 80)
+  if (!key) return null
+  for (const [name, sha] of sessionByName) {
+    if (name.slice(0, 80) === key) return sha
+  }
+  return null
+}
+
+/** v2.87：当前会话已登记的源文件数（诊断用） */
+export function sessionSourceCount(): number {
+  return sessionSources.size
+}

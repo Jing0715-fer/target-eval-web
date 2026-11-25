@@ -748,18 +748,30 @@ export interface HtArchiveEntry {
 
 /** v2.69：上传一份导入的既有报告原文到服务端留存 — 返回留存 id（后续汇总报告
  *  生成时服务端读回，作为「完整报告」弹出页内嵌原文，与下载的单独报告一致）。
- *  失败返回 undefined（不阻塞导入 — 统计快照已本地解析，仅弹出页降级）。 */
+ *  失败返回 undefined（不阻塞导入 — 统计快照已本地解析，仅弹出页降级）。
+ *  v2.87：网络抖动/服务端 5xx 瞬态重试一次（3s）— 服务重启窗口下导入时上传
+ *  不再一次性失败（直传链路是更强兜底，但导入时成功可减少后续重传量）。 */
 export async function uploadImportedReport(fileName: string, html: string): Promise<string | undefined> {
-  try {
-    const res = await fetch('/api/evaluate/ht-imported-report', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileName, html }),
-    })
-    const data = (await res.json().catch(() => null)) as { ok?: boolean; id?: string } | null
-    return res.ok && data?.ok && typeof data.id === 'string' ? data.id : undefined
-  } catch {
-    return undefined
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch('/api/evaluate/ht-imported-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName, html }),
+      })
+      if (res.status >= 500 && attempt < 1) {
+        await new Promise(r => setTimeout(r, 3000))
+        continue
+      }
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; id?: string } | null
+      return res.ok && data?.ok && typeof data.id === 'string' ? data.id : undefined
+    } catch {
+      if (attempt < 1) {
+        await new Promise(r => setTimeout(r, 3000))
+        continue
+      }
+      return undefined
+    }
   }
 }
 
@@ -825,6 +837,12 @@ export interface HtDashboardInfo {
   droppedCount?: number
   /** v2.60：被跳过靶点的展示标签（最多 10 条 — toast 提示用） */
   droppedLabels?: string[]
+  /** v2.87：本次生成直传的导入原文份数（客户端 offered — 完成 toast 呈现） */
+  ptOffered?: number
+  /** v2.87：服务端实际落库的直传份数（内容寻址去重后 — 含采纳既有留存） */
+  ptStored?: number
+  /** v2.87：直传落库的首个失败原因（落库失败不阻塞生成 — 呈现给用户定位环境问题） */
+  ptError?: string
 }
 
 /** v2.60：上传给服务端的作业缓存快照（服务端作业已过期时恢复统计行；与
@@ -924,6 +942,9 @@ export interface HtDashboardGenerateInput {
   }>
   /** v2.68：导入报告携带的原作业 id（entries 中对应行标「载入」徽标 — 与本次评估行区分） */
   importedJobIds?: string[]
+  /** v2.87：导入报告原文直传（生成请求直接携带 — 留存未确认可用的源文件；
+   *  服务端同一请求内落库后内嵌。预算：≤128 份 · 单份 ≤8M 字符 · 总量 ≤32M 字符） */
+  importedSources?: Array<{ sha: string; fileName: string; html: string }>
   /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示）；
    *  v2.76：第二参数 pct = 全局百分比 0-100（进度条，旧服务端无此字段时 undefined） */
   onProgress?: (msg: string, pct?: number) => void
@@ -1028,6 +1049,10 @@ async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Prom
     ...(data.dashboard.recoveredCount != null ? { recoveredCount: data.dashboard.recoveredCount } : {}),
     ...(data.dashboard.droppedCount != null ? { droppedCount: data.dashboard.droppedCount } : {}),
     ...(data.dashboard.droppedLabels?.length ? { droppedLabels: data.dashboard.droppedLabels } : {}),
+    // v2.87：导入原文直传统计（完成 toast 呈现 — 同为 POST 应答独有字段）
+    ...(data.dashboard.ptOffered != null ? { ptOffered: data.dashboard.ptOffered } : {}),
+    ...(data.dashboard.ptStored != null ? { ptStored: data.dashboard.ptStored } : {}),
+    ...(data.dashboard.ptError ? { ptError: data.dashboard.ptError } : {}),
   }
   // 轮询至终态。v2.74 三重容错（修复用户实测「Failed to fetch」误报与长等待误判超时）：
   //  ① 轮询 fetch 网络异常（dev 重编译 / 网关瞬断 / 服务器短暂重启自愈）→ 不再直接
