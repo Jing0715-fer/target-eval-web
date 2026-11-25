@@ -290,5 +290,37 @@
  *    先于绘制 — 无闪烁）；
  *  - 回归：scripts/test-v291-large-passthrough.ts（12MiB 直传全链路 6/6 —
  *    POST 落库 ptStored=1 → 生成 done → 字节级内嵌）+ v2.86 汇总件导入 15/15。
+ *
+ * v2.92：汇总报告导入原文内嵌 — 真实根因修复（用户实测「v2.91 已拉取、UI 显示
+ *  2.91、重新生成的汇总报告依然 117 靶点零内嵌」— 排查发现历版「沙盒全链路
+ *  验证通过」与用户环境失败的分叉点从未被覆盖）：
+ *  - 根因定位（三层叠加，任何一层单测都「绿」、叠加才复现用户形态）：
+ *    ① 产物时间口径：看板 g 字段为 UTC（toISOString），用户按本地时间读
+ *    「07:30」误判产物新旧 — 本轮曾据此误判「旧文件」，用户指正后修正；
+ *    ② http 非安全上下文（IP/域名直访，非 localhost）浏览器 crypto.subtle
+ *    不可用 → 前端 sourceSha 走 FNV 兜底（x 前缀），服务端留存按 sha256
+ *    内容寻址 — **两口径永远对不上**，sha 兜底通道在该环境形同虚设；
+ *    ③ IndexedDB 本地留存 150MB 上限：百份级批次（117 份 × ~1.1MB ≈ 128MB）
+ *    多轮导入累计超限 → 按写入时间淘汰最旧 → 上一轮运行的源被清光 →
+ *    生成前 heal（无源可重传）与 v2.88 直传（无源可取）双双落空；
+ *    ②+③ 叠加 = reportId 无（heal 失败未回填）+ sha 查库 miss（口径错位）
+ *    → loadImportedReportHtml 空 Map → 117 行全部降级 — 与用户产物完全同构
+ *    （沙盒实测：crypto.subtle 罩蔽模拟 ② 单独不复现 — heal 重传通道把它
+ *    吸收；②+③ 叠加的 fileName 兜底回归见 scripts/test-v292-filename-
+ *    fallback.ts）。
+ *  - 修复三件套：
+ *    ① 服务端 fileName 兜底通道（根治层）：loadImportedReportHtml 与
+ *      resolveImportedReportPath 新增第三键 `fn:{fileName}` — reportId 与 sha
+ *      双 miss 时按（归属匹配的）导入文件名反查本人留存（服务端留存在 —
+ *      导入/重传落过库，只是键口径对不上找不到）；fileName 是人读口径，
+ *      稳定不变，不受浏览器安全上下文影响；命中后同步回登记 reportId/
+ *      sha 键（下次直查）；诊断日志加 fileName 兜底找回计数；
+ *    ② IndexedDB 上限 150MB → 600MB：多轮百份级批次不再淘汰旧运行源；
+ *    ③ 看板产物版本自标注：HTML meta targeteval:version + 头部「报告版本」
+ *      徽标 + ht-rpt-data 载荷 v 字段 + 弹出重建页徽标 + 完成 toast 尾注
+ *      「本报告由 vX 生成」— 产物自带版本，回报排查不再依赖口头描述
+ *      （本轮「07:30 旧文件」误判的痛点根治）。
+ *  - 用户恢复指引（存量受损运行）：打开历史运行 → 重新导入 117 份报告文件
+ *    （刷新浏览器本地留存 + 服务端留存）→ 重新生成汇总报告 → 原文内嵌恢复。
  */
-export const APP_VERSION = 'v2.91.0'
+export const APP_VERSION = 'v2.92.0'

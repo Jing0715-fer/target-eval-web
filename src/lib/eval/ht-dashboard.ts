@@ -594,16 +594,26 @@ export function buildImportedRows(
 
 /** v2.83：多键路径解析（reportId 直查 → 内容哈希兜底）。loadImportedReportHtml
  *  的映射对每份原文同时登记 reportId 与 `sha:{sourceSha}` 两个键（同一磁盘路径），
- *  reportId 死亡/丢失的靶点凭内容哈希仍能取到同内容留存的路径。 */
+ *  reportId 死亡/丢失的靶点凭内容哈希仍能取到同内容留存的路径。
+ *  v2.92：fileName 第三通道 — http 非安全上下文（IP/域名直访）浏览器 crypto.subtle
+ *  不可用时前端 sha 是 FNV 兜底（x 前缀），与服务端 sha256 内容寻址**永远对不上**
+ *  （sha 通道在该环境形同虚设）；reportId 又依赖「生成前自愈重传成功回填」— 本地
+ *  留存（IndexedDB 150MB 淘汰/清理）丢失时 heal 无源可传，两键齐断 → 全降级。
+ *  fileName 是人读口径（导入文件名稳定不变），服务端留存记录恒带 — 按名反查
+ *  本人留存是内容寻址错位时的最后兜底。 */
 export function resolveImportedReportPath(
   m: Map<string, string>,
-  t: { reportId?: string; sourceSha?: string },
+  t: { reportId?: string; sourceSha?: string; fileName?: string },
 ): string | undefined {
   if (t.reportId) {
     const p = m.get(t.reportId)
     if (p) return p
   }
-  if (t.sourceSha) return m.get(`sha:${t.sourceSha}`)
+  if (t.sourceSha) {
+    const p = m.get(`sha:${t.sourceSha}`)
+    if (p) return p
+  }
+  if (t.fileName) return m.get(`fn:${t.fileName}`)
   return undefined
 }
 
@@ -624,7 +634,9 @@ export async function loadImportedReportHtml(
   budget: { total: number },
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>()
-  const withKey = imported.filter(t => Boolean(t.reportId || t.sourceSha))
+  // v2.92：fileName 也算可用键（http 非安全上下文 sha 口径错位 + reportId 未回填
+  // 时的兜底通道 — 见 resolveImportedReportPath 注释）
+  const withKey = imported.filter(t => Boolean(t.reportId || t.sourceSha || t.fileName))
   if (withKey.length === 0) return out
   try {
     await ensureImportedReportTable()
@@ -636,16 +648,20 @@ export async function loadImportedReportHtml(
   const ordered = [...withKey.filter((t) => !t.stats), ...withKey.filter((t) => t.stats)]
   const ids = [...new Set(ordered.map((t) => t.reportId).filter((x): x is string => Boolean(x)))]
   const shas = [...new Set(ordered.map((t) => t.sourceSha).filter((x): x is string => Boolean(x)))]
-  let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string; contentSha: string | null }> = []
+  // v2.92：fileName 反查键（载荷 fileName 截 80 字符 — 超长名取前缀对齐服务端 120 口径）
+  const names = [...new Set(ordered.map((t) => t.fileName).filter((x): x is string => Boolean(x)).map((n) => n.slice(0, 120)))]
+  let recs: Array<{ id: string; ownerKey: string | null; htmlPath: string; contentSha: string | null; fileName: string | null }> = []
   try {
     recs = await db.importedReport.findMany({
       where: {
         OR: [
           ...(ids.length ? [{ id: { in: ids.slice(0, 600) } }] : []),
           ...(shas.length ? [{ contentSha: { in: shas.slice(0, 600) } }] : []),
+          // v2.92：fileName 精确反查（in 查询 — 同名多轮导入由归属+createdAt desc 先见即最新）
+          ...(names.length ? [{ fileName: { in: names.slice(0, 600) } }] : []),
         ],
       },
-      select: { id: true, ownerKey: true, htmlPath: true, contentSha: true },
+      select: { id: true, ownerKey: true, htmlPath: true, contentSha: true, fileName: true },
       orderBy: { createdAt: 'desc' }, // v2.83：同内容多条取最新（先见即最新）
     })
   } catch (err) {
@@ -656,14 +672,22 @@ export async function loadImportedReportHtml(
   // v2.83：sha → 最新可读候选记录（同内容多条时取 createdAt 最新；文件在否
   //  交给 stat 预检 — 此处只过滤归属与空路径）
   const recsBySha = new Map<string, { id: string; htmlPath: string }>()
+  // v2.92：fileName → 最新可读候选（归属同口径 — 同名文件可能来自不同上传者，
+  //  他人留存不采信；createdAt desc 先见即最新）
+  const recsByName = new Map<string, { id: string; htmlPath: string }>()
   for (const rec of recs) {
     if (!rec.contentSha || !rec.htmlPath) continue
     if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) continue // 他人留存 — 不采信
     const prev = recsBySha.get(rec.contentSha)
     if (!prev) recsBySha.set(rec.contentSha, { id: rec.id, htmlPath: rec.htmlPath })
   }
+  for (const rec of recs) {
+    if (!rec.fileName || !rec.htmlPath) continue
+    if (rec.ownerKey && rec.ownerKey !== owner.key && rec.ownerKey !== owner.ipKey) continue // 他人留存 — 不采信
+    if (!recsByName.has(rec.fileName)) recsByName.set(rec.fileName, { id: rec.id, htmlPath: rec.htmlPath })
+  }
   // v2.81 诊断计数（用户环境「全部未能内嵌」排查 — dev 控制台一眼定位缺在哪一环）
-  let diagNoRecord = 0, diagOwnerMismatch = 0, diagShaHealed = 0
+  let diagNoRecord = 0, diagOwnerMismatch = 0, diagShaHealed = 0, diagNameHealed = 0
   const candidates: Array<{ key: string; path: string }> = []
   const seenPaths = new Set<string>()
   const pushCandidate = (key: string, path: string) => {
@@ -702,15 +726,29 @@ export async function loadImportedReportHtml(
         diagShaHealed++
       }
     }
+    // v2.92：fileName 兜底（③ 通道 — ① reportId 与 ② sha 双 miss 时：http 非安全
+    //  上下文 sha 口径错位（FNV x 前缀查不到 sha256 寻址的库）且 heal 无源未回填
+    //  reportId 的场景，服务端留存在（导入/重传落过库）— 按文件名反查本人留存；
+    //  命中后同步登记 reportId 键（下次直查免走 fn 通道）。
+    if (!path && t.fileName) {
+      const nameRec = recsByName.get(t.fileName.slice(0, 120))
+      if (nameRec) {
+        path = nameRec.htmlPath
+        diagNameHealed++
+        if (t.reportId) pushCandidate(t.reportId, path)
+      }
+    }
     // 多键登记：sha 键指向该靶点最终解析到的路径（reportId 命中时与 ① 同路径）
     if (path && t.sourceSha) pushCandidate(`sha:${t.sourceSha}`, path)
+    // v2.92：fn 键登记（resolveImportedReportPath 第三通道 — 键与载荷 fileName 同口径截 120）
+    if (path && t.fileName) pushCandidate(`fn:${t.fileName.slice(0, 120)}`, path)
     if (!path) {
       if (t.reportId && !recById.get(t.reportId)) diagNoRecord++
       // 有记录但路径空/归属不符已在上面计数
     }
   }
-  if (diagNoRecord > 0 || diagOwnerMismatch > 0 || diagShaHealed > 0) {
-    console.warn(`[ht-dashboard] 导入报告留存规划：${ordered.length} 个靶点（无记录/无路径 ${diagNoRecord}，归属不匹配 ${diagOwnerMismatch}，sha 兜底找回 ${diagShaHealed}）`)
+  if (diagNoRecord > 0 || diagOwnerMismatch > 0 || diagShaHealed > 0 || diagNameHealed > 0) {
+    console.warn(`[ht-dashboard] 导入报告留存规划：${ordered.length} 个靶点（无记录/无路径 ${diagNoRecord}，归属不匹配 ${diagOwnerMismatch}，sha 兜底找回 ${diagShaHealed}，fileName 兜底找回 ${diagNameHealed}）`)
   }
   // v2.71：stat 预检（丢失/超限不出队）→ 预算分配（降级行优先）→ 只返回路径
   // v2.83：候选先按磁盘路径去重（同内容重复记录不重复占预算）
