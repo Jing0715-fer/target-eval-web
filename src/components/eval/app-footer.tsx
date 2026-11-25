@@ -1,5 +1,6 @@
 /** 紧凑底部信息条：数据源说明 + 当前 LLM 引擎 + 数据隔离提示（Linear 式低调页脚） */
 import { ShieldCheck } from 'lucide-react'
+import { APP_VERSION } from '@/lib/version'
 
 export function AppFooter({ engineSummary }: { engineSummary?: string }) {
   return (
@@ -9,7 +10,9 @@ export function AppFooter({ engineSummary }: { engineSummary?: string }) {
           <span className="size-1.5 rounded-[2px] bg-primary" aria-hidden />
           TargetEval
           <span className="font-normal text-muted-foreground/50" aria-hidden>·</span>
-          <span className="font-mono text-[10px] font-normal text-muted-foreground/85">v2.60.0</span>
+          {/* v2.79：版本号改用单一来源（此前硬编码 v2.60.0 从未随版本推进更新 —
+              排查用户部署版本时页脚版本号完全失真） */}
+          <span className="font-mono text-[10px] font-normal text-muted-foreground/85">{APP_VERSION}</span>
         </span>
         <span className="hidden h-3 w-px bg-border sm:block" aria-hidden />
         <p className="text-[11px] leading-relaxed text-muted-foreground">

@@ -222,8 +222,11 @@ export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]
 
 /** v2.59→v2.67：BLAST nr 全库检索命中表（靶点身份识别证据 — PDB 库同源不足以
  *  归属 UniProt 时提交序列改查 NCBI nr 全库）。v2.67：与 HTML 报告同口径 — 全量
- *  直出（此前「前 5 条直出 + 其余折叠」），容器内滚动查看。 */
-export function BlastNrTable({ hits }: { hits: BlastNrHit[] }) {
+ *  直出（此前「前 5 条直出 + 其余折叠」），容器内滚动查看。
+ *  v2.82：variant="uniprot" — EBI UniProt 库（Swiss-Prot）序列匹配命中（同款
+ *  表格，标题/说明区分 — 身份级联 v2.44 通道的检索证据）。 */
+export function BlastNrTable({ hits, variant = 'nr' }: { hits: BlastNrHit[]; variant?: 'nr' | 'uniprot' }) {
+  const isUni = variant === 'uniprot'
   const rows = (list: BlastNrHit[]) => list.map((h, i) => {
     const isUniprot = h.db !== 'other' && /^[A-Z0-9]{6,10}$/.test(h.accession)
     return (
@@ -292,8 +295,8 @@ export function BlastNrTable({ hits }: { hits: BlastNrHit[] }) {
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/70 bg-muted/40 px-4 py-2.5">
-        <p className="text-xs font-semibold text-foreground">BLAST nr 全库检索</p>
-        <p className="font-mono text-[10px] tracking-wide text-muted-foreground/85">NCBI nr · {hits.length} hits · 靶点身份识别</p>
+        <p className="text-xs font-semibold text-foreground">{isUni ? 'UniProt 库序列匹配' : 'BLAST nr 全库检索'}</p>
+        <p className="font-mono text-[10px] tracking-wide text-muted-foreground/85">{isUni ? `EBI BLAST · Swiss-Prot · ${hits.length} hits · 靶点身份识别` : `NCBI nr · ${hits.length} hits · 靶点身份识别`}</p>
       </div>
       <div className="eval-scroll overflow-auto">
         <Table>
@@ -311,7 +314,9 @@ export function BlastNrTable({ hits }: { hits: BlastNrHit[] }) {
         </Table>
       </div>
       <p className="border-t border-border/60 px-4 py-2.5 text-[11px] leading-relaxed text-muted-foreground/85">
-        PDB 库同源不足以归属 UniProt（一致性 &lt;85% 或覆盖 &lt;40%，或检索失败）时，提交序列自动改查 NCBI nr 全库定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。
+        {isUni
+          ? 'PDB 库同源与 NCBI nr 全库均未能确定靶点身份（或检索失败）时，提交序列自动改查 EBI BLAST（UniProtKB Swiss-Prot 人工审校库）定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'
+          : 'PDB 库同源不足以归属 UniProt（一致性 <85% 或覆盖 <40%，或检索失败）时，提交序列自动改查 NCBI nr 全库定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'}
       </p>
     </div>
   )

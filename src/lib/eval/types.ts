@@ -735,6 +735,9 @@ export interface JobSummary {
   /** v2.59：BLAST nr 全库检索命中（靶点身份识别级联实际执行 nr 检索时存档，≤20 条；
    *  报告/结果页展示「前 5 条直出 + 其余折叠」；nr 未执行/无命中/历史作业缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联 v2.44 通道实际执行
+   *  且有命中时存档，≤20 条；报告/结果页展示；历史作业缺省） */
+  uniprotBlastHits?: BlastNrHit[]
   /** 合并评估（UniProt+序列同靶点）时的构建信息 */
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+ 作业存在；历史作业缺省） */

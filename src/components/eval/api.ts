@@ -25,6 +25,7 @@ import {
   type LocalEngineStore,
 } from './llm-store-migration'
 import { getCachedJobDetail } from './job-cache'
+import { APP_VERSION } from '@/lib/version'
 
 /** GET /api/jobs — 最近作业列表 */
 export async function fetchJobList(): Promise<JobListItem[]> {
@@ -762,8 +763,49 @@ export async function uploadImportedReport(fileName: string, html: string): Prom
   }
 }
 
+/** v2.81：批量校验导入报告的服务端留存是否仍可读（记录在 + 归属匹配 + 落盘
+ *  文件存在）— 返回缺失的 id 列表。端点不可达/响应异常返回 null（调用方视同
+ *  全部存活 — 不盲目触发全量重传，服务端不可用时生成本就无法进行）。 */
+export async function verifyImportedReports(ids: string[]): Promise<{ missing: string[] } | null> {
+  if (ids.length === 0) return { missing: [] }
+  try {
+    const res = await fetch(`/api/evaluate/ht-imported-report?ids=${encodeURIComponent(ids.slice(0, 60).join(','))}`, {
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; missing?: unknown } | null
+    if (!data?.ok || !Array.isArray(data.missing)) return null
+    return { missing: data.missing.filter((x): x is string => typeof x === 'string') }
+  } catch {
+    return null
+  }
+}
+
+/** v2.83：按内容哈希批量校验服务端留存 — 返回「哈希 → 存活留存 id」映射与
+ *  仍缺失的哈希清单。同内容已有任何可读留存即命中（重复导入/历史批次同样
+ *  采纳，无需重传）。端点不可达/响应异常返回 null（调用方自定降级策略）。 */
+export async function verifyImportedSources(shas: string[]): Promise<{ retained: Record<string, string>; missing: string[] } | null> {
+  if (shas.length === 0) return { retained: {}, missing: [] }
+  try {
+    const res = await fetch(`/api/evaluate/ht-imported-report?shas=${encodeURIComponent(shas.slice(0, 60).join(','))}`, {
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; retained?: unknown; missing?: unknown } | null
+    if (!data?.ok || typeof data.retained !== 'object' || data.retained == null || !Array.isArray(data.missing)) return null
+    const retained: Record<string, string> = {}
+    for (const [k, v] of Object.entries(data.retained as Record<string, unknown>)) {
+      if (typeof v === 'string') retained[k] = v
+    }
+    return { retained, missing: data.missing.filter((x): x is string => typeof x === 'string') }
+  } catch {
+    return null
+  }
+}
+
 /** POST /api/evaluate/ht-dashboard 生成的统计看板（评分统计 + AI 整体可行性报告）
- *  v2.71：progress = 生成阶段进度文案（running 期间轮询回传 — 横幅实时展示） */
+ *  v2.71：progress = 生成阶段进度文案（running 期间轮询回传 — 横幅实时展示）
+ *  v2.76：progressPct = 全局百分比 0-100（进度条；服务端各阶段权重标定后编码回传） */
 export interface HtDashboardInfo {
   id: string
   status: 'running' | 'done' | 'error'
@@ -772,6 +814,11 @@ export interface HtDashboardInfo {
   createdAt?: string
   /** v2.71：生成阶段进度（仅 running 期间返回 — 前端「生成中」横幅实时展示） */
   progress?: string
+  /** v2.76：全局进度百分比 0-100（仅 running 期间返回 — 前端「生成中」横幅进度条） */
+  progressPct?: number
+  /** v2.78：可自动重试的失败（服务重启/失联导致的「生成中断」— generateHtDashboard
+   *  据此自动重新生成一次，重试仍失败才把错误呈现给用户） */
+  retryable?: boolean
   /** v2.60：本次生成从浏览器本地缓存快照恢复的靶点数（服务端作业已过期/实例回收） */
   recoveredCount?: number
   /** v2.60：无数据副本被跳过的靶点数（服务端已过期且本地缓存无快照） */
@@ -847,8 +894,12 @@ function buildSnapshotsForMissing(missingJobIds: string[]): HtArchivedSnapshotIn
  * v2.60 两阶段重试：服务端发现部分作业已不在 DB（实例回收/过期）时返 409 +
  * missingJobIds（不创建看板）；此处从浏览器本地缓存提取这些作业的终态快照
  * 重试（allowPartial — 仍缺的靶点计入 dropped 跳过，不再整单失败「作业不存在」）。
+ * v2.78 生成中断自动重试：服务端 GET 轮询内置僵死检测（running 且写入停滞
+ * >90s = 生成进程已被服务重启/OOM 带走 → 立即落库「生成中断」error），本函数
+ * 识别该错误（前缀）或与服务器失联（retryable）时自动重新生成一次 — 用户对
+ * 服务重启完全无感（重试仍失败才呈现错误与手动重试入口）。
  */
-export async function generateHtDashboard(input: {
+export interface HtDashboardGenerateInput {
   entries: HtDashboardEntry[]
   goal?: string
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；v2.68 seqs = 行内序列格原文 —
@@ -866,21 +917,89 @@ export async function generateHtDashboard(input: {
     sequence?: string
     fileName?: string
     reportId?: string
+    /** v2.83：原文内容哈希（reportId 死亡/丢失时服务端按内容找回同内容留存） */
+    sourceSha?: string
     range?: [number, number]
     stats?: ImportedReportStats
   }>
   /** v2.68：导入报告携带的原作业 id（entries 中对应行标「载入」徽标 — 与本次评估行区分） */
   importedJobIds?: string[]
-  /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示） */
-  onProgress?: (msg: string) => void
-}): Promise<HtDashboardInfo> {
+  /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示）；
+   *  v2.76：第二参数 pct = 全局百分比 0-100（进度条，旧服务端无此字段时 undefined） */
+  onProgress?: (msg: string, pct?: number) => void
+}
+
+/** v2.78：服务端僵死检测落库的错误文案前缀 — 与服务端 HT_DASHBOARD_STALL_PREFIX
+ *  字面量一致（服务端 lib 带 Prisma/fs 依赖不能进客户端包，故两端各持一份；
+ *  文案变更需两处同步）。 */
+const HT_STALL_ERROR_PREFIX = '生成中断：'
+
+/** v2.79：无进度心跳判定窗口（ms）。v2.77+ 服务端看门狗每 5s 心跳写库 → 活生成
+ *  期间进度文本/百分比至多 ~8s（心跳 5s + 轮询 3s）不变；连续 3 分钟（20 倍余量）
+ *  无任何变化且轮询持续成功 = 生成进程已死或服务端写入受阻（旧版 v2.77 服务端
+ *  无僵死检测 / v2.78+ 标记落库失败两类场景 — 用户实测「10 分钟无进展」仅剩的
+ *  两条通路）→ 快速失败并自动重新生成一次，不再盲等 10 分钟黑盒。 */
+const PROGRESS_STALL_MS = 180_000
+
+/** v2.79：错误文案自标注部署版本 — 用户回报错误文本即可定位前后端实际运行的
+ *  代码版本（服务端版本来自 GET 状态轮询回传的 v 字段；未观测到时仅标前端）。
+ *  「统计看板生成超时」在 v2.77 与 v2.78 文案完全相同但行为不同 — 拿不到版本
+ *  就无法定位是哪一版的行为（此前页脚版本号更停留在 v2.60.0 从未更新）。 */
+const verTag = (serverV?: string): string => `（前端 ${APP_VERSION}${serverV ? ` · 服务端 ${serverV}` : ''}）`
+
+export async function generateHtDashboard(input: HtDashboardGenerateInput): Promise<HtDashboardInfo> {
+  for (let attempt = 0; ; attempt++) {
+    let result: HtDashboardInfo
+    try {
+      result = await generateHtDashboardAttempt(input)
+    } catch (e) {
+      // POST 阶段网络失败（post 内部已重试 3×5s 仍不通 — 服务器重启窗口）：
+      // 2s 后自动重新生成一次（服务器恢复即成功，重试仍失败才抛给调用方）
+      if (attempt >= 1) throw e
+      input.onProgress?.('与服务器连接中断 — 正在自动重新生成…', undefined)
+      await new Promise(r => setTimeout(r, 2000))
+      continue
+    }
+    // v2.78：服务端「生成中断」（僵死检测 — 生成进程被服务重启/OOM 带走）或
+    //  轮询阶段失联（retryable — v2.79 起含 3 分钟无进度心跳停滞与服务响应异常）
+    //  → 自动重新生成一次；其余错误原样返回
+    const stalled = result.status === 'error' && typeof result.error === 'string' && result.error.startsWith(HT_STALL_ERROR_PREFIX)
+    const lostServer = result.status === 'error' && result.retryable === true
+    if (attempt >= 1 || !(stalled || lostServer)) return result
+    input.onProgress?.(stalled ? '服务重启导致生成中断 — 正在自动重新生成…' : '生成停滞/与服务器连接中断 — 正在自动重新生成…', undefined)
+    await new Promise(r => setTimeout(r, 2000))
+  }
+}
+
+async function generateHtDashboardAttempt(input: HtDashboardGenerateInput): Promise<HtDashboardInfo> {
   const llm = getLlmEngineOverride()
-  const post = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>
+  // v2.74：POST 瞬态重试 — dev server 重编译 / 网关瞬断窗口内 fetch 直接抛
+  //  "Failed to fetch"（v2.73 及之前 POST 一次网络抖动即整体判死，而服务端实际
+  //  生成得好好的 — 用户实测报错根因之一）。最多 3 次 × 5s；业务 4xx 不重试。
+  //  v2.75：404/405 也纳入瞬态重试 — 本端点的 POST 处理器永不返回 404/405（业务
+  //  错误只有 400/409/500），出现即框架层路由未就绪（dev server 重启窗口 /
+  //  部署中），重试可自愈（用户实测「统计看板生成失败（HTTP 404）」根因）；
+  //  重试耗尽仍 404 时报错文案附指引。
+  const postOnce = (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) =>
     fetch('/api/evaluate/ht-dashboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...input, ...(llm ? { llm } : {}), ...extra }),
     })
+  const post = async (extra?: { archived?: HtArchivedSnapshotInput[]; allowPartial?: boolean }) => {
+    let lastErr: unknown = null
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = await postOnce(extra)
+        if ((r.status >= 500 || r.status === 404 || r.status === 405) && i < 2) { await new Promise(rs => setTimeout(rs, 5000)); continue }
+        return r
+      } catch (e) {
+        lastErr = e
+        if (i < 2) await new Promise(rs => setTimeout(rs, 5000))
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error('无法连接服务器（网络中断）')
+  }
   let res = await post()
   let data = (await res.json().catch(() => null)) as {
     ok?: boolean
@@ -895,7 +1014,13 @@ export async function generateHtDashboard(input: {
     data = (await res.json().catch(() => null)) as typeof data
   }
   if (!res.ok || !data?.ok || !data.dashboard) {
-    throw new Error(data?.error ?? `统计看板生成失败（HTTP ${res.status}）`)
+    // v2.75：404 附明确指引 — 本端点 POST 永不合法返回 404（见上 post 注释），
+    //  重试耗尽仍 404 说明服务长时间未就绪（部署中/异常重启），告知用户稍后重试
+    //  而非让「HTTP 404」不知所云（用户实测反馈无法理解该错误）。
+    const hint = res.status === 404 || res.status === 405
+      ? ' — 服务暂不可达，可能正在重启或部署中；运行结果已保留，稍后打开该运行会自动重试，或点击「重新生成汇总报告」'
+      : ''
+    throw new Error(data?.error ?? `统计看板生成失败（HTTP ${res.status}${hint}）`)
   }
   if (data.dashboard.status !== 'running') return data.dashboard
   // POST 应答携带的恢复/跳过信息（GET 状态不回传 — 轮询终态后合并回结果供调用方提示）
@@ -904,31 +1029,152 @@ export async function generateHtDashboard(input: {
     ...(data.dashboard.droppedCount != null ? { droppedCount: data.dashboard.droppedCount } : {}),
     ...(data.dashboard.droppedLabels?.length ? { droppedLabels: data.dashboard.droppedLabels } : {}),
   }
-  // 轮询至终态（LLM 整体报告 ≤2 分钟；失败/超时均如实返回 — 调用方降级提示）。
-  //  v2.71：① 超时 240s → 600s（对齐服务端 maxDuration — 大批次 LLM 重试叠加
-  //  原文内嵌时可超 4 分钟，旧上限把仍在正常生成的运行误报为「超时」；
-  //  ② running 期间回传服务端阶段进度（生成中横幅实时展示，不再黑盒等待）；
-  //  ③ 服务端短暂重启（如部署/OOM 后自愈）期间 fetch 失败 → 继续轮询不中断。
+  // 轮询至终态。v2.74 三重容错（修复用户实测「Failed to fetch」误报与长等待误判超时）：
+  //  ① 轮询 fetch 网络异常（dev 重编译 / 网关瞬断 / 服务器短暂重启自愈）→ 不再直接
+  //    抛出（v2.73 及之前 `.then()` 不捕获 fetch rejection — 一次网络抖动即把整个
+  //    生成判死「Failed to fetch」）；连续 20 次（≈60s）全失败才判定网络中断；
+  //  ② 超时改「无进展判定」：进度文本变化即重置 10 分钟窗口（服务端 v2.74 起 LLM
+  //    长等待期间每 5s 写心跳进度 — 不再出现「LLM 限流重试期间进度静默被误判超时」）；
+  //    硬上限 30 分钟；
+  //  ③ running 期间回传服务端阶段进度（v2.71 起 — 生成中横幅实时展示）。
+  //  v2.77 补强（配合服务端全局阶段看门狗 — 根除「10 分钟无进展」误报的最后一环）：
+  //  ④ 轮询 fetch 挂 30s 超时（服务进程被同步长任务阻塞时，请求悬而不决 → 旧实现
+  //    await 永不返回、既不计数也不超时，横幅无限挂在「生成中」；现在快速计入
+  //    netFails 走①的容错路径）；
+  //  ⑤ 响应不可解析（JSON 解析得 null — 框架层路由未就绪返 HTML 404 / 网关异常页）
+  //    独立计数：旧实现静默跳过，10 分钟窗口照常走完才报「无进展超时」；现在约
+  //    1 分钟持续不可解析即快速失败并给出准确归因；
+  //  ⑥ 进度百分比变化同样重置窗口（文本含已等待秒数通常同步变化，双保险）；
+  //  ⑦ 超时文案重写：服务端各阶段每 5s 心跳汇报，出现本提示即说明服务进程已
+  //    中断/卡滞（真卡滞由服务端 20 分钟看门狗先一步落库 error — 前端会立刻拿到）；
+  //  v2.79 ⑧：无进度窗口 10 分钟 → 3 分钟（PROGRESS_STALL_MS）+ retryable 自动重试
+  //    — v2.78 后用户仍复现「10 分钟无进展」：服务端僵死标记落库失败（磁盘满/
+  //    库被占用）时 v2.78 静默吞掉继续盲等；服务端代码为 v2.77（未重启/未拉取）
+  //    时无僵死检测可依赖。活生成器每 5s 心跳（20 倍余量）不可能 3 分钟静默 —
+  //    快速失败重试优于黑盒等待；⑨ 错误文案自标注前后端版本（verTag）。
   const t0 = Date.now()
+  let lastProgress = ''
+  let lastPct: number | null | undefined = null
+  let lastProgressAt = Date.now()
+  let netFails = 0
+  let badResp = 0
+  let serverV: string | undefined // v2.79：最近一次轮询回传的服务端版本（verTag 用）
   for (;;) {
     await new Promise(r => setTimeout(r, 3000))
-    const d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store' })
-      .then(x => x.json().catch(() => null)) as { ok?: boolean; dashboard?: HtDashboardInfo } | null
+    let d: { ok?: boolean; v?: string; dashboard?: HtDashboardInfo } | null = null
+    try {
+      // v2.77 ④：30s 请求级超时（与服务端 3s 间隔轮询节奏匹配 — 正常响应 <100ms）
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 30_000)
+      try {
+        d = await fetch(`/api/evaluate/ht-dashboard?id=${encodeURIComponent(data.dashboard.id)}`, { cache: 'no-store', signal: ctrl.signal })
+          .then(x => x.json().catch(() => null)) as { ok?: boolean; v?: string; dashboard?: HtDashboardInfo } | null
+      } finally {
+        clearTimeout(timer)
+      }
+      netFails = 0
+    } catch {
+      netFails++
+      if (netFails >= 20) {
+        // v2.78 retryable：失联多为服务重启窗口（生成进程大概率已死 — 记录僵死）
+        //  → 外层自动重新生成一次，恢复后无感续上
+        return { id: data.dashboard.id, status: 'error' as const, error: `与服务器失去连接（约 1 分钟内请求持续失败 — 服务可能重启中；生成可能仍在后台进行，恢复后可从历史重试或刷新查看）${verTag()}`, retryable: true, ...recoverInfo }
+      }
+      continue
+    }
+    if (d === null) {
+      // v2.77 ⑤：请求成功但响应体不可解析（框架层 404 HTML / 重编译窗口 / 网关
+      //  异常页）— 与网络中断分开归因，持续 ≈1 分钟即快速失败；v2.79：纳入
+      //  retryable（dev 重编译窗口结束后自动重新生成可无感恢复 — 与失联同口径）。
+      badResp++
+      if (badResp >= 20) {
+        return { id: data.dashboard.id, status: 'error' as const, error: `服务响应异常（约 1 分钟内状态查询持续返回不可解析内容 — 服务可能正在重启或重编译；生成可能仍在后台进行，稍后可从历史重试或刷新查看）${verTag()}`, retryable: true, ...recoverInfo }
+      }
+      continue
+    }
+    badResp = 0
+    if (typeof d.v === 'string') serverV = d.v
     if (d?.dashboard && d.dashboard.status !== 'running') return { ...d.dashboard, ...recoverInfo }
-    if (d?.dashboard?.progress) input.onProgress?.(d.dashboard.progress)
-    if (Date.now() - t0 > 600_000) {
-      return { id: data.dashboard.id, status: 'error' as const, error: '统计看板生成超时（10 分钟 — 生成可能仍在后台进行，可稍后从历史重试或刷新查看）', ...recoverInfo }
+    // v2.75：GET 返回 JSON 错误体（无 dashboard 字段 — 处理器 404「看板不存在」等）
+    //  → 快速失败，不再空转 10 分钟等超时。看板记录已不在服务器（实例回收/数据
+    //  重置/归属变更）时生成永远无法完成，早失败 + 明确文案优于超时；框架层瞬态
+    //  404（HTML 体 → d=null）不在此列，继续轮询等自愈。
+    if (d && !d.dashboard && !d.ok && typeof (d as { error?: unknown }).error === 'string') {
+      // v2.78 retryable：看板记录已不在服务器（实例回收/数据重置）— 重新 POST
+      //  即可整体重建（409 时走缓存快照两阶段恢复），外层自动重试一次
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成失败（${(d as { error: string }).error} — 服务端看板数据已不存在；运行结果不受影响，可点击「重新生成汇总报告」重建）${verTag(serverV)}`, retryable: true, ...recoverInfo }
+    }
+    if (d?.dashboard?.progress) {
+      input.onProgress?.(d.dashboard.progress, d.dashboard.progressPct)
+      // v2.77 ⑥：文本或百分比任一变化即重置窗口
+      const pctNow = d.dashboard.progressPct ?? null
+      if (d.dashboard.progress !== lastProgress || pctNow !== lastPct) {
+        lastProgress = d.dashboard.progress
+        lastPct = pctNow
+        lastProgressAt = Date.now()
+      }
+    }
+    const now = Date.now()
+    if (now - lastProgressAt > PROGRESS_STALL_MS) {
+      // v2.79：无进度心跳 3 分钟 → 快速失败 + retryable（外层自动重新生成一次）。
+      //  本文案仅在重试也失败后才会呈现给用户（重试成功时错误被外层拦截）—
+      //  故可如实描述「已自动重新生成仍未恢复」。
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成停滞（连续 3 分钟无进度心跳 — 生成进程已中断或服务端状态写入受阻；已自动重新生成一次仍未恢复。运行结果不受影响，可稍后从历史重试或刷新查看）${verTag(serverV)}`, retryable: true, ...recoverInfo }
+    }
+    if (now - t0 > 1_800_000) {
+      return { id: data.dashboard.id, status: 'error' as const, error: `统计看板生成超时（已等待 30 分钟 — 生成可能仍在后台进行，运行结果不受影响；可稍后从历史重试或刷新查看）${verTag(serverV)}`, ...recoverInfo }
     }
   }
 }
 
-/** GET /api/evaluate/ht-archive — 一次高通量运行的全部报告打包 zip 下载
- *  （每组一个子文件夹 + 合并报告 + _README.txt 清单）。失败抛错。 */
+/** GET/POST /api/evaluate/ht-archive — 一次高通量运行的全部报告打包 zip 下载
+ *  （每组一个子文件夹 + 合并报告 + _README.txt 清单）。失败抛错。
+ *  v2.80「更稳妥的打包」：① entries 改走 POST JSON body（GET query 600 条目时
+ *  可达数百 KB — 部分网关/浏览器 414 或截断；GET 通道保留兼容）；② fetch 挂
+ *  300s 超时（服务端 zip 构建有界 — nodebuffer 全量缓冲后一次性响应，挂死多为
+ *  服务重启/网关瞬断，旧版无超时会永远转圈）；③ 瞬态重试 3×5s（网络失败/5xx/
+ *  404 均可能是重启窗口 — 与 ht-dashboard POST 同口径）。 */
 export async function downloadHtReportArchive(entries: HtArchiveEntry[], fallbackName = '报告'): Promise<void> {
   if (!entries.length) throw new Error('没有可下载的报告')
-  const res = await fetch(`/api/evaluate/ht-archive?entries=${encodeURIComponent(JSON.stringify(entries))}`, {
-    cache: 'no-store',
-  })
+  const postOnce = async (): Promise<Response> => {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 300_000)
+    try {
+      return await fetch('/api/evaluate/ht-archive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entries }),
+        cache: 'no-store',
+        signal: ctrl.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  let res: Response | null = null
+  let lastErr: unknown = null
+  for (let i = 0; i < 3 && !res; i++) {
+    try {
+      const r = await postOnce()
+      if ((r.status >= 500 || r.status === 404 || r.status === 405) && i < 2) {
+        await new Promise(rs => setTimeout(rs, 5000))
+        continue
+      }
+      res = r
+    } catch (e) {
+      lastErr = e
+      if (i < 2) await new Promise(rs => setTimeout(rs, 5000))
+    }
+  }
+  if (!res) {
+    throw new Error(
+      lastErr instanceof Error && lastErr.name === 'AbortError'
+        ? '批量下载超时（5 分钟无响应 — 服务可能正在重启或网络不通；运行结果不受影响，稍后可重试）'
+        : lastErr instanceof Error && lastErr.message
+          ? lastErr.message
+          : '无法连接服务器（网络中断 — 稍后可重试；运行结果不受影响）',
+    )
+  }
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null
     throw new Error(data?.error ?? `批量下载失败（HTTP ${res.status}）`)

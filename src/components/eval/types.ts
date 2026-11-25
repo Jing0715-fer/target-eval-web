@@ -233,6 +233,8 @@ export interface MergedTargetLite {
   rangeOutsideBlastHits?: BlastHit[]
   /** v2.59：BLAST nr 全库检索命中（BlastNrTable 展示；历史报告缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.82：EBI UniProt 库序列匹配命中（BlastNrTable uniprot 变体展示；历史报告缺省） */
+  uniprotBlastHits?: BlastNrHit[]
   /** v2.9：AlphaFold 预测结构元数据（交互 3D 视图见下载的 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
@@ -709,6 +711,9 @@ export interface JobSummary {
   /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档，≤20 条；
    *  结果页 BLAST 章节展示前 5 条 + 折叠；nr 未执行/历史作业缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联 v2.44 通道实际
+   *  执行且有命中时存档，≤20 条；结果页 BLAST 章节展示；历史作业缺省） */
+  uniprotBlastHits?: BlastNrHit[]
   construct?: ConstructInfo
   /** BLAST 执行状态（v1.7+） */
   blast?: BlastStatusInfo
@@ -1013,6 +1018,11 @@ export interface HTGroupItemState {
   /** v2.69：导入报告原文的服务端留存 id（导入时上传 — 汇总报告生成时服务端
    *  读回作为「完整报告」弹出页内嵌原文，与下载的单独报告一致） */
   importedReportId?: string
+  /** v2.81：导入报告原文的浏览器本地留存键（内容哈希 — ht-import-cache）。
+   *  汇总报告生成前校验服务端留存（importedReportId），缺失/丢失时凭此键从
+   *  本地留存取回原文重新上传自愈（ensureImportedRetention）— 弹出页原文内嵌
+   *  不再取决于导入那一瞬间的上传成败 */
+  importedReportSha?: string
   /** v2.72：同行被忽略的抗体链（HtSeqTarget.antibodyPartner 透传 — 提交评估
    *  时随 options 携带，抗原的 Cryo-EM 评分计入复合物分子量） */
   antibodyPartner?: { chains: number; lengthAa: number }
@@ -1068,9 +1078,16 @@ export interface HTRunState {
   dashboardError?: string
   /** v2.36：汇总报告生成中（完成横幅的「生成中」态 — 终态后由 dashboardId/dashboardError 接替） */
   dashboardPending?: boolean
+  /** v2.78：本次生成开始时间戳（ms — 生成中横幅「已等待 Ns」计时；服务进程中断时
+   *  配合 v2.78 僵死检测 90s 内自动标记「生成中断」并自动重新生成一次） */
+  dashboardPendingSince?: number
   /** v2.71：汇总报告生成阶段进度（running 期间轮询回传 — 生成中横幅实时展示；
    *  纯展示字段，终态后由 dashboardId/dashboardError 接替清空） */
   dashboardProgress?: string
+  /** v2.76：汇总报告生成全局进度百分比 0-100（与 dashboardProgress 同一次轮询
+   *  回传 — 生成中横幅进度条；纯展示字段，终态后清空。旧服务端无编码时 undefined，
+   *  横幅退化为不确定态动画条） */
+  dashboardProgressPct?: number
   /** v2.36：原始 Excel 行快照（汇总报告「原表内容」列；导入时留存）。v2.68：seqs =
    *  该行序列单元格的原文（与 text 中 [序列 N aa] 标记按出现顺序对应 — 汇总主表
    *  序列标记处的一键复制按钮数据源；旧快照无此字段则不渲染按钮） */
@@ -1092,6 +1109,8 @@ export interface HtImportedKeyEntry {
   stats?: ImportedReportStats
   /** v2.69：导入报告原文的服务端留存 id（弹出页内嵌原文） */
   reportId?: string
+  /** v2.81：原文浏览器本地留存键（内容哈希 — 生成前自愈重传用） */
+  reportSha?: string
 }
 
 /** 高通量评估启动载荷（InputPanel 高通量 Tab → startRun） */
@@ -1115,8 +1134,9 @@ export interface HTStartPayload {
   importedFlags?: { groups?: boolean[][]; seqGroups?: boolean[][] }
   /** v2.68：启动面板导入报告携带的靶点键→报告数据（importedFlags 对应键的补充 —
    *  jobId 供汇总报告从服务端恢复完整统计行；fileName 为行内「载入」徽标说明；
-   *  v2.69 stats/reportId = 解析的统计快照 + 原文服务端留存 id） */
-  importedReports?: Array<{ key: string; jobId?: string; fileName: string; stats?: ImportedReportStats; reportId?: string }>
+   *  v2.69 stats/reportId = 解析的统计快照 + 原文服务端留存 id；v2.81 reportSha =
+   *  原文浏览器本地留存键 — 生成前自愈重传用） */
+  importedReports?: Array<{ key: string; jobId?: string; fileName: string; stats?: ImportedReportStats; reportId?: string; reportSha?: string }>
   goal?: string
   ligands?: EvaluateRequest['ligands']
   options: EvaluateOptions

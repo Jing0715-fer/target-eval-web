@@ -26,10 +26,18 @@ export function ensureImportedReportTable(): Promise<void> {
         '"size" INTEGER NOT NULL, ' +
         '"ownerKey" TEXT, ' +
         '"ownerMask" TEXT, ' +
+        '"contentSha" TEXT, ' +
         '"createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)',
       )
+      // v2.83：既有库补列（幂等 — 列已存在时 SQLite 报 duplicate column，吞掉即可）
+      try {
+        await db.$executeRawUnsafe('ALTER TABLE "ImportedReport" ADD COLUMN "contentSha" TEXT')
+      } catch {
+        /* 列已存在 */
+      }
       await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS "ImportedReport_createdAt_idx" ON "ImportedReport"("createdAt")')
       await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS "ImportedReport_ownerKey_createdAt_idx" ON "ImportedReport"("ownerKey", "createdAt")')
+      await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS "ImportedReport_contentSha_idx" ON "ImportedReport"("contentSha")')
     })().catch((err: unknown) => {
       ensurePromise = null // 本次失败不缓存 — 下次调用重试
       throw err

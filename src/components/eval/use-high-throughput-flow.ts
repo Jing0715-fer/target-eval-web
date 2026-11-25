@@ -48,7 +48,7 @@ import { toast } from '@/hooks/use-toast'
 import { downloadHtReportArchive, generateBatchReport, generateHtDashboard, getLlmEngineOverride, isStatelessEnv, judgeTargetRelation, type HtArchiveEntry } from './api'
 import { deleteHTRun, getHTRun, listHTRuns, markInterruptedOnLoad, saveHTRun } from './high-throughput-store'
 import { backfillBatchReportCache, backfillCacheOnMount, backfillJobCache, cacheBatchReport, cacheJobDetail, getCachedJobDetail } from './job-cache'
-import { enrichImportedReports, parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
+import { enrichImportedReports, ensureImportedRetention, parseHtImportFiles, matchReportToTarget, planArchiveSkips, sha256Hex16, diagnoseArchiveImport, type HtArchiveReport, type HtMatchTarget, type ImportEnrichItem } from './ht-archive-import'
 import type { StartResult } from './use-evaluation-flow'
 import { autoDownloadHtmlReport, buildBatchNote, fallbackIndependentJudgment } from './use-evaluation-flow'
 import type { EvaluateRequest, HTGroupItemState, HTGroupState, HTRunState, HtSeqTarget, HTStartPayload, JobDetail, RelationJudgment } from './types'
@@ -101,6 +101,23 @@ function cloneRun(run: HTRunState): HTRunState {
   return JSON.parse(JSON.stringify(run)) as HTRunState
 }
 
+/** v2.75：该运行是否有可生成汇总报告的数据源 — 评估完成靶点（jobId）或任何形态的
+ *  导入载入靶点（与 finalizeHtDashboard 的 entries/importedBare 收集口径一致：
+ *  importedJobId（DB 恢复完整统计行）/ importedReportId·importedStats（解析报告的
+ *  完整统计行）/ 纯 imported 标记（bare 降级行 — 主表呈现 + 完成口径））。
+ *  此前 regenerateDashboard 守卫只认前三者，纯 bare 载入运行（报告无法解析且
+ *  原文留存失败）会误拒「无法生成汇总报告」。 */
+function hasDashboardSource(r: HTRunState): boolean {
+  return r.groups.some((g) => g.items.some((it) =>
+    (it.status === 'done' && it.jobId) ||
+    it.importedJobId ||
+    it.importedReportId ||
+    it.importedStats ||
+    it.imported === true ||
+    (it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入')),
+  ))
+}
+
 /** v2.38：靶点有变动待评估 → 组回可执行态 + 汇总看板作废（下次自然完成重生成） */
 function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
   if (g.status === 'done' || g.status === 'canceled') {
@@ -112,6 +129,8 @@ function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
     r.dashboardError = undefined
     r.dashboardPending = false
     r.dashboardProgress = undefined
+    r.dashboardProgressPct = undefined
+    r.dashboardPendingSince = undefined
   }
 }
 
@@ -155,6 +174,41 @@ function resetFailedForRetry(r: HTRunState): number {
   return n
 }
 
+/** v2.82：载入靶点中「导入报告未回填 UniProt ID」的判定（用户规则：这类报告的
+ *  原评估未识别出靶点身份 — 可选择不载入、重新评估，由当前更强的身份级联
+ *  （PDB 同源回填 → BLAST nr → EBI UniProt 匹配 → 精确序列匹配）补识别）。
+ *  无统计快照（报告解析不出数据）同样视为未回填 — 一并提供重新评估选项。 */
+export function importedItemLacksUniprot(it: HTGroupItemState): boolean {
+  if (it.imported !== true) return false
+  return !it.importedStats?.uniprotId
+}
+
+/** v2.82：批量重置「载入但未回填 UniProt」的靶点为待评估（脱离载入口径，导入
+ *  数据一并作废 — 与 toggleSkipItem 恢复路径同构）— 返回重置数与靶点名样本。 */
+function resetImportedWithoutUniprot(r: HTRunState): { reset: number; labels: string[] } {
+  let n = 0
+  const labels: string[] = []
+  for (const g of r.groups) {
+    for (const it of g.items) {
+      if (!importedItemLacksUniprot(it)) continue
+      it.status = 'pending'
+      it.skipNote = undefined
+      it.error = undefined
+      it.imported = undefined
+      it.importedJobId = undefined
+      it.importedFile = undefined
+      it.importedStats = undefined
+      it.importedReportId = undefined
+      it.importedReportSha = undefined
+      it.jobId = undefined // 防御性清引用（载入项本无 jobId — 与 resetFailedForRetry 同口径）
+      n++
+      if (labels.length < 5) labels.push(it.label)
+    }
+    if (g.items.some((it) => it.status === 'pending')) touchGroupForRerun(g, r)
+  }
+  return { reset: n, labels }
+}
+
 /** v2.41：从终态作业详情推导「LLM 报告未完整生成」的备注（完整时 undefined）。
  *  新作业读 summary.reportLlmMissing；旧版本作业（无该字段）从终态日志快照
  *  推导（管线日志行「LLM 报告章节 X「…」 失败: …」）— 存量运行同样能标可重跑 */
@@ -183,6 +237,10 @@ interface ArchiveSkipResult {
   /** v2.70：有源文件但原文未能留存/内嵌的靶点数（上传失败或超 32MB 上限 —
    *  统计快照不受影响，仅汇总弹出页无原文可嵌；toast 提示用户） */
   uploadMissed: number
+  /** v2.73：导入后仍需评估的靶点数（pending + canceled — 恢复运行时 canceled
+   *  会被重置为 pending 重新评估）。0 = 全部靶点已了结（完成/载入/跳过），
+   *  点击「继续运行」即刻完成并直接生成汇总报告（toast/按钮文案自适应用） */
+  pendingLeft: number
 }
 
 /** v2.38→v2.45 导入既有报告匹配 — 用 planArchiveSkips 统一严格规则 + v2.45 组号通道：
@@ -246,12 +304,17 @@ function applyArchiveSkips(
   }
   // v2.49 逐文件诊断（含已完成靶点提示 — 避免误报「不在清单」）
   const diag = diagnoseArchiveImport(reports, matchable, { totalGroups: r.groups.length }, all)
+  // v2.73：导入后仍需评估的靶点数（pending + canceled；恢复时 canceled 重置为
+  //  pending 重新评估）。0 = 点击「继续运行」即刻完成并直接生成汇总报告。
+  const pendingLeft = r.groups.flatMap((g) => g.items)
+    .filter((it) => it.status === 'pending' || it.status === 'canceled').length
   return {
     matched: matchedKeys.size,
     missLines: diag.filter((d) => !d.matched && !d.doneOnly).map((d) => `${d.file}：${d.reason}`),
     doneOnlyCount: diag.filter((d) => d.doneOnly).length,
     matchedByKey,
     uploadMissed: 0,
+    pendingLeft,
   }
 }
 
@@ -278,6 +341,10 @@ export function useHighThroughputFlow() {
   const runRef = useRef<HTRunState | null>(null)
   /** v2.36：finalizeHtDashboard 的稳定引用（openRunById 自动续生成用 — 声明先于函数体） */
   const finalizeHtDashboardRef = useRef<(() => Promise<void>) | null>(null)
+  /** v2.75：本会话内已自动重试过汇总生成的运行 id（打开失败横幅的运行时自动重试
+   *  一次 — 每会话每运行只试一次，失败后靠横幅中的「重新生成」手动重试，避免反复
+   *  打开运行时无谓消耗 LLM 配额） */
+  const dashboardAutoRetriedRef = useRef<Set<string>>(new Set())
   /** v2.25：一次高通量运行的自动下载统一目录前缀 — 默认下载目录下新建文件夹，
    *  同次运行的全部报告（每靶点独立报告 + 合并报告）都落在同一文件夹内。
    *  命名：TargetEval_HT_日期_Ng（恢复运行/openRunById 时按 run 元数据重建，
@@ -866,8 +933,12 @@ export function useHighThroughputFlow() {
     //     存在时直接构建完整统计行（不依赖 DB 保留期，旧版报告也能整合进表格）；
     //     reportId（原文服务端留存 id）供弹出页内嵌报告原文；两者都缺时降级行兜底。
     //     DB 命中时服务端按 label 去重（以 DB 恢复行为准 — 数据更全）
-    const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string; reportId?: string; range?: [number, number]; stats?: HTGroupItemState['importedStats'] }> = []
+    const importedBare: Array<{ label: string; group?: number; sequence?: string; fileName?: string; reportId?: string; sourceSha?: string; range?: [number, number]; stats?: HTGroupItemState['importedStats'] }> = []
     const importedJobIds = new Set<string>()
+    // v2.85：原文内嵌状态统计（完成 toast 明示 — 「上传进度显示了但最终没嵌入」
+    //  的结果不再黑盒：无键靶点数 + 自愈不可达源文件数都有明确反馈）
+    let importedNoRetKeyCount = 0
+    let healUnreachableSources = 0
     for (const g of runState.groups) {
       for (const it of g.items) {
         if (it.status === 'done' && it.jobId) {
@@ -879,6 +950,8 @@ export function useHighThroughputFlow() {
             sequence: it.sequence?.slice(0, 50_000),
             fileName: it.importedFile,
             reportId: it.importedReportId,
+            // v2.83：内容哈希随载荷上传 — reportId 死亡/丢失时服务端按内容找回同内容留存
+            sourceSha: it.importedReportSha,
             range: it.range,
             stats: it.importedStats,
           })
@@ -902,10 +975,67 @@ export function useHighThroughputFlow() {
       })
       return
     }
-    // v2.36：生成中标记（横幅立即可见，终态后接替）
+    // v2.36：生成中标记（横幅立即可见，终态后接替）；v2.78：起始时间戳（横幅「已等待 Ns」计时）
     runState.dashboardPending = true
+    runState.dashboardPendingSince = Date.now()
     saveHTRun(runState)
     setRun(cloneRun(runState))
+    // ── v2.81：导入留存校验 + 自愈重传（用户实测「117 个靶点的原文未能内嵌弹出页」
+    //    根治）— 生成前向服务端批量校验 importedReportId 留存是否仍可读；缺失/
+    //    丢失（导入时上传失败 / DB 重置 / 实例回收）的源文件凭 importedReportSha
+    //    从浏览器本地留存（ht-import-cache）取回 HTML 重新上传，回写运行记录 —
+    //    弹出页原文内嵌不再取决于导入那一瞬间的上传成败。v2.84：端点不可达时
+    //    也尽力重传（POST 幂等去重 — 见 ensureImportedRetention 头注释）。──
+    if (importedBare.length > 0) {
+      const healRefs: Array<{ item: HTGroupItemState; bare: (typeof importedBare)[number] }> = []
+      for (const g of runState.groups) {
+        for (const it of g.items) {
+          if (it.imported !== true && !(it.status === 'skipped' && (it.skipNote ?? '').startsWith('已导入'))) continue
+          // v2.84：组内标签优先匹配（旧版仅按 label 全局 find — 跨组同名标签
+          //  （如两组各有一条「model·链1」）会错配到别组的 bare 载荷条目）
+          const bare = importedBare.find(b => b.label === it.label && b.group === g.index + 1)
+            ?? importedBare.find(b => b.label === it.label)
+          if (bare && (it.importedReportSha || it.importedReportId)) healRefs.push({ item: it, bare })
+        }
+      }
+      // v2.85：无留存键的载入靶点（既无 reportId 也无 sourceSha — 弹出页必降级）。
+      //  历史成因：v2.83 enrich 组装 rep 引用回归（次链靶点丢留存键）/ 更早版本
+      //  导入的旧运行记录。这些靶点本地浏览器也无源文件副本（凭 sha 才能存取），
+      //  无法自动自愈 — 完成 toast 明示数量与恢复方式（重新导入报告文件）。
+      importedNoRetKeyCount = importedBare.filter(b => !b.reportId && !b.sourceSha).length
+      if (healRefs.length > 0) {
+        try {
+          const heal = await ensureImportedRetention(
+            healRefs.map(r => ({ reportId: r.item.importedReportId, sha: r.item.importedReportSha })),
+            {
+              onProgress: msg => {
+                if (runState.dashboardProgress === msg) return
+                runState.dashboardProgress = msg
+                setRun(cloneRun(runState))
+              },
+            },
+          )
+          if (heal.fixed.size > 0) {
+            let healedItems = 0
+            for (const r of healRefs) {
+              const fresh = r.item.importedReportSha ? heal.fixed.get(r.item.importedReportSha) : undefined
+              if (fresh) { r.item.importedReportId = fresh; r.bare.reportId = fresh; healedItems++ }
+            }
+            if (healedItems > 0) {
+              console.log(`[ht-dashboard] 导入留存自愈：采纳/重传 ${healedItems} 个靶点的留存（重传 ${heal.reuploaded} 份 · 零重传采纳 ${heal.adopted} 份）`)
+              saveHTRun(runState)
+            }
+          }
+          // v2.85：自愈后仍无可用留存的源文件数（服务端无同内容 + 浏览器本地
+          //  IndexedDB 也无副本 — 这些靶点弹出页必降级；toast 明示）
+          healUnreachableSources = heal.stillMissing
+          runState.dashboardProgress = undefined
+        } catch {
+          runState.dashboardProgress = undefined
+          /* 自愈失败不阻塞生成 — 沿用既有留存（服务端若仍保有则照常内嵌） */
+        }
+      }
+    }
     try {
       // v2.61：各序列靶点的提交序列（jobId → 全文 — 汇总表「复制序列」按钮与全靶点
       // 完整报告页展示；≤600 条、总量 600K 字符防载荷膨胀 — 超出部分静默丢弃）。
@@ -929,15 +1059,19 @@ export function useHighThroughputFlow() {
         imported: importedBare.length ? importedBare : undefined,
         importedJobIds: importedJobIds.size ? [...importedJobIds] : undefined,
         // v2.71：running 期间轮询回传阶段进度（生成中横幅实时展示 — 不落盘，
-        //  仅文本变化时刷新视图避免重渲染抖动）
-        onProgress: (msg) => {
-          if (runState.dashboardProgress === msg) return
+        //  仅文本变化时刷新视图避免重渲染抖动）；v2.76：附带全局百分比 pct
+        //  （进度条 — 百分比前移同样触发刷新，条平滑推进）
+        onProgress: (msg, pct) => {
+          if (runState.dashboardProgress === msg && runState.dashboardProgressPct === pct) return
           runState.dashboardProgress = msg
+          runState.dashboardProgressPct = pct
           setRun(cloneRun(runState))
         },
       })
       runState.dashboardPending = false
       runState.dashboardProgress = undefined
+      runState.dashboardProgressPct = undefined
+      runState.dashboardPendingSince = undefined
       if (dash.status === 'done') {
         runState.dashboardId = dash.id
         runState.dashboardError = undefined
@@ -960,9 +1094,26 @@ export function useHighThroughputFlow() {
         const importedTail = importedBare.length + importedJobIds.size > 0
           ? `已包含 ${importedJobIds.size + importedBare.length} 个导入载入的靶点（${importedJobIds.size} 个恢复了完整统计${parsedImportedCount ? `、${parsedImportedCount} 个已解析导入报告的评分与结论` : ''}${importedBare.length - parsedImportedCount > 0 ? `、${importedBare.length - parsedImportedCount} 个以载入行呈现（报告无法解析）` : ''}）；`
           : ''
+        // v2.85：报告原文内嵌状态（用户核心关切「原封不动嵌入」— 成败与缺口可见）
+        //  - 有留存键的靶点 = 服务端将内嵌弹出页的（自愈重传后重算 — 含采纳/重传）；
+        //  - 无键 / 自愈不可达的靶点弹出页回退「载入说明 + 评分统计」页，toast
+        //    明示数量与恢复方式（重新导入报告文件 — 浏览器本地凭 sha 留存了源文件
+        //    副本的，重新生成时已自动重传，无需用户处理）。
+        const importedWithKey = importedBare.filter(t => Boolean(t.reportId || t.sourceSha)).length
+        const embedTail = importedBare.length > 0
+          ? importedWithKey === importedBare.length
+            ? `全部 ${importedBare.length} 个载入靶点的报告原文已内嵌弹出页（与原报告字节级一致）；`
+            : `报告原文内嵌 ${importedWithKey}/${importedBare.length} 个载入靶点${importedNoRetKeyCount > 0 ? `（${importedNoRetKeyCount} 个靶点缺少原文留存键${healUnreachableSources > 0 ? `、${healUnreachableSources} 份源文件服务端与浏览器本地均无留存` : ''}）` : healUnreachableSources > 0 ? `（${healUnreachableSources} 份源文件服务端与浏览器本地均无留存）` : ''} — 未内嵌的靶点弹出页将显示载入说明与已解析评分，重新导入对应报告文件并重新生成可恢复原文；`
+          : ''
+        // v2.80：服务端 done 但携带提示（基础版恢复交付 / AI 部分降级 — error 列
+        //  在 done 终态下存的是降级说明而非错误）— toast 如实呈现，用户知道拿到
+        //  的是哪个版本、如何升级
+        const noteTail = typeof dash.error === 'string' && dash.error.trim()
+          ? `；${dash.error.trim()}`
+          : ''
         toast({
           title: '统计看板已生成',
-          description: `${recoverTail}${dropTail}${importedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。`,
+          description: `${recoverTail}${dropTail}${importedTail}${embedTail}评分统计 + AI 整体可行性报告已自动下载；每靶点含一句话结论（能否做）与单独报告链接，「批量下载全部」zip 解压后离线链接可直接点开。${noteTail}`,
         })
       } else {
         runState.dashboardError = dash.error ?? '统计看板生成失败'
@@ -975,6 +1126,8 @@ export function useHighThroughputFlow() {
     } catch (e) {
       runState.dashboardPending = false
       runState.dashboardProgress = undefined
+      runState.dashboardProgressPct = undefined
+      runState.dashboardPendingSince = undefined
       runState.dashboardError = e instanceof Error ? e.message : '统计看板生成失败'
       toast({
         title: '统计看板生成失败',
@@ -1105,6 +1258,7 @@ export function useHighThroughputFlow() {
               it.importedFile = rep.fileName
               it.importedStats = rep.stats
               it.importedReportId = rep.reportId
+              it.importedReportSha = rep.reportSha
             }
           }
         }
@@ -1121,6 +1275,7 @@ export function useHighThroughputFlow() {
               it.importedFile = rep.fileName
               it.importedStats = rep.stats
               it.importedReportId = rep.reportId
+              it.importedReportSha = rep.reportSha
             }
           }
         }
@@ -1361,13 +1516,35 @@ export function useHighThroughputFlow() {
   }, [ensureEditable, resumeRun])
 
   /**
+   * v2.82：重新评估「载入但导入报告未回填 UniProt ID」的靶点（用户规则）—
+   * 批量脱离载入口径（导入数据作废）重置为待评估并自动继续运行；当前身份
+   * 级联（PDB 同源回填 → BLAST nr → EBI UniProt 匹配 → 精确序列匹配）重识别，
+   * 报告/汇总表回填 UniProt 列与身份证据（含 BLAST 检索结果展示）。
+   */
+  const retryImportedWithoutUniprot = useCallback(async (): Promise<StartResult> => {
+    if (!ensureEditable()) return { ok: false, error: '运行进行中' }
+    const r = runRef.current
+    if (!r) return { ok: false, error: '没有打开的运行' }
+    const { reset, labels } = resetImportedWithoutUniprot(r)
+    if (reset === 0) {
+      toast({ title: '没有可重新评估的载入靶点', description: '载入的报告均已回填 UniProt ID（或没有载入靶点）。' })
+      return { ok: false, error: '没有待重评估的载入靶点' }
+    }
+    toast({
+      title: `已取消载入 ${reset} 个未回填 UniProt 的靶点，改为重新评估`,
+      description: `${labels.join('、')}${reset > labels.length ? ` 等 ${reset} 个` : ''} — 正在继续运行（当前身份识别级联将重新检索 PDB 同源 / BLAST nr / UniProt 库补识别）。`,
+    })
+    return resumeRun()
+  }, [ensureEditable, resumeRun])
+
+  /**
    * v2.38→v2.44 导入既有报告（zip 归档 / 单独 HTML 文件，可多选批量）— 匹配到的
    * 未评估靶点标 skipped（报告已在用户手里，不重复评估、不占配额）。返回匹配数
    * + 未命中诊断（v2.49）；失败抛错。匹配循环在模块级 applyArchiveSkips
    * （react-hooks/immutability：直接在 useCallback 内改 runRef 会被 React 编译器拦，
    * 模块函数不受限）。
    */
-  const importArchive = useCallback(async (files: File | File[]): Promise<ArchiveSkipResult> => {
+  const importArchive = useCallback(async (files: File | File[], opts: { onProgress?: (msg: string) => void } = {}): Promise<ArchiveSkipResult> => {
     if (!ensureEditable()) throw new Error('运行进行中，请先暂停或停止')
     const r = runRef.current
     if (!r) throw new Error('没有打开的运行')
@@ -1407,10 +1584,15 @@ export function useHighThroughputFlow() {
         }
       }
       try {
-        const enriched = await enrichImportedReports(enrichItems, parsed)
+        const enriched = await enrichImportedReports(enrichItems, parsed, {
+          // v2.83：百份级导入进度透传（调用方按钮实时反馈）
+          onProgress: opts.onProgress,
+        })
         enrichedTargets.forEach((it, i) => {
           if (enriched[i]?.stats) it.importedStats = enriched[i]!.stats
           if (enriched[i]?.reportId) it.importedReportId = enriched[i]!.reportId
+          // v2.81：原文浏览器本地留存键（生成前自愈重传）
+          if (enriched[i]?.sourceSha) it.importedReportSha = enriched[i]!.sourceSha
         })
         // v2.70：原文留存失败计数（有源文件但没拿到 reportId — 上传失败/超 32MB）
         result.uploadMissed = enriched.reduce(
@@ -1435,13 +1617,14 @@ export function useHighThroughputFlow() {
       toast({ title: '汇总报告生成中', description: '请等待当前生成完成后重试。' })
       return
     }
-    if (!r.groups.some((g) => g.items.some((it) => (it.status === 'done' && it.jobId) || it.importedJobId || it.importedReportId || it.importedStats))) {
+    if (!hasDashboardSource(r)) {
       toast({ title: '无法生成汇总报告', description: '该运行没有成功完成的靶点（全部失败/被取消/被跳过）— 可「重跑失败/不完整项」补齐后自动重新生成。', variant: 'destructive' })
       return
     }
     r.dashboardId = undefined
     r.dashboardError = undefined
     r.dashboardProgress = undefined
+    r.dashboardProgressPct = undefined
     snapshot()
     await finalizeHtDashboardRef.current?.()
   }, [snapshot])
@@ -1494,6 +1677,21 @@ export function useHighThroughputFlow() {
       void backfillBatchReportCache(reportIds)
       // v2.36：打开时发现汇总报告生成被刷新中断（done + pending 且无结果）→ 自动续生成
       if (r.status === 'done' && r.dashboardPending && !r.dashboardId) void finalizeHtDashboardRef.current?.()
+      // v2.75：打开时发现汇总报告生成失败（错误横幅持久化在 localStorage）→ 自动重试
+      //  一次自愈。背景：用户实测「统计看板生成失败（HTTP 404）」后，失败状态永久
+      //  挂在横幅上（刷新/重开都还在），且纯导入运行的「重新生成」按钮被 doneTargets>0
+      //  门控隐藏（v2.75 已改 settledTargets）— 用户既看不懂也无处可点。网络类失败
+      //  （HTTP 4xx/5xx/Failed to fetch/超时）多为服务重启窗口的瞬态，服务恢复后
+      //  重试即成功；每会话每运行只自动试一次（防 LLM 配额无谓消耗），失败后横幅
+      //  「重新生成汇总报告」按钮仍可手动重试。
+      if (
+        r.status === 'done' && !r.dashboardId && !r.dashboardPending &&
+        r.dashboardError && r.dashboardError !== '__done__' &&
+        !dashboardAutoRetriedRef.current.has(id) && hasDashboardSource(r)
+      ) {
+        dashboardAutoRetriedRef.current.add(id)
+        void finalizeHtDashboardRef.current?.()
+      }
       if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' })
     },
     [],
@@ -1639,6 +1837,8 @@ export function useHighThroughputFlow() {
     skipGroupPending,
     /** v2.38 全局重跑失败项并自动继续运行 */
     retryFailed,
+    /** v2.82 重新评估「载入但导入报告未回填 UniProt」的靶点（批量脱离载入 → 继续运行） */
+    retryImportedWithoutUniprot,
     /** v2.38 导入既有报告（zip / 单独 HTML，可多选；匹配到的未评估靶点标 skipped） */
     importArchive,
     /** v2.44 手动重新生成汇总报告（回看已完成运行时） */

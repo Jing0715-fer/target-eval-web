@@ -7,6 +7,12 @@
  *  · 总进度条：组 × 靶点双轨
  *  · 暂停横幅：原因 + 「重新开始运行」（配额恢复后手动续跑）— 用户核心诉求
  *  · v2.38 停止横幅：手动停止后可恢复（继续运行 / 重跑失败项 / 返回输入）
+ *  · v2.73 全部载入直达汇总（用户诉求「载入列表后再载入所有的报告后也可以
+ *    点击评估直接生成汇总报告」）：导入 toast 按剩余状态给出准确下一步（全部
+ *    载入 → 「继续运行」即刻完成并直接生成汇总报告；已完成运行 → 「重新生成」
+ *    并入新载入靶点；混合 → 「评估其余 N 个」）；pendingLeft 结果字段（flow）+
+ *    pendingAfterResume/directSummaryReady 派生 — 暂停/停止横幅与按钮文案
+ *    自适应（「继续运行 · 直接出汇总报告」+ tooltip 与说明行同步）
  *  · v2.38 靶点级操作（非 running）：每个靶点 chip 可跳过/恢复/重跑；组级
  *    「重跑失败」「跳过未开始」；「导入报告（zip）」把已有报告的靶点标跳过
  *  · 组矩阵（v2.25 紧凑化）：响应式多列网格（sm 2 列 / xl 3 列 / 2xl 4 列），
@@ -16,7 +22,7 @@
  *  · v2.25 批量下载：当前运行 / 每组均可一键打包 zip（每组子文件夹 + 合并报告 + README）
  */
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Ban,
@@ -40,6 +46,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Progress } from '@/components/ui/progress'
 import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { formatDuration } from './format'
@@ -47,6 +54,7 @@ import { cacheJobDetail, getCachedJobDetail } from './job-cache'
 import { EvalLogConsole } from './log-console'
 import { ProgressPanel } from './progress-panel'
 import type { BatchItem, BatchState } from './use-evaluation-flow'
+import { importedItemLacksUniprot } from './use-high-throughput-flow'
 import type { useHighThroughputFlow } from './use-high-throughput-flow'
 import type { HTGroupState, JobDetail } from './types'
 
@@ -171,12 +179,28 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const [logDialogGroup, setLogDialogGroup] = useState<number | null>(null)
   /** v2.38 报告 zip 导入（非 running 阶段） */
   const [importingZip, setImportingZip] = useState(false)
+  /** v2.83：导入进度（百份级导入可达分钟级 — 按钮实时反馈） */
+  const [importProgress, setImportProgress] = useState<string | null>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
+
+  /** v2.78：汇总报告生成中横幅「已等待 Ns」本地计时（每秒重渲染 — 服务端进度
+   *  尚未上报时给用户即时反馈，不再黑盒空转；配合服务端僵死检测：生成进程
+   *  中断时 90s 内自动标记「生成中断」并自动重新生成一次，无需用户处理） */
+  const [, setDashboardPendingTick] = useState(0)
+  useEffect(() => {
+    if (!run?.dashboardPending) return
+    const t = setInterval(() => setDashboardPendingTick((x) => x + 1), 1000)
+    return () => clearInterval(t)
+  }, [run?.dashboardPending])
 
   if (!run) return null
 
   const allItems = run.groups.flatMap((g) => g.items)
   const doneGroups = run.groups.filter((g) => g.status === 'done').length
+  const isRunning = flow.phase === 'running'
+  const isPaused = flow.phase === 'paused'
+  const isStopped = flow.phase === 'stopped'
+  const isDone = flow.phase === 'done'
   const doneTargets = allItems.filter((it) => it.status === 'done').length
   /** v2.60：导入既有报告而跳过的靶点（计入完成口径 — 「N 评估 + M 载入」；
    *  旧版 localStorage 运行无 imported 字段，回退按 skipNote 前缀「已导入」识别） */
@@ -189,11 +213,17 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
   const incompleteTargets = allItems.filter((it) => it.status === 'done' && it.reportIncomplete).length
   /** v2.41：全局重跑入口的靶点数（失败/中断 + 报告不完整） */
   const retryableTargets = failedTargets + incompleteTargets
+  /** v2.82：载入靶点中导入报告未回填 UniProt ID 的数（可批量不载入、重新评估 —
+   *  原评估未识别出靶点身份；当前身份级联更强，重评估可回填） */
+  const importedNoUniprotTargets = allItems.filter((it) => importedItemLacksUniprot(it)).length
+  /** v2.73：恢复后仍需评估的靶点数（pending + canceled — 恢复时 canceled 重置为
+   *  pending 重新评估）。0 = 全部靶点已了结（完成/载入/手动跳过），点击「继续
+   *  运行」即刻完成并直接生成汇总报告。 */
+  const pendingAfterResume = allItems.filter((it) => it.status === 'pending' || it.status === 'canceled').length
+  /** v2.73：非运行阶段且全部靶点已了结（有载入/完成）— 「继续运行」语义变为
+   *  「直接出汇总报告」（用户诉求：载入所有报告后点击评估直接生成汇总报告） */
+  const directSummaryReady = !isRunning && settledTargets > 0 && pendingAfterResume === 0
   const currentGroup = run.groups.find((g) => g.index === run.currentIndex && (g.status !== 'done' && g.status !== 'canceled'))
-  const isRunning = flow.phase === 'running'
-  const isPaused = flow.phase === 'paused'
-  const isStopped = flow.phase === 'stopped'
-  const isDone = flow.phase === 'done'
   /** 非运行阶段（可编辑靶点选择 / 导入 zip） */
   const editable = !isRunning
   /** 已产出报告的组数（v2.25 批量下载入口可用性） */
@@ -215,8 +245,11 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
     const list = files ? Array.from(files) : []
     if (list.length === 0 || importingZip) return
     setImportingZip(true)
+    setImportProgress(null)
     try {
-      const result = await flow.importArchive(list)
+      const result = await flow.importArchive(list, {
+        onProgress: msg => setImportProgress(msg.length > 60 ? msg.slice(0, 60) : msg),
+      })
       // v2.49 逐文件诊断文本（未命中原因 + 已完成提示）
       const missTail = result.missLines.length > 0
         ? `\n未命中文件原因：\n${result.missLines.slice(0, 5).join('\n')}${result.missLines.length > 5 ? `\n…等共 ${result.missLines.length} 个文件` : ''}`
@@ -229,11 +262,18 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         ? `\n注意：${result.uploadMissed} 份报告原文未能内嵌（体积超 32MB 上限或服务端留存失败）— 评分与结论已照常解析进汇总表格，对应「完整报告」弹出页将显示已解析的评分统计；完整原文可直接打开导入的报告文件。`
         : ''
       if (result.matched > 0) {
+        // v2.73：后续操作指引自适应 — 导入后按剩余状态给出准确下一步（全部载入 →
+        //  继续运行即直接出汇总；运行已完成的旧运行 → 重新生成并入）
+        const nextHint = isDone
+          ? `新载入的靶点将在重新生成的汇总报告中呈现（评分与结论整合进总表）— 点击汇总横幅中的「重新生成」即可。`
+          : result.pendingLeft === 0
+            ? `全部靶点已载入/完成 — 点击「继续运行」即刻完成并直接生成汇总报告（无需评估，报告自动下载）。`
+            : `点击「继续运行」评估其余 ${result.pendingLeft} 个靶点（已载入的不再评估）。`
         toast({
           title: `已导入 ${result.matched} 个靶点的既有报告`,
           description: (
             <div className="whitespace-pre-line">
-              {`这些靶点将跳过评估（报告见导入的文件）；点击「继续运行」评估其余靶点。${doneNote}${uploadNote}${missTail}`}
+              {`这些靶点将跳过评估（报告见导入的文件）；${nextHint}${doneNote}${uploadNote}${missTail}`}
             </div>
           ),
         })
@@ -256,6 +296,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
     } finally {
       setImportingZip(false)
+      setImportProgress(null)
       if (zipInputRef.current) zipInputRef.current.value = ''
     }
   }
@@ -419,7 +460,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 {run.pausedReason ?? '前端编排因页面刷新中断；服务器侧仍在执行的作业会继续，恢复后自动接上等待结果。'}
               </p>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                点击下方「继续运行」从断点恢复（已完成的组与靶点不会重复评估，不浪费配额）；也可先在组卡片中跳过/重跑指定靶点，或导入既有报告 zip 跳过已完成靶点。
+                {directSummaryReady
+                  ? '全部靶点已了结（完成/载入）— 点击「继续运行」即刻完成并直接生成汇总报告（无需评估，完成后自动下载）。'
+                  : '点击下方「继续运行」从断点恢复（已完成的组与靶点不会重复评估，不浪费配额）；也可先在组卡片中跳过/重跑指定靶点，或导入既有报告 zip 跳过已完成靶点。'}
               </p>
             </div>
           </div>
@@ -429,9 +472,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               onClick={() => void flow.resumeRun()}
               className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
-              继续运行
+              {directSummaryReady ? '继续运行 · 直接出汇总报告' : '继续运行'}
             </Button>
             {retryableTargets > 0 && (
               <Button
@@ -448,6 +492,20 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   : `重跑失败/不完整项（${retryableTargets}）并继续`}
               </Button>
             )}
+            {/* v2.82：用户规则 — 载入但未回填 UniProt 的靶点可批量不载入、重新评估 */}
+            {importedNoUniprotTargets > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void flow.retryImportedWithoutUniprot()}
+                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，报告回填 UniProt 与检索证据`}
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                {`不载入未回填 UniProt 的报告 · 重新评估（${importedNoUniprotTargets}）`}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -458,7 +516,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+              {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
               保留记录并返回输入
@@ -478,7 +536,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 已完成 {settledTargets} 个靶点的结果保留{importedTargets > 0 ? `（${doneTargets} 个评估完成 + ${importedTargets} 个载入既有报告）` : ''}{skippedTargets > 0 ? `；另手动跳过 ${skippedTargets} 个` : ''}；未开始/被中断的靶点可随时继续，失败的靶点可单独重跑。
               </p>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                「继续运行」从断点恢复（已完成的靶点不重复评估）；也可先在组卡片中跳过不需要的靶点、重跑失败项，或导入既有报告 zip 跳过已完成靶点。
+                {directSummaryReady
+                  ? '全部靶点已了结（完成/载入）— 点击「继续运行」即刻完成并直接生成汇总报告（无需评估，完成后自动下载）。'
+                  : '「继续运行」从断点恢复（已完成的靶点不重复评估）；也可先在组卡片中跳过不需要的靶点、重跑失败项，或导入既有报告 zip 跳过已完成靶点。'}
               </p>
             </div>
           </div>
@@ -488,9 +548,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               onClick={() => void flow.resumeRun()}
               className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
-              继续运行
+              {directSummaryReady ? '继续运行 · 直接出汇总报告' : '继续运行'}
             </Button>
             {retryableTargets > 0 && (
               <Button
@@ -507,6 +568,20 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   : `重跑失败/不完整项（${retryableTargets}）并继续`}
               </Button>
             )}
+            {/* v2.82：用户规则 — 载入但未回填 UniProt 的靶点可批量不载入、重新评估 */}
+            {importedNoUniprotTargets > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void flow.retryImportedWithoutUniprot()}
+                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，报告回填 UniProt 与检索证据`}
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                {`不载入未回填 UniProt 的报告 · 重新评估（${importedNoUniprotTargets}）`}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -517,7 +592,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-              {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+              {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
               保留记录并返回输入
@@ -827,19 +902,61 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 <RotateCcw className="size-3.5" aria-hidden />
                 重新生成
               </Button>
+              {/* v2.82：用户规则 — 载入但未回填 UniProt 的靶点可批量不载入、重新评估 */}
+              {importedNoUniprotTargets > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={run.dashboardPending}
+                  onClick={() => void flow.retryImportedWithoutUniprot()}
+                  className="h-8 gap-1.5 rounded-lg border-emerald-500/40 px-3 text-[12px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                  title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，评估完成后自动重新生成汇总报告`}
+                >
+                  <RotateCcw className="size-3.5" aria-hidden />
+                  {`不载入未回填 UniProt 的报告 · 重新评估（${importedNoUniprotTargets}）`}
+                </Button>
+              )}
             </>
           ) : run.dashboardPending ? (
             <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-semibold text-foreground">汇总报告生成中…</p>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                <p className="text-[13px] font-semibold text-foreground">汇总报告生成中…</p>
+                {/* v2.76：全局百分比（服务端各阶段权重标定回传 — 进度条主指标）；
+                    v2.78：无百分比时（首条进度落库前/旧服务端）显示本地已等待计时 —
+                    横幅始终有具体数字反馈，不再只有空转动画条 */}
+                {run.dashboardProgressPct != null ? (
+                  <span className="font-mono text-[12px] font-semibold tabular-nums text-primary">
+                    {Math.round(run.dashboardProgressPct)}%
+                  </span>
+                ) : run.dashboardPendingSince != null ? (
+                  <span className="font-mono text-[12px] font-semibold tabular-nums text-muted-foreground">
+                    已等待 {Math.max(0, Math.round((Date.now() - run.dashboardPendingSince) / 1000))}s
+                  </span>
+                ) : null}
+              </div>
+              {/* v2.76 进度条：有百分比 → 确定性（Radix 过渡平滑推进）；无（旧服务
+                  端纯文本进度 / 首条进度落库前）→ 不确定态滑动动画，不再黑盒等待 */}
+              <div className="mt-2" aria-hidden>
+                {run.dashboardProgressPct != null ? (
+                  <Progress value={run.dashboardProgressPct} className="h-1.5" />
+                ) : (
+                  <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-primary/15">
+                    <div className="ht-progress-indeterminate absolute inset-y-0 left-0 w-2/5 rounded-full bg-primary" />
+                  </div>
+                )}
+              </div>
               {/* v2.71：服务端阶段进度实时展示（running 期间轮询回传 — 生成不再黑盒等待） */}
               {run.dashboardProgress ? (
-                <p className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                <p className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
                   <LoaderCircle className="size-3 shrink-0 animate-spin" aria-hidden />
                   <span className="truncate">{run.dashboardProgress}</span>
                 </p>
               ) : null}
-              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；大批次（百级靶点）报告原文逐份流式写入可能需要数分钟，期间可自由查看各组结果。
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                {run.dashboardProgress
+                  ? '正在汇总批次统计、每靶点结论与 AI 整体可行性报告（内嵌全部报告正文与原始表内容），完成后自动下载 HTML；大批次（百级靶点）报告原文逐份流式写入可能需要数分钟，期间可自由查看各组结果。'
+                  : '服务端正在加载靶点数据并规划报告内嵌（首条进度数秒内到达）；若服务进程在生成期间中断或进度长时间停更，系统会在 3 分钟内自动检测并重新生成，无需手动处理 — 运行结果不受影响。'}
               </p>
             </div>
           ) : (
@@ -854,7 +971,11 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     : <>{run.dashboardError}（运行结果不受影响；可重新生成或重新下载 zip 重试打包可用的看板）</>}
                 </p>
               </div>
-              {run.dashboardError !== '__done__' && doneTargets > 0 && (
+              {/* v2.75：改用 settledTargets（评估完成 + 载入）— 纯导入运行（0 评估、
+                  全部载入）此前 doneTargets=0 导致按钮被隐藏，生成失败后横幅提示「可
+                  重新生成」却没有任何入口（用户实测「汇总报告生成失败 HTTP 404」后无
+                  法重试，只能反复看着失败横幅） */}
+              {run.dashboardError !== '__done__' && settledTargets > 0 && (
                 <Button
                   type="button"
                   variant="outline"
@@ -927,8 +1048,9 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     : `重跑失败/不完整项（${retryableTargets}）`}
                 </Button>
               )}
-              {/* v2.44：无汇总报告状态的兜底入口（旧运行/生成标记被清 — 横幅未渲染时） */}
-              {!run.dashboardId && !run.dashboardPending && !run.dashboardError && doneTargets > 0 && (
+              {/* v2.44：无汇总报告状态的兜底入口（旧运行/生成标记被清 — 横幅未渲染时）；
+                  v2.75：doneTargets → settledTargets（纯导入运行同样可生成汇总） */}
+              {!run.dashboardId && !run.dashboardPending && !run.dashboardError && settledTargets > 0 && (
                 <Button
                   type="button"
                   variant="outline"
@@ -951,7 +1073,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的未评估靶点标跳过（用于补齐清单后重跑剩余靶点）"
               >
                 {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
-                {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+                {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
               </Button>
             </>
           )}
@@ -961,9 +1083,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               onClick={() => void flow.resumeRun()}
               className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
-              继续运行
+              {directSummaryReady ? '继续运行 · 直接出汇总报告' : '继续运行'}
             </Button>
           )}
           {reportableGroups > 0 && (

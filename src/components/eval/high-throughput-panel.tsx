@@ -165,6 +165,8 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
   // ── v2.38 报告导入（zip 归档 / v2.44 单独 HTML，可多选批量；既有报告匹配 → 自动取消勾选） ──
   const zipInputRef = useRef<HTMLInputElement>(null)
   const [importingZip, setImportingZip] = useState(false)
+  /** v2.83：导入进度（逐份解析/校验/上传 — 百份级导入可达分钟级，无反馈像卡死） */
+  const [importProgress, setImportProgress] = useState<string | null>(null)
   const [zipMeta, setZipMeta] = useState<{ name: string; reports: number; matched: number } | null>(null)
   /** v2.70：本次导入中原文未能留存/内嵌的靶点数（超 32MB 或上传失败 — toast 提示） */
   const importUploadMissedRef = useRef(0)
@@ -172,6 +174,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
     const list = files ? Array.from(files) : []
     if (list.length === 0 || importingZip) return
     setImportingZip(true)
+    setImportProgress(null)
     importUploadMissedRef.current = 0
     try {
       const importParsed = await parseHtImportFiles(list)
@@ -237,19 +240,26 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
         //  stats 随启动载荷入运行记录（不依赖 DB 保留期，旧版报告也能整合进汇总
         //  表格）；reportId 供汇总弹出页内嵌报告原文。任一失败独立降级，不阻塞导入
         try {
-          const enriched = await enrichImportedReports(enrichItems, importParsed)
+          const enriched = await enrichImportedReports(enrichItems, importParsed, {
+            // v2.83：百份级导入进度（按钮实时反馈 — 无反馈时分钟级等待像卡死）
+            onProgress: msg => setImportProgress(msg.length > 60 ? msg.slice(0, 60) : msg),
+          })
           let uploadMissed = 0
           enriched.forEach((e, i) => {
             const entry = nextImported.get(enrichKeys[i]!)
             if (!entry) return
             if (e.stats) entry.stats = e.stats
             if (e.reportId) entry.reportId = e.reportId
+            // v2.81：原文浏览器本地留存键（生成前自愈重传 — 服务端留存丢失时凭此取回）
+            if (e.sourceSha) entry.reportSha = e.sourceSha
             // v2.70：原文留存失败计数（有源文件但没拿到 reportId — 上传失败/超 32MB）
             if (enrichItems[i]?.rep && !e.reportId) uploadMissed++
           })
           importUploadMissedRef.current = uploadMissed
         } catch {
           /* enrich 失败（网络/解析）→ 降级「载入」行，导入匹配本身不受影响 */
+        } finally {
+          setImportProgress(null)
         }
         onImportedEntriesChange([...nextImported.values()].filter((e) => next.has(e.key)))
       }
@@ -293,6 +303,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       toast({ title: '导入失败', description: e instanceof Error ? e.message : '无法解析所选报告文件', variant: 'destructive' })
     } finally {
       setImportingZip(false)
+      setImportProgress(null)
       if (zipInputRef.current) zipInputRef.current.value = ''
     }
   }
@@ -451,7 +462,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           {importingZip
             ? <LoaderCircle className="size-3 animate-spin" aria-hidden />
             : <FileArchive className="size-3" aria-hidden />}
-          {importingZip ? '导入中…' : '导入报告（zip/HTML）'}
+          {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
         </Button>
         <span className="font-mono text-[10px] text-muted-foreground/85">
           .xlsx / .xls / .csv ≤ 10MB · AI 识别分组列与复合物行 · 序列行逐行成组（同链多靶点同组 · 抗体链忽略 · 同源多聚体只计 1 条 · 跨行完全同源 ≥95% 并为一组） · 导入会替换当前输入
@@ -595,6 +606,40 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           </span>
         </div>
       )}
+
+      {/* v2.82：导入报告未回填 UniProt 的靶点 — 可一键不载入、改为重新评估（用户规则：
+          这类报告的原评估未识别出靶点身份；重新评估由当前更强的身份级联补识别） */}
+      {(() => {
+        const noUniKeys = new Set(importedEntries.filter((e) => !e.stats?.uniprotId).map((e) => e.key))
+        if (noUniKeys.size === 0) return null
+        return (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-2">
+            <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <span className="text-[11.5px] leading-relaxed text-amber-700 dark:text-amber-300">
+              {noUniKeys.size} 份匹配的报告未回填 UniProt ID（原评估未识别出靶点身份）— 可不载入这些报告，启动后重新评估补识别（PDB 同源回填 → BLAST nr → UniProt 库序列匹配，报告会展示检索结果并回填 UniProt 列）。
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                // 与手动重新勾选同构：移出 skipKeys + 清「导入」标记 → 启动时正常评估
+                onSkipKeysChange(skipKeys.filter((k) => !noUniKeys.has(k)))
+                onImportedEntriesChange(importedEntries.filter((e) => !noUniKeys.has(e.key)))
+                toast({
+                  title: `已取消载入 ${noUniKeys.size} 个未回填 UniProt 的报告`,
+                  description: '对应靶点恢复勾选 — 启动后将重新评估（当前身份识别级联重检索，回填 UniProt 与检索证据）。',
+                })
+              }}
+              className="ml-auto h-7 gap-1 rounded-lg border-amber-500/40 px-2.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400"
+              title={`恢复勾选这 ${noUniKeys.size} 个靶点（不载入其导入的报告）— 启动后重新评估`}
+            >
+              <RotateCcw className="size-3" aria-hidden />
+              不载入这些报告 · 改为重新评估（{noUniKeys.size}）
+            </Button>
+          </div>
+        )
+      })()}
 
       {/* 分组预览：每组一行（组号 + 靶点 chips + 复合物/单靶点徽章）；v2.23.1 序列兜底组；
           v2.38 每靶点勾选框（未勾选 = 启动时跳过，保留在记录里可恢复） */}

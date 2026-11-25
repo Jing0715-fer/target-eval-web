@@ -1815,6 +1815,50 @@ function blastNrPanelHtml(hits: BlastNrHit[], withHead: boolean): string {
   </table></div>`
 }
 
+/** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配面板（身份级联 v2.44 通道 — NCBI nr
+ *  患病/失败/未达阈值时提交序列直查 UniProtKB。此前命中只用于身份处理从不展示，
+ *  用户实测「搜索了库但报告不显示检索结果」— 本面板补齐检索证据链；与 nr 面板
+ *  同款表格版式，独立 h3 小节（不参与 PDB/nr 切换 — 始终可见）。 */
+function uniprotBlastPanelHtml(hits: BlastNrHit[]): string {
+  if (!hits.length) return ''
+  const nrRow = (h: BlastNrHit) => {
+    const range = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo > 0
+      ? `${h.queryFrom}-${h.queryTo}`
+      : (h.queryCoverage > 0 ? `${h.queryCoverage} aa` : '—')
+    const covSpan = h.queryFrom != null && h.queryTo != null && h.queryFrom > 0 && h.queryTo >= h.queryFrom
+      ? h.queryTo - h.queryFrom + 1
+      : (h.queryCoverage > 0 ? h.queryCoverage : '')
+    const dbChip = h.db === 'sp'
+      ? '<span class="nr-chip nr-chip-sp" title="Swiss-Prot 人工审校条目 — UniProt 归属可信度高">Swiss-Prot</span>'
+      : h.db === 'tr'
+        ? '<span class="nr-chip nr-chip-tr" title="UniProt TrEMBL 自动注释条目">TrEMBL</span>'
+        : '<span class="nr-chip nr-chip-other" title="其他来源条目（非 UniProt 形态）">其他</span>'
+    const accLink = h.db !== 'other' && /^[A-Z0-9]{6,10}$/.test(h.accession)
+      ? `<a href="https://www.uniprot.org/uniprotkb/${h.accession}" target="_blank" rel="noopener">${h.accession}</a>`
+      : esc(h.accession || '—')
+    const descTitle = esc([h.description, h.organism ? `OS=${h.organism}` : '', h.geneName ? `GN=${h.geneName}` : ''].filter(Boolean).join(' '))
+    return `
+    <tr data-ident="${h.identity}" data-e="${Number.isFinite(h.evalue) ? h.evalue : ''}" data-cov="${covSpan}">
+      <td class="td-id">${accLink}${h.entryName ? `<div class="nr-entry">${esc(h.entryName)}</div>` : ''}</td>
+      <td class="t-desc" title="${descTitle}"><span class="t-clamp">${esc(h.description || '—')}</span></td>
+      <td class="num">${h.identity.toFixed(1)}%</td>
+      <td class="num">${esc(h.evalueRaw)}</td>
+      <td class="num">${esc(range)}</td>
+      <td>${dbChip}</td>
+    </tr>`
+  }
+  return `
+  <h3 class="itx-h3">UniProt 库序列匹配 <span class="itx-h3-sub">EBI BLAST · Swiss-Prot · ${hits.length} hits · 靶点身份识别</span></h3>
+  <p class="note">PDB 库同源与 NCBI nr 全库均未能确定靶点身份（或检索失败）时，提交序列已自动改查 EBI BLAST（UniProtKB Swiss-Prot 人工审校库）定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据（报告题目/刊头的「UniProt 匹配」标注即来源于此）。按显著性排序、同编号去重取最高一致性；「覆盖范围」为提交序列上的残基区间（首个 HSP，1-based 闭区间）。可经表头下方「排序」切换 Identity 降序等，并支持导出 CSV。</p>
+  <div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="uniblast">
+    <colgroup>
+      <col style="width:118px"><col><col style="width:78px"><col style="width:92px"><col style="width:88px"><col style="width:96px">
+    </colgroup>
+    <thead><tr><th>UniProt / 编号</th><th>描述</th><th class="num">Identity</th><th class="num">E-value</th><th class="num" title="首个 HSP 在提交序列上的残基区间（1-based 闭区间）">覆盖范围</th><th>库</th></tr></thead>
+    <tbody>${hits.map(nrRow).join('')}</tbody>
+  </table></div>`
+}
+
 /** v2.67：BLAST 结果库切换（PDB 库 / nr 全库 — 两库都有命中时表头上方分段按钮；
  *  面板显隐由 TABLE_FILTER_JS 驱动，打印时两库面板自动全展开、打印后恢复切换态） */
 function blastLibToggleHtml(pdbCount: number, nrCount: number): string {
@@ -2094,7 +2138,9 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const blastRan = ctx.blastStatus && (ctx.blastStatus.status === 'ok' || ctx.blastStatus.status === 'no-hits')
   // v2.59：nr 全库检索命中存在时同样展示章节（身份识别证据）
   const blastNrCount = ctx.blastNrHits?.length ?? 0
-  const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus) || blastNrCount > 0
+  // v2.82：UniProt 库序列匹配命中存在时同样展示（身份识别证据 — EBI 通道）
+  const uniBlastCount = ctx.uniprotBlastHits?.length ?? 0
+  const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus) || blastNrCount > 0 || uniBlastCount > 0
   const ligNo = (ctx.ligands?.length ?? 0) > 0 ? nextNo() : ''
   // v2.7/v2.7.6 配体卡展示构件（ligDetailProps / ligStructFig / ligIdentFold / strategyZh）
   // 已提升为模块级共享导出 —— 单靶点与合并报告单源同版
@@ -2709,7 +2755,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
 
   ${showBlastSec ? `
   <section class="sec" id="${idOf('blast')}">
-    <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}${blastNrCount ? ` · nr ${blastNrCount}` : ''}`)}</h2>
+    <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}${blastNrCount ? ` · nr ${blastNrCount}` : ''}${uniBlastCount ? ` · UniProt 匹配 ${uniBlastCount}` : ''}`)}</h2>
     ${(ctx.blastHits.length > 0 && blastNrCount > 0) ? blastLibToggleHtml(ctx.blastHits.length, blastNrCount) : ''}
     ${ctx.blastHits.length ? `<div${blastNrCount > 0 ? ' data-libpanel="pdb"' : ''}><p class="note">按检索显著性排序（已排除直接结构重复项；可经表头下方「排序」切换为 Identity 降序等）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。表头下方可按方法筛选、切换排序。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast">
       <colgroup>
@@ -2723,6 +2769,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
       ? `<div class="callout callout-amber"><b>同源检索失败 — 本报告不含同源结构证据</b>${esc(describeBlastStatus(ctx.blastStatus))}。本报告结论主要基于直接结构与文献证据；同源先例缺失可能低估或高估可行性，建议重新评估补齐同源证据。</div>`
       : `<p class="note">${esc(describeBlastStatus(ctx.blastStatus))}。同源结构证据在本报告中缺位，结论主要基于直接结构与文献证据；如需同源检索可重新评估并勾选「强制 BLAST」。</p>`}
     ${blastNrCount > 0 ? `<div${ctx.blastHits.length > 0 ? ' data-libpanel="nr" hidden' : ''}>${blastNrPanelHtml(ctx.blastNrHits ?? [], ctx.blastHits.length === 0)}</div>` : ''}
+    ${uniBlastCount > 0 ? `<div>${uniprotBlastPanelHtml(ctx.uniprotBlastHits ?? [])}</div>` : ''}
   </section>` : ''}
 
   ${ctx.literature.length ? `

@@ -71,7 +71,8 @@ import {
   toCleanImportedStats,
   type ImportedStatsSection,
 } from '@/lib/eval/imported-stats'
-import { uploadImportedReport } from './api'
+import { uploadImportedReport, verifyImportedReports, verifyImportedSources } from './api'
+import { saveImportedSource, getImportedSource } from './ht-import-cache'
 
 /** 导入的 zip/文件内一份可匹配的报告 */
 export interface HtArchiveReport {
@@ -880,6 +881,12 @@ const IMPORT_SOURCE_MAX_CHARS = 33_000_000
  *  大报告（多结构/3D 内嵌）的靶点全部降级为无评分 bare 行） */
 const IMPORTED_UPLOAD_MAX_CHARS = 32_000_000
 
+/** v2.83：源文本缓存上限（条）。旧版无界缓存全部源文件文本（117 份 ≈ 128MB
+ *  常驻 + JSON 上传体/IndexedDB 写入叠加 → 渲染进程 RSS 2.1GB 被内核 OOM 杀死，
+ *  dmesg 实证）— 现改为容量 2 的 LRU：enrich 每源至多读两次（解析 + 缺失补传），
+ *  补传重读 File 零成本，任何时刻至多驻留 2 份文本。 */
+const SOURCE_TEXT_CACHE_MAX = 2
+
 export async function parseHtImportFiles(files: File[]): Promise<HtImportParseResult> {
   const out: HtArchiveReport[] = []
   /** 源文件句柄（srcIdx → 单文件 File 或已解开的 zip 实例） */
@@ -927,6 +934,13 @@ export async function parseHtImportFiles(files: File[]): Promise<HtImportParseRe
     if (text != null && text.length > IMPORT_SOURCE_MAX_CHARS) {
       text = text.slice(0, IMPORT_SOURCE_MAX_CHARS)
     }
+    // v2.83：LRU 有界缓存（旧版无界 — OOM 根源，见 SOURCE_TEXT_CACHE_MAX 注释）
+    src.cache.delete(cacheKey)
+    while (src.cache.size >= SOURCE_TEXT_CACHE_MAX) {
+      const oldest = src.cache.keys().next().value
+      if (oldest === undefined) break
+      src.cache.delete(oldest)
+    }
     src.cache.set(cacheKey, text)
     return text
   }
@@ -973,45 +987,226 @@ export interface ImportEnrichItem {
 /** v2.69：为匹配到的导入靶点解析统计快照并上传报告原文 — 返回逐项结果
  *  （stats 缺失 = 降级行；reportId 缺失 = 弹出页无原文可内嵌；两者独立降级）。
  *  任一步骤失败都不阻塞导入（导入匹配本身不受影响）。上传按源文件去重
- *  （同一文件只传一次 — 合并报告整组共享）。 */
+ *  （同一文件只传一次 — 合并报告整组共享）。
+ *  v2.81：源文件 HTML 一部落入浏览器本地留存（ht-import-cache — 内容哈希
+ *  sourceSha 随条目返回）。导入时上传失败/事后服务端留存丢失时，汇总报告
+ *  生成前可按 sha 取回缓存重新上传自愈（ensureImportedRetention）— 弹出页
+ *  原文内嵌不再取决于导入那一瞬间的上传成败。
+ *  v2.83：**内存安全三阶段**（用户实测 117 份 × ~1.1MB 导入时浏览器被 OOM
+ *  杀死 — dmesg 实证 chrome RSS 2.1GB，页面崩溃重载后全部状态丢失，上传循环
+ *  死在中途 → 汇总弹出页全部降级）：
+ *  ① 逐源「读→解析→本地留存→**立即释放文本**」（旧版把全部源文件文本永久
+ *     缓存在 readSource 的 src.cache 里 — 117 份 ≈ 128MB 常驻，叠加 JSON 上传
+ *     体与 IndexedDB 写入即突破渲染进程内存上限）；
+ *  ② 按内容哈希批量校验服务端留存（60/批）— 已留存的直接采纳既有 id；
+ *  ③ 仅真正缺失的重新读盘上传（重读 File 零成本）。
+ *  峰值内存 = 单份文本（典型 1-1.5MB）而非全量之和；重新导入同一批文件时
+ *  ②直接全命中 — 百份 MB 级重传变零。 */
 export async function enrichImportedReports(
   items: ImportEnrichItem[],
   parsed: HtImportParseResult,
-): Promise<Array<{ stats?: ImportedReportStats; reportId?: string }>> {
-  const out: Array<{ stats?: ImportedReportStats; reportId?: string }> = items.map(() => ({}))
+  opts: { onProgress?: (msg: string) => void } = {},
+): Promise<Array<{ stats?: ImportedReportStats; reportId?: string; sourceSha?: string }>> {
+  const { onProgress } = opts
+  const out: Array<{ stats?: ImportedReportStats; reportId?: string; sourceSha?: string }> = items.map(() => ({}))
   if (items.length === 0) return out
   // 源文件分组：同一源文件只读一次 / 只上传一次（loaded = 已尝试读取，读到 0 个区段也不重试）
-  const bySource = new Map<string, { rep: HtArchiveReport; sections: ImportedStatsSection[]; reportId?: string; loaded?: boolean }>()
+  const bySource = new Map<string, { rep: HtArchiveReport; fileName: string; sections: ImportedStatsSection[]; sourceSha?: string; loaded?: boolean }>()
   for (let i = 0; i < items.length; i++) {
     const it = items[i]!
     const rep = it.rep
     if (!rep || rep.kind === 'dashboard') continue
     const key = parsed.sourceKey(rep)
-    let entry = bySource.get(key)
-    if (!entry) {
-      entry = { rep, sections: [] }
-      bySource.set(key, entry)
+    if (!bySource.has(key)) {
+      const base = (rep.path.split('::')[0] ?? rep.path).split('/').pop() ?? ''
+      const fileName = `${base.replace(/\.html?$/i, '').slice(0, 100) || '导入报告'}.html`
+      bySource.set(key, { rep, fileName, sections: [] })
     }
-    // 逐项解析区段（同一源文件的多个靶点各自定位自己的子页）
-    if (entry.sections.length === 0 && !entry.loaded) {
-      entry.loaded = true
-      const text = await parsed.readSource(rep)
-      if (text) {
-        entry.sections = extractImportedStatsSectionsShared(text)
-        // v2.70：上传按 32MB 上限独立门控（超大文件统计照常解析，仅不内嵌原文 —
-        //  readSource 的 33M 切片不会作为原文上传，此处长度检查双重保险）
-        if (text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
-          const base = (rep.path.split('::')[0] ?? rep.path).split('/').pop() ?? ''
-          const fileName = base.replace(/\.html?$/i, '').slice(0, 100) || '导入报告'
-          entry.reportId = await uploadImportedReport(`${fileName}.html`, text)
-        }
+  }
+  // ── 阶段①：逐源读盘→解析→本地留存→释放文本（串行 — 峰值内存 = 单份）──
+  const sources = [...bySource.values()]
+  for (let s = 0; s < sources.length; s++) {
+    const entry = sources[s]!
+    entry.loaded = true
+    onProgress?.(`解析导入报告 ${s + 1}/${sources.length}（${entry.fileName.slice(0, 40)}）…`)
+    // v2.83：文本用完即弃（旧版 readSource 永久缓存全部文本 — OOM 根源）
+    const text = await parsed.readSource(entry.rep).catch(() => null)
+    if (text) {
+      entry.sections = extractImportedStatsSectionsShared(text)
+      // v2.70：上传按 32MB 上限独立门控（超大文件统计照常解析，仅不内嵌原文 —
+      //  readSource 的 33M 切片不会作为原文上传，此处长度检查双重保险）
+      if (text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
+        // v2.81：浏览器本地留存（上传失败/事后丢失均可凭 sha 自愈重传）
+        entry.sourceSha = await saveImportedSource(entry.fileName, text).catch(() => undefined)
       }
     }
+  }
+  // ── 阶段②：内容哈希批量校验服务端留存 — 已留存的直接采纳（重新导入零重传）──
+  const shaToEntry = new Map<string, { rep: HtArchiveReport; fileName: string }>()
+  for (const entry of sources) {
+    if (entry.sourceSha && !shaToEntry.has(entry.sourceSha)) {
+      shaToEntry.set(entry.sourceSha, { rep: entry.rep, fileName: entry.fileName })
+    }
+  }
+  const retained = new Map<string, string>() // sha → 服务端存活 id
+  if (shaToEntry.size > 0) {
+    onProgress?.(`校验 ${shaToEntry.size} 份报告的服务端留存…`)
+    const shas = [...shaToEntry.keys()]
+    for (let i = 0; i < shas.length; i += 60) {
+      const r = await verifyImportedSources(shas.slice(i, i + 60))
+      if (!r) break // 端点不可达 → 全部视为缺失（照旧全量上传 — 与旧版行为一致）
+      for (const [sha, id] of Object.entries(r.retained)) retained.set(sha, id)
+    }
+  }
+  // ── 阶段③：仅缺失的重读上传（串行 — 文本用完即弃）──
+  const missing = [...shaToEntry.entries()].filter(([sha]) => !retained.has(sha))
+  for (let m = 0; m < missing.length; m++) {
+    const [sha, src] = missing[m]!
+    onProgress?.(`上传报告原文 ${m + 1}/${missing.length}（${src.fileName.slice(0, 40)}）…`)
+    const text = await parsed.readSource(src.rep).catch(() => null)
+    if (text && text.length <= IMPORTED_UPLOAD_MAX_CHARS) {
+      const id = await uploadImportedReport(src.fileName, text)
+      if (id) retained.set(sha, id)
+    }
+  }
+  // ── 逐项组装（同一源文件的多个靶点各自定位自己的子页）──
+  // v2.84 修复：按 sourceKey 查回源条目（v2.83 误改为按 rep 对象引用查 Map —
+  //  同一合并报告文件的多靶点各自匹配到**不同的**报告条目对象（meta 条目 /
+  //  h1 条目 / 组号通道条目互不相同），只有首个靶点的 rep 恰好是 entry.rep，
+  //  其余靶点 entryOfRep.get(rep) 全部落空 → 静默丢失 stats/sourceSha/reportId
+  //  — 用户实测 117 靶点导入 24 个次链（链2/链3）齐齐退化为 bare 降级行、
+  //  UniProt ID 与评分一并消失（v2.82 按 key 查找无此问题 — 回归修复）。
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]!
+    const rep = it.rep
+    if (!rep || rep.kind === 'dashboard') continue
+    const entry = bySource.get(parsed.sourceKey(rep))
+    if (!entry) continue
     const stats = pickImportedStatsShared(entry.sections, it)
     if (stats) out[i]!.stats = toCleanImportedStats(stats)
-    if (entry.reportId) out[i]!.reportId = entry.reportId
+    if (entry.sourceSha) {
+      out[i]!.sourceSha = entry.sourceSha
+      const id = retained.get(entry.sourceSha)
+      if (id) out[i]!.reportId = id
+    }
   }
   return out
+}
+
+/** v2.81：留存自愈的单项输入（导入靶点 — reportId 与内容哈希至少有其一） */
+export interface RetentionCheckItem {
+  reportId?: string
+  sha?: string
+}
+
+/**
+ * v2.81：汇总报告生成前的导入留存校验 + 自愈重传（「报告没有内嵌」根治）。
+ *
+ * 流程：① 有 sha 的项按**内容哈希**批量校验（v2.83 — 同内容任何存活留存即
+ * 采纳其 id，reportId 死亡但内容还在的零重传秒愈）；② 无 sha 仅 reportId 的项
+ * （v2.81 前的旧运行记录）按 id 校验；③ 仍缺失且本地缓存（ht-import-cache）
+ * 有源文件的重新上传拿新 id；返回 sha → reportId 映射（含采纳与重传，调用方
+ * 回写运行记录持久化自愈结果）。
+ *
+ * v2.84 修复（用户实测「留存校验暂不可用 — 沿用既有服务端留存」后 117/117
+ * 原文全部未内嵌）：旧逻辑把「端点成功应答但服务端一份都没留住」（retained
+ * 为空 = 实例回收/DB 重置后的常态）误判为「端点不可达」→ 提前返回跳过自愈
+ * 重传 → 弹出页全降级。且真不可达时「视同全部存活」同样脆弱（GET 失败但
+ * POST 可用的网关场景 — 如 URL 长度限制）。现在：
+ *  - 端点可达且全部存活 → 零重传采纳（不变）；
+ *  - 端点可达但有缺失 → 缺失项从本地缓存重传（不变 — 但不再被误判短路）；
+ *  - 端点不可达 → 也尽力重传（POST 幂等 — 服务端内容寻址去重，同内容已有
+ *    留存直接回既有 id，不重复落盘；服务端真不可用时逐份快速失败不阻塞）。
+ *
+ * 设计边界：
+ *  - 本地缓存也没有（旧版运行记录无 sha / IndexedDB 被清）且服务端无同内容
+ *    留存 → 该源文件保持现状（确实丢失则弹出页降级 — 与 v2.80 行为一致）；
+ *  - 单份重传失败 → 跳过继续（尽力而为，不阻塞汇总生成）。
+ *
+ * 返回：{ fixed: sha→存活 reportId（采纳 + 重传）, reuploaded: 重传成功数,
+ * adopted: 零重传采纳数, stillMissing: 仍无可用留存的源文件数 }。
+ */
+export async function ensureImportedRetention(
+  items: RetentionCheckItem[],
+  opts: { onProgress?: (msg: string) => void; uploadConcurrency?: number } = {},
+): Promise<{ fixed: Map<string, string>; reuploaded: number; adopted: number; stillMissing: number }> {
+  const { onProgress, uploadConcurrency = 3 } = opts
+  const fixed = new Map<string, string>()
+  const uniqueIds = [...new Set(items.map(i => i.reportId).filter((x): x is string => Boolean(x)))]
+  const uniqueShas = [...new Set(items.map(i => i.sha).filter((x): x is string => Boolean(x)))]
+  if (uniqueIds.length === 0 && uniqueShas.length === 0) return { fixed, reuploaded: 0, adopted: 0, stillMissing: 0 }
+  // ① 内容哈希批量校验（v2.83 — 60 sha/请求；命中即采纳零重传）。
+  //  v2.84：verifyReached 区分「端点不可达」与「应答成功但无留存」— 后者是
+  //  实例回收/DB 重置后的正常应答（retained 空 + missing 全量），绝非不可达。
+  const liveSha = new Map<string, string>() // sha → 存活 id
+  let verifyReached = false
+  if (uniqueShas.length > 0) {
+    onProgress?.(`校验 ${uniqueShas.length} 份导入报告的服务端留存…`)
+    for (let i = 0; i < uniqueShas.length; i += 60) {
+      const r = await verifyImportedSources(uniqueShas.slice(i, i + 60))
+      if (!r) break // 端点不可达 — 状态未知，全部按缺失走重传（POST 幂等去重）
+      verifyReached = true
+      for (const [sha, id] of Object.entries(r.retained)) liveSha.set(sha, id)
+    }
+    if (!verifyReached) {
+      onProgress?.(`留存校验端点暂不可达 — 尝试从本地留存重传 ${uniqueShas.length} 份报告（服务端幂等去重，已留存的不会重复落盘）…`)
+    }
+  }
+  // ② 无 sha 仅 reportId 的项按 id 校验（v2.81 前旧运行记录兼容路径）
+  const missingIds = new Set<string>()
+  const idOnlyItems = items.filter(i => !i.sha && i.reportId)
+  if (idOnlyItems.length > 0) {
+    const ids = [...new Set(idOnlyItems.map(i => i.reportId!))]
+    onProgress?.(`校验 ${ids.length} 份旧运行记录的留存…`)
+    for (let i = 0; i < ids.length; i += 60) {
+      const r = await verifyImportedReports(ids.slice(i, i + 60))
+      if (!r) break
+      for (const m of r.missing) missingIds.add(m)
+    }
+  }
+  // ③ 逐项判定：采纳 / 重传 / 缺失。
+  //  v2.84：端点不可达时也全部标记重传（旧版「视同存活」提前返回 = 用户实测
+  //  117/117 原文未内嵌的直接原因之一 — POST 幂等去重下重传是安全的兜底）。
+  let reuploaded = 0
+  let adopted = 0
+  let stillMissing = 0
+  const brokenShas = new Set<string>()
+  for (const it of items) {
+    if (!it.sha) {
+      if (it.reportId && missingIds.has(it.reportId)) stillMissing++ // 旧记录且 id 死亡 — 无本地缓存键无法重传
+      continue
+    }
+    const live = liveSha.get(it.sha)
+    if (live) {
+      fixed.set(it.sha, live)
+      adopted++
+      continue
+    }
+    brokenShas.add(it.sha) // 端点可达：确实缺失；不可达：状态未知 — 均走重传
+  }
+  if (brokenShas.size === 0) return { fixed, reuploaded, adopted, stillMissing }
+  // ④ 从本地留存取回并重传（限并发 — 百份 × MB 级不能全量齐发）
+  const queue = [...brokenShas]
+  let next = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(uploadConcurrency, queue.length)) }, async () => {
+    for (;;) {
+      const i = next++
+      if (i >= queue.length) return
+      const sha = queue[i]!
+      const src = await getImportedSource(sha)
+      if (!src) { stillMissing++; continue }
+      const newId = await uploadImportedReport(src.fileName, src.html)
+      if (newId) {
+        fixed.set(sha, newId)
+        reuploaded++
+        onProgress?.(`重新上传导入报告原文 ${reuploaded}/${queue.length}（${src.fileName.slice(0, 40)}）…`)
+      } else {
+        stillMissing++
+      }
+    }
+  })
+  await Promise.all(workers)
+  return { fixed, reuploaded, adopted, stillMissing }
 }
 
 /**
