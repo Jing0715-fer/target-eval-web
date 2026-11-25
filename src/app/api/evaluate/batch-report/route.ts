@@ -16,6 +16,7 @@ import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
 import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
+import { renderReportPdf, pdfResponse, pdfDisposition, pdfErrorResponse } from '@/lib/eval/report-pdf'
 import { propagateFamilyBlast } from '@/lib/eval/blast-family'
 import { augmentTargetsForSharedPdbCoverage } from '@/lib/eval/rcsb'
 import { getEngineSummary, runWithLlmOverride, sanitizeLlmOverride } from '@/lib/eval/llm-provider'
@@ -516,8 +517,8 @@ export async function GET(req: Request) {
     }
   }
 
-  // 下载 HTML 文件
-  if (url.searchParams.get('download') === '1') {
+  // 下载 HTML 文件 / 导出 PDF（v2.87）
+  if (url.searchParams.get('download') === '1' || url.searchParams.get('format') === 'pdf') {
     if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该报告无 HTML 文件' }, { status: 404 })
     try {
       let html = await fs.readFile(record.htmlPath, 'utf-8')
@@ -538,6 +539,15 @@ export async function GET(req: Request) {
       const date = new Date().toISOString().slice(0, 10)
       const asciiBase = titleBase && /^[\x20-\x7e]+$/.test(titleBase) ? titleBase : `TargetEval_Merged_${date}`
       const finalBase = titleBase || `merged-report-${record.id.slice(0, 8)}`
+      // v2.87：PDF 导出（视图全展开 + 每靶点新起一页 — @media print 分页规则同源）
+      if (url.searchParams.get('format') === 'pdf') {
+        try {
+          const bytes = await renderReportPdf(html)
+          return pdfResponse(bytes, pdfDisposition(asciiBase, finalBase))
+        } catch (err) {
+          return pdfErrorResponse(err, `合并报告（${record.id}）`)
+        }
+      }
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',

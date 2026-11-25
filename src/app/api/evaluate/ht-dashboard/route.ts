@@ -18,6 +18,9 @@
  * GET /api/evaluate/ht-dashboard?id=xxx — JSON 状态（前端轮询）
  * GET ?id=xxx&inline=1 — HTML 预览（iframe/新窗口）
  * GET ?id=xxx&download=1 — 下载 HTML 看板文件（前端自动落盘复用此通道）
+ * GET ?id=xxx&format=pdf — A4 PDF 导出（v2.87：注入看板打印分页规则后 Chromium
+ *   print-to-PDF — 统计卡/方法条/表行避让腰斩，页脚页码；弹出页载荷为 script
+ *   数据不参与打印，PDF 即统计+总表+AI 分析的紧凑汇总版）
  */
 import { NextResponse } from 'next/server'
 import * as fs from 'node:fs/promises'
@@ -55,6 +58,7 @@ import {
   type HtDashboardEntry,
   type HtImportedTarget,
 } from '@/lib/eval/ht-dashboard'
+import { renderReportPdf, pdfResponse, pdfDisposition, pdfErrorResponse, applyDashboardPrintCss, PDF_HTML_MAX_BYTES, ReportPdfTooLargeError } from '@/lib/eval/report-pdf'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -917,6 +921,24 @@ export async function GET(req: Request) {
           },
         })
       }
+    }
+  }
+
+  // v2.87：PDF 导出（读盘整串 + 注入看板打印分页规则 + Chromium print-to-PDF）。
+  //  体积护栏：超限看板拒绝渲染并给出指引（下载 HTML 后浏览器打印，版式规则同源）。
+  if (url.searchParams.get('format') === 'pdf') {
+    if (!record.htmlPath) return NextResponse.json({ ok: false, error: '该看板无 HTML 文件（生成失败或未落盘）' }, { status: 404 })
+    if (record.status === 'running') return NextResponse.json({ ok: false, error: '看板正在生成中，请等待完成后再导出 PDF' }, { status: 409 })
+    try {
+      const stat = await fs.stat(record.htmlPath)
+      if (stat.size > PDF_HTML_MAX_BYTES) throw new ReportPdfTooLargeError(stat.size)
+      const html = applyDashboardPrintCss(await fs.readFile(record.htmlPath, 'utf-8'))
+      const bytes = await renderReportPdf(html)
+      const titleBase = (record.title ?? '').replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || `TargetEval_Dashboard_${record.id.slice(0, 8)}`
+      const asciiBase = /^[\x20-\x7e]+$/.test(titleBase) ? titleBase : `TargetEval_Dashboard_${new Date().toISOString().slice(0, 10)}`
+      return pdfResponse(bytes, pdfDisposition(asciiBase, titleBase))
+    } catch (err) {
+      return pdfErrorResponse(err, `统计看板（${id}）`)
     }
   }
 

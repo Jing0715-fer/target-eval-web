@@ -620,9 +620,9 @@ export function applyZoomUpgrade(html: string): string {
 //  经 applyUxUpgrade 注入（marker 幂等）—— 历史作业同样获得 A4 打印/复制/横滚体验。
 
 const UX_PAGE_MARKER = 'rpt-ux-v1'
-const PRINT_PAGE_MARKER = 'rpt-pr-v1'
+const PRINT_PAGE_MARKER = 'rpt-pr-v2'
 
-export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.6）：@page 边距 + 分页避让 + 表格自动布局防右截断 */
+export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.6 + v2.87 强化）：@page 边距 + 分页避让 + 表格自动布局防右截断 */
   @page { size: A4; margin: 12mm 10mm 14mm; }
   @media print {
     body { font-size: 12px; line-height: 1.78; }
@@ -646,6 +646,27 @@ export const PRINT_PAGE_CSS = `  /* ${PRINT_PAGE_MARKER} A4 打印分页（v2.7.
     .lig-struct img { width: 96px; height: 96px; }
     .af-stage, .af-poster { height: 200px; }
     .copy-btn, .rpt-zoom-badge, .backtop { display: none !important; }
+    /* ── v2.87 分页避让强化（服务端 PDF 导出 + 浏览器打印同源生效 —
+       页断点不扰乱排版：行不腰斩 / 图不跨页 / 标题不孤行尾 / 卡片网格整卡避让） ── */
+    tr { break-inside: avoid-page; }
+    img, figure { break-inside: avoid-page; }
+    h1, h2, h3, h4, h5 { break-after: avoid-page; }
+    .glance-grid, .glance-tiles, .meta-grid, .fig-grid, .lig-grid,
+    .af-stage, .af-poster, .af-fig, .seqbox { break-inside: avoid-page; }
+    .tgt-card, .rel-box, .qa-ans, .note { break-inside: avoid-page; }
+  }
+`
+
+/** v2.87 增量：已带 v1 打印规则（rpt-pr-v1）的历史报告只补本块 —
+ *  纯新增选择器（CSS 级联在后覆盖），不重复注入 UX 套件 */
+export const PRINT_PAGE_DELTA_CSS = `  /* ${PRINT_PAGE_MARKER} v2.87 分页避让增量：行/图不腰斩 + 标题不孤行尾 + 卡片整卡避让（PDF 导出） */
+  @media print {
+    tr { break-inside: avoid-page; }
+    img, figure { break-inside: avoid-page; }
+    h1, h2, h3, h4, h5 { break-after: avoid-page; }
+    .glance-grid, .glance-tiles, .meta-grid, .fig-grid, .lig-grid,
+    .af-stage, .af-poster, .af-fig, .seqbox { break-inside: avoid-page; }
+    .tgt-card, .rel-box, .qa-ans, .note { break-inside: avoid-page; }
   }
 `
 
@@ -1140,14 +1161,29 @@ export function applyTableFilterUpgrade(html: string): string {
   return out
 }
 
-/** 旧报告兼容：无 UX 标记的历史 report.html，注入打印版式 + 复制/横滚 CSS+JS（幂等，已有则原样返回） */
+/** 旧报告兼容：注入打印版式 + 复制/横滚 CSS+JS（幂等）。
+ *  v2.87：标记从 rpt-pr-v1 升到 rpt-pr-v2（分页避让强化）—
+ *  - 从未升级过的旧报告（无 ux-v1）→ 全量注入（打印 v2 + UX CSS+JS）；
+ *  - v2.7.6+ 生成的报告（有 ux-v1 + 打印 v1）→ 只补打印 v2 增量块
+ *    （纯新增选择器，CSS 级联覆盖，不重复注入 UX CSS/JS）。 */
 export function applyUxUpgrade(html: string): string {
-  if (html.includes(UX_PAGE_MARKER)) return html
+  const needsPrintV2 = !html.includes(PRINT_PAGE_MARKER)
+  const needsUx = !html.includes(UX_PAGE_MARKER)
+  if (!needsPrintV2 && !needsUx) return html
   let out = html
   const h = out.indexOf('</head>')
-  if (h >= 0) out = `${out.slice(0, h)}<style id="rpt-ux">${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>\n${out.slice(h)}`
-  const b = out.lastIndexOf('</body>')
-  if (b >= 0) out = `${out.slice(0, b)}${UX_PAGE_JS}\n${out.slice(b)}`
+  if (h >= 0) {
+    if (needsUx) {
+      out = `${out.slice(0, h)}<style id="rpt-ux">${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>\n${out.slice(h)}`
+    } else {
+      // 已带 ux-v1（v2.7.6+ 模板直出）— 只补打印 v2 增量
+      out = `${out.slice(0, h)}<style id="rpt-pr2">${PRINT_PAGE_DELTA_CSS}</style>\n${out.slice(h)}`
+    }
+  }
+  if (needsUx) {
+    const b = out.lastIndexOf('</body>')
+    if (b >= 0) out = `${out.slice(0, b)}${UX_PAGE_JS}\n${out.slice(b)}`
+  }
   return out
 }
 

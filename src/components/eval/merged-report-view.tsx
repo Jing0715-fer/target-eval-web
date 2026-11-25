@@ -36,6 +36,7 @@ import { BlastTable, BlastNrTable } from './blast-table'
 import { LiteratureList } from './literature-list'
 import { PdbTable } from './pdb-table'
 import { SharedPdbTable, SharedStructuresHeader } from './shared-pdb-table'
+import { ReportDownloadMenu } from './report-download-menu'
 import type { BatchReportInfo, MergedTargetLite } from './types'
 
 export interface MergedReportViewProps {
@@ -453,6 +454,9 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
     window.open(`/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&download=1`, '_blank')
   }
 
+  /** v2.87：服务端 PDF 导出（fromCache 本地副本无服务端文件 — 不提供 PDF 选项） */
+  const reportPdfUrl = report.fromCache ? null : `/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&download=1`
+
   // reloadNonce > 0 时追加 cache-bust（同 id 重新生成后强制 iframe 重拉新 HTML，避免命中旧内容）
   const inlineUrl = `/api/evaluate/batch-report?id=${encodeURIComponent(report.id)}&inline=1${reloadNonce ? `&_r=${reloadNonce}` : ''}`
 
@@ -617,13 +621,16 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
               <Eye className="size-4" />
               大窗预览
             </Button>
-            <Button
-              onClick={downloadReport}
-              className="btn-brand h-10 gap-2 rounded-lg px-4 font-medium text-primary-foreground"
-            >
-              <Download className="size-4" />
-              下载 HTML（{reportTitle.slice(0, 12)}{reportTitle.length > 12 ? '…' : ''}）
-            </Button>
+            {/* v2.87：下载报告菜单（HTML / PDF 双格式 — PDF 时合并报告视图全展开、每靶点新起一页） */}
+            <ReportDownloadMenu
+              size="default"
+              label={`下载报告（${reportTitle.slice(0, 12)}${reportTitle.length > 12 ? '…' : ''}）`}
+              onDownloadHtml={downloadReport}
+              pdfUrl={reportPdfUrl}
+              pdfFallbackName={reportTitle}
+              pdfNote="每靶点独立一页"
+              className="btn-brand border-transparent text-primary-foreground"
+            />
             {!embedFailed && (
               <Button
                 onClick={() => reportFrameRef.current?.contentWindow?.print()}
@@ -1052,15 +1059,14 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                         <ExternalLink className="size-3.5" />
                         新窗口打开
                       </Button>
-                      <Button
+                      {/* v2.87：预览降级路径的下载菜单（HTML / PDF） */}
+                      <ReportDownloadMenu
                         size="sm"
-                        variant="outline"
-                        onClick={downloadReport}
-                        className="h-8 gap-1.5 rounded-lg"
-                      >
-                        <Download className="size-3.5" />
-                        下载
-                      </Button>
+                        label="下载"
+                        onDownloadHtml={downloadReport}
+                        pdfUrl={reportPdfUrl}
+                        pdfFallbackName={reportTitle}
+                      />
                     </div>
                   </div>
                 ) : (

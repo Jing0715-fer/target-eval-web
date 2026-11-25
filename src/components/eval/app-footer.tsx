@@ -4,7 +4,7 @@ import { APP_VERSION } from '@/lib/version'
 
 export function AppFooter({ engineSummary }: { engineSummary?: string }) {
   return (
-    <footer className="glass header-gradient-border mt-auto">
+    <footer className="glass header-gradient-border relative mt-auto">
       {/* 顶边主色渐变描边（header-gradient-border::after）— 与顶栏呼应 */}
       <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-3 text-center sm:px-5 lg:px-6 xl:max-w-[1440px] 2xl:max-w-[1720px]">
         <span className="flex items-center gap-1.5 text-[11px] font-semibold tracking-[-0.01em] text-muted-foreground">
