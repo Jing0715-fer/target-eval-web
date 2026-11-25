@@ -1,13 +1,16 @@
 'use client'
 
 /**
- * 报告下载菜单（v2.87）—「下载报告 ▾」下拉：HTML / PDF 双格式。
+ * 报告下载菜单（v2.87 · v2.88 连续长页）—「下载报告 ▾」下拉：HTML / PDF 双格式。
  *
- *  用户需求：「结果除了 HTML 外，增加导出 PDF 的选项」。
- *  - HTML：沿用既有通道（window.open 服务端文件流，即时下载）；
- *  - PDF：服务端 Chromium print-to-PDF（与 HTML 同一份文件 + 同一套 @media print
- *    A4 分页规则），渲染数秒到数十秒 — fetch blob 另存，按钮即时反馈生成中/
- *    完成/失败（toast），期间可关闭菜单继续浏览；
+ *  用户需求：「结果除了 HTML 外，增加导出 PDF 的选项」+「pdf 能完全不分页吗？
+ *  格式尽量和 html 保持一致」。
+ *  - HTML：沿用既有通道（window.open 服务端文件流，即时下载；浏览器 Ctrl/Cmd+P
+ *    可另存 A4 分页 PDF — 打印归档由它承担）；
+ *  - PDF：服务端 Chromium print-to-PDF · 连续长页 — 纸张 = 内容实测尺寸，整份
+ *    报告一页装下（零页断点零页码）；按屏幕媒体渲染，版式与网页版一致。渲染
+ *    数秒到数十秒 — fetch blob 另存，按钮即时反馈生成中/完成/失败（toast），
+ *    期间可关闭菜单继续浏览；
  *  - PDF 不可用（本地缓存副本 / 无状态内联报告无服务端文件）→ 退化为单按钮
  *    （保持既有 HTML/Markdown 降级行为，不出现死选项）。
  */
@@ -58,11 +61,11 @@ export function ReportDownloadMenu({
     setPdfBusy(true)
     toast({
       title: '正在生成 PDF…',
-      description: '服务端渲染 A4 分页版式（卡片/表格行不截断、页脚页码），约数秒到一分钟，取决于报告长度。',
+      description: '服务端按网页版式渲染连续长页 PDF（整份报告一页装下、不分页），约数秒到一分钟，取决于报告长度。',
     })
     try {
       await downloadReportPdf(pdfUrl, pdfFallbackName)
-      toast({ title: 'PDF 已导出', description: '已保存到浏览器下载目录（与 HTML 报告同一份内容、A4 分页版式）。' })
+      toast({ title: 'PDF 已导出', description: '已保存到浏览器下载目录（与 HTML 报告同一份内容 · 连续长页不分页 · 版式同网页版）。' })
     } catch (e) {
       toast({
         title: 'PDF 导出失败',
@@ -139,7 +142,7 @@ export function ReportDownloadMenu({
           <div className="min-w-0 flex-1">
             <div className="text-[13px] font-medium">PDF 报告（.pdf）</div>
             <div className="text-[11px] text-muted-foreground">
-              A4 分页版式 · 页脚页码{pdfNote ? ` · ${pdfNote}` : ' · 适合打印与分享'}
+              连续长页 · 不分页 · 版式同网页版{pdfNote ? ` · ${pdfNote}` : ' · 适合阅读分享'}
             </div>
           </div>
         </DropdownMenuItem>

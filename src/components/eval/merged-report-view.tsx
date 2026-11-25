@@ -621,14 +621,14 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
               <Eye className="size-4" />
               大窗预览
             </Button>
-            {/* v2.87：下载报告菜单（HTML / PDF 双格式 — PDF 时合并报告视图全展开、每靶点新起一页） */}
+            {/* v2.87/v2.88：下载报告菜单（HTML / PDF 双格式 — PDF 连续长页：全部靶点视图展开、整份报告一页装下不分页） */}
             <ReportDownloadMenu
               size="default"
               label={`下载报告（${reportTitle.slice(0, 12)}${reportTitle.length > 12 ? '…' : ''}）`}
               onDownloadHtml={downloadReport}
               pdfUrl={reportPdfUrl}
               pdfFallbackName={reportTitle}
-              pdfNote="每靶点独立一页"
+              pdfNote="全部靶点视图展开"
               className="btn-brand border-transparent text-primary-foreground"
             />
             {!embedFailed && (

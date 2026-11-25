@@ -1219,11 +1219,11 @@ export async function downloadHtReportArchive(entries: HtArchiveEntry[], fallbac
   setTimeout(() => URL.revokeObjectURL(url), 30_000)
 }
 
-// ─── 报告 PDF 导出（v2.87）──────────────────────────────────────
+// ─── 报告 PDF 导出（v2.87 引入 · v2.88 连续长页）────────────────────────────
 
-/** 报告 PDF 导出：fetch blob → 另存（服务端 Chromium print-to-PDF — 与 HTML 下载
- *  同一份文件、同一套 @media print A4 分页规则：卡片/表格行不腰斩、标题不孤行尾、
- *  页脚页码；合并报告视图全展开 + 每靶点新起一页）。
+/** 报告 PDF 导出：fetch blob → 另存（服务端 Chromium print-to-PDF · 连续长页
+ *  不分页 — 与 HTML 下载同一份文件、按屏幕媒体渲染（版式同网页版）：纸张 = 内容
+ *  实测尺寸，整份报告一页装下；合并报告全部靶点视图连续展开；表格行不腰斩。
  *  url：报告接口相对路径（不含 format 参数，本函数追加）；fallbackName：响应缺
  *  Content-Disposition 时的兜底文件名。渲染耗时数秒到数十秒 — 240s 超时；失败抛错。 */
 export async function downloadReportPdf(url: string, fallbackName = 'TargetEval_Report'): Promise<void> {
@@ -1235,7 +1235,7 @@ export async function downloadReportPdf(url: string, fallbackName = 'TargetEval_
   } catch (e) {
     throw new Error(
       e instanceof Error && e.name === 'AbortError'
-        ? 'PDF 导出超时（4 分钟无响应 — 报告可能过大；可下载 HTML 后在浏览器中 Ctrl/Cmd+P 打印为 PDF，版式相同）'
+        ? 'PDF 导出超时（4 分钟无响应 — 报告可能过大；可下载 HTML 离线查看，或浏览器 Ctrl/Cmd+P 另存 A4 分页 PDF）'
         : '无法连接服务器（网络中断 — 稍后可重试）',
     )
   } finally {
@@ -1247,7 +1247,7 @@ export async function downloadReportPdf(url: string, fallbackName = 'TargetEval_
   }
   const blob = await res.blob()
   if (blob.size < 512) {
-    throw new Error('PDF 导出失败（返回内容异常）— 可下载 HTML 后在浏览器中 Ctrl/Cmd+P 打印为 PDF，版式相同')
+    throw new Error('PDF 导出失败（返回内容异常）— 可下载 HTML 离线查看，或浏览器 Ctrl/Cmd+P 另存 A4 分页 PDF')
   }
   // filename* 优先（RFC 5987 中文报告题目），回退 filename=，再回退兜底名
   const cd = res.headers.get('content-disposition') ?? ''

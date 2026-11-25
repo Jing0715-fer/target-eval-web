@@ -826,7 +826,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
                 <ExternalLink className="size-3.5" />
                 新窗口
               </Button>
-              {/* v2.87：下载报告菜单（HTML / PDF 双格式 — 服务端报告提供 PDF） */}
+              {/* v2.87/v2.88：下载报告菜单（HTML / PDF 双格式 — 服务端报告提供 PDF · 连续长页不分页） */}
               <ReportDownloadMenu
                 size="sm"
                 onDownloadHtml={downloadReport}
@@ -1259,7 +1259,7 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               <Eye className="size-4" />
               在线预览报告
             </Button>
-            {/* v2.87：下载报告菜单（HTML / PDF 双格式） */}
+            {/* v2.87/v2.88：下载报告菜单（HTML / PDF 双格式 · PDF 连续长页不分页） */}
             <ReportDownloadMenu
               size="default"
               onDownloadHtml={downloadReport}

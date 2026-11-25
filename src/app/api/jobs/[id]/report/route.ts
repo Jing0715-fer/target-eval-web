@@ -1,8 +1,9 @@
 /**
  * GET /api/jobs/[id]/report — 评估报告 HTML（独立文件）
  * ?download=1 → 触发浏览器下载
- * ?format=pdf → A4 PDF 导出（v2.87：Chromium print-to-PDF，与服务端 HTML 同源
- *   @media print 分页规则 — 卡片/表格行不腰斩、标题不孤行尾；页脚带页码）
+ * ?format=pdf → 连续长页 PDF 导出（v2.88：Chromium print-to-PDF 按屏幕媒体渲染
+ *   — 版式同网页版；纸张 = 内容实测尺寸，整份报告一页装下不分页；超物理上限时
+ *   19008px 长条最少分页 + 行/卡避让）
  * 公网加固：仅创建者可取报告；他人 404（报告含评估表提取的客户目标等敏感内容）。
  */
 import { NextResponse } from 'next/server'
@@ -44,7 +45,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   html = applyTableFilterUpgrade(html)
   const url = new URL(req.url)
   const download = url.searchParams.get('download') === '1'
-  // v2.87：PDF 导出（与服务端 HTML 同一份文件 + 同一套打印分页规则）
+  // v2.88：PDF 导出（连续长页 — 与服务端 HTML 同一份文件，屏幕媒体渲染）
   if (url.searchParams.get('format') === 'pdf') {
     try {
       const bytes = await renderReportPdf(html)
