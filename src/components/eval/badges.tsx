@@ -1,10 +1,12 @@
 'use client'
 
+import { Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AssetKind, JobStatus } from './types'
 import { scoreLevel } from './format'
 
-/** 结构解析方法标签（X-ray / Cryo-EM / NMR）：细边框 + 浅底色（Linear 克制语义色） */
+/** 结构解析方法标签（X-ray / Cryo-EM / NMR）：v2.86 Claude 式语义色配对 —
+ *  fg/bg 令牌同源（--xray/--xray-bg 等），与参考项目 claude-* 色系一致 */
 export function MethodBadge({
   method,
   isXray,
@@ -19,24 +21,39 @@ export function MethodBadge({
   className?: string
 }) {
   let label = (method ?? '').trim()
-  let cls =
-    'border-border bg-muted text-muted-foreground'
+  let style: React.CSSProperties = {
+    color: 'var(--muted-foreground)',
+    backgroundColor: 'color-mix(in srgb, var(--muted) 60%, transparent)',
+    borderColor: 'var(--border)',
+  }
   if (isXray || /x-?ray|diffraction/i.test(label)) {
     label = 'X-ray'
-    cls = 'border-primary/30 bg-primary/[0.06] text-primary'
+    style = {
+      color: 'var(--xray)',
+      backgroundColor: 'var(--xray-bg)',
+      borderColor: 'color-mix(in srgb, var(--xray) 30%, transparent)',
+    }
   } else if (isCryoem || /cryo|electron/i.test(label)) {
     label = 'Cryo-EM'
-    cls = 'border-teal-500/30 bg-teal-500/[0.06] text-teal-700 dark:text-teal-300'
+    style = {
+      color: 'var(--cryoem)',
+      backgroundColor: 'var(--cryoem-bg)',
+      borderColor: 'color-mix(in srgb, var(--cryoem) 30%, transparent)',
+    }
   } else if (isNmr || /nmr|nuclear/i.test(label)) {
     label = 'NMR'
-    cls = 'border-amber-500/30 bg-amber-500/[0.06] text-amber-700 dark:text-amber-400'
+    style = {
+      color: 'var(--nmr)',
+      backgroundColor: 'var(--nmr-bg)',
+      borderColor: 'color-mix(in srgb, var(--nmr) 30%, transparent)',
+    }
   }
   if (!label) label = '—'
   return (
     <span
+      style={style}
       className={cn(
-        'inline-flex items-center rounded-md border px-1.5 py-px text-[10px] font-semibold tracking-wide whitespace-nowrap',
-        cls,
+        'inline-flex items-center rounded-md border px-1.5 py-px text-[10px] font-semibold tracking-wide whitespace-nowrap shadow-[0_1px_2px_rgb(28_27_34/0.05)]',
         className
       )}
     >
@@ -88,15 +105,16 @@ export function StatusBadge({ status, className }: { status: JobStatus; classNam
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-md border px-1.5 py-px text-[10px] font-semibold tracking-wide whitespace-nowrap',
+        'inline-flex items-center gap-1.5 rounded-md border px-1.5 py-px text-[10px] font-semibold tracking-wide whitespace-nowrap shadow-[0_1px_2px_rgb(22_23_29/0.05)]',
         item.cls,
         className
       )}
     >
       {item.pulse && <span className="relative flex size-1.5">
         <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-75" />
-        <span className="relative inline-flex size-1.5 rounded-full bg-primary" />
+        <span className="relative inline-flex size-1.5 rounded-full bg-primary shadow-[0_0_6px_rgb(94_106_210/0.7)]" />
       </span>}
+      {status === 'done' && <Check className="size-2.5 shrink-0" strokeWidth={3} aria-hidden />}
       {item.label}
     </span>
   )
@@ -121,7 +139,7 @@ export function RatingBadge({
   return (
     <span
       className={cn(
-        'inline-flex items-center rounded-md border px-1.5 py-px text-[10px] font-semibold tracking-wide whitespace-nowrap',
+        'inline-flex items-center rounded-md border px-1.5 py-px text-[10px] font-semibold tracking-wide tabular-nums whitespace-nowrap shadow-[0_1px_2px_rgb(22_23_29/0.05)]',
         levelCls,
         className
       )}

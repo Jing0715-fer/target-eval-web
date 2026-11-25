@@ -161,6 +161,11 @@ export function EvalLogConsole({ logs, title, live = true, className }: EvalLogC
       <CardContent className="flex flex-col gap-2.5 px-5 py-4">
         {/* 工具栏：标题 + 行数/级别统计 + 过滤/搜索/操作 */}
         <div className="flex flex-wrap items-center gap-2">
+          <span className="flex shrink-0 items-center gap-1" aria-hidden>
+            <span className="size-2.5 rounded-full bg-red-400/70 dark:bg-red-500/50" />
+            <span className="size-2.5 rounded-full bg-amber-400/80 dark:bg-amber-500/60" />
+            <span className="size-2.5 rounded-full bg-emerald-400/80 dark:bg-emerald-500/60" />
+          </span>
           <Terminal className="size-3.5 shrink-0 text-muted-foreground/80" aria-hidden />
           <h3 className="lin-eyebrow shrink-0 text-muted-foreground">{heading}</h3>
           <span className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] tabular-nums text-muted-foreground/85">
@@ -188,9 +193,9 @@ export function EvalLogConsole({ logs, title, live = true, className }: EvalLogC
                   onClick={() => setLevelFilter(f.key)}
                   aria-pressed={levelFilter === f.key}
                   className={cn(
-                    'rounded-[5px] px-2 py-0.5 font-mono text-[10px] transition-colors',
+                    'rounded-[5px] px-2 py-0.5 font-mono text-[10px] transition-all',
                     levelFilter === f.key
-                      ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(22_23_29/0.08)]'
+                      ? 'bg-card text-foreground elev-1'
                       : 'text-muted-foreground/85 hover:text-foreground',
                   )}
                 >
@@ -210,14 +215,14 @@ export function EvalLogConsole({ logs, title, live = true, className }: EvalLogC
                 onChange={e => setQuery(e.target.value)}
                 placeholder="筛选…"
                 aria-label="日志关键字筛选"
-                className="h-7 w-24 rounded-md border border-border bg-muted/50 pr-6 pl-6 font-mono text-[11px] text-foreground placeholder:text-muted-foreground/50 focus:border-ring focus:outline-none sm:w-32"
+                className="h-7 w-24 rounded-md border border-border bg-muted/50 pr-6 pl-6 font-mono text-[11px] text-foreground transition-[border-color,box-shadow] placeholder:text-muted-foreground/50 focus:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus:outline-none sm:w-32"
               />
               {query && (
                 <button
                   type="button"
                   onClick={() => setQuery('')}
                   aria-label="清除筛选"
-                  className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground/80 hover:text-foreground"
+                  className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground/80 transition-colors hover:text-foreground"
                 >
                   <X className="size-3" />
                 </button>
@@ -314,7 +319,7 @@ export function EvalLogConsole({ logs, title, live = true, className }: EvalLogC
             <button
               type="button"
               onClick={resumeFollow}
-              className="absolute bottom-2 left-1/2 -translate-x-1/2 inline-flex items-center gap-1.5 rounded-full border border-[#2e3237] bg-[#16181c] px-3 py-1 font-mono text-[10px] text-[#8a8f98] shadow-lg transition-colors hover:text-white"
+              className="absolute bottom-2 left-1/2 -translate-x-1/2 inline-flex items-center gap-1.5 rounded-full border border-[#2e3237] bg-[#16181c]/95 px-3 py-1 font-mono text-[10px] text-[#8a8f98] shadow-lg backdrop-blur-sm transition-all hover:-translate-y-px hover:border-[#3a3f47] hover:bg-[#1d2025] hover:text-white focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:outline-none"
             >
               <ArrowDown className="size-3" />
               已暂停跟随 · 回到底部

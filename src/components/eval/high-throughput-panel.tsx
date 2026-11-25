@@ -442,7 +442,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           size="sm"
           disabled={importing}
           onClick={() => excelInputRef.current?.click()}
-          className="h-7 gap-1.5 rounded-lg px-2.5 text-[11px] font-medium"
+          className="h-7 gap-1.5 rounded-lg px-2.5 text-[11px] font-medium active:scale-[0.97]"
           title="上传 Excel/CSV 靶点表，由 LLM 语义提取分组（组号/复合物列、同行多靶点等）并填入下方输入；LLM 不可用时自动规则提取"
         >
           {importing
@@ -456,7 +456,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           size="sm"
           disabled={importingZip}
           onClick={() => zipInputRef.current?.click()}
-          className="h-7 gap-1.5 rounded-lg px-2.5 text-[11px] font-medium"
+          className="h-7 gap-1.5 rounded-lg px-2.5 text-[11px] font-medium active:scale-[0.97]"
           title="导入既有报告（zip 归档或单独的报告 HTML 文件，可多选批量 — 如浏览器下载的「G74_xxx.html」）— 已有报告的靶点自动取消勾选（跳过评估，不占配额）"
         >
           {importingZip
@@ -501,7 +501,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             {importMeta.source === 'llm' ? 'LLM 智能提取' : '规则提取（LLM 不可用）'}
           </span>
           <span className="font-mono text-[11px] text-foreground/90">
-            提取 {importMeta.groupCount} 组 · {importMeta.targetCount} 靶点，已填入下方分组
+            提取 <span className="num-glow">{importMeta.groupCount}</span> 组 · <span className="num-glow">{importMeta.targetCount}</span> 靶点，已填入下方分组
           </span>
           {importMeta.rangeTargetCount > 0 && (
             <span
@@ -567,7 +567,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
           <FileStack className="size-3" aria-hidden />
-          {groupTotal} 组 · {selectedCount}/{totalTargets + seqTargetTotal} 靶点已选
+          <span className="num-glow text-foreground">{groupTotal}</span> 组 · <span className="num-glow text-foreground">{selectedCount}/{totalTargets + seqTargetTotal}</span> 靶点已选
         </span>
         <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
           <Zap className="size-3" aria-hidden />
@@ -602,7 +602,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
             {zipMeta.name}
           </span>
           <span className="font-mono text-[11px] text-sky-700 dark:text-sky-400">
-            识别 {zipMeta.reports} 条报告记录 · 匹配 {zipMeta.matched} 个已有报告的靶点（已取消勾选；启动后计入「载入」，不重复评估）
+            识别 <span className="num-glow">{zipMeta.reports}</span> 条报告记录 · 匹配 <span className="num-glow">{zipMeta.matched}</span> 个已有报告的靶点（已取消勾选；启动后计入「载入」，不重复评估）
           </span>
         </div>
       )}
@@ -631,7 +631,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                   description: '对应靶点恢复勾选 — 启动后将重新评估（当前身份识别级联重检索，回填 UniProt 与检索证据）。',
                 })
               }}
-              className="ml-auto h-7 gap-1 rounded-lg border-amber-500/40 px-2.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400"
+              className="ml-auto h-7 gap-1 rounded-lg border-amber-500/40 px-2.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 active:scale-[0.97] dark:text-amber-400"
               title={`恢复勾选这 ${noUniKeys.size} 个靶点（不载入其导入的报告）— 启动后重新评估`}
             >
               <RotateCcw className="size-3" aria-hidden />
@@ -646,7 +646,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
       {(parsed.groups.length > 0 || seqGroups.length > 0) && (
         <ol className="flex flex-col gap-1.5">
           {parsed.groups.map((g, i) => (
-            <li key={i} className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-muted/40 px-2.5 py-1.5">
+            <li key={i} className="studio-card studio-card-hover flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-muted/40 px-2.5 py-1.5">
               <button
                 type="button"
                 onClick={() => toggleGroupSkip('g', i, g.length)}
@@ -671,7 +671,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                         ? imported
                           ? 'border-emerald-500/40 bg-emerald-500/[0.05] text-emerald-700/90 dark:text-emerald-400/90'
                           : 'border-sky-500/30 text-sky-700/60 line-through decoration-sky-500/40 dark:text-sky-400/60'
-                        : 'border-border text-foreground/90',
+                        : 'border-border text-foreground/90 transition-colors hover:border-primary/35 hover:bg-accent/60',
                     )}
                     title={
                       imported
@@ -711,7 +711,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           {seqGroups.map((g, gi) => (
             <li
               key={`seq-${gi}`}
-              className="flex flex-wrap items-center gap-1.5 rounded-lg border border-teal-500/30 bg-teal-500/[0.04] px-2.5 py-1.5"
+              className="studio-card studio-card-hover flex flex-wrap items-center gap-1.5 rounded-lg border border-teal-500/30 bg-teal-500/[0.04] px-2.5 py-1.5"
               title="该行无 UniProt ID 但有序列 → 逐行成组（同一行的多个靶点作为同一组）；抗体链已忽略、同源多聚体只计 1 条；跨行所有链 ≥95% 同源的重复交付行已并入本组（首个交付行为代表）；组内每条序列作为独立序列靶点评估（结构预测走 ESMFold 兜底）。评估区间由管线在 BLAST 归属后自动推导（构建比对 / BLAST nr 比对坐标 — 不取自 Excel 行文本，年份等数字不会被误当残基区间）"
             >
               <button
@@ -736,7 +736,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                         ? imported
                           ? 'border-emerald-500/40 bg-emerald-500/[0.05] text-emerald-700/90 dark:text-emerald-400/90'
                           : 'border-sky-500/30 text-sky-700/60 line-through decoration-sky-500/40 dark:text-sky-400/60'
-                        : 'border-border text-foreground/90',
+                        : 'border-border text-foreground/90 transition-colors hover:border-primary/35 hover:bg-accent/60',
                     )}
                     title={`${s.header || '裸序列'}（${s.length} aa）${imported ? ` · 已有报告（导入匹配${importedEntry?.fileName ? ` · ${importedEntry.fileName}` : ''}，进度计入「载入」${importedEntry?.jobId ? '；汇总报告将恢复完整统计' : '；旧版报告以「载入」行呈现'}）` : skipped ? ' · 已跳过（启动时不评估；运行中可恢复）' : ''}`}
                   >
@@ -784,16 +784,17 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
 
       {/* 最近高通量运行（恢复断点 / 回看结果） */}
       {recentRuns.length > 0 && (
-        <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-card p-2.5">
+        <div className="studio-card relative flex flex-col gap-1.5 overflow-hidden rounded-lg border border-border bg-card p-2.5">
+          <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
           <p className="lin-eyebrow text-muted-foreground/80">Recent Runs · 最近高通量运行</p>
           <ol className="flex flex-col gap-1">
             {recentRuns.slice(0, 3).map((r) => {
               const pill = runStatusPill(r)
               return (
-                <li key={r.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-muted/30 px-2.5 py-1.5">
+                <li key={r.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-muted/30 px-2.5 py-1.5 transition-colors hover:border-border hover:bg-accent/50">
                   <span className={cn('rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium', pill.cls)}>{pill.label}</span>
                   <span className="font-mono text-[11px] text-foreground/90">
-                    {r.groups.length} 组 · {r.totalTargetCount} 靶点
+                    <span className="num-glow">{r.groups.length}</span> 组 · <span className="num-glow">{r.totalTargetCount}</span> 靶点
                   </span>
                   <span className="font-mono text-[10px] text-muted-foreground/85">{formatDateTime(new Date(r.createdAt).toISOString())}</span>
                   <span className="ml-auto flex items-center gap-1">
@@ -803,7 +804,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                         variant="outline"
                         size="sm"
                         onClick={() => onResumeRun(r.id)}
-                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium"
+                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium active:scale-[0.97]"
                         title={r.status === 'paused' ? '从断点恢复运行' : '接上仍在执行的作业，从断点继续'}
                       >
                         <RotateCcw className="size-3" aria-hidden />
@@ -815,7 +816,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                         variant="outline"
                         size="sm"
                         onClick={() => onResumeRun(r.id)}
-                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium"
+                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium active:scale-[0.97]"
                         title="回看该次运行的组结果与日志"
                       >
                         <Play className="size-3" aria-hidden />
@@ -830,7 +831,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
                         size="sm"
                         disabled={archiving || !r.groups.some((g) => g.mergedReportId || g.items.some((it) => it.status === 'done' && it.jobId))}
                         onClick={() => onArchiveRun(r.id)}
-                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium"
+                        className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium active:scale-[0.97]"
                         title="打包该次运行全部报告为单个 zip（每组一个子文件夹，含合并报告与 README 清单）"
                       >
                         {archiving

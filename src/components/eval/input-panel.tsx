@@ -26,7 +26,8 @@ import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tabs, TabsContent } from '@/components/ui/tabs'
+import { SlidingTabsList } from '@/components/eval/segmented-tabs'
 import { cn } from '@/lib/utils'
 import {
   countResidues,
@@ -135,9 +136,9 @@ function StepSection({
           {no !== '01' && <span className="-mt-4 h-4 w-px bg-border" />}
           <span
             className={cn(
-              'flex size-5.5 shrink-0 items-center justify-center rounded-full border font-mono text-[9.5px] font-semibold tabular-nums transition-colors duration-300',
+              'flex size-5.5 shrink-0 items-center justify-center rounded-full border font-mono text-[9.5px] font-semibold tabular-nums transition-all duration-300',
               tone === 'done'
-                ? 'border-primary bg-primary text-primary-foreground shadow-[0_0_0_3px_rgb(94_106_210/0.15)]'
+                ? 'border-transparent bg-gradient-to-br from-[#6d74e0] to-[#7a5ce4] text-white shadow-[0_0_0_3px_rgb(94_106_210/0.15),0_2px_8px_-2px_rgb(94_106_210/0.45)]'
                 : tone === 'optional'
                   ? 'border-dashed border-border bg-background text-muted-foreground/85'
                   : 'border-border bg-background text-muted-foreground',
@@ -676,28 +677,22 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
             : '开始评估'
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgb(22_23_29/0.04)] dark:shadow-[0_1px_2px_rgb(0_0_0/0.4)]">
+    <div className="studio-card relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
+      {/* 顶部品牌渐变发丝线 — 与全站卡片呼应 */}
+      <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
       <Tabs value={mode} onValueChange={(v) => setMode(v as TabMode)} className="flex min-h-0 flex-1 flex-col gap-0">
-        {/* 卡头工具条：输入方式切换（Linear 分段控件 — 选中 = 表面抬升；移动端占满整行） */}
-        <div className="flex shrink-0 items-center gap-x-3 gap-y-2 border-b border-border bg-secondary/50 px-4 py-2.5 sm:px-5">
+        {/* 卡头工具条：输入方式切换（v2.86 Claude 式滑动胶囊分段控件 — pill 随选中项滑动；移动端占满整行） */}
+        <div className="flex shrink-0 items-center gap-x-3 gap-y-2 border-b border-border bg-secondary/40 px-4 py-2.5 sm:px-5">
           <span className="lin-eyebrow hidden text-muted-foreground/80 sm:inline">Input · 输入方式</span>
-          <TabsList className="h-8 w-full justify-between gap-0.5 rounded-lg border border-border bg-muted p-0.5 sm:ml-auto sm:w-auto sm:justify-start">
-            {([
+          <SlidingTabsList
+            className="sm:ml-auto"
+            items={[
               { value: 'uniprot', label: 'UniProt', icon: Dna },
               { value: 'sequence', label: '序列', icon: FileText },
               { value: 'docx', label: '评估表', icon: Paperclip },
               { value: 'highthroughput', label: '高通量', icon: Zap },
-            ] as const).map(({ value, label, icon: Icon }) => (
-              <TabsTrigger
-                key={value}
-                value={value}
-                className="h-7 flex-1 gap-1.5 rounded-[6px] px-2 text-[11.5px] font-medium text-muted-foreground shadow-none transition-all data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_3px_rgb(22_23_29/0.10)] sm:flex-none sm:px-3 dark:data-[state=active]:bg-[#191a1b] [&_svg]:size-3"
-              >
-                <Icon aria-hidden />
-                {label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+            ]}
+          />
         </div>
 
         {/* 字段区（卡片内的滚动窗口，上下缘渐隐） */}
@@ -755,7 +750,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                           key={ex.id}
                           type="button"
                           onClick={() => setUniprot(ex.id)}
-                          className="min-h-8 rounded-md border border-border bg-muted px-2.5 font-mono text-[10.5px] text-muted-foreground transition-colors hover:border-ring hover:text-primary"
+                          className="min-h-8 rounded-md border border-border bg-card px-2.5 font-mono text-[10.5px] text-muted-foreground shadow-[0_1px_2px_rgb(22_23_29/0.04)] transition-all duration-200 hover:-translate-y-px hover:border-primary/40 hover:text-primary hover:shadow-[0_3px_8px_-2px_rgb(94_106_210/0.25)] active:translate-y-0"
                         >
                           {ex.id} · {ex.name}
                         </button>
@@ -763,7 +758,7 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
                       <button
                         type="button"
                         onClick={() => setUniprot(EXAMPLE_UNIPROTS.map(ex => ex.id).join(', '))}
-                        className="min-h-8 rounded-md border border-primary/30 bg-primary/[0.06] px-2.5 font-mono text-[10.5px] text-primary transition-colors hover:border-primary/60"
+                        className="min-h-8 rounded-md border border-primary/30 bg-primary/[0.06] px-2.5 font-mono text-[10.5px] text-primary transition-all duration-200 hover:-translate-y-px hover:border-primary/60 hover:bg-primary/[0.1] hover:shadow-[0_3px_8px_-2px_rgb(94_106_210/0.3)] active:translate-y-0"
                       >
                         多靶点示例（EGFR + p53）
                       </button>
@@ -1285,8 +1280,13 @@ export function InputPanel({ submitting, submitError, onStart, onClearSubmitErro
               size="lg"
               disabled={!inputReady || submitting}
               onClick={handleStart}
-              className="group relative h-10 flex-1 overflow-hidden rounded-lg bg-primary text-[13.5px] font-semibold tracking-[-0.01em] text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_6px_16px_-8px_rgb(94_106_210/0.5)] transition-all hover:bg-[#7a84dc] disabled:opacity-50 disabled:shadow-none dark:hover:bg-[#828fff]"
+              className="btn-brand group relative h-11 flex-1 overflow-hidden rounded-lg text-[13.5px] font-semibold tracking-[-0.01em] text-primary-foreground disabled:opacity-50 disabled:shadow-none"
             >
+              {/* 悬浮时扫过的高光 — 高级感微动效 */}
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-y-0 left-0 w-1/4 -translate-x-full bg-gradient-to-r from-transparent via-white/25 to-transparent transition-transform duration-700 ease-out group-hover:translate-x-[420%] group-disabled:hidden"
+              />
               {submitting ? (
                 <LoaderCircle className="size-4 animate-spin" />
               ) : (

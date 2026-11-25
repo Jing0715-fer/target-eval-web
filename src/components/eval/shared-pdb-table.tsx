@@ -17,11 +17,11 @@ export interface SharedPdbTableProps {
 export function SharedPdbTable({ shared }: SharedPdbTableProps) {
   if (shared.length === 0) return null
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
-      <div className="overflow-auto">
+    <div className="studio-card overflow-hidden rounded-xl border border-border bg-card">
+      <div className="eval-scroll overflow-auto">
         <Table>
-          <TableHeader className="sticky top-0 z-10 bg-muted/60">
-            <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+          <TableHeader className="sticky top-0 z-10 bg-muted/70">
+            <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
               <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">PDB ID</TableHead>
               <TableHead className="eval-eyebrow h-9 text-muted-foreground">方法</TableHead>
               <TableHead className="eval-eyebrow h-9 text-muted-foreground">分辨率</TableHead>
@@ -37,7 +37,7 @@ export function SharedPdbTable({ shared }: SharedPdbTableProps) {
             {shared.map((s, i) => (
               <TableRow
                 key={`${s.pdbId}-${i}`}
-                className="border-border/60 hover:bg-accent/50"
+                className="border-border/60 hover:bg-muted/50"
               >
                 <TableCell className="pl-4">
                   <a

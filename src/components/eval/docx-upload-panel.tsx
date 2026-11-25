@@ -106,17 +106,19 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             handleFile(e.dataTransfer.files?.[0])
           }}
           className={cn(
-            'flex min-h-28 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed px-6 py-5 text-center outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/30',
+            'flex min-h-28 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed px-6 py-5 text-center outline-none transition-all duration-200 focus-visible:ring-[3px] focus-visible:ring-ring/30',
             dragOver
-              ? 'border-primary bg-primary/[0.05]'
-              : 'border-border bg-muted/50 hover:border-ring hover:bg-primary/[0.03]',
+              ? 'border-primary/50 bg-primary/[0.04]'
+              : 'border-border bg-muted/50 hover:-translate-y-px hover:border-primary/40 hover:bg-primary/[0.03]',
             uploading && 'pointer-events-none opacity-80'
           )}
         >
           {uploading ? (
             <LoaderCircle className="size-6 animate-spin text-primary" />
           ) : (
-            <FileUp className="size-6 text-muted-foreground/80" />
+            <div className="flex size-11 items-center justify-center rounded-xl bg-primary/[0.07] ring-1 ring-primary/15 ring-inset">
+              <FileUp className="size-5 text-primary/70" />
+            </div>
           )}
           <div className="text-[13px] font-medium text-foreground/90">
             {uploading
@@ -128,7 +130,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
           {uploading && uploadProgress?.phase === 'uploading' && (
             <div className="h-1.5 w-full max-w-72 overflow-hidden rounded-full bg-border" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((uploadProgress.loaded / Math.max(1, uploadProgress.total)) * 100)}>
               <div
-                className="h-full rounded-full bg-primary transition-all"
+                className="h-full rounded-full bg-gradient-to-r from-[#5e6ad2] to-[#8b5cf6] transition-all"
                 style={{ width: `${Math.min(100, (uploadProgress.loaded / Math.max(1, uploadProgress.total)) * 100)}%` }}
               />
             </div>
@@ -212,7 +214,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         </div>
       )}
       {!insightsLoading && (insights || insightsError) && (
-        <div className="rounded-lg border border-border bg-card px-3.5 py-3">
+        <div className="rounded-lg border border-border bg-card px-3.5 py-3 studio-card">
           <div className="mb-2 flex items-center gap-2">
             <Sparkles className="size-3.5 shrink-0 text-primary" />
             <span className="text-xs font-semibold text-foreground">AI 智能解析要点</span>
@@ -268,7 +270,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                         key={i}
                         type="button"
                         onClick={() => onApplyGoal(g)}
-                        className="break-words rounded-sm border-l-2 border-amber-400 bg-amber-500/[0.07] px-2.5 py-1.5 text-left text-xs leading-relaxed text-foreground/90 transition-colors hover:bg-amber-500/[0.12]"
+                        className="break-words rounded-md border-l-2 border-amber-400/80 bg-amber-500/[0.07] px-2.5 py-1.5 text-left text-xs leading-relaxed text-foreground/90 transition-all hover:border-amber-500 hover:bg-amber-500/[0.12]"
                         title="点击填入客户目标"
                       >
                         {g}
@@ -376,7 +378,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
           <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-foreground/80">
             <SearchCheck className="size-3.5 shrink-0 text-teal-600 dark:text-teal-400" aria-hidden />
             <span>蛋白名称 → UniProt 解析命中</span>
-            <span className="rounded-md bg-teal-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-teal-600 dark:text-teal-400">
+            <span className="rounded-md border border-teal-500/25 bg-teal-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums text-teal-600 dark:text-teal-400">
               命中 {rResolved.length}/{rResolved.length + rUnresolved.length}
             </span>
             <span className="text-[11px] font-normal text-muted-foreground/80">（评估表未含 UniProt/序列 — 已按靶点名称检索 UniProt 并自动填入下方可选靶点）</span>
@@ -428,7 +430,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-foreground/80">
             <span>识别出的 UniProt ID（可多选，全部将逐个评估并各生成一份报告）</span>
-            <span className="rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary">
+            <span className="rounded-md border border-primary/20 bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums text-primary">
               已选 {selectedUniprots.length}/{parsed.uniprotIds.length}
             </span>
             {selectedUniprots.length > 5 && (
@@ -447,10 +449,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                   }}
                   title={selected ? '点击取消选择该靶点' : '点击选中该靶点'}
                   className={cn(
-                    'min-h-9 rounded-lg border px-3 font-mono text-[13px] transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30',
+                    'min-h-9 rounded-lg border px-3 font-mono text-[13px] transition-all duration-200 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30',
                     selected
                       ? 'border-primary bg-primary font-semibold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.15)]'
-                      : 'border-border bg-card text-foreground/80 hover:border-ring hover:text-primary'
+                      : 'border-border bg-card text-foreground/80 hover:border-primary/40 hover:text-primary'
                   )}
                 >
                   {id}
@@ -481,10 +483,10 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
                     onSelectSequence(selected ? null : i)
                   }}
                   className={cn(
-                    'rounded-lg border p-2.5 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30',
+                    'rounded-lg border p-2.5 text-left transition-all duration-200 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30',
                     selected
-                      ? 'border-primary bg-primary/[0.06] ring-1 ring-primary'
-                      : 'border-border bg-card hover:border-ring/60'
+                      ? 'border-primary/40 bg-primary/[0.06] ring-1 ring-primary/30'
+                      : 'border-border bg-card studio-card studio-card-hover'
                   )}
                 >
                   <div className="flex flex-wrap items-baseline gap-2">
@@ -546,7 +548,7 @@ export function DocxUploadPanel(props: DocxUploadPanelProps) {
             {parsed.images.map((img) => (
               <div
                 key={img.id}
-                className="overflow-hidden rounded-lg border border-border bg-card"
+                className="overflow-hidden rounded-lg border border-border bg-card studio-card"
               >
                 <div className="relative h-24 bg-muted">
                   <img

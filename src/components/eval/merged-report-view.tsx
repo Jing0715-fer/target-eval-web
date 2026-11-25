@@ -103,7 +103,8 @@ function MergedReportFrame({
   }, [loaded, syncHeight])
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border bg-card shadow-none">
+    <div className="studio-card relative overflow-hidden rounded-xl border border-border bg-card">
+      <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
       {!loaded && (
         <div className="absolute inset-0 z-10 flex min-h-72 flex-col items-center justify-center gap-3 bg-card">
           <Loader2 className="size-6 animate-spin text-primary" aria-hidden />
@@ -243,7 +244,8 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
     ...(t.construct ? [{ k: '客户构建', v: `${t.construct.providedLength} aa（与全长一致性 ${t.construct.identity}%${t.construct.start != null && t.construct.end != null ? `，区间 ${t.construct.start}-${t.construct.end}` : ''}）` }] : []),
   ]
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
+    <div className="studio-card relative overflow-hidden rounded-xl border border-border bg-card">
+      <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 border-b border-border/70 bg-muted/30 px-4 py-3">
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-foreground font-mono text-[11px] font-bold text-background">{index + 1}</span>
         <span className="text-sm font-semibold text-foreground">{t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}</span>
@@ -266,7 +268,7 @@ function TargetMiniReport({ t, index }: { t: MergedTargetLite; index: number }) 
           {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'} · {t.sequenceLength} aa
         </span>
         {overall && (
-          <span className={cn('ml-auto rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums', scoreTone)}>
+          <span className={cn('ml-auto num-glow rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums', scoreTone)}>
             总体 {overall.score}/10 · {overall.rating}
           </span>
         )}
@@ -469,7 +471,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
           新建评估
         </Button>
         <span className="font-mono text-[11px] text-muted-foreground/85">
-          合并报告 {report.id.slice(0, 8)} · {targetLabels.length} 个关联靶点
+          合并报告 {report.id.slice(0, 8)} · <span className="num-glow">{targetLabels.length}</span> 个关联靶点
         </span>
       </div>
 
@@ -499,7 +501,8 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
         </h1>
 
         {/* 关系判定卡 */}
-        <div className={cn('flex flex-col gap-2.5 rounded-xl border px-4 py-3.5 sm:px-5', tone.border)}>
+        <div className={cn('studio-card relative flex flex-col gap-2.5 overflow-hidden rounded-xl border px-4 py-3.5 sm:px-5', tone.border)}>
+          <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
           <div className="flex flex-wrap items-center gap-2">
             <Link2 className={cn('size-4 shrink-0', tone.icon)} aria-hidden />
             <span className="text-sm font-semibold text-foreground">
@@ -563,9 +566,10 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
       >
         {regenerating ? (
           /* 需求B：重新生成进行中 — 分钟级 LLM 三段式重跑，期间下方仍展示上一版内容 */
-          <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/[0.05] px-5 py-4 sm:flex-row sm:items-center">
+          <div className="studio-card relative flex flex-col gap-3 overflow-hidden rounded-xl border border-primary/30 bg-primary/[0.05] px-5 py-4 sm:flex-row sm:items-center">
+            <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
             <div className="flex items-center gap-3">
-              <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+              <div className="pulse-ring flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                 <RefreshCw className="size-4.5 animate-spin" aria-hidden />
               </div>
               <div>
@@ -582,12 +586,13 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
         ) : (
         <div
           className={cn(
-            'flex flex-col gap-4 rounded-xl border px-5 py-4 sm:flex-row sm:items-center',
+            'studio-card relative flex flex-col gap-4 overflow-hidden rounded-xl border px-5 py-4 sm:flex-row sm:items-center',
             llmOk
               ? 'border-violet-500/30 bg-violet-500/[0.06]'
               : 'border-amber-500/30 bg-amber-500/[0.06]'
           )}
         >
+          <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
           <div className="flex items-center gap-3">
             <div className={cn(
               'flex size-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground',
@@ -607,14 +612,14 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
           <div className="flex flex-wrap gap-2 sm:ml-auto">
             <Button
               onClick={openPreview}
-              className="h-10 gap-2 rounded-lg bg-primary px-4 font-medium text-primary-foreground hover:bg-[#7a84dc] dark:hover:bg-[#828fff]"
+              className="btn-brand h-10 gap-2 rounded-lg px-4 font-medium text-primary-foreground"
             >
               <Eye className="size-4" />
               大窗预览
             </Button>
             <Button
               onClick={downloadReport}
-              className="h-10 gap-2 rounded-lg bg-violet-600 px-4 font-medium text-white hover:bg-violet-700 dark:bg-violet-700"
+              className="btn-brand h-10 gap-2 rounded-lg px-4 font-medium text-primary-foreground"
             >
               <Download className="size-4" />
               下载 HTML（{reportTitle.slice(0, 12)}{reportTitle.length > 12 ? '…' : ''}）
@@ -623,7 +628,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
               <Button
                 onClick={() => reportFrameRef.current?.contentWindow?.print()}
                 variant="outline"
-                className="h-10 gap-2 rounded-lg border-violet-500/40 bg-card px-4 font-medium text-violet-700 hover:bg-violet-500/[0.06] dark:text-violet-300"
+                className="h-10 gap-2 rounded-lg border-violet-500/40 bg-card px-4 font-medium text-violet-700 shadow-xs hover:border-violet-500/50 hover:bg-violet-500/[0.08] active:scale-[0.97] dark:text-violet-300"
               >
                 <Printer className="size-4" />
                 打印
@@ -635,7 +640,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                 onClick={() => setRegenOpen(true)}
                 variant="outline"
                 title="LLM 分析重新生成（靶点结构/同源/文献数据不重跑）"
-                className="h-10 gap-2 rounded-lg border-border bg-card px-4 font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="h-10 gap-2 rounded-lg border-border bg-card px-4 font-medium text-muted-foreground shadow-xs hover:border-primary/30 hover:bg-muted hover:text-foreground active:scale-[0.97]"
               >
                 <RefreshCw className="size-4" />
                 重新生成
@@ -670,7 +675,8 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
           <div id="sec-attribution" className="lin-eyebrow text-muted-foreground">
             Sequence Attribution · 评估表序列归属（系统比对）
           </div>
-          <div className="overflow-hidden rounded-xl border border-border bg-card">
+          <div className="studio-card relative overflow-hidden rounded-xl border border-border bg-card">
+            <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
@@ -692,7 +698,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                       unmatched: { text: '未匹配', cls: 'border-border bg-muted text-muted-foreground' },
                     }[a.kind]
                     return (
-                      <tr key={a.index} className="border-b border-border/60 last:border-0" title={a.note}>
+                      <tr key={a.index} className="border-b border-border/60 transition-colors last:border-0 hover:bg-muted/60" title={a.note}>
                         <td className="px-3 py-2 font-mono text-muted-foreground/80">{i + 1}</td>
                         <td className="max-w-56 truncate px-3 py-2 text-foreground/80" title={a.header}>
                           {a.header || '（未命名序列）'}
@@ -739,7 +745,8 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
             </div>
           )
         })()}
-        <Card className="rounded-xl border-border bg-card shadow-none">
+        <Card className="studio-card relative overflow-hidden rounded-xl border-border bg-card">
+          <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
           <CardContent className="px-5 py-5 sm:px-7 sm:py-6">
             <div className="mb-4 flex items-center gap-2 text-muted-foreground/85">
               <BookOpenText className="size-3.5" aria-hidden />
@@ -809,8 +816,9 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
           transition={{ duration: 0.35, delay: 0.22, ease: 'easeOut' }}
           aria-labelledby="sec-merged-oligomer"
         >
-          <details className="group overflow-hidden rounded-xl border border-border bg-card">
-            <summary className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1.5 px-5 py-3.5 list-none [&::-webkit-details-marker]:hidden">
+          <details className="group studio-card relative overflow-hidden rounded-xl border border-border bg-card">
+            <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
+            <summary className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1.5 px-5 py-3.5 list-none transition-colors hover:bg-muted/50 [&::-webkit-details-marker]:hidden">
               <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/80 transition-transform duration-200 group-open:rotate-180" aria-hidden />
               <span id="sec-merged-oligomer" className="lin-eyebrow text-muted-foreground">
                 Oligomeric State · 聚集形式判定（{oligoTargets.length} 个靶点 · 已计入各靶点评分）
@@ -843,7 +851,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
                     ? 'border-amber-500/40 bg-amber-500/[0.08] text-amber-700 dark:text-amber-400'
                     : 'border-border bg-muted text-foreground/70'
                 return (
-                  <div key={t.jobId} className="flex flex-col gap-2.5 rounded-xl border border-border bg-card px-5 py-4">
+                  <div key={t.jobId} className="studio-card studio-card-hover flex flex-col gap-2.5 rounded-xl border border-border bg-card px-5 py-4">
                     <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-sm font-semibold text-foreground">
                         {t.proteinName}{t.nspLabel && <span className="ml-1 font-mono text-[0.8em] font-semibold text-primary">{t.nspLabel}</span>}
@@ -1112,7 +1120,7 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
             </Button>
             <Button
               onClick={() => void runRegenerate()}
-              className="h-9 gap-1.5 rounded-lg bg-primary px-4 text-xs font-medium text-primary-foreground"
+              className="btn-brand h-9 gap-1.5 rounded-lg px-4 text-xs font-medium text-primary-foreground"
             >
               <RefreshCw className="size-3.5" />
               开始重新生成

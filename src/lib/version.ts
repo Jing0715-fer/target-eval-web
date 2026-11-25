@@ -139,5 +139,33 @@
  *  - ④ finalizeHtDashboard 统计无留存键靶点（v2.83 回归期旧运行记录的次链
  *    靶点）— 这些靶点弹出页必降级且无法自动自愈（浏览器本地也凭 sha 才能
  *    取回），完成 toast 明示数量与恢复方式，不再静默。
+ *
+ * v2.86：UI 全面升级（用户指令：参考 pdb-tracker-web-v5 的设计语言升级，
+ *  色调维持品牌薰衣草紫）— 在 v2.85 的「Refined Studio」分层阴影/微交互基
+ *  础上，整体迁移到参考项目的 Claude 式设计语言（紫调版）：
+ *  - 设计令牌：画布从纯白改紫调暖白 #faf9fc（暗色从近纯黑改紫调暖黑
+ *    #17171e/#1e1e28 — 有色温的深浅底更柔和）；圆角 8→10px（0.625rem）；
+ *    新增语义色 fg/bg 配对令牌 --xray/--xray-bg、--cryoem/--cryoem-bg、
+ *    --nmr/--nmr-bg（与参考项目 claude-* 色系同源：紫/青/琥珀）；微字号
+ *    体系 text-2xs/3xs/4xs（11/10/9px）；阴影改大半径低透明度柔光分层；
+ *  - 头部（app-shell）：Claude 三件套 — header-gradient-border 底边主色渐
+ *    变描边 + header-enhanced-bg 对角微染背景 + header-text-gradient 渐变
+ *    字标 + header-icon-wrap 渐变品牌图标（20s 缓慢旋转 / hover 光晕缩放）；
+ *    页脚同款渐变描边呼应；
+ *  - 滑动胶囊分段控件（segmented-tabs.tsx 新组件，参考项目标志性交互）：
+ *    输入方式切换（UniProt/序列/评估表/高通量）改 rounded-full 胶囊容器 +
+ *    白色指示 pill 随选中项滑动（DOM 测量 offsetLeft/Width + ResizeObserver，
+ *    纯展示组件不介入业务状态）；
+ *  - 评估管线导引：四步骤改参考项目 welcome-stat-badge 模式（语义色图标
+ *    色块 + hover 110% 缩放）；MethodBadge 改语义色配对令牌（X-ray 紫/
+ *    Cryo-EM 青/NMR 琥珀，明暗主题同源令牌自动切换）；
+ *  - 移植参考项目动效体系：stat-card-hover 弹性抬升、number-pulse-glow
+ *    关键数字呼吸光晕、tab-underline-hover 下划线滑入、skeleton-row-
+ *    staggered 骨架屏错峰入场、prefers-reduced-motion 全量关闭装饰动画；
+ *  - Hero 首屏：渐变强调字 + 能力 chips + 环境光晕/点阵网格保留（紫调重
+ *    染）；CTA 渐变按钮/卡片分层阴影等 v2.85 升级全部经令牌层自动继承新
+ *    色调（studio-card/btn-brand 等工具类挂接语义变量 — 一处改令牌全站生效）。
+ *  E2E 验证：明/暗双主题 + 桌面/移动双断点 + 滑动胶囊切换 + 对话框开合
+ *  零报错；VLM 视觉评审 8/10（渐变字标/胶囊控件/紫调画布三要素确认）。
  */
-export const APP_VERSION = 'v2.85.0'
+export const APP_VERSION = 'v2.86.0'

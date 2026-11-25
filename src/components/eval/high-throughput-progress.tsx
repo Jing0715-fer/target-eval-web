@@ -103,7 +103,7 @@ function isImportedItem(it: { imported?: boolean; status: string; skipNote?: str
 function itemDotCls(status: string): string {
   switch (status) {
     case 'running':
-      return 'bg-primary animate-pulse'
+      return 'bg-primary animate-pulse shadow-[0_0_6px_rgb(94_106_210/0.7)]'
     case 'done':
       return 'bg-emerald-500'
     case 'error':
@@ -363,7 +363,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
           variant="outline"
           size="sm"
           onClick={() => onOpenBatchReport(g.mergedReportId as string)}
-          className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium"
+          className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium active:scale-[0.97]"
         >
           <FileText className="size-3" aria-hidden />
           打开合并报告
@@ -378,7 +378,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
           variant="outline"
           size="sm"
           onClick={() => onOpenJob(doneItem.jobId as string)}
-          className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium"
+          className="h-7 gap-1 rounded-lg px-2.5 text-[11px] font-medium active:scale-[0.97]"
         >
           <FileText className="size-3" aria-hidden />
           查看报告
@@ -397,7 +397,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
           <p className="lin-eyebrow text-primary">High-Throughput</p>
-          <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-medium', phasePill.cls)}>
+          <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-medium', phasePill.cls, isRunning && 'pulse-ring')}>
             {phasePill.icon}
             {phasePill.text}
           </span>
@@ -408,7 +408,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
           <h1 className="text-2xl leading-snug font-semibold tracking-[-0.02em] text-foreground sm:text-[28px]">高通量评估</h1>
           <span className="font-mono text-sm font-normal text-muted-foreground">
-            组 {doneGroups}/{run.groups.length} 完成 · 靶点 {settledTargets}/{run.totalTargetCount}
+            组 <span className="num-glow text-foreground">{doneGroups}/{run.groups.length}</span> 完成 · 靶点 <span className="num-glow text-foreground">{settledTargets}/{run.totalTargetCount}</span>
             {importedTargets > 0 ? `（${doneTargets} 评估 + ${importedTargets} 载入）` : ''}
             {skippedTargets > 0 ? ` · 跳过 ${skippedTargets}` : ''}
             {!isRunning && failedTargets > 0 ? ` · 失败 ${failedTargets}` : ''}
@@ -426,23 +426,24 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
       </header>
 
       {/* ── 总进度（组 × 靶点双轨） ── */}
-      <div className="flex flex-col gap-2 rounded-xl border border-border bg-card px-4 py-3.5">
+      <div className="studio-card relative flex flex-col gap-2 overflow-hidden rounded-xl border border-border bg-card px-4 py-3.5">
+        <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/25 to-transparent" />
         <div className="flex items-baseline justify-between gap-2">
           <span className="text-[12.5px] font-medium text-foreground">总体进度</span>
           <span className="font-mono text-[11px] text-muted-foreground">
-            已用时 {formatDuration(flow.elapsedSec)} · {doneGroups}/{run.groups.length} 组完成 · {settledTargets}/{run.totalTargetCount} 靶点完成{importedTargets > 0 ? `（${doneTargets} 评估 + ${importedTargets} 载入）` : ''}
+            已用时 {formatDuration(flow.elapsedSec)} · <span className="num-glow">{doneGroups}/{run.groups.length}</span> 组完成 · <span className="num-glow">{settledTargets}/{run.totalTargetCount}</span> 靶点完成{importedTargets > 0 ? `（${doneTargets} 评估 + ${importedTargets} 载入）` : ''}
           </span>
         </div>
         <div className="flex items-center gap-2">
           <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/85">组</span>
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-            <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${(doneGroups / Math.max(1, run.groups.length)) * 100}%` }} />
+            <div className="h-full rounded-full bg-gradient-to-r from-[#5e6ad2] to-[#8b5cf6] transition-[width] duration-500" style={{ width: `${(doneGroups / Math.max(1, run.groups.length)) * 100}%` }} />
           </div>
         </div>
         <div className="flex items-center gap-2">
           <span className="w-8 shrink-0 font-mono text-[10px] text-muted-foreground/85">靶点</span>
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-            <div className="h-full rounded-full bg-primary/60 transition-[width] duration-500" style={{ width: `${(settledTargets / Math.max(1, run.totalTargetCount)) * 100}%` }} />
+            <div className="h-full rounded-full bg-gradient-to-r from-[#5e6ad2]/75 to-[#8b5cf6]/75 transition-[width] duration-500" style={{ width: `${(settledTargets / Math.max(1, run.totalTargetCount)) * 100}%` }} />
           </div>
         </div>
       </div>
@@ -471,7 +472,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               type="button"
               size="sm"
               onClick={() => void flow.resumeRun()}
-              className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              className="btn-brand h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-semibold text-primary-foreground"
               title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
@@ -483,7 +484,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 variant="outline"
                 size="sm"
                 onClick={() => void flow.retryFailed()}
-                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
                 title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即继续运行`}
               >
                 <Play className="size-3.5" aria-hidden />
@@ -499,7 +500,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 variant="outline"
                 size="sm"
                 onClick={() => void flow.retryImportedWithoutUniprot()}
-                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 active:scale-[0.97] dark:text-emerald-400"
                 title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，报告回填 UniProt 与检索证据`}
               >
                 <RotateCcw className="size-3.5" aria-hidden />
@@ -512,13 +513,13 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               disabled={importingZip}
               onClick={() => zipInputRef.current?.click()}
-              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
               title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
               {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
+            <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]">
               保留记录并返回输入
             </Button>
           </div>
@@ -547,7 +548,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               type="button"
               size="sm"
               onClick={() => void flow.resumeRun()}
-              className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              className="btn-brand h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-semibold text-primary-foreground"
               title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
@@ -559,7 +560,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 variant="outline"
                 size="sm"
                 onClick={() => void flow.retryFailed()}
-                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
                 title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即继续运行`}
               >
                 <Play className="size-3.5" aria-hidden />
@@ -575,7 +576,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 variant="outline"
                 size="sm"
                 onClick={() => void flow.retryImportedWithoutUniprot()}
-                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                className="h-9 gap-1.5 rounded-lg border-emerald-500/40 px-3.5 text-[12.5px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 active:scale-[0.97] dark:text-emerald-400"
                 title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，报告回填 UniProt 与检索证据`}
               >
                 <RotateCcw className="size-3.5" aria-hidden />
@@ -588,13 +589,13 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               disabled={importingZip}
               onClick={() => zipInputRef.current?.click()}
-              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
               title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的靶点直接跳过，不重复评估"
             >
               {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
               {importingZip ? (importProgress ?? '导入中…') : '导入报告（zip/HTML）'}
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium">
+            <Button type="button" variant="outline" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]">
               保留记录并返回输入
             </Button>
           </div>
@@ -613,7 +614,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
 
       {/* ── 当前组详情（running：复用 ProgressPanel — 阶段时间线 + 实时日志） ── */}
       {isRunning && currentGroup && (
-        <section aria-label="当前组详情" className={cn('rounded-xl border bg-card', currentGroup.index === run.currentIndex ? 'border-primary/30' : 'border-border')}>
+        <section aria-label="当前组详情" className={cn('studio-card rounded-xl border bg-card', currentGroup.index === run.currentIndex ? 'border-primary/30' : 'border-border')}>
           <div className="flex flex-wrap items-center gap-2 border-b border-border/70 px-4 py-2.5">
             <Layers className="size-3.5 shrink-0 text-primary" aria-hidden />
             <p className="text-[12.5px] font-semibold text-foreground">当前组 G{String(currentGroup.index + 1).padStart(2, '0')}</p>
@@ -671,8 +672,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               <li
                 key={g.index}
                 className={cn(
-                  'flex flex-col gap-1.5 rounded-xl border bg-card px-3 py-2.5 transition-colors',
-                  g.index === run.currentIndex && isRunning ? 'border-primary/40' : 'border-border',
+                  'studio-card studio-card-hover flex flex-col gap-1.5 rounded-xl border bg-card px-3 py-2.5',
+                  g.index === run.currentIndex && isRunning ? 'border-primary/50' : 'border-border',
                 )}
               >
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -720,7 +721,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                                 : 'border-sky-500/30 bg-sky-500/[0.05] text-sky-700/80 line-through decoration-sky-500/40 dark:text-sky-400/80'
                               : it.status === 'done' && it.reportIncomplete
                                 ? 'border-amber-500/40 bg-amber-500/[0.06] text-amber-700 dark:text-amber-400'
-                                : 'border-border bg-muted/40 text-foreground/90',
+                                : 'border-border bg-muted/40 text-foreground/90 transition-colors hover:border-primary/35 hover:bg-muted/70',
                         )}
                         title={it.reportMissingNote ?? it.skipNote ?? it.error ?? (it.range ? `${it.label} · 评估区间 ${it.range[0]}-${it.range[1]}（仅保留链范围重叠的结构）` : it.label)}
                       >
@@ -884,7 +885,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 href={`/api/evaluate/ht-dashboard?id=${encodeURIComponent(run.dashboardId)}&inline=1`}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-primary px-3 text-[12px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+                className="btn-brand inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[12px] font-semibold text-primary-foreground"
               >
                 <Gauge className="size-3.5" aria-hidden />
                 打开汇总报告
@@ -896,7 +897,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 size="sm"
                 disabled={run.dashboardPending}
                 onClick={() => void flow.regenerateDashboard()}
-                className="h-8 gap-1.5 rounded-lg px-3 text-[12px] font-medium"
+                className="h-8 gap-1.5 rounded-lg px-3 text-[12px] font-medium active:scale-[0.97]"
                 title="重新生成汇总报告（按当前全部已完成靶点重新汇总批次统计 + 全靶点总表 + AI 整体可行性，完成后自动下载新 HTML — 重跑/补齐靶点后刷新用）"
               >
                 <RotateCcw className="size-3.5" aria-hidden />
@@ -910,7 +911,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   size="sm"
                   disabled={run.dashboardPending}
                   onClick={() => void flow.retryImportedWithoutUniprot()}
-                  className="h-8 gap-1.5 rounded-lg border-emerald-500/40 px-3 text-[12px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                  className="h-8 gap-1.5 rounded-lg border-emerald-500/40 px-3 text-[12px] font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700 active:scale-[0.97] dark:text-emerald-400"
                   title={`取消载入这 ${importedNoUniprotTargets} 个靶点的既有报告（原评估未识别出 UniProt 身份）并重新评估 — 当前身份级联（PDB 同源回填 → BLAST nr → UniProt 库序列匹配）重识别，评估完成后自动重新生成汇总报告`}
                 >
                   <RotateCcw className="size-3.5" aria-hidden />
@@ -926,7 +927,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                     v2.78：无百分比时（首条进度落库前/旧服务端）显示本地已等待计时 —
                     横幅始终有具体数字反馈，不再只有空转动画条 */}
                 {run.dashboardProgressPct != null ? (
-                  <span className="font-mono text-[12px] font-semibold tabular-nums text-primary">
+                  <span className="num-glow font-mono text-[12px] font-semibold tabular-nums text-primary">
                     {Math.round(run.dashboardProgressPct)}%
                   </span>
                 ) : run.dashboardPendingSince != null ? (
@@ -939,10 +940,10 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   端纯文本进度 / 首条进度落库前）→ 不确定态滑动动画，不再黑盒等待 */}
               <div className="mt-2" aria-hidden>
                 {run.dashboardProgressPct != null ? (
-                  <Progress value={run.dashboardProgressPct} className="h-1.5" />
+                  <Progress value={run.dashboardProgressPct} className="h-1.5 [&>[data-slot=progress-indicator]]:rounded-full [&>[data-slot=progress-indicator]]:bg-gradient-to-r [&>[data-slot=progress-indicator]]:from-[#5e6ad2] [&>[data-slot=progress-indicator]]:to-[#8b5cf6]" />
                 ) : (
                   <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-primary/15">
-                    <div className="ht-progress-indeterminate absolute inset-y-0 left-0 w-2/5 rounded-full bg-primary" />
+                    <div className="ht-progress-indeterminate absolute inset-y-0 left-0 w-2/5 rounded-full bg-gradient-to-r from-[#5e6ad2] to-[#8b5cf6]" />
                   </div>
                 )}
               </div>
@@ -982,7 +983,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   size="sm"
                   disabled={run.dashboardPending}
                   onClick={() => void flow.regenerateDashboard()}
-                  className="h-8 gap-1.5 rounded-lg border-amber-500/40 px-3 text-[12px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400"
+                  className="h-8 gap-1.5 rounded-lg border-amber-500/40 px-3 text-[12px] font-medium text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 active:scale-[0.97] dark:text-amber-400"
                   title="重新生成汇总报告（按当前全部已完成靶点重新汇总，完成后自动下载新 HTML）"
                 >
                   <RotateCcw className="size-3.5" aria-hidden />
@@ -1008,7 +1009,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 variant="outline"
                 size="sm"
                 onClick={() => flow.pauseRun()}
-                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:text-amber-400"
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 active:scale-[0.97] dark:text-amber-400"
                 title="暂停编排（不再开新作业；正在执行的作业会跑完并记录结果）— 可随时从断点继续"
               >
                 <Pause className="size-3.5" aria-hidden />
@@ -1020,7 +1021,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 size="sm"
                 disabled={flow.canceling}
                 onClick={() => void flow.cancelRun()}
-                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:text-red-400"
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium text-red-600 hover:bg-red-500/10 hover:text-red-600 active:scale-[0.97] dark:text-red-400"
                 title="停止运行并取消服务器上正在执行的作业（已完成的结果保留；可随时「继续运行」恢复）"
               >
                 <XCircle className="size-3.5" aria-hidden />
@@ -1030,7 +1031,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
           )}
           {isDone && (
             <>
-              <Button type="button" size="sm" onClick={onNewEvaluation} className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground">
+              <Button type="button" size="sm" onClick={onNewEvaluation} className="btn-brand h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-semibold text-primary-foreground">
                 开始新的高通量评估
               </Button>
               {retryableTargets > 0 && (
@@ -1039,7 +1040,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   variant="outline"
                   size="sm"
                   onClick={() => void flow.retryFailed()}
-                  className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                  className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
                   title={`重置全部 ${retryableTargets} 个失败/中断${incompleteTargets > 0 ? `/报告不完整（${incompleteTargets}）` : ''}靶点并立即重新运行（汇总报告将重新生成）`}
                 >
                   <Play className="size-3.5" aria-hidden />
@@ -1056,7 +1057,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                   variant="outline"
                   size="sm"
                   onClick={() => void flow.regenerateDashboard()}
-                  className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                  className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
                   title="生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，单文件 — 完成后自动下载）"
                 >
                   <Gauge className="size-3.5" aria-hidden />
@@ -1069,7 +1070,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 size="sm"
                 disabled={importingZip}
                 onClick={() => zipInputRef.current?.click()}
-                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+                className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
                 title="导入既有报告（zip 归档或单独的报告 HTML，可多选）— 匹配到的未评估靶点标跳过（用于补齐清单后重跑剩余靶点）"
               >
                 {importingZip ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <FileArchive className="size-3.5" aria-hidden />}
@@ -1082,7 +1083,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               type="button"
               size="sm"
               onClick={() => void flow.resumeRun()}
-              className="h-9 gap-1.5 rounded-lg bg-primary px-3.5 text-[12.5px] font-semibold text-primary-foreground"
+              className="btn-brand h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-semibold text-primary-foreground"
               title={directSummaryReady ? '全部靶点已评估完成/载入既有报告 — 点击后运行即刻完成并自动生成汇总报告（统计看板 + 全靶点总表 + AI 整体可行性，无需评估）' : '从断点继续运行（已完成的组与靶点不重复评估）'}
             >
               <RotateCcw className="size-3.5" aria-hidden />
@@ -1096,7 +1097,7 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
               size="sm"
               disabled={flow.archiving}
               onClick={() => void flow.archiveRun()}
-              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium"
+              className="h-9 gap-1.5 rounded-lg px-3.5 text-[12.5px] font-medium active:scale-[0.97]"
               title="打包本次运行全部报告为单个 zip（每组一个子文件夹，含合并报告与 README 清单；内附靶点清单可回导跳过已完成靶点）"
             >
               {flow.archiving

@@ -75,7 +75,7 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
   const visible = collapsed ? filtered.slice(0, COLLAPSED_COUNT) : filtered
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
+    <div className="studio-card overflow-hidden rounded-xl border border-border bg-card">
       {/* 工具行：方法筛选 + 配体统计 */}
       <div className="flex flex-wrap items-center gap-1.5 border-b border-border/70 px-4 py-3">
         {FILTERS.map((f) => {
@@ -88,10 +88,10 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
               onClick={() => applyFilter(f.key)}
               disabled={count === 0 && f.key !== 'all'}
               className={cn(
-                'min-h-8 rounded-md border px-2.5 font-mono text-[11px] transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-40',
+                'min-h-8 rounded-md border px-2.5 font-mono text-[11px] transition-all outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-40',
                 active
                   ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border bg-card text-muted-foreground hover:border-ring/60 hover:text-primary'
+                  : 'border-border bg-muted text-muted-foreground hover:border-primary/40 hover:text-primary active:scale-[0.97]'
               )}
             >
               {f.label}
@@ -111,8 +111,8 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
       {/* 表格 */}
       <div className="eval-scroll overflow-auto">
         <Table>
-          <TableHeader className="sticky top-0 z-10 bg-muted/60">
-            <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+          <TableHeader className="sticky top-0 z-10 bg-muted/70">
+            <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
               <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">PDB ID</TableHead>
               <TableHead className="eval-eyebrow h-9 text-muted-foreground">方法</TableHead>
               <TableHead className="eval-eyebrow h-9 text-muted-foreground">分辨率</TableHead>
@@ -129,7 +129,9 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
               <TableRow>
                 <TableCell colSpan={9} className="h-28 text-center text-sm text-muted-foreground">
                   <span className="flex flex-col items-center gap-1.5">
-                    <Inbox className="size-5" />
+                    <span className="flex size-9 items-center justify-center rounded-full bg-muted">
+                      <Inbox className="size-5 text-muted-foreground" />
+                    </span>
                     {pdbs.length === 0 ? (
                       <>
                         <span>该靶点暂无直接关联的 PDB 结构</span>
@@ -150,7 +152,7 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
                 return (
                   <TableRow
                     key={`${p.pdbId}-${i}`}
-                    className="border-border/60 hover:bg-accent/50"
+                    className="border-border/60 hover:bg-muted/50"
                   >
                     <TableCell className="pl-4">
                       <a
@@ -246,7 +248,7 @@ export function PdbTable({ pdbs, ligandCount, literature, outsidePdbs, rangeLabe
             <div className="eval-scroll overflow-auto">
               <Table>
                 <TableHeader className="sticky top-0 z-10 bg-muted/70">
-                  <TableRow className="hover:bg-transparent dark:hover:bg-transparent">
+                  <TableRow className="border-input hover:bg-transparent dark:hover:bg-transparent">
                     <TableHead className="eval-eyebrow h-9 pl-4 text-muted-foreground">PDB ID</TableHead>
                     <TableHead className="eval-eyebrow h-9 text-muted-foreground">方法</TableHead>
                     <TableHead className="eval-eyebrow h-9 text-muted-foreground">分辨率</TableHead>

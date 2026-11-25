@@ -27,7 +27,7 @@ export function Ligand2dFigure({ src, cid, name }: { src: string; cid?: number; 
         <img
           src={src}
           alt="2D 化学结构式"
-          className="h-32 w-32 rounded-md border border-border bg-white object-contain p-1 transition-[box-shadow,border-color] group-hover:border-ring/50 group-hover:shadow-sm"
+          className="studio-card h-32 w-32 rounded-md border border-border bg-white object-contain p-1 group-hover:border-ring/50"
         />
         <span className="pointer-events-none absolute top-1.5 right-1.5 flex items-center gap-0.5 rounded-sm border border-border/70 bg-card/90 px-1 py-px font-mono text-[9px] font-semibold text-muted-foreground opacity-0 backdrop-blur-sm transition-opacity duration-200 group-hover:opacity-100 pointer-coarse:opacity-100">
           <ZoomIn className="size-2.5" aria-hidden />
@@ -55,7 +55,7 @@ export function Ligand2dFigure({ src, cid, name }: { src: string; cid?: number; 
               const el = e.currentTarget
               if (el.naturalWidth > 1) setDim(`${el.naturalWidth} × ${el.naturalHeight} px`)
             }}
-            className="mx-auto max-h-[68vh] w-auto max-w-full rounded-xl border border-border bg-white object-contain p-2"
+            className="studio-card mx-auto max-h-[68vh] w-auto max-w-full rounded-xl border border-border bg-white object-contain p-2"
           />
           <p className="text-center font-mono text-[10px] tracking-wide text-muted-foreground/85">
             2D 结构式 · PubChem{cid ? ` · CID ${cid}` : ''}{dim ? ` · 原始分辨率 ${dim}` : ''}
