@@ -87,25 +87,28 @@ interface DashboardBody {
 }
 
 /** v2.87：importedSources 消毒（生成时原文直传 — 预算同客户端口径：
- *  ≤128 份 · 单份 ≤32M 字符 · 总量 ≤32M 字符；sha 为客户端内容键（http 环境
- *  FNV 兑底 — 服务端落库时重算 sha256 并校正载荷条目的 sourceSha） */
+ *  ≤128 份 · 单份 ≤16MB 字节 · 总量 ≤64MB 字节。v2.91 由字符口径改字节口径：
+ *  字符数在 CJK 内容下会低估 UTF-8 体积至 3 倍 — 与请求体传输上限的约束严格对齐。
+ *  sha 为客户端内容键（http 环境 FNV 兑底 — 服务端落库时重算 sha256 并校正载荷条目的 sourceSha） */
 function sanitizeImportedSources(v: unknown): Array<{ sha: string; fileName: string; html: string }> {
   if (!Array.isArray(v)) return []
   const out: Array<{ sha: string; fileName: string; html: string }> = []
   let total = 0
   const MAX_ITEMS = 128
-  const MAX_TOTAL_CHARS = 32_000_000
-  const MAX_HTML_CHARS = 32_000_000
+  const MAX_TOTAL_BYTES = 64_000_000
+  const MAX_HTML_BYTES = 16_000_000
   for (const e of v) {
     if (!e || typeof e !== 'object' || out.length >= MAX_ITEMS) continue
     const o = e as { sha?: unknown; fileName?: unknown; html?: unknown }
     const sha = typeof o.sha === 'string' && /^[a-z0-9]{6,64}$/i.test(o.sha) ? o.sha.toLowerCase() : ''
     const html = typeof o.html === 'string' ? o.html : ''
-    if (!sha || !html.trim() || html.length > MAX_HTML_CHARS) continue
-    if (total + html.length > MAX_TOTAL_CHARS) continue // 预算耗尽 — 后续丢弃（客户端已按同口径预算，正常不触达）
+    if (!sha || !html.trim()) continue
+    const bytes = Buffer.byteLength(html, 'utf8')
+    if (bytes > MAX_HTML_BYTES) continue
+    if (total + bytes > MAX_TOTAL_BYTES) continue // 预算耗尽 — 后续丢弃（客户端已按同口径预算，正常不触达）
     const fileName = typeof o.fileName === 'string' ? o.fileName : ''
     out.push({ sha, fileName, html })
-    total += html.length
+    total += bytes
   }
   return out
 }
@@ -314,8 +317,19 @@ export async function POST(req: Request) {
   let body: DashboardBody
   try {
     body = (await req.json()) as DashboardBody
-  } catch {
-    return NextResponse.json({ ok: false, error: '请求体不是合法 JSON' }, { status: 400 })
+  } catch (e) {
+    // v2.91：精确归因。框架层请求体上限（proxyClientMaxBodySize）超限时请求体
+    // 被静默截断 → JSON 解析必败。Content-Length 能区分「载荷过大被截断」与
+    // 「请求方构造异常」：>16MB 且解析失败 ≈ 截断（客户端直传预算 64MB — 正常
+    // 载荷在此之上仍应可解析；16MB 以下解析失败才是真正的非法 JSON）。
+    const cl = Number(req.headers.get('content-length') ?? 0)
+    const overLimit = Number.isFinite(cl) && cl > 16_000_000
+    return NextResponse.json({
+      ok: false,
+      error: overLimit
+        ? `请求体过大（${(cl / 1_048_576).toFixed(1)}MB）且解析失败 — 疑似被框架层请求体上限截断；可减少导入的报告文件数量/体积后重试，或联系部署方调高 proxyClientMaxBodySize`
+        : `请求体不是合法 JSON${e instanceof Error && e.message ? `（${e.message.slice(0, 120)}）` : ''}`,
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } })
   }
 
   const entries = sanitizeEntries(body.entries)

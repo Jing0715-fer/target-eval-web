@@ -943,7 +943,8 @@ export interface HtDashboardGenerateInput {
   /** v2.68：导入报告携带的原作业 id（entries 中对应行标「载入」徽标 — 与本次评估行区分） */
   importedJobIds?: string[]
   /** v2.87：导入报告原文直传（生成请求直接携带 — 留存未确认可用的源文件；
-   *  服务端同一请求内落库后内嵌。预算：≤128 份 · 单份 ≤8M 字符 · 总量 ≤32M 字符） */
+   *  服务端同一请求内落库后内嵌。v2.91 预算改字节口径：≤128 份 · 单份 ≤16MB
+   *  字节 · 总量 ≤64MB 字节 — 与请求体传输上限严格对齐） */
   importedSources?: Array<{ sha: string; fileName: string; html: string }>
   /** v2.71：running 期间每次轮询回传阶段进度（生成中横幅实时展示）；
    *  v2.76：第二参数 pct = 全局百分比 0-100（进度条，旧服务端无此字段时 undefined） */
