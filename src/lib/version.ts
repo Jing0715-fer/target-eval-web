@@ -228,15 +228,54 @@
  *    → 汇总）sk 池字节级内嵌确认 + 直传链路专项验证（屏蔽上传端点模拟用户
  *    故障 — 直传同请求落库内嵌如常）。
  *
+ * v2.89：PDF 导出改连续长页（用户指令：「pdf 能完全不分页吗？格式尽量和 html
+ *  保持一致」— v2.87 的 A4 分页版实测反馈）：
+ *  - 单页连续：renderReportPdf 纸张尺寸 = 内容实测尺寸（宽 = .page 版心 1224px
+ *    桌面基准、高 = 全文高度 + 8px 裕量），pageRanges '1' 兜底 — 整份报告一页
+ *    装下，零页断点、零页码；版式=网页版（page.emulateMedia('screen') 按
+ *    **屏幕媒体**渲染 — @media print 的 A4 压缩规则 12px 正文/9.5px 表格全部
+ *    不参与，与浏览器打开 HTML 的观感一致）；
+ *  - 版心冻结：.page 宽度/四向内边距 + body 字号在页内 getComputedStyle 实测后
+ *    以 !important 钉死 — 印刷重排宽度（=纸张宽 1224）与测量视口（1440）命中
+ *    的媒体查询档位不同（920 版心会落入 max-width:1024 档收紧 padding），钉死
+ *    后版式不漂移；
+ *  - 静态化注入（与打印口径同源）：合并报告 .rpt-view 视图全展开（首页 + 各
+ *    靶点报告页连续呈现）；BLAST PDB/nr 两库面板全展开（CDP print 不派发
+ *    beforeprint — 页内等价移除 [data-libpanel] 的 hidden）；表格 3 行截断
+ *    （.t-clamp）恢复全文；交互控件（复制/放大/回顶/工具条/库切换钮）隐藏；
+ *    AF 交互 3D 回退静态 poster；懒加载图转立即加载（打印管线强制加载全部图，
+ *    屏幕媒体不会 — 折叠视口外的 loading=lazy 图必须显式取数否则长页下方图片
+ *    缺失）；数据表防截断（横滚容器溢出改可见 + 看板宽表自动布局换行）；
+ *  - 物理极限兜底：Chromium/PDF 单页 ≤ ~200in（96dpi ≈ 19200px）— 内容更高
+ *    时退化为「最少分页」：页高 19008px 连续长条（24 靶点看板 ~5 万 px → 3
+ *    条长页而非 24+ 页 A4），断点注入避让（行/图不腰斩、标题不孤行尾）；
+ *  - 前端文案同步：下载菜单 PDF 项「连续长页 · 不分页 · 版式同网页版」、
+ *    生成中/完成 toast、合并报告 pdfNote「全部靶点视图展开」；HTML 下载后的
+ *    浏览器 Ctrl/Cmd+P 仍为 A4 分页版（打印归档场景由它承担）。
+ * v2.90：PDF 导出可靠性加固（v2.89 连续长页版实测：统计看板 PDF 偶发一次失败后，
+ *  **所有**导出永久 187ms 秒败「browser has been closed」直到重启服务）：
+ *  - 浏览器单例自愈：Chromium 进程死亡（沙箱 3.9GB 内存 OOM 击杀/崩溃）后，旧
+ *    单例把指向死浏览器的 promise 永久缓存 — 现监听 disconnected 事件清空单例，
+ *    下次调用自动重拉新浏览器（与「服务进程反复死亡」同类根源的根治）；
+ *  - 透明重试：渲染中浏览器死亡的错误形态统一识别 → 清死单例 → 新浏览器重试
+ *    一次（用户无感）；两次都死才报错，报错前再清一次保证服务后续可用；
+ *  - load 事件 best-effort：Google Fonts 等外部子资源偶发悬挂时 load 不触发，
+ *    旧版 setContent 90s 硬失败 — 现 best-effort 继续（readyState 10s 显式确认
+ *    解析完成度）；字体就绪改 15s 竞速（网络悬挂时 fonts.ready 永不 resolve，
+ *    旧版 evaluate 无超时会永久卡死串行队列 — 超时回退系统 CJK 字体出稿）；
+ *  - 内存预检：大 HTML（≥4MB，实测 10MB 看板 Chromium 峰值 2.4GB RSS）渲染前
+ *    检查系统余量，<1.2GB 快速失败并给出「稍后重试 / 下载 HTML 浏览器打印」
+ *    指引，不让渲染跑 90s 后被 OOM 击杀连带浏览器死亡。
+ *
  * v2.91：汇总报告生成「请求体不是合法 JSON」根治 + 输入方式切换 pill 修复：
  *  - ① 根因（框架层请求体上限截断）：v2.88 导入原文直传把源文件 HTML 随汇总
  *    报告生成请求携带，多份报告合计 >10MiB 时 — Next 16 dev 代理默认
  *    proxyClientMaxBodySize = 10,485,760 字节，超限的请求体被框架层**静默截断**
  *    → route 内 req.json() 必抛 → 400「请求体不是合法 JSON」→ 看板整单失败
  *    （用户实测：汇总报告生成失败，且与「导入报告未嵌入」同根 — 生成请求
- *    本身就没送达）。沙盒实测二分定位：8MB 正常 / 10.4MB 正常 / 10.5MB+ 必现；
- *    修复：next.config.ts experimental.proxyClientMaxBodySize 提至 200MiB
- *    （覆盖直传最坏口径 + 归档快照 + 余量）；
+ *    本身就没送达）。沙盒实测二分定位：10.4MB 正常 / 10.5MB+ 必现；修复：
+ *    next.config.ts experimental.proxyClientMaxBodySize 提至 200MiB（覆盖直传
+ *    最坏口径 + 归档快照 + 余量）；
  *  - ② 预算口径统一改字节（客户端 TextEncoder / 服务端 Buffer.byteLength）：
  *    旧字符口径（32M 字符）在 CJK 报告下 UTF-8 体积可达 3 倍（96MB）— 与传输
  *    层字节约束错位是本次事故的放大器；现两端同口径 ≤128 份 · 单份 ≤16MB
@@ -248,6 +287,8 @@
  *    改 trigger 的 data-state 属性，segmented-tabs 组件不消费 Tabs 上下文不
  *    re-render、容器尺寸不变 → measure 无触发时机，pill 停在初始位置。修复：
  *    MutationObserver 监听 data-state 变化重测（attributeFilter 限定，微任务
- *    先于绘制 — 无闪烁）。
+ *    先于绘制 — 无闪烁）；
+ *  - 回归：scripts/test-v291-large-passthrough.ts（12MiB 直传全链路 6/6 —
+ *    POST 落库 ptStored=1 → 生成 done → 字节级内嵌）+ v2.86 汇总件导入 15/15。
  */
 export const APP_VERSION = 'v2.91.0'

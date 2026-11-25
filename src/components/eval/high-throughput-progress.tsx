@@ -891,8 +891,8 @@ export function HighThroughputView({ flow, onOpenJob, onOpenBatchReport, onNewEv
                 <Gauge className="size-3.5" aria-hidden />
                 打开汇总报告
               </a>
-              {/* v2.87：汇总报告下载菜单（HTML / PDF — PDF 为统计+总表+AI 分析的 A4 分页紧凑版，
-                  卡片/表行不腰斩、页脚页码；服务端 Chromium 渲染，报告大时需数秒到一分钟） */}
+              {/* v2.87/v2.88：汇总报告下载菜单（HTML / PDF — PDF 为连续长页：统计 + 总表 + AI 分析
+                  按网页版式一页装下不分页；服务端 Chromium 渲染，报告大时需数秒到一分钟） */}
               <ReportDownloadMenu
                 size="sm"
                 label="下载报告"
