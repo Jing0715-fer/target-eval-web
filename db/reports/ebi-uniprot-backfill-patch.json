@@ -1,0 +1,132 @@
+{
+ "generatedAt": "2026-11-26",
+ "total": 14,
+ "entries": [
+  {
+   "job": "imp-60",
+   "label": "Conformation1·链2",
+   "uniprotId": "A0A089PHY9",
+   "identity": 85,
+   "coverage": 99,
+   "description": "Urease subunit gamma",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-62",
+   "label": "Conformation2·链2",
+   "uniprotId": "A0A089PHY9",
+   "identity": 85,
+   "coverage": 99,
+   "description": "Urease subunit gamma",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-51",
+   "label": "20230905·链1",
+   "uniprotId": "Q6N9U9",
+   "identity": 94.9,
+   "coverage": 99.8,
+   "description": "Nitrogenase protein alpha chain",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-26",
+   "label": "GPR88_E2",
+   "uniprotId": "A0A452R3J4",
+   "identity": 86.6,
+   "coverage": 99.2,
+   "description": "G protein-coupled receptor 88",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-52",
+   "label": "20230905·链2",
+   "uniprotId": "Q6N9V1",
+   "identity": 89.3,
+   "coverage": 99.8,
+   "description": "Fe-only nitrogenase subunit beta",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-54",
+   "label": "20230901·链1",
+   "uniprotId": "Q6N9V1",
+   "identity": 96.5,
+   "coverage": 99.8,
+   "description": "Fe-only nitrogenase subunit beta",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-96",
+   "label": "GC_trimer_model",
+   "uniprotId": "A0A125T1E9",
+   "identity": 88.1,
+   "coverage": 99.6,
+   "description": "M polyprotein",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-28",
+   "label": "PKU_Jinlab_GPR88_G_E2·链2",
+   "uniprotId": "A0A452R3J4",
+   "identity": 86.6,
+   "coverage": 99.6,
+   "description": "G protein-coupled receptor 88",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-31",
+   "label": "PKU_Jinlab_GPR88_G_E2_…0414·链2",
+   "uniprotId": "A0A452R3J4",
+   "identity": 86.6,
+   "coverage": 99.6,
+   "description": "G protein-coupled receptor 88",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-78",
+   "label": "PPRD-dimer-250623",
+   "uniprotId": "A0A221S4Q5",
+   "identity": 96.3,
+   "coverage": 99.1,
+   "description": "Hemagglutinin glycoprotein",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "imp-79",
+   "label": "PPRV-dimer",
+   "uniprotId": "F1C3L3",
+   "identity": 98.3,
+   "coverage": 99.1,
+   "description": "Hemagglutinin glycoprotein",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "impb-17",
+   "label": "J240-coot-3",
+   "uniprotId": "A0A8A1NDM2",
+   "identity": 93.8,
+   "coverage": 99.9,
+   "description": "Spike glycoprotein",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "impb-18",
+   "label": "Omicron-2P-RBD2up1down_J528",
+   "uniprotId": "A0A8A1NDM2",
+   "identity": 93,
+   "coverage": 100,
+   "description": "Spike glycoprotein",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  },
+  {
+   "job": "impb-56",
+   "label": "RBD-fab-240816_refined…ned_006",
+   "uniprotId": "A0A8A5XRG7",
+   "identity": 93.4,
+   "coverage": 99.5,
+   "description": "Spike glycoprotein",
+   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+  }
+ ]
+}

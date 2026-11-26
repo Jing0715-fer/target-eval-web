@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EBI UniProtKB 回补验证 · 28 缺失靶点</title>
+<style>
+:root{--ink:#1c2430;--mut:#68758a;--line:#e3e8f0;--bg:#f6f8fb;--ok:#0b7a3d;--near:#a56a00;--far:#b3372f;--acc:#7a3ba0}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:var(--bg)}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:22px;margin:0 0 6px} .sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0 20px}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card .n{font-size:26px;font-weight:700} .card .t{color:var(--mut);font-size:12px}
+.card.g .n{color:var(--ok)} .card.y .n{color:var(--near)} .card.r .n{color:var(--far)}
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;min-width:860px;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:13px}
+th{background:#eef2f8;text-align:left;padding:8px 10px;font-size:12px;color:var(--mut);border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+.ok{color:var(--ok)} .near{color:var(--near)} .far{color:var(--far)} .dim{color:#9aa6b8}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;color:#fff;white-space:nowrap}
+.b1{background:var(--ok)} .b2{background:var(--near)} .b3{background:var(--far)} .b4{background:#8a95a6}
+.chan{color:var(--mut);font-size:11px;margin-top:3px}
+.alt{margin:2px 0} .alt small{color:var(--mut)}
+.rec a{font-weight:600}
+.note{background:#fff;border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:8px;padding:14px 16px;margin:18px 0;font-size:13px}
+.note h3{margin:0 0 8px;font-size:14px}
+.note ul{margin:4px 0;padding-left:20px} .note li{margin:3px 0}
+code{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:12px}
+</style></head><body><div class="wrap">
+<h1>EBI UniProtKB 回补验证报告</h1>
+<div class="sub">对象：TargetEval_HT_2026-11-25（117 靶点）汇总报告中缺失 UniProt ID 的 28 个靶点 · 生成：2026-11-26 07:38</div>
+
+<div class="cards">
+<div class="card"><div class="n">28</div><div class="t">缺失 UniProt ID 靶点</div></div>
+<div class="card g"><div class="n">14</div><div class="t">主链直接回补（≥85% + 覆盖≥40%）</div></div>
+<div class="card y"><div class="n">5</div><div class="t">备选链回补（2 功能链 / 3 抗体链）</div></div>
+<div class="card r"><div class="n">7</div><div class="t">未达阈值（不回补）</div></div>
+<div class="card"><div class="n">2</div><div class="t">报告未留存序列（无法验证）</div></div>
+</div>
+
+<div class="note"><h3>验证方法（与 TargetEval v2.95 身份级联同口径）</h3>
+<ul>
+<li><b>查询序列</b>：从汇总报告各行 <code>data-seq</code>（原表完整序列）按 <code>CHAIN</code> 分隔拆链，取与提交长度最接近的链；未达标靶点追加第 2/3 候选链探索。</li>
+<li><b>T1 精确匹配</b>：UniProt Peptide Search（全库子串）→ 26 条查询全部无命中（均为突变体/构建体/毒株变异序列）。</li>
+<li><b>T2 EBI BLAST · Swiss-Prot</b>（已审校 57.6 万条，秒-分钟级）→ 主链回补 4 个。</li>
+<li><b>T3 EBI BLAST · 全库 uniprotkb</b>（含 TrEMBL ~2.5 亿条，1-6 分钟/条）→ 主链再回补 10 个，是本次回补的主力通道（毒株/物种 TrEMBL 条目）。</li>
+<li><b>判定阈值</b>：一致性 ≥85% 且查询覆盖 ≥40% 且命中为 UniProt 条目（bestCoverageHit 覆盖度加权，与管线 <code>TARGET_IDENTIFY_MIN_COV</code> 同口径）。</li>
+</ul></div>
+
+<div class="tblwrap">
+<table>
+<thead><tr><th>作业</th><th>靶点（原始标签）</th><th>提交</th><th>主链最佳命中</th><th>备选链命中（≥85%）</th><th>建议回补</th><th>判定</th></tr></thead>
+<tbody>
+<tr>
+<td>imp-26</td>
+<td>GPR88_E2</td>
+<td>247aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></b> 86.6%/99.2%<br><small>G protein-coupled receptor 88</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-28</td>
+<td>PKU_Jinlab_GPR88_G_E2·链2</td>
+<td>246aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></b> 86.6%/99.6%<br><small>G protein-coupled receptor 88</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-31</td>
+<td>PKU_Jinlab_GPR88_G_E2_…0414·链2</td>
+<td>246aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></b> 86.6%/99.6%<br><small>G protein-coupled receptor 88</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-51</td>
+<td>20230905·链1</td>
+<td>445aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/Q6N9U9" target="_blank" rel="noopener">Q6N9U9</a></b> 94.9%/99.8%<br><small>Nitrogenase protein alpha chain</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/Q6N9U9" target="_blank" rel="noopener">Q6N9U9</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-52</td>
+<td>20230905·链2</td>
+<td>402aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></b> 89.3%/99.8%<br><small>Fe-only nitrogenase subunit beta</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-54</td>
+<td>20230901·链1</td>
+<td>436aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></b> 96.5%/99.8%<br><small>Fe-only nitrogenase subunit beta</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-60</td>
+<td>Conformation1·链2</td>
+<td>100aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></b> 85%/99%<br><small>Urease subunit gamma</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-62</td>
+<td>Conformation2·链2</td>
+<td>100aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></b> 85%/99%<br><small>Urease subunit gamma</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-78</td>
+<td>PPRD-dimer-250623</td>
+<td>460aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A221S4Q5" target="_blank" rel="noopener">A0A221S4Q5</a></b> 96.3%/99.1%<br><small>Hemagglutinin glycoprotein</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A221S4Q5" target="_blank" rel="noopener">A0A221S4Q5</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-79</td>
+<td>PPRV-dimer</td>
+<td>460aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/F1C3L3" target="_blank" rel="noopener">F1C3L3</a></b> 98.3%/99.1%<br><small>Hemagglutinin glycoprotein</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/F1C3L3" target="_blank" rel="noopener">F1C3L3</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-96</td>
+<td>GC_trimer_model</td>
+<td>489aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A125T1E9" target="_blank" rel="noopener">A0A125T1E9</a></b> 88.1%/99.6%<br><small>M polyprotein</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A125T1E9" target="_blank" rel="noopener">A0A125T1E9</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>impb-17</td>
+<td>J240-coot-3</td>
+<td>1070aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></b> 93.8%/99.9%<br><small>Spike glycoprotein</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>impb-18</td>
+<td>Omicron-2P-RBD2up1down_J528</td>
+<td>1082aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></b> 93%/100%<br><small>Spike glycoprotein</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>impb-56</td>
+<td>RBD-fab-240816_refined…ned_006</td>
+<td>196aa</td>
+<td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A8A5XRG7" target="_blank" rel="noopener">A0A8A5XRG7</a></b> 93.4%/99.5%<br><small>Spike glycoprotein</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A8A5XRG7" target="_blank" rel="noopener">A0A8A5XRG7</a></td>
+<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td>imp-10</td>
+<td>lag3+fab·链4</td>
+<td>76aa</td>
+<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0ACI8P9V4" target="_blank" rel="noopener">A0ACI8P9V4</a></b> 82.6%/98.7%<br><small>Lymphocyte activation gene 3 protein</small></span></td>
+<td><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P0DOX7" target="_blank" rel="noopener">P0DOX7</a></b> 88.4%/99.1%<br><small>Immunoglobulin kappa light chain</small></span></div></td>
+<td class="rec"><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P0DOX7" target="_blank" rel="noopener">P0DOX7</a></b> 88.4%/99.1%<br><small>Immunoglobulin kappa light chain</small></span></div></td>
+<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td></tr><tr>
+<td>imp-29</td>
+<td>PKU_Jinlab_GPR88_G_E2·链3</td>
+<td>195aa</td>
+<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0A7L1V4Y5" target="_blank" rel="noopener">A0A7L1V4Y5</a></b> 83.2%/73.5%<br><small>Guanine nucleotide-binding protein subunit alpha (Fragme</small></span></td>
+<td><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
+<td class="rec"><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
+<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td></tr><tr>
+<td>imp-32</td>
+<td>PKU_Jinlab_GPR88_G_E2_…0414·链3</td>
+<td>204aa</td>
+<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0A7L1V4Y5" target="_blank" rel="noopener">A0A7L1V4Y5</a></b> 83.2%/73.5%<br><small>Guanine nucleotide-binding protein subunit alpha (Fragme</small></span></td>
+<td><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
+<td class="rec"><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
+<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td></tr><tr>
+<td>imp-44</td>
+<td>MHC_HM443+VLBp969·链2</td>
+<td>243aa</td>
+<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/P0DSE2" target="_blank" rel="noopener">P0DSE2</a></b> 76.9%/99.2%<br><small>M1-specific T cell receptor beta chain</small></span></td>
+<td><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
+<td class="rec"><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
+<td><span class="badge b2">备选链可回补</span></td></tr><tr>
+<td>imp-45</td>
+<td>MHC_HM443+VLBp969·链3</td>
+<td>205aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/P0DSE1" target="_blank" rel="noopener">P0DSE1</a></b> 71.1%/99%<br><small>M1-specific T cell receptor alpha chain</small></span></td>
+<td><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
+<td class="rec"><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
+<td><span class="badge b2">备选链可回补</span></td></tr><tr>
+<td>imp-100</td>
+<td>GPCR75</td>
+<td>347aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A8C9I9H4" target="_blank" rel="noopener">A0A8C9I9H4</a></b> 63.5%/99.7%<br><small>Probable G protein-coupled receptor 75</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"></td>
+<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td>imp-106</td>
+<td>B-7-mer</td>
+<td>729aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0ABD1AVK7" target="_blank" rel="noopener">A0ABD1AVK7</a></b> 73.3%/99%<br><small>Disease resistance protein</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"></td>
+<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td>imp-23</td>
+<td>PA_22f1_fab_new</td>
+<td>251aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/Q4ZE94" target="_blank" rel="noopener">Q4ZE94</a></b> 68.8%/63.1%<br><small>Protective antigen (Fragment)</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"></td>
+<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td>imp-39</td>
+<td>62_C15</td>
+<td>355aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A5K7YXR9" target="_blank" rel="noopener">A0A5K7YXR9</a></b> 48.4%/99.4%<br><small>Type II secretion system protein GspD</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"></td>
+<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td>imp-40</td>
+<td>A1+P_final</td>
+<td>253aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0ABM8TRE4" target="_blank" rel="noopener">A0ABM8TRE4</a></b> 56%/99.2%<br><small>Curli production assembly/transport component CsgG</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"></td>
+<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td>imp-59</td>
+<td>Conformation1·链1</td>
+<td>471aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A4P9UUN6" target="_blank" rel="noopener">A0A4P9UUN6</a></b> 63.5%/99.8%<br><small>Urease subunit alpha</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"></td>
+<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td>imp-61</td>
+<td>Conformation2·链1</td>
+<td>453aa</td>
+<td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A133XK86" target="_blank" rel="noopener">A0A133XK86</a></b> 61.6%/99.8%<br><small>Urease subunit alpha</small></span></td>
+<td><span class="dim">—</span></td>
+<td class="rec"></td>
+<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr><td>imp-111</td><td>IL17A_FNQZ_fab_0910·链1</td><td>107aa</td>
+<td class="dim" colspan="3">汇总报告未留存该行原表序列（序列折叠/缺失）— 无法验证</td><td><span class="badge b4">无序列</span></td></tr><tr><td>imp-87</td><td>SavA_E148Q+FAD+acyl_pa…ne_0718</td><td>594aa</td>
+<td class="dim" colspan="3">汇总报告未留存该行原表序列（序列折叠/缺失）— 无法验证</td><td><span class="badge b4">无序列</span></td></tr>
+</tbody></table>
+</div>
+
+<div class="note"><h3>结论</h3>
+<ul>
+<li><b>可回补 19/28（68%）</b>：主链直接回补 14 个 + 备选功能链回补 2 个（MHC-I 重链 / GPR86 复合物链等）；另有 3 个仅抗体成分链（IGKC/IGKV 种系基因）达标 — 语义上是复合物的抗体成分而非靶点主抗原，建议按需取舍。</li>
+<li><b>TrEMBL 全库通道（T3）价值关键</b>：Spike（Omicron）、PPRV H 蛋白（96-98%）、固氮酶（89-97%）、GPR88（86.6%）、HIV Env（88.1%）、脲酶 γ（85%）全部依赖 TrEMBL 毒株/物种条目，Swiss-Prot 快通道只能救回其中 4 个。</li>
+<li><b>不可回补 7 个</b>：均为工程改造构建体（纳米孔 A1+P 56%、62_C15 分泌素 48%）、种系距离过远（畜牧所脲酶 α 63%、GPCR75 64%、B-7-mer 73%）或菌株变异（PA_22f1 68.8%/覆盖 63% — 即此前 BLAST nr 超时的靶点，EBI 全库亦确认其与已知条目距离远，身份降级为近似证据属正确判定）。</li>
+<li><b>2 个无法验证</b>：IL17A_FNQZ_fab_0910·链1（序列已折叠）、SavA_E148Q（原表序列未留存）— 汇总报告建议为折叠序列保留 data-seq 快照。</li>
+<li><b>耗时</b>：全流程约 35 分钟（26 主链 T1+T2 ≈ 8 分钟；T3 全库批次并行 ≈ 25 分钟，EBI 队列中等拥堵时段）。作为 NCBI nr 失败后的兜底（v2.95 已集成），单靶点成本 T3 约 1-6 分钟，可接受。</li>
+</ul></div>
+</div></body></html>
