@@ -735,9 +735,9 @@ export interface IdentityAlignment {
   mSeq: string
   /** 对齐后的条目序列（'-' = 缺口） */
   hSeq: string
-  /** 比对区一致率 %（匹配列/对齐列） */
+  /** 比对区一致率 %（v2.98 非缺口列口径：全同列 / 非缺口对齐列 — 缺口列不稀释一致率） */
   identity: number
-  /** 正替代率 %（含全同 — BLAST Positives 同口径） */
+  /** 正替代率 %（v2.98 非缺口列口径；含全同 — BLAST Positives 改非缺口分母） */
   positives: number
   /** 缺口残基总数（两侧合计） */
   gaps: number

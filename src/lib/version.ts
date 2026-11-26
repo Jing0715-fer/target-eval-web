@@ -452,5 +452,23 @@
  *  - applyAlignLayoutUpgrade 幂等升级（jobs/report、batch-report inline+下载、
  *    ht-archive 两类内嵌路径全接入）— v2.96 落盘的历史报告无需重跑即获得
  *    自适应块宽（含 GPR75 → Q6X632 392 列实盘面板）。
+ * v2.98：比对一致率改非缺口列口径（用户规则 2026-11-26：「同源度低的问题是
+ *  序列中存在很多 gap，gap 应该不降低同源度，应该用非 gap 区的对比来计算
+ *  同源度」— 实测 GPR75 突变构建：82 缺口列把一致率从 76.5% 稀释到 60.5%）：
+ *  - identity-align.ts：一致率/正替代率分母从「对齐列数（含缺口）」改为
+ *    「非缺口对齐列 = 对齐列 - 缺口列」— 构建型序列删除环区/标签段产生的
+ *    缺口列不再稀释一致率；缺口仍按 BLAST 同参数（存在 -11/延伸 -1）参与
+ *    比对寻优，只改展示口径不改比对几何；全缺口防御性放弃面板；
+ *  - 面板口径双轨标注（report-html.ts）：「一致率/正替代」chips 明示「非缺口」
+ *    口径 + 分母公式 title；「缺口 N 列」「比对 N 列（非缺口 M）」chips 补齐
+ *    计数；「命中一致性」chip 明示「BLAST 口径」（BLAST 以含缺口列的对齐长度
+ *    为分母 — 外部证据保持原口径不改写）；说明段/最高同源回填 callout 同步
+ *    标注两口径数值，题图「最高同源 N%」仍为 BLAST 归属口径；
+ *  - 旧报告零重跑升级（ALIGN_LAYOUT_JS v1→v2，applyAlignLayoutUpgrade 摘
+ *    aln-fit-v1 旧脚本注入 v2）：逐列数据从 v2.96 固定的面板 DOM 采集重算，
+ *    chips/说明段直接改写为非缺口口径 — v2.96 落盘历史报告（含 GPR75 →
+ *    Q6X632 392 列实盘：60.5% → 76.5%）无需重新评估即显示新口径；新报告
+ *    服务端已按新口径渲染，重算幂等无变化；
+ *  - pipeline 日志/types 注释同步（identity/positives 语义 = 非缺口列口径）。
  */
-export const APP_VERSION = 'v2.97.0'
+export const APP_VERSION = 'v2.98.0'

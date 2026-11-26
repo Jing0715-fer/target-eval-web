@@ -2282,7 +2282,7 @@ class SegmentRunner {
       })
       if (aln) {
         st.idAlignment = aln
-        this.log(`身份比对完成：提交序列 ${aln.qFrom}-${aln.qTo} ↔ ${info.uniprotId} 条目 ${aln.hFrom}-${aln.hTo}（比对区一致率 ${aln.identity}%，正替代 ${aln.positives}%，缺口 ${aln.gaps}，${aln.alignLen} 列）— 报告 BLAST 章节展示序列比对`)
+        this.log(`身份比对完成：提交序列 ${aln.qFrom}-${aln.qTo} ↔ ${info.uniprotId} 条目 ${aln.hFrom}-${aln.hTo}（比对区非缺口一致率 ${aln.identity}%，正替代 ${aln.positives}%，缺口 ${aln.gaps} 列，比对 ${aln.alignLen} 列 / 非缺口 ${aln.alignLen - aln.gaps} 列）— 报告 BLAST 章节展示序列比对`)
       }
     } catch { /* best-effort：比对失败不影响评估 */ }
   }

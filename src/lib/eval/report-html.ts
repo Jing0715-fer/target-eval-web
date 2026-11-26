@@ -2009,20 +2009,20 @@ function identityAlignmentPanelHtml(aln: IdentityAlignment, ti?: TargetIdentityI
     ? `<a href="https://www.uniprot.org/uniprotkb/${esc(aln.acc)}" target="_blank" rel="noopener">${esc(aln.acc)}</a>`
     : esc(aln.acc)
   const beCallout = ti?.bestEffort
-    ? `<div class="callout callout-amber"><b>最高同源回填 — 远缘参考归属，需人工复核。</b><ul class="aln-be-list"><li>身份识别级联（PDB 同源 → EBI Swiss-Prot → NCBI nr / EBI UniProtKB 全库 → 精确匹配）所有通道均未达「一致性 ≥85% 且覆盖 ≥40%」归属阈值；</li><li>按规则以覆盖度加权最佳命中回填本条目：一致性 ${Math.round(ti.identity ?? aln.identity)}%${ti.coverage != null ? ` · 覆盖 ${Math.round(ti.coverage)}%` : ''}；</li><li>条目为提交序列的远缘同源参考 — 蛋白名/物种/条目信息按参考条目口径，结构证据仍以同源检索结果为准，关键决策请人工复核。</li></ul></div>`
+    ? `<div class="callout callout-amber"><b>最高同源回填 — 远缘参考归属，需人工复核。</b><ul class="aln-be-list"><li>身份识别级联（PDB 同源 → EBI Swiss-Prot → NCBI nr / EBI UniProtKB 全库 → 精确匹配）所有通道均未达「一致性 ≥85% 且覆盖 ≥40%」归属阈值；</li><li>按规则以覆盖度加权最佳命中回填本条目：一致性 ${Math.round(ti.identity ?? aln.identity)}%（BLAST 报告口径，含缺口列）${ti.coverage != null ? ` · 覆盖 ${Math.round(ti.coverage)}%` : ''}，非缺口区一致率见下方比对（${aln.identity.toFixed(1)}%）；</li><li>条目为提交序列的远缘同源参考 — 蛋白名/物种/条目信息按参考条目口径，结构证据仍以同源检索结果为准，关键决策请人工复核。</li></ul></div>`
     : ''
   return `
   <h3 class="itx-h3">序列比对 <span class="itx-h3-sub">身份识别证据 · 提交序列 ↔ ${accLink}${dbChip}${aln.entryName ? ` ${esc(aln.entryName)}` : ''} · ${cols} 列</span></h3>
-  <p class="note">提交序列与归属 UniProt 条目的${aln.method === 'exact-substring' ? '精确匹配区间（提交序列为条目子串 — 完全一致）' : '局部比对（Smith-Waterman 仿射缺口 · BLOSUM62 — 与 BLAST HSP 同口径）'}：块首尾为双侧残基号（1-based），比对块宽度随页面宽度自适应满宽排布，中线「|」全同 /「+」正替代（BLOSUM62 得分 &gt;0）；<b>悬停任意残基显示双侧氨基酸位置号</b>（查询位 · 条目位 · 替代类型），同列三行联动高亮；顶部概览条为全区一致性分布（悬停显示游程区间）。${aln.blastIdentity != null && aln.blastIdentity < 99.95 ? `归属命中一致性 ${aln.blastIdentity.toFixed(1)}%，比对区一致率 ${aln.identity.toFixed(1)}%（覆盖提交序列 ${aln.qFrom}-${aln.qTo} / ${aln.qLen} aa，条目 ${aln.hFrom}-${aln.hTo} / ${aln.hLen} aa）。` : ''}</p>
+  <p class="note">提交序列与归属 UniProt 条目的${aln.method === 'exact-substring' ? '精确匹配区间（提交序列为条目子串 — 完全一致）' : '局部比对（Smith-Waterman 仿射缺口 · BLOSUM62 — 与 BLAST HSP 同口径）'}：块首尾为双侧残基号（1-based），比对块宽度随页面宽度自适应满宽排布，中线「|」全同 /「+」正替代（BLOSUM62 得分 &gt;0）；<b>悬停任意残基显示双侧氨基酸位置号</b>（查询位 · 条目位 · 替代类型），同列三行联动高亮；顶部概览条为全区一致性分布（悬停显示游程区间）。<b>一致率按非缺口列计算（缺口列不稀释一致率，缺口数另行标注）</b>。${aln.blastIdentity != null && aln.blastIdentity < 99.95 ? `归属命中一致性 ${aln.blastIdentity.toFixed(1)}%（BLAST 报告口径，含缺口列），比对区非缺口一致率 ${aln.identity.toFixed(1)}%（覆盖提交序列 ${aln.qFrom}-${aln.qTo} / ${aln.qLen} aa，条目 ${aln.hFrom}-${aln.hTo} / ${aln.hLen} aa）。` : ''}</p>
   <div class="aln-panel" data-acc="${esc(aln.acc)}">
     <div class="aln-stats">
-      <span class="aln-chip" title="比对区一致率 = 全同列 / 对齐列数">一致率 <b>${aln.identity.toFixed(1)}%</b></span>
-      <span class="aln-chip" title="正替代率 = 全同 + BLOSUM62 正得分替换列 / 对齐列数（BLAST Positives 同口径 — 含全同，故 ≥ 一致率）">正替代 <b>${aln.positives.toFixed(1)}%</b><i>含全同</i></span>
-      <span class="aln-chip">缺口 <b>${aln.gaps}</b></span>
-      <span class="aln-chip">比对 <b>${aln.alignLen}</b> 列</span>
+      <span class="aln-chip" title="一致率 = 全同列 / 非缺口对齐列（v2.98 口径：缺口列不计入分母 — 缺口不稀释一致率）">一致率 <b>${aln.identity.toFixed(1)}%</b><i>非缺口</i></span>
+      <span class="aln-chip" title="正替代率 = 全同 + BLOSUM62 正得分替换列 / 非缺口对齐列（含全同，故 ≥ 一致率；缺口列不计入分母）">正替代 <b>${aln.positives.toFixed(1)}%</b><i>含全同</i></span>
+      <span class="aln-chip">缺口 <b>${aln.gaps}</b> 列</span>
+      <span class="aln-chip">比对 <b>${aln.alignLen}</b> 列<i>非缺口 ${aln.alignLen - aln.gaps}</i></span>
       <span class="aln-chip">查询 <b>${aln.qFrom}-${aln.qTo}</b><i>/${aln.qLen} aa</i></span>
       <span class="aln-chip">${esc(aln.acc)} <b>${aln.hFrom}-${aln.hTo}</b><i>/${aln.hLen} aa</i></span>
-      ${aln.blastIdentity != null ? `<span class="aln-chip" title="BLAST 归属命中的报告一致性（级联回填口径）">命中一致性 <b>${aln.blastIdentity.toFixed(1)}%</b></span>` : ''}
+      ${aln.blastIdentity != null ? `<span class="aln-chip" title="BLAST 归属命中的报告一致性（级联回填口径 — BLAST 以含缺口列的对齐长度为分母）">命中一致性 <b>${aln.blastIdentity.toFixed(1)}%</b><i>BLAST 口径</i></span>` : ''}
     </div>
     ${beCallout}
     <div class="aln-strip-wrap"><svg class="aln-strip" viewBox="0 0 ${cols} 10" preserveAspectRatio="none" role="img" aria-label="比对区一致性分布概览">${stripRects}</svg></div>
@@ -2080,26 +2080,28 @@ export const ALIGN_TIP_JS = `<script>
 })();
 </script>`
 
-/** v2.97 比对块宽自适应脚本标记（applyAlignLayoutUpgrade 幂等判据） */
-export const ALIGN_LAYOUT_MARKER = 'aln-fit-v1'
+/** v2.97/v2.98 比对块宽自适应 + 指标重算脚本标记（applyAlignLayoutUpgrade 幂等判据；
+ *  v2 = 块宽自适应 + 一致率/正替代非缺口口径重算） */
+export const ALIGN_LAYOUT_MARKER = 'aln-fit-v2'
 
-/** v2.97：比对面板块宽随容器自适应（用户规则：「序列比对的部分要充分利用页面宽度，
- *  不要空太多空间，并且也可以随页面宽度动态调整」）。
- *  - SSR 60 列分块仅作无 JS 兜底与打印媒体基准；屏幕媒体下本脚本按
- *    `.aln-scroll` 实测内宽 ÷ 等宽字符实测宽 → 满列数重排（每块列数 =
- *    floor(可用宽/字符宽)，页面越宽每行残基越多，窄屏自动降列数免横滚）；
- *  - 数据零冗余：逐列数据（字符/状态/双侧位置/行标签）直接从 v2.96 起固定的
- *    SSR DOM 采集缓存于面板元素 — 新旧报告同一代码路径，无需重新落盘；
- *  - 重排触发：ResizeObserver（视口缩放/合并报告视图切换/iframe 宽变）+
- *    window.resize 兜底 + 字体就绪（1ch 随字体加载变化）重排；
- *  - 防振荡：floor + 2px 亚像素安全边 — 内容恒 ≤ 容器，不触发「滚动条出现 →
- *    clientWidth 收缩 → 再重排」反馈环；
- *  - 打印：beforeprint 且 matchMedia('print')（真打印）时重排为 60 列经典版式
- *    （A4 稳定容纳）；PDF 导出走 screen 媒体不受影响（按 PDF 页宽满排）；
- *  - 隐藏面板（clientWidth=0）跳过 — 变为可见时 ResizeObserver 自动补排。
+/** v2.97：比对面板块宽随容器自适应；v2.98：一致率/正替代率非缺口口径重算。
+ *  - 块宽自适应（v2.97，用户规则：「序列比对的部分要充分利用页面宽度，不要空
+ *    太多空间，并且也可以随页面宽度动态调整」）：SSR 60 列分块仅作无 JS 兜底与
+ *    打印基准，屏幕媒体下按 `.aln-scroll` 实测内宽 ÷ 等宽字符实测宽 → 满列数
+ *    重排（每块列数 = floor(可用宽/字符宽)，页面越宽每行残基越多，窄屏自动降
+ *    列数免横滚）；ResizeObserver + resize 兜底 + 字体就绪重排；floor + 2px
+ *    亚像素安全边防「重排→滚动条→宽度收缩→再重排」反馈环；隐藏面板跳过；
+ *  - 指标重算（v2.98，用户规则：「gap 应该不降低同源度，应该用非 gap 区的
+ *    对比来计算同源度」）：逐列数据（字符/状态/双侧位置/行标签）从 v2.96 起
+ *    固定的 SSR DOM 采集 — 一致率 = 全同列/非缺口列、正替代 = (全同+正替代列)
+ *    /非缺口列，直接改写面板 chips（含口径标注）与说明段文案。v2.96 落盘的
+ *    历史报告（含缺口稀释的旧值）无需重跑即显示非缺口口径；新报告服务端已按
+ *    同口径渲染，重算幂等无变化；
+ *  - 打印：beforeprint 且 matchMedia('print')（真打印）时重排 60 列经典版式
+ *    （A4 稳定容纳）；PDF 导出走 screen 媒体不受影响（按 PDF 页宽满排）。
  *  与 ALIGN_TIP_JS 相同的事件委托口径 — 重排后悬停位置号/整列高亮照常工作。 */
 export const ALIGN_LAYOUT_JS = `<script>
-/* ${ALIGN_LAYOUT_MARKER} — 比对块宽随容器自适应重排 */
+/* ${ALIGN_LAYOUT_MARKER} — 比对块宽随容器自适应重排 + 一致率非缺口口径重算 */
 (function(){
   var MIN_COLS = 20;
   var PRINT_COLS = 60;
@@ -2190,10 +2192,58 @@ export const ALIGN_LAYOUT_JS = `<script>
     scroll.innerHTML = buildHtml(d, per);
   }
 
+  // ── v2.98 指标重算：一致率/正替代改非缺口列口径（旧报告升级；新报告服务端已同口径，幂等）──
+  function recomputeMetrics(panel, d){
+    if (panel.__alnMetrics) return;
+    panel.__alnMetrics = true;
+    var m = 0, p = 0, x = 0, g = 0;
+    for (var i = 0; i < d.cols.length; i++){
+      var st = d.cols[i].st;
+      if (st === 'g') g++; else if (st === 'm') m++; else if (st === 'p') p++; else x++;
+    }
+    var nonGap = m + p + x;
+    if (nonGap < 1) return;
+    var idPct = Math.round(m / nonGap * 1000) / 10;
+    var posPct = Math.round((m + p) / nonGap * 1000) / 10;
+    var chips = panel.querySelectorAll('.aln-chip');
+    for (var c = 0; c < chips.length; c++){
+      var chip = chips[c];
+      var t = (chip.textContent || '').replace(/\\s+/g, ' ');
+      if (t.indexOf('一致率') === 0){
+        chip.innerHTML = '一致率 <b>' + idPct + '%</b><i>非缺口</i>';
+        chip.setAttribute('title', '一致率 = 全同列 / 非缺口对齐列（v2.98 口径：缺口列不计入分母 — 缺口不稀释一致率）');
+      } else if (t.indexOf('正替代') === 0){
+        chip.innerHTML = '正替代 <b>' + posPct + '%</b><i>含全同</i>';
+        chip.setAttribute('title', '正替代率 = 全同 + BLOSUM62 正得分替换列 / 非缺口对齐列（含全同，故 ≥ 一致率；缺口列不计入分母）');
+      } else if (t.indexOf('缺口') === 0){
+        chip.innerHTML = '缺口 <b>' + g + '</b> 列';
+      } else if (t.indexOf('比对') === 0){
+        chip.innerHTML = '比对 <b>' + d.cols.length + '</b> 列<i>非缺口 ' + nonGap + '</i>';
+      }
+    }
+    // 说明段：比对区一致率数值 + 口径文案（新报告已是非缺口文案，正则不命中 — 幂等）
+    var note = panel.previousElementSibling;
+    while (note && !(note.tagName === 'P' && (note.className || '').indexOf('note') >= 0)) note = note.previousElementSibling;
+    if (note){
+      note.innerHTML = note.innerHTML
+        .replace(/比对区一致率\\s*[\\d.]+%/, '比对区非缺口一致率 ' + idPct + '%')
+        .replace(/比对区一致率/, '比对区非缺口一致率');
+    }
+    // 最高同源回填 callout（v2.96 旧文案）：补 BLAST 口径标注 + 非缺口一致率数值；
+    // 新报告服务端已含「非缺口」字样 → 跳过（幂等）
+    var beList = panel.querySelector('.aln-be-list');
+    if (beList && beList.innerHTML.indexOf('非缺口') < 0){
+      beList.innerHTML = beList.innerHTML
+        .replace(/(回填本条目：一致性\\s*[\\d.]+%)/, '$1（BLAST 报告口径，含缺口列），非缺口区一致率 ' + idPct + '%');
+    }
+  }
+
   function wire(p){
     if (p.__alnWired){ layout(p); return; }
     p.__alnWired = true;
     panels.push(p);
+    var d0 = harvest(p);
+    if (d0) recomputeMetrics(p, d0);
     layout(p);
     var target = p.querySelector('.aln-scroll') || p;
     if (window.ResizeObserver){
@@ -2226,15 +2276,18 @@ export const ALIGN_LAYOUT_JS = `<script>
 })();
 </script>`
 
-/** v2.97：旧报告（v2.96 生成 — 已含比对面板但块宽固定 60 列）幂等注入块宽自适应
- *  脚本；无比对面板的报告直返。面板 DOM 结构 v2.96 起固定（逐残基 span 携带
- *  data-qp/data-hp/状态类），脚本从 DOM 采集重排 — 历史报告无需重新落盘。 */
+/** v2.97/v2.98：旧报告（v2.96 生成 — 已含比对面板但块宽固定 60 列、一致率为含
+ *  缺口口径）幂等注入块宽自适应 + 非缺口口径重算脚本；无比对面板的报告直返。
+ *  面板 DOM 结构 v2.96 起固定（逐残基 span 携带 data-qp/data-hp/状态类），脚本
+ *  从 DOM 采集重排与重算 — 历史报告无需重新落盘。v2.97 内联脚本（aln-fit-v1）
+ *  先摘除再注入 v2（指标重算依赖 harvest 后置，v1 无此逻辑）。 */
 export function applyAlignLayoutUpgrade(html: string): string {
   if (html.includes(ALIGN_LAYOUT_MARKER)) return html
   if (!html.includes('aln-panel')) return html
-  const b = html.lastIndexOf('</body>')
+  const stripped = html.replace(/<script>\s*\/\* aln-fit-v1[\s\S]*?<\/script>/, '')
+  const b = stripped.lastIndexOf('</body>')
   if (b < 0) return html
-  return `${html.slice(0, b)}${ALIGN_LAYOUT_JS}\n${html.slice(b)}`
+  return `${stripped.slice(0, b)}${ALIGN_LAYOUT_JS}\n${stripped.slice(b)}`
 }
 
 /** v2.67：BLAST 结果库切换（PDB 库 / nr 全库 — 两库都有命中时表头上方分段按钮；

@@ -13,6 +13,10 @@
  *  - 产出三行比对串（qseq/mseq/hseq，'-' 表缺口）+ 双侧 1-based 闭区间坐标
  *    （qFrom/qTo = 提交序列；hFrom/hTo = UniProt 条目编号）+ 一致率/正替代率
  *    （BLOSUM62 得分 >0 的替换列，BLAST「Positives」同口径）/缺口统计。
+ *  - v2.98 口径：一致率/正替代率分母 = 非缺口对齐列（用户规则 2026-11-26：「gap
+ *    应该不降低同源度，应该用非 gap 区的对比来计算」— 构建型序列删除环区/标签
+ *    段产生的缺口列不再稀释一致率；缺口列数另行展示）。缺口仍由 BLAST 同参数
+ *    （存在 -11 / 延伸 -1）参与比对寻优 — 只改展示口径，不改比对几何。
  *  - 内存护栏：全量 DP ≤ 6M 格（~12MB 方向矩阵 + 滚动得分行）；更大的条目
  *    （如 titin 3 万 aa）经 8-mer 种子对角线投票裁出同源窗口再比对 — 坐标
  *    按窗口偏移还原为条目编号。种子定位失败（无任何 8-mer 全同）返回 null，
@@ -234,8 +238,12 @@ function alignLocal(
   const mSeq = String.fromCharCode(...mChars)
 
   const alignLen = qChars.length
-  const identity = Math.round((matches / alignLen) * 1000) / 10
-  const positivePct = Math.round((positives / alignLen) * 1000) / 10
+  // v2.98：非缺口列口径 — 分母 = 对齐列数 - 缺口列（gap 不稀释一致率/正替代率）。
+  // gaps 与回溯逐列同步累计（每缺口列 +1），非缺口列 = matches + 错配列。
+  const nonGap = alignLen - gaps
+  if (nonGap < 1) return null // 防御性：全缺口比对（理论不可达）放弃面板
+  const identity = Math.round((matches / nonGap) * 1000) / 10
+  const positivePct = Math.round((positives / nonGap) * 1000) / 10
   return { qFrom, qTo, hFrom, hTo, qSeq, mSeq, hSeq, identity, positives: positivePct, gaps, alignLen, qLen: P, hLen: F + hOffset }
 }
 
