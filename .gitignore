@@ -61,6 +61,8 @@ server.log
 /db/reports/*/
 /db/custom.db
 /db/custom.db-journal
+/db/custom.db-wal
+/db/custom.db-shm
 /db/cache/alphafold/
 /db/cache/ligand2d/
 /scripts/out/
