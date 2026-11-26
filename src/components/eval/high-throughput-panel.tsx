@@ -616,7 +616,7 @@ export function HighThroughputPanel({ value, onChange, parsed, seqGroups, onSeqG
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-2">
             <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
             <span className="text-[11.5px] leading-relaxed text-amber-700 dark:text-amber-300">
-              {noUniKeys.size} 份匹配的报告未回填 UniProt ID（原评估未识别出靶点身份）— 可不载入这些报告，启动后重新评估补识别（PDB 同源回填 → BLAST nr → UniProt 库序列匹配，报告会展示检索结果并回填 UniProt 列）。
+              {noUniKeys.size} 份匹配的报告未回填 UniProt ID（原评估未识别出靶点身份）— 可不载入这些报告，启动后重新评估补识别（PDB 同源回填 → UniProt 库序列匹配 → BLAST nr，报告会展示检索结果并回填 UniProt 列）。
             </span>
             <Button
               type="button"

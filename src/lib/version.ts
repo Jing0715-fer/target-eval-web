@@ -351,5 +351,25 @@
  *    铺满、执行摘要/PDB 清单/BLAST/关键文献全章节完整、VLM 视觉复核排版
  *    正常、0 控制台错误）；诊断脚本保留：scripts/repro-pdf-layout.ts（复现
  *    + 媒体探针）/ verify-pdf-v293.ts / verify-dash-v293.ts。
+ * v2.94：BLAST nr 识别超时根治（用户实测序列靶点作业 cmwwwnzi6：NCBI 队列
+ *  患病日 BLAST nr 识别两轮尝试共耗 2.3h 双双以「The operation was aborted
+ *  due to timeout」失败，而同目的的 EBI UniProtKB 直查 12s 完成 — 总作业时长
+ *  8302s 里 99% 耗在等 NCBI）：
+ *  - 身份识别级联反转（pipeline.ts）：EBI UniProtKB（Swiss-Prot，秒级）从
+ *    「nr 失败后的兜底」升为**先行快通道** — 已归属（≥85% 一致性 + 40% 覆盖）
+ *    即跳过 NCBI nr 慢通道（常态省 1-10 分钟，拥堵日省 90s-2.3h）；EBI 未决
+ *    （无命中/未达阈值/服务失败）时 nr 仍接着跑（TrEMBL 未审校条目近似命中是
+ *    nr 的独有价值）。命名优先级不变（评估表 > nr ≈ UniProt 匹配 > PDB 同源）；
+ *    检查点状态字段（nrBlast 系 / upBlast 系）独立自洽，跨版本续跑安全；
+ *  - submitBlastPut 提交硬超时（blast.ts，pdbaa/nr 共用）：旧版 `signal ??
+ *    timeout(30s)` 在异步作业路径（signal=作业信号无段截止）下**无任何请求级
+ *    超时** — NCBI 接受连接不响应时提交 fetch 永久悬挂。现恒定 45s 硬超时经
+ *    AbortSignal.any 与外部信号组合（取消/段截止仍即时报出）；外部中止一律
+ *    原样上抛（旧版仅匹配 name==='AbortError'，段截止的 TimeoutError 形态被
+ *    误入重试链后以空泛 'aborted' 逃逸，难定位）；
+ *  - collectBlastNr 墙钟全路径约束（blast.ts）：墙钟检查移至循环顶 — 旧版仅
+ *    在「HTTP 200 + 未出结果」路径检查，连续网络失败（30 次 fetch 超时 ≈ 18
+ *    分钟 > 10 分钟墙钟）与非 200 响应（429/5xx）两条路径可无限越预算循环；
+ *    轮询 fetch 组合外部信号（取消即时报出，不再等 30s 请求超时）。
  */
-export const APP_VERSION = 'v2.93.0'
+export const APP_VERSION = 'v2.94.0'

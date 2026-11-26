@@ -315,7 +315,7 @@ export function BlastNrTable({ hits, variant = 'nr' }: { hits: BlastNrHit[]; var
       </div>
       <p className="border-t border-border/60 px-4 py-2.5 text-[11px] leading-relaxed text-muted-foreground/85">
         {isUni
-          ? 'PDB 库同源与 NCBI nr 全库均未能确定靶点身份（或检索失败）时，提交序列自动改查 EBI BLAST（UniProtKB Swiss-Prot 人工审校库）定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'
+          ? '靶点身份尚未确定时，提交序列自动经 EBI BLAST 直查 UniProtKB（Swiss-Prot 人工审校库）定位真实蛋白身份（v2.94 起为身份识别的第一检索通道 — 秒级；NCBI nr 全库为其后的补充通道）— 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'
           : 'PDB 库同源不足以归属 UniProt（一致性 <85% 或覆盖 <40%，或检索失败）时，提交序列自动改查 NCBI nr 全库定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'}
       </p>
     </div>

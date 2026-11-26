@@ -217,7 +217,15 @@ async function submitBlastPut(
   let lastErr: unknown = null
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      const res = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: signal ?? AbortSignal.timeout(30_000) })
+      // v2.94：提交请求恒定 45s 硬超时（与外部信号经 AbortSignal.any 组合）— 旧版
+      //  `signal ?? AbortSignal.timeout(30_000)` 在异步作业路径（signal=作业信号，无
+      //  段截止）下**无任何请求级超时**：NCBI 接受连接但不响应时提交 fetch 永久悬挂
+      //  （用户实测 nr 识别挂死 90+ 分钟后以「The operation was aborted due to
+      //  timeout」失败）；外部中止（取消/段截止）仍即时报出，硬超时独立兜底走重试。
+      const reqSignal = signal
+        ? (AbortSignal.any?.([signal, AbortSignal.timeout(45_000)]) ?? signal)
+        : AbortSignal.timeout(45_000)
+      const res = await fetch(BLAST_URL, { method: 'POST', body: submitBody, signal: reqSignal })
       if (!res.ok) throw new Error(`${label} 提交失败 HTTP ${res.status}`)
       const text = await res.text()
       const rid = text.match(/RID\s*=\s*(\S+)/)?.[1]
@@ -232,7 +240,11 @@ async function submitBlastPut(
       markNcbiCongested()
       throw new Error(`${label} 未返回 RID（NCBI 限流/资源暂时不可用）`)
     } catch (e) {
-      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      // v2.94：外部信号已中止（作业取消/段截止）一律原样上抛 — 旧版仅匹配
+      //  name==='AbortError'，段截止（AbortSignal.any 组合下的 TimeoutError 形态，
+      //  消息「The operation was aborted due to timeout」）被误入重试链后经已中止
+      //  信号的 sleep 以空泛 'aborted' 逃逸，调用方难以定位真实原因。
+      if (signal?.aborted) throw e
       lastErr = e
       if (attempt < attempts - 1) {
         const delay = BLAST_RETRY_DELAYS_MS[attempt] ?? 15000
@@ -880,11 +892,13 @@ const MAX_NR_WALL_MS = 10 * 60_000
 export type BlastNrCollectResult = { hits: BlastNrHit[] } | { stillRunning: true; pollState: BlastPollState }
 
 /**
- * 收集 BLAST nr 结果（v2.16）：
+ * 收集 BLAST nr 结果（v2.16；v2.94 管线级联中降为 EBI 快通道未决后的慢通道）：
  *  - 与 pdbaa 轮询同构（RTOE 首等 + 6s 常规轮询 + 段预算续跑），但**无 RCSB 兜底**
  *   （RCSB 序列搜索返回的是 PDB 同源，对「这是哪个蛋白」的身份识别无增量价值）
- *  - FAILED / RID 过期 / 长期不可达 / 5 分钟墙钟 → 抛错（调用方记 warn 后继续评估，
- *    身份识别是 best-effort 增强，失败不影响主流程）
+ *  - FAILED / RID 过期 / 长期不可达 / 墙钟超限（默认 10 分钟；RCSB 兜底日 90s —
+ *    由调用方经 maxWallMs 传入）→ 抛错（调用方记 warn 后继续评估，身份识别是
+ *    best-effort 增强，失败不影响主流程）
+ *  - v2.94：墙钟检查在循环顶统一约束全部路径（网络失败/非 200 旧版可绕过越预算）
  */
 export async function collectBlastNr(
   rid: string,
@@ -903,6 +917,13 @@ export async function collectBlastNr(
   while (true) {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
     if (budgetLeft() < 6_000) return { stillRunning: true, pollState: snapshot() }
+    // v2.94：墙钟检查移至循环顶 — 旧版仅在「HTTP 200 + 未出结果」路径检查，
+    //  连续网络失败（fetch 超时/不可达）与非 200 响应（429/5xx）两条路径绕过检查
+    //  可无限越预算循环（30 次连续 fetch 超时 ≈ 18 分钟 > 10 分钟墙钟；用户实测
+    //  nr 识别挂死 90+ 分钟）。置于顶部后所有路径统一受墙钟约束。
+    if (Date.now() - startedAt > wallMs) {
+      throw new Error(`BLAST nr 已提交 ${Math.round(wallMs / 60000)} 分钟仍无结果（NCBI 队列异常）`)
+    }
     const clampedSleep = (ms: number): number => {
       const bl = budgetLeft()
       return bl === Infinity ? ms : Math.max(2_000, Math.min(ms, bl - 4_000))
@@ -912,10 +933,14 @@ export async function collectBlastNr(
     const elapsed = Math.round((Date.now() - startedAt) / 1000)
     let pollRes: Response
     try {
-      pollRes = await fetch(`${BLAST_URL}?CMD=Get&FORMAT_TYPE=XML&RID=${rid}`, { signal: AbortSignal.timeout(30_000) })
+      // v2.94：轮询 fetch 组合外部信号（取消/段截止即时报出）+ 30s 请求超时
+      const pollSignal = signal
+        ? (AbortSignal.any?.([signal, AbortSignal.timeout(30_000)]) ?? AbortSignal.timeout(30_000))
+        : AbortSignal.timeout(30_000)
+      pollRes = await fetch(`${BLAST_URL}?CMD=Get&FORMAT_TYPE=XML&RID=${rid}`, { signal: pollSignal })
       netFails = 0
     } catch (e) {
-      if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
+      if (signal?.aborted) throw e // v2.94：外部中止原样上抛（含段截止 TimeoutError 形态）
       netFails++
       if (netFails >= MAX_CONSECUTIVE_NET_FAILS) {
         throw new Error(`BLAST nr 轮询网络不可达（连续 ${netFails} 次失败，已等 ${Math.round(elapsed / 60)} 分钟）`)
@@ -934,9 +959,6 @@ export async function collectBlastNr(
     }
     if (xml.includes('Status=FAILED') || xml.includes('Status=UNKNOWN')) {
       throw new Error(xml.includes('Status=FAILED') ? 'BLAST nr 任务在 NCBI 侧失败' : `BLAST nr RID ${rid} 已过期`)
-    }
-    if (Date.now() - startedAt > wallMs) {
-      throw new Error(`BLAST nr 已提交 ${Math.round(wallMs / 60000)} 分钟仍无结果（NCBI 队列异常）`)
     }
     onProgress?.(xml.includes('Status=SEARCHING')
       ? `NCBI nr 计算中（第 ${attempts} 次，已 ${elapsed}s）`

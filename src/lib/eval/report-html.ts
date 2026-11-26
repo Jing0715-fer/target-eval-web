@@ -1885,7 +1885,7 @@ function uniprotBlastPanelHtml(hits: BlastNrHit[]): string {
   }
   return `
   <h3 class="itx-h3">UniProt 库序列匹配 <span class="itx-h3-sub">EBI BLAST · Swiss-Prot · ${hits.length} hits · 靶点身份识别</span></h3>
-  <p class="note">PDB 库同源与 NCBI nr 全库均未能确定靶点身份（或检索失败）时，提交序列已自动改查 EBI BLAST（UniProtKB Swiss-Prot 人工审校库）定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据（报告题目/刊头的「UniProt 匹配」标注即来源于此）。按显著性排序、同编号去重取最高一致性；「覆盖范围」为提交序列上的残基区间（首个 HSP，1-based 闭区间）。可经表头下方「排序」切换 Identity 降序等，并支持导出 CSV。</p>
+  <p class="note">靶点身份尚未确定时，提交序列已自动经 EBI BLAST 直查 UniProtKB（Swiss-Prot 人工审校库）定位真实蛋白身份（v2.94 起为身份识别的第一检索通道 — 秒级；NCBI nr 全库为其后的补充通道，未审校 TrEMBL 条目由其覆盖）— 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据（报告题目/刊头的「UniProt 匹配」标注即来源于此）。按显著性排序、同编号去重取最高一致性；「覆盖范围」为提交序列上的残基区间（首个 HSP，1-based 闭区间）。可经表头下方「排序」切换 Identity 降序等，并支持导出 CSV。</p>
   <div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="uniblast">
     <colgroup>
       <col style="width:118px"><col><col style="width:78px"><col style="width:92px"><col style="width:88px"><col style="width:96px">

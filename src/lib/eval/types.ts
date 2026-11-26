@@ -655,12 +655,14 @@ export function describeBlastStatus(info: BlastStatusInfo | undefined | null): s
 
 /**
  * 纯序列输入（无 UniProt ID）时的靶点身份识别结果。
- * 识别级联（按名称优先级）：
+ * 识别级联（按名称优先级；v2.94 起快通道先行）：
  *  1. 评估表蛋白名（LLM 提取 insights.proteinName / 序列标签头）
- *  2. BLAST nr 最佳命中（sp|ACC|ENTRY 描述 — 含真实蛋白名/物种/基因名）
+ *  2. EBI UniProtKB（Swiss-Prot）序列匹配最佳命中（v2.94 先行 — 秒级；
+ *     含真实蛋白名/物种/基因名）与 BLAST nr 最佳命中（EBI 未决时的慢通道，
+ *     TrEMBL 近似命中为独有价值）— 两者同优先级（覆盖全蛋白空间）
  *  3. PDB 同源最佳命中描述（Chain A, XXX kinase domain → 同源推断）
- * UniProt accession 定位（peptide 精确检索 / PDB BLAST ≥85% / nr ≥85%）成功时
- * 走完整回填（uniprotInfo 置位），本结构仅保留识别来源注记。
+ * UniProt accession 定位（peptide 精确检索 / PDB BLAST ≥85% / EBI 匹配 ≥85%
+ * / nr ≥85%）成功时走完整回填（uniprotInfo 置位），本结构仅保留识别来源注记。
  */
 export interface TargetIdentityInfo {
   /** 展示名（评估表蛋白名 / nr 命中蛋白名 / PDB 同源描述清洗结果） */

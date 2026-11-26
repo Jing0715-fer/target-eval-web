@@ -1674,10 +1674,113 @@ class SegmentRunner {
       }
     }
 
-    // ── v2.16 靶点身份识别级联（纯序列输入且尚无 UniProt 归属时）──────────
-    //  级联顺序（用户语义）：评估表蛋白名（phaseUniprot 已派生）→ PDB 同源描述推断
-    //  → BLAST nr 兜底（定位真实蛋白身份；sp|ACC| 命中 ≥85% 时回填 UniProt 全量元数据）
-    //  → EBI Swiss-Prot 直查（v2.44）→ UniProt 全库精确匹配（v2.58，含 TrEMBL）
+    // ── v2.94 身份识别快通道：EBI UniProtKB（Swiss-Prot）序列匹配**先行**（原 v2.44 兕底通道升级）──
+    //  用户诉求原句「报告没回填 UniProt ID 时直接用 UniProt 库以序列匹配，取同源度最高的，
+    //  并显示同源度」。v2.94 级联反转：用户实测 NCBI 队列患病日 BLAST nr 识别挂死
+    //  90+ 分钟×2 次重试后双双超时（总耗 2.3h），而 EBI 直查同一身份问题秒级完成 —
+    //  快通道先行，已归属（≥85% 一致性 + 40% 覆盖）即跳过 NCBI nr 慢通道（常态省
+    //  1-10 分钟，拥堵日省更多）；EBI 未决（无命中/未达阈值/服务失败）时 nr 仍接着
+    //  跑（TrEMBL 未审校条目近似命中是 nr 的独有价值 — Swiss-Prot 仅含已审校条目）。
+    //  注：blastStatus='failed'（NCBI+RCSB 双亡）时**仍执行** — 这正是本通道的
+    //  核心价值场景；仅用户显式关闭 BLAST / 抗体序列跳过。
+    if (!st.uniprotInfo && st.sequence.length >= 30 && !st.upBlastDone
+      && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody') {
+      const upGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
+      if (budgetLeft(this.cb) < upGateMs) {
+        return this.handoff()
+      }
+      try {
+        this.report('blast', st.upBlast
+          ? 'UniProt 库序列匹配检索中（等待结果）…'
+          : '靶点身份尚未确定 — 提交序列到 UniProt 库序列匹配…', 0.9)
+        if (!st.upBlast) {
+          st.upBlast = await submitUniprotSequenceBlast(st.sequence, this.deadlineSignal())
+        }
+        const outcome = await collectUniprotSequenceBlast(st.upBlast, {
+          deadline: this.cb.deadline,
+          resume: { attempts: st.upBlast.attempts, startedAt: st.upBlast.startedAt },
+          signal: this.signal,
+          onProgress: msg => this.report('blast', msg, 0.9),
+        })
+        if ('stillRunning' in outcome) {
+          // 段预算到点 — 保存轮询进度，下一段继续轮询同一 jobId
+          st.upBlast = outcome.job
+          return this.handoff()
+        }
+        st.upBlastDone = true
+        st.upHits = outcome.hits
+        this.log(outcome.hits.length
+          ? `UniProt 库序列匹配完成：${outcome.hits.length} 个命中，最佳一致性 ${Math.max(...outcome.hits.map(h => h.identity))}%`
+          : 'UniProt 库序列匹配完成 — 无命中（全新/人工构建序列）')
+      } catch (e) {
+        if (this.signal.aborted) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        const deadlineCut = this.cb.deadline != null && this.cb.deadline > 0 && Date.now() >= this.cb.deadline - 2_000
+        if (deadlineCut) {
+          // 段预算切断提交/轮询（非服务拒绝）— 不置 done：下一段重新提交或继续轮询
+          // （与 nr 提交的 blastSubmitCuts 同语义；墙钟由 collectUniprotSequenceBlast 控制）
+          this.log(`UniProt 序列匹配被段预算切断（${msg.slice(0, 80)}）— 下一段继续`, 'warn')
+          return this.handoff()
+        }
+        this.log(`UniProt 序列匹配失败（${msg.slice(0, 120)}）— 靶点身份保持现有证据，评估继续`, 'warn')
+        st.upBlastDone = true
+      }
+    }
+
+    // v2.44：UniProt 序列匹配的身份处理（与 nr 级联同口径 — 覆盖度加权最佳 +
+    // 「85% 一致性 + 40% 覆盖」回填阈值；未达阈值时作近似身份，题目显示同源度）
+    if (!st.uniprotInfo && st.upHits && !st.upIdentityDone) {
+      const idGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
+      if (budgetLeft(this.cb) < idGateMs) {
+        return this.handoff()
+      }
+      const uniHits = st.upHits.filter(h => h.db !== 'other')
+      const upBestCov = bestCoverageHit(uniHits.length ? uniHits : st.upHits, st.sequence.length)
+      const best = upBestCov?.hit
+      if (best && best.identity >= 85 && best.db !== 'other' && upBestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
+        this.log(`UniProt 序列匹配命中 UniProt ${best.accession}（${best.description.slice(0, 60)}，一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(upBestCov.covFrac * 100)}%）— 回填元数据…`)
+        const info = await fetchUniprotInfo(best.accession)
+        if (info) {
+          st.uniprotInfo = info
+          st.targetIdentity = {
+            ...buildUniprotBlastIdentity(best),
+            note: `UniProt 序列匹配（一致性 ${best.identity}%）→ 已归属 UniProt ${best.accession}`,
+          }
+          // HSP 比对坐标 → 提交序列在 UniProt 条目内的覆盖区间（与 nr 回填同口径 —
+          // 构建比对未产出区间时采用；非全长按截短口径分流）
+          if (best.hitFrom != null && best.hitTo != null && best.hitFrom > 0 && best.hitTo >= best.hitFrom) {
+            const s = Math.max(1, best.hitFrom)
+            const e = Math.min(info.sequenceLength, best.hitTo)
+            if (e >= s && !st.blastRange) {
+              st.blastRange = { start: s, end: e, queryFrom: best.queryFrom, hitFrom: best.hitFrom }
+              this.log(`UniProt 序列匹配比对坐标：提交序列 ↔ ${best.accession} 主体 ${best.hitFrom}-${best.hitTo} → 评估区间 ${s}-${e}（构建比对未产出区间时采用；非全长按截短口径分流）`)
+            }
+          }
+          await this.rebuildStructureDataAfterBackfill(info)
+        } else {
+          st.targetIdentity = st.targetIdentity?.source === 'eval-table' ? st.targetIdentity : buildUniprotBlastIdentity(best)
+          this.log(`UniProt 序列匹配到 ${best.accession}，但元数据获取失败（网络）— 记录近似身份（${best.description.slice(0, 60)}，${best.identity}%）`, 'warn')
+        }
+      } else if (best && best.identity >= 40) {
+        // 未达回填阈值 — 近似身份（题目用 UniProt 匹配名 + 显示同源度）
+        // 命名优先级：评估表 > nr 识别 ≈ UniProt 匹配 > PDB 同源推断
+        if (!st.targetIdentity || st.targetIdentity.source === 'blast-homolog') {
+          st.targetIdentity = buildUniprotBlastIdentity(best)
+          this.log(`UniProt 序列匹配最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（${best.accession}，一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）— 未达「85% 一致性 + 40% 覆盖」回填阈值，记录为近似身份（题目采用 UniProt 匹配名并显示同源度）`)
+        } else {
+          this.log(`UniProt 序列匹配最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）— 未达回填阈值；既有命名优先保留`, 'info')
+        }
+      } else if (best) {
+        this.log(`UniProt 序列匹配完成 — 最佳命中（一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）低于阈值 — 全新/人工构建序列或短片段巧合匹配，靶点身份保持现有证据`, 'warn')
+      }
+      st.upIdentityDone = true
+    }
+
+    // ── v2.16 靶点身份识别慢通道：BLAST nr（纯序列输入且尚无 UniProt 归属时）──
+    //  级联顺序（v2.94 反转 — 快通道优先）：评估表蛋白名（phaseUniprot 已派生）
+    //  → PDB 同源描述推断 → EBI Swiss-Prot 直查（v2.44/v2.94，秒级 — 上块）
+    //  → BLAST nr 慢通道（EBI 未决时；sp|ACC| 命中 ≥85% 时回填 UniProt 全量
+    //  元数据；TrEMBL 近似命中为独有价值）→ UniProt 全库精确匹配（v2.58，含 TrEMBL）
     // v2.67：PDB 库检索整体失败（blastStatus=failed）时不再跳过 nr — 此时 nr 是唯一
     //  身份通道（用户反馈：序列靶点 UniProt 回填率不足）；仅显式禁用 BLAST / 抗体链豁免
     if (!st.uniprotInfo && st.sequence.length >= 30 && (!st.nrBlastDone || !st.nrIdentityDone)
@@ -1705,15 +1808,15 @@ class SegmentRunner {
         try {
           this.report('blast', st.nrBlast
             ? 'BLAST nr 靶点识别检索中（等待 NCBI 计算）…'
-            : '靶点身份尚未确定 — 提交 BLAST nr 检索定位真实蛋白…', 0.9)
+            : '靶点身份尚未确定 — 提交 BLAST nr 检索定位真实蛋白…', 0.92)
           if (!st.nrBlast) {
-            const submitted = await submitBlastNr(st.sequence, msg => this.report('blast', msg, 0.9), this.deadlineSignal())
+            const submitted = await submitBlastNr(st.sequence, msg => this.report('blast', msg, 0.92), this.deadlineSignal())
             st.nrBlast = { rid: submitted.rid, rtoe: submitted.rtoe }
           }
           const outcome = await collectBlastNr(
             st.nrBlast.rid,
             st.nrBlast.rtoe,
-            msg => this.report('blast', msg, 0.9),
+            msg => this.report('blast', msg, 0.92),
             this.signal,
             {
               deadline: this.cb.deadline,
@@ -1809,109 +1912,9 @@ class SegmentRunner {
       }
     }
 
-    // ── v2.44：UniProt 序列匹配兜底（用户诉求「报告没回填 UniProt ID 时直接用
-    //    UniProt 库以序列匹配，取同源度最高的，并显示同源度」）──
-    //    级联至此仍未归属（NCBI 提交失败走 RCSB 兜底且实体映射落空 / nr 检索失败
-    //    或无命中 / 命中未达回填阈值 — 用户实测 J53 即此类）时，经 EBI BLAST
-    //    服务直查 UniProtKB（Swiss-Prot，秒级）定位真实蛋白身份。
-    //    注：blastStatus='failed'（NCBI+RCSB 双亡）时**仍执行** — 这正是本兜底的
-    //    核心价值场景；仅用户显式关闭 BLAST / 抗体序列跳过。
-    if (!st.uniprotInfo && st.sequence.length >= 30 && !st.upBlastDone
-      && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody') {
-      const upGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
-      if (budgetLeft(this.cb) < upGateMs) {
-        return this.handoff()
-      }
-      try {
-        this.report('blast', st.upBlast
-          ? 'UniProt 库序列匹配检索中（等待结果）…'
-          : '靶点身份尚未确定 — 提交序列到 UniProt 库序列匹配…', 0.95)
-        if (!st.upBlast) {
-          st.upBlast = await submitUniprotSequenceBlast(st.sequence, this.deadlineSignal())
-        }
-        const outcome = await collectUniprotSequenceBlast(st.upBlast, {
-          deadline: this.cb.deadline,
-          resume: { attempts: st.upBlast.attempts, startedAt: st.upBlast.startedAt },
-          signal: this.signal,
-          onProgress: msg => this.report('blast', msg, 0.95),
-        })
-        if ('stillRunning' in outcome) {
-          // 段预算到点 — 保存轮询进度，下一段继续轮询同一 jobId
-          st.upBlast = outcome.job
-          return this.handoff()
-        }
-        st.upBlastDone = true
-        st.upHits = outcome.hits
-        this.log(outcome.hits.length
-          ? `UniProt 库序列匹配完成：${outcome.hits.length} 个命中，最佳一致性 ${Math.max(...outcome.hits.map(h => h.identity))}%`
-          : 'UniProt 库序列匹配完成 — 无命中（全新/人工构建序列）')
-      } catch (e) {
-        if (this.signal.aborted) throw e
-        const msg = e instanceof Error ? e.message : String(e)
-        const deadlineCut = this.cb.deadline != null && this.cb.deadline > 0 && Date.now() >= this.cb.deadline - 2_000
-        if (deadlineCut) {
-          // 段预算切断提交/轮询（非服务拒绝）— 不置 done：下一段重新提交或继续轮询
-          // （与 nr 提交的 blastSubmitCuts 同语义；墙钟由 collectUniprotSequenceBlast 控制）
-          this.log(`UniProt 序列匹配被段预算切断（${msg.slice(0, 80)}）— 下一段继续`, 'warn')
-          return this.handoff()
-        }
-        this.log(`UniProt 序列匹配失败（${msg.slice(0, 120)}）— 靶点身份保持现有证据，评估继续`, 'warn')
-        st.upBlastDone = true
-      }
-    }
-
-    // v2.44：UniProt 序列匹配的身份处理（与 nr 级联同口径 — 覆盖度加权最佳 +
-    // 「85% 一致性 + 40% 覆盖」回填阈值；未达阈值时作近似身份，题目显示同源度）
-    if (!st.uniprotInfo && st.upHits && !st.upIdentityDone) {
-      const idGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
-      if (budgetLeft(this.cb) < idGateMs) {
-        return this.handoff()
-      }
-      const uniHits = st.upHits.filter(h => h.db !== 'other')
-      const upBestCov = bestCoverageHit(uniHits.length ? uniHits : st.upHits, st.sequence.length)
-      const best = upBestCov?.hit
-      if (best && best.identity >= 85 && best.db !== 'other' && upBestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
-        this.log(`UniProt 序列匹配命中 UniProt ${best.accession}（${best.description.slice(0, 60)}，一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(upBestCov.covFrac * 100)}%）— 回填元数据…`)
-        const info = await fetchUniprotInfo(best.accession)
-        if (info) {
-          st.uniprotInfo = info
-          st.targetIdentity = {
-            ...buildUniprotBlastIdentity(best),
-            note: `UniProt 序列匹配（一致性 ${best.identity}%）→ 已归属 UniProt ${best.accession}`,
-          }
-          // HSP 比对坐标 → 提交序列在 UniProt 条目内的覆盖区间（与 nr 回填同口径 —
-          // 构建比对未产出区间时采用；非全长按截短口径分流）
-          if (best.hitFrom != null && best.hitTo != null && best.hitFrom > 0 && best.hitTo >= best.hitFrom) {
-            const s = Math.max(1, best.hitFrom)
-            const e = Math.min(info.sequenceLength, best.hitTo)
-            if (e >= s && !st.blastRange) {
-              st.blastRange = { start: s, end: e, queryFrom: best.queryFrom, hitFrom: best.hitFrom }
-              this.log(`UniProt 序列匹配比对坐标：提交序列 ↔ ${best.accession} 主体 ${best.hitFrom}-${best.hitTo} → 评估区间 ${s}-${e}（构建比对未产出区间时采用；非全长按截短口径分流）`)
-            }
-          }
-          await this.rebuildStructureDataAfterBackfill(info)
-        } else {
-          st.targetIdentity = st.targetIdentity?.source === 'eval-table' ? st.targetIdentity : buildUniprotBlastIdentity(best)
-          this.log(`UniProt 序列匹配到 ${best.accession}，但元数据获取失败（网络）— 记录近似身份（${best.description.slice(0, 60)}，${best.identity}%）`, 'warn')
-        }
-      } else if (best && best.identity >= 40) {
-        // 未达回填阈值 — 近似身份（题目用 UniProt 匹配名 + 显示同源度）
-        // 命名优先级：评估表 > nr 识别 ≈ UniProt 匹配 > PDB 同源推断
-        if (!st.targetIdentity || st.targetIdentity.source === 'blast-homolog') {
-          st.targetIdentity = buildUniprotBlastIdentity(best)
-          this.log(`UniProt 序列匹配最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（${best.accession}，一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）— 未达「85% 一致性 + 40% 覆盖」回填阈值，记录为近似身份（题目采用 UniProt 匹配名并显示同源度）`)
-        } else {
-          this.log(`UniProt 序列匹配最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）— 未达回填阈值；既有命名优先保留`, 'info')
-        }
-      } else if (best) {
-        this.log(`UniProt 序列匹配完成 — 最佳命中（一致性 ${best.identity}%，覆盖 ${Math.round(upBestCov!.covFrac * 100)}%）低于阈值 — 全新/人工构建序列或短片段巧合匹配，靶点身份保持现有证据`, 'warn')
-      }
-      st.upIdentityDone = true
-    }
-
     // ── v2.58：UniProt 全库精确序列匹配兜底（Peptide Search — 覆盖含 TrEMBL 的
     //    全部 UniProtKB 条目，索引级秒级查询）──
-    //    级联至此（PDB 同源回填 → BLAST nr → EBI Swiss-Prot 直查）仍未归属的
+    //    级联至此（PDB 同源回填 → EBI Swiss-Prot 直查 → BLAST nr，v2.94 顺序）仍未归属的
     //    两类漏网场景：
     //     ① 靶点只有 TrEMBL 条目（冷门物种/未审校蛋白）— EBI 直查仅扫 Swiss-Prot，
     //       只能找到 40-85% 近缘 ortholog（未达回填阈值）→ 精确子串匹配直接定位
