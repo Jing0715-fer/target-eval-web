@@ -22,7 +22,7 @@ import * as fs from 'node:fs/promises'
 import JSZip from 'jszip'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy } from '@/lib/eval/request-guard'
-import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade } from '@/lib/eval/report-html'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyAlignLayoutUpgrade } from '@/lib/eval/report-html'
 import { planArchiveNames, HT_DASHBOARD_ZIP_NAME, type ArchivePlanItem } from '@/lib/eval/ht-archive-names'
 import { ensureHtDashboardProgressColumn } from '@/lib/eval/ht-dashboard'
 
@@ -150,7 +150,7 @@ async function buildArchiveResponse(entries: ArchiveEntryInput[], owner: ReturnT
         // v2.71：有界读取（≤2MB — 内存安全）
         let html = await readHtmlPrefix(job.reportPath)
         if (html.length > MAX_HTML_BYTES) html = html.slice(0, MAX_HTML_BYTES)
-        html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
+        html = applyAlignLayoutUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html))))
         loaded.push({ entry, html, kind: 'job', title: safeName(entry.label || job.uniprotId || job.title || entry.jobId) })
       } catch {
         missing.push(entry.label ?? entry.jobId)
@@ -165,7 +165,7 @@ async function buildArchiveResponse(entries: ArchiveEntryInput[], owner: ReturnT
         // v2.71：有界读取（≤2MB — 内存安全）
         let html = await readHtmlPrefix(record.htmlPath)
         if (html.length > MAX_HTML_BYTES) html = html.slice(0, MAX_HTML_BYTES)
-        html = applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))
+        html = applyAlignLayoutUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html))))
         loaded.push({ entry, html, kind: 'merged', title: safeName(record.title || `merged-${record.id.slice(0, 8)}`, 80) })
       } catch {
         missing.push(entry.mergedId)

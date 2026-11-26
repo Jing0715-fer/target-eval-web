@@ -15,7 +15,7 @@ import { getOwner, isOwnedBy, notFound, ownerListFilter } from '@/lib/eval/reque
 import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
 import { uploadOwnedBy, isUploadId } from '@/lib/eval/upload-owner'
 import { generateMergedReport, loadMergedTargets, renderMergedReportHtml, toMergedTargetLite } from '@/lib/eval/report-merged'
-import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade, applyAlignLayoutUpgrade } from '@/lib/eval/report-html'
 import { renderReportPdf, pdfResponse, pdfDisposition, pdfErrorResponse } from '@/lib/eval/report-pdf'
 import { propagateFamilyBlast } from '@/lib/eval/blast-family'
 import { augmentTargetsForSharedPdbCoverage } from '@/lib/eval/rcsb'
@@ -504,7 +504,7 @@ export async function GET(req: Request) {
       if (!html.includes(MERGED_FMT_MARKER)) {
         html = (await upgradedMergedHtml(record)) ?? html
       }
-      html = applyTableFilterUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html))))
+      html = applyAlignLayoutUpgrade(applyTableFilterUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))))
       return new Response(html, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
@@ -526,7 +526,7 @@ export async function GET(req: Request) {
       if (!html.includes(MERGED_FMT_MARKER)) {
         html = (await upgradedMergedHtml(record)) ?? html
       }
-      html = applyTableFilterUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html))))
+      html = applyAlignLayoutUpgrade(applyTableFilterUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html)))))
       // v2.10 ①：文件名改用报告题目（LLM 生成的描述性标题，如「BTN-TCR 复合物结构解析可行性评估」）
       // — 清洗文件系统非法字符并限长；RFC 5987 filename* 携带中文原题（现代浏览器优先采用），
       // ASCII 回退名仅供不支持 filename* 的旧解析器（前端自动下载已同步优先解析 filename*）

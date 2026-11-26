@@ -11,7 +11,7 @@ import * as fs from 'node:fs/promises'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy } from '@/lib/eval/request-guard'
 import { reportNotFoundResponse } from '@/lib/eval/report-not-found'
-import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade } from '@/lib/eval/report-html'
+import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyTableFilterUpgrade, applyAlignLayoutUpgrade } from '@/lib/eval/report-html'
 import { renderReportPdf, pdfResponse, pdfDisposition, pdfErrorResponse } from '@/lib/eval/report-pdf'
 
 export const runtime = 'nodejs'
@@ -43,6 +43,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   html = applyUxUpgrade(html)
   // v2.53：旧报告（无/旧表筛选标记）注入或升级 PDB/BLAST 列表筛选排序；幂等
   html = applyTableFilterUpgrade(html)
+  // v2.97：旧报告（v2.96 比对面板 60 列固定宽）注入块宽自适应脚本；幂等
+  html = applyAlignLayoutUpgrade(html)
   const url = new URL(req.url)
   const download = url.searchParams.get('download') === '1'
   // v2.88：PDF 导出（连续长页 — 与服务端 HTML 同一份文件，屏幕媒体渲染）

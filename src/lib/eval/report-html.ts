@@ -1902,13 +1902,15 @@ function uniprotBlastPanelHtml(hits: BlastNrHit[]): string {
 
 // ─── v2.96 身份识别序列比对面板（非 100% 一致性归属的证据可视化）──────────────
 
-/** 比对面板每块的列数（经典 BLAST 版式 — 60 列/块，等宽字体逐列对齐） */
+/** 比对面板 SSR 每块的列数（经典 BLAST 版式 60 列 — 无 JS 兜底与打印媒体基准；
+ *  屏幕媒体下 ALIGN_LAYOUT_JS 按容器实测宽度动态重排，充分利用页面满宽） */
 const ALN_BLOCK_COLS = 60
 
 /** v2.96：提交序列 ↔ UniProt 条目的双序列比对面板（用户规则：非 100% 一致性的
  *  归属展示比对 — 样式美观、可读性强、悬停显示氨基酸残基号）。
- *  - 三行版式：提交序列 / 中线（| 全同 + 正替代）/ UniProt 条目 — 60 列分块，
- *    块首尾标注双侧残基号（1-based，与 BLAST 版式一致）；
+ *  - 三行版式：提交序列 / 中线（| 全同 + 正替代）/ UniProt 条目 — SSR 60 列分块
+ *    （无 JS 兜底/打印基准），屏幕媒体下 ALIGN_LAYOUT_JS 随容器宽度动态重排
+ *    （满宽利用，窄屏自动降列数免横滚）；块首尾标注双侧残基号（1-based，与 BLAST 版式一致）；
  *  - 逐残基 span 携带双侧位置（data-qp/data-hp）— 页级 ALIGN_TIP_JS 悬停浮层
  *    显示「查询 第 N 位 · {acc} 第 M 位 · 残基（全同/正替代/错配/缺口）」，
  *    同时整列高亮（同块三行联动）；
@@ -2011,7 +2013,7 @@ function identityAlignmentPanelHtml(aln: IdentityAlignment, ti?: TargetIdentityI
     : ''
   return `
   <h3 class="itx-h3">序列比对 <span class="itx-h3-sub">身份识别证据 · 提交序列 ↔ ${accLink}${dbChip}${aln.entryName ? ` ${esc(aln.entryName)}` : ''} · ${cols} 列</span></h3>
-  <p class="note">提交序列与归属 UniProt 条目的${aln.method === 'exact-substring' ? '精确匹配区间（提交序列为条目子串 — 完全一致）' : '局部比对（Smith-Waterman 仿射缺口 · BLOSUM62 — 与 BLAST HSP 同口径）'}：块首尾为双侧残基号（1-based），中线「|」全同 /「+」正替代（BLOSUM62 得分 &gt;0）；<b>悬停任意残基显示双侧氨基酸位置号</b>（查询位 · 条目位 · 替代类型），同列三行联动高亮；顶部概览条为全区一致性分布（悬停显示游程区间）。${aln.blastIdentity != null && aln.blastIdentity < 99.95 ? `归属命中一致性 ${aln.blastIdentity.toFixed(1)}%，比对区一致率 ${aln.identity.toFixed(1)}%（覆盖提交序列 ${aln.qFrom}-${aln.qTo} / ${aln.qLen} aa，条目 ${aln.hFrom}-${aln.hTo} / ${aln.hLen} aa）。` : ''}</p>
+  <p class="note">提交序列与归属 UniProt 条目的${aln.method === 'exact-substring' ? '精确匹配区间（提交序列为条目子串 — 完全一致）' : '局部比对（Smith-Waterman 仿射缺口 · BLOSUM62 — 与 BLAST HSP 同口径）'}：块首尾为双侧残基号（1-based），比对块宽度随页面宽度自适应满宽排布，中线「|」全同 /「+」正替代（BLOSUM62 得分 &gt;0）；<b>悬停任意残基显示双侧氨基酸位置号</b>（查询位 · 条目位 · 替代类型），同列三行联动高亮；顶部概览条为全区一致性分布（悬停显示游程区间）。${aln.blastIdentity != null && aln.blastIdentity < 99.95 ? `归属命中一致性 ${aln.blastIdentity.toFixed(1)}%，比对区一致率 ${aln.identity.toFixed(1)}%（覆盖提交序列 ${aln.qFrom}-${aln.qTo} / ${aln.qLen} aa，条目 ${aln.hFrom}-${aln.hTo} / ${aln.hLen} aa）。` : ''}</p>
   <div class="aln-panel" data-acc="${esc(aln.acc)}">
     <div class="aln-stats">
       <span class="aln-chip" title="比对区一致率 = 全同列 / 对齐列数">一致率 <b>${aln.identity.toFixed(1)}%</b></span>
@@ -2077,6 +2079,163 @@ export const ALIGN_TIP_JS = `<script>
   document.addEventListener('scroll', hide, true);
 })();
 </script>`
+
+/** v2.97 比对块宽自适应脚本标记（applyAlignLayoutUpgrade 幂等判据） */
+export const ALIGN_LAYOUT_MARKER = 'aln-fit-v1'
+
+/** v2.97：比对面板块宽随容器自适应（用户规则：「序列比对的部分要充分利用页面宽度，
+ *  不要空太多空间，并且也可以随页面宽度动态调整」）。
+ *  - SSR 60 列分块仅作无 JS 兜底与打印媒体基准；屏幕媒体下本脚本按
+ *    `.aln-scroll` 实测内宽 ÷ 等宽字符实测宽 → 满列数重排（每块列数 =
+ *    floor(可用宽/字符宽)，页面越宽每行残基越多，窄屏自动降列数免横滚）；
+ *  - 数据零冗余：逐列数据（字符/状态/双侧位置/行标签）直接从 v2.96 起固定的
+ *    SSR DOM 采集缓存于面板元素 — 新旧报告同一代码路径，无需重新落盘；
+ *  - 重排触发：ResizeObserver（视口缩放/合并报告视图切换/iframe 宽变）+
+ *    window.resize 兜底 + 字体就绪（1ch 随字体加载变化）重排；
+ *  - 防振荡：floor + 2px 亚像素安全边 — 内容恒 ≤ 容器，不触发「滚动条出现 →
+ *    clientWidth 收缩 → 再重排」反馈环；
+ *  - 打印：beforeprint 且 matchMedia('print')（真打印）时重排为 60 列经典版式
+ *    （A4 稳定容纳）；PDF 导出走 screen 媒体不受影响（按 PDF 页宽满排）；
+ *  - 隐藏面板（clientWidth=0）跳过 — 变为可见时 ResizeObserver 自动补排。
+ *  与 ALIGN_TIP_JS 相同的事件委托口径 — 重排后悬停位置号/整列高亮照常工作。 */
+export const ALIGN_LAYOUT_JS = `<script>
+/* ${ALIGN_LAYOUT_MARKER} — 比对块宽随容器自适应重排 */
+(function(){
+  var MIN_COLS = 20;
+  var PRINT_COLS = 60;
+  var SAFETY = 2;
+  var panels = [];
+  function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // ── 采集：从 SSR 分块 DOM 收回逐列数据（v2.96 起面板结构固定，新旧报告通用）──
+  function harvest(panel){
+    if (panel.__alnData) return panel.__alnData;
+    var scroll = panel.querySelector('.aln-scroll');
+    if (!scroll) return null;
+    var blocks = scroll.querySelectorAll('.aln-block');
+    if (!blocks.length) return null;
+    var cols = [], qLab = '', hLab = '', built = 0;
+    for (var b = 0; b < blocks.length; b++){
+      var labs = blocks[b].querySelectorAll('.aln-lab');
+      if (labs.length >= 3){ qLab = labs[0].textContent || ''; hLab = labs[2].textContent || ''; }
+      var seqs = blocks[b].querySelectorAll('.aln-seq');
+      if (seqs.length < 3) continue;
+      if (!built) built = seqs[0].children.length;
+      var qRow = seqs[0].children, hRow = seqs[2].children;
+      var n = Math.min(qRow.length, hRow.length);
+      for (var i = 0; i < n; i++){
+        var qe = qRow[i], he = hRow[i];
+        var cls = qe.className || '';
+        var st = /aln-g\\b/.test(cls) ? 'g' : /aln-m\\b/.test(cls) ? 'm' : /aln-p\\b/.test(cls) ? 'p' : 'x';
+        cols.push({ q: qe.textContent || '-', h: he.textContent || '-', st: st,
+          qp: parseInt(qe.getAttribute('data-qp') || '0', 10) || 0,
+          hp: parseInt(qe.getAttribute('data-hp') || '0', 10) || 0 });
+      }
+    }
+    if (!cols.length) return null;
+    panel.__alnData = { cols: cols, qLab: qLab, hLab: hLab, scroll: scroll, built: built };
+    return panel.__alnData;
+  }
+
+  // ── 重建：与 SSR 同构的分块三行版式（标签/位点/逐残基 span 全同）──
+  function buildHtml(d, per){
+    var total = d.cols.length, html = '';
+    for (var s = 0; s < total; s += per){
+      var e = Math.min(total, s + per), qs = '', ms = '', hs = '';
+      var qF = 0, qL = 0, hF = 0, hL = 0;
+      for (var k = s; k < e; k++){
+        var c = d.cols[k];
+        var attrs = (c.qp ? ' data-qp="' + c.qp + '"' : '') + (c.hp ? ' data-hp="' + c.hp + '"' : '');
+        qs += '<span class="aln-r aln-' + c.st + '"' + attrs + '>' + c.q + '</span>';
+        hs += '<span class="aln-r aln-' + c.st + '"' + attrs + '>' + c.h + '</span>';
+        ms += '<span class="aln-mid aln-' + c.st + '">' + (c.st === 'm' ? '|' : c.st === 'p' ? '+' : '&nbsp;') + '</span>';
+        if (c.qp){ qF = qF || c.qp; qL = c.qp; }
+        if (c.hp){ hF = hF || c.hp; hL = c.hp; }
+      }
+      var pos = function(a, b){ return a ? a + '<span class="aln-pos-sep">–</span>' + b : '—'; };
+      html += '<div class="aln-block">' +
+        '<div class="aln-row"><span class="aln-lab">' + esc(d.qLab) + '</span><span class="aln-pos">' + pos(qF, qL) + '</span><span class="aln-seq">' + qs + '</span></div>' +
+        '<div class="aln-row aln-row-mid"><span class="aln-lab"></span><span class="aln-pos"></span><span class="aln-seq">' + ms + '</span></div>' +
+        '<div class="aln-row"><span class="aln-lab">' + esc(d.hLab) + '</span><span class="aln-pos">' + pos(hF, hL) + '</span><span class="aln-seq">' + hs + '</span></div>' +
+        '</div>';
+    }
+    return html;
+  }
+
+  // ── 布局：测宽 → 满列数 → 有变化才重建（含打印固定列模式）──
+  function layout(panel, forceCols){
+    var d = harvest(panel);
+    if (!d) return;
+    var scroll = d.scroll;
+    var avail = scroll.clientWidth;
+    if (avail <= 0) return;
+    var cs = window.getComputedStyle(scroll);
+    avail -= (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    var blk = scroll.querySelector('.aln-block');
+    if (!blk) return;
+    var labs = blk.querySelectorAll('.aln-lab');
+    var poss = blk.querySelectorAll('.aln-pos');
+    var preW = (labs[0] ? labs[0].offsetWidth : 86) + (poss[0] ? poss[0].offsetWidth : 76);
+    var row = blk.querySelectorAll('.aln-seq')[0];
+    var n = row ? row.children.length : 0;
+    if (!n) return;
+    var charW = row.getBoundingClientRect().width / n;
+    if (!(charW > 0)) return;
+    var per = forceCols || Math.floor((avail - preW - SAFETY) / charW);
+    if (!isFinite(per) || per < MIN_COLS) per = MIN_COLS;
+    if (per > d.cols.length) per = d.cols.length;
+    var cur = parseInt(scroll.getAttribute('data-aln-cols') || '0', 10) || d.built;
+    if (per === cur) return;
+    scroll.setAttribute('data-aln-cols', String(per));
+    scroll.innerHTML = buildHtml(d, per);
+  }
+
+  function wire(p){
+    if (p.__alnWired){ layout(p); return; }
+    p.__alnWired = true;
+    panels.push(p);
+    layout(p);
+    var target = p.querySelector('.aln-scroll') || p;
+    if (window.ResizeObserver){
+      var t = 0;
+      new ResizeObserver(function(){ clearTimeout(t); t = setTimeout(function(){ layout(p); }, 60); }).observe(target);
+    }
+  }
+  function init(){
+    var list = document.querySelectorAll('.aln-panel');
+    for (var i = 0; i < list.length; i++) wire(list[i]);
+  }
+  init();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  window.addEventListener('load', init);
+  if (document.fonts && document.fonts.ready && document.fonts.ready.then){
+    document.fonts.ready.then(function(){ panels.forEach(function(p){ layout(p); }); });
+  }
+  if (!window.ResizeObserver){
+    var rt = 0;
+    window.addEventListener('resize', function(){
+      clearTimeout(rt); rt = setTimeout(function(){ panels.forEach(function(p){ layout(p); }); }, 120);
+    });
+  }
+  // 真打印（print 媒体）重排 60 列经典版式；PDF 导出走 screen 媒体不受影响
+  window.addEventListener('beforeprint', function(){
+    if (window.matchMedia && !window.matchMedia('print').matches) return;
+    panels.forEach(function(p){ layout(p, PRINT_COLS); });
+  });
+  window.addEventListener('afterprint', function(){ panels.forEach(function(p){ layout(p); }); });
+})();
+</script>`
+
+/** v2.97：旧报告（v2.96 生成 — 已含比对面板但块宽固定 60 列）幂等注入块宽自适应
+ *  脚本；无比对面板的报告直返。面板 DOM 结构 v2.96 起固定（逐残基 span 携带
+ *  data-qp/data-hp/状态类），脚本从 DOM 采集重排 — 历史报告无需重新落盘。 */
+export function applyAlignLayoutUpgrade(html: string): string {
+  if (html.includes(ALIGN_LAYOUT_MARKER)) return html
+  if (!html.includes('aln-panel')) return html
+  const b = html.lastIndexOf('</body>')
+  if (b < 0) return html
+  return `${html.slice(0, b)}${ALIGN_LAYOUT_JS}\n${html.slice(b)}`
+}
 
 /** v2.67：BLAST 结果库切换（PDB 库 / nr 全库 — 两库都有命中时表头上方分段按钮；
  *  面板显隐由 TABLE_FILTER_JS 驱动，打印时两库面板自动全展开、打印后恢复切换态）。
@@ -3581,6 +3740,7 @@ ${body}
 ${UX_PAGE_JS}
 ${TABLE_FILTER_JS}
 ${ALIGN_TIP_JS}
+${ALIGN_LAYOUT_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`

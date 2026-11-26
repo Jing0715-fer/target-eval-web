@@ -434,5 +434,23 @@
  *  ③真实评估端到端（imp-100 GPR75 突变序列，NCBI 拥堵日）：级联全走完后
  *  按最高同源回填 Q6X632（60.7% × 99.7%）+ 392 列比对面板落盘，报告题目/
  *  刊头/面板/悬停交互全链路核验，零控制台报错。
+ * v2.97：比对面板块宽随页面自适应（用户反馈 2026-11-26：「序列比对的部分要充分
+ *  利用页面宽度，不要空太多空间，并且也可以随页面宽度动态调整」— v2.96 固定
+ *  60 列分块在宽屏（1360px 版心）仅占卡片 20-38% 宽，右侧大片空白）：
+ *  - ALIGN_LAYOUT_JS 页级脚本（单靶点/合并报告外壳注入）：SSR 60 列块仅为无 JS
+ *    兜底与打印基准，屏幕媒体下按 `.aln-scroll` 实测内宽 ÷ 等宽字符实测宽求
+ *    满列数重排 — 每行残基数随页面宽度动态增减（宽屏满宽 ~88 列/行，窄屏自动
+ *    降列免横滚，MIN_COLS=20 以下保滚动）；数据从 v2.96 固定的面板 DOM 直接
+ *    采集（字符/状态类/data-qp/data-hp/行标签），新旧报告同一代码路径零迁移；
+ *  - 触发面：ResizeObserver（视口缩放、合并报告视图切换、应用内 iframe 宽变）
+ *    + window.resize 兜底 + document.fonts.ready（1ch 随字体加载校正）；floor +
+ *    2px 安全边防「重排→滚动条→宽度收缩→再重排」反馈环；隐藏面板（clientWidth
+ *    =0）跳过、可见时观察器自动补排；
+ *  - 打印语义：beforeprint 且 matchMedia('print')（真打印）重排 60 列经典
+ *    BLAST 版式（A4 稳定容纳），afterprint 还原屏幕满宽；PDF 导出走 screen
+ *    媒体（report-pdf emulateMedia）不受打印分支影响，按 PDF 页宽满排；
+ *  - applyAlignLayoutUpgrade 幂等升级（jobs/report、batch-report inline+下载、
+ *    ht-archive 两类内嵌路径全接入）— v2.96 落盘的历史报告无需重跑即获得
+ *    自适应块宽（含 GPR75 → Q6X632 392 列实盘面板）。
  */
-export const APP_VERSION = 'v2.96.0'
+export const APP_VERSION = 'v2.97.0'

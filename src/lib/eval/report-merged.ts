@@ -32,7 +32,7 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
-import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, TABLE_FILTER_JS, ALIGN_TIP_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
+import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, TABLE_FILTER_JS, ALIGN_TIP_JS, ALIGN_LAYOUT_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
 import { describeRelationType, describeBlastStatus, type AfDomainRange, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastNrHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type IdentityAlignment, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
@@ -2016,6 +2016,7 @@ ${viewSwitchJs}
 ${UX_PAGE_JS}
 ${TABLE_FILTER_JS}
 ${ALIGN_TIP_JS}
+${ALIGN_LAYOUT_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`
