@@ -83,6 +83,23 @@
  *    值 — 已识别序列靶点的刊头长度是 UniProt 全长，旧长度通道天然对不上）/
  *    meta 提交长度 / 容差 ±3 aa / 同长歧义标签消歧。
  *
+ * v2.100：汇总报告表格四项优化（用户反馈 2026-11-26）：
+ *  ① G 蛋白（受体复合物组分）行不计入统计 — GPCR 类项目原表常同时含受体
+ *    与 G 蛋白复合物，G 蛋白自身已有大量结构，其结构数不代表受体靶点可行性
+ *    （会虚高「有结构靶点/方法分布/均分」口径）。isGProteinRow 三重识别
+ *    （UniProt 标准名「Guanine nucleotide-binding protein」/ G蛋白·Gα·Gβ·Gγ
+ *    命名 / GN 前缀亚基基因符号），识别到的行：主表呈现（评分/报告保留 +
+ *    「G蛋白」徽标）但结构列显示「—」且不计入批次统计（分布/均分/结构/结论
+ *    全口径，statTargets 为新分母）+ 筛选器新增「G蛋白（复合组分）」选项 +
+ *    头部说明横幅；「G protein-coupled receptor」排除（GPCR 本体不误判）；
+ *  ② 序列列独立 — 复制序列按钮从原表文本内嵌标记移至独立「序列」列（原表
+ *    行文本序列标记一并移除省空间；旧快照无 seqs 保留纯文本标记），序列原文
+ *    按钮化（N aa ⧉，点击复制 — excelSeqs 多条全列）；
+ *  ③ 报告列按钮并排 — 「查看报告」（青绿）/「下载」（琥珀）同尺寸同字重
+ *    不同色横向单行排列（原纵向两行占高），离线/在线链接内联随行；
+ *  ④ 紧凑化 — th/td 纵向 padding 收窄（8/8px→6/5px）、原表内容块与结论行
+ *    收紧、表下长注解精简。
+ *
  * 离线链接语义：zip 相对路径与 ht-archive 打包命名同源（planArchiveNames 共享
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
  */
@@ -204,6 +221,10 @@ export interface HtDashboardStats {
   targetsWithLigand: number
   rangeTargets: number
   verdictCounts: { go: number; caution: number; no: number }
+  /** v2.100：G 蛋白（受体复合物组分）行数 — 主表呈现但不参与批次统计口径 */
+  gProteinCount: number
+  /** v2.100：参与统计口径的靶点数（= loadedTargets - G 蛋白行 — 分布/均分/结构/结论的分母） */
+  statTargets: number
 }
 
 /** 看板条目输入（POST 载荷；job 条目出统计行，merged 条目只参与 zip 命名规划） */
@@ -952,48 +973,83 @@ export function attachExcelRows(rows: HtDashboardRow[], excelRows: HtExcelRowSna
 
 // ─── 统计 ─────────────────────────────────────────────────────────────────────
 
+// ─── v2.100 G 蛋白（受体复合物组分）行识别 ────────────────────────────────────
+
+/** v2.100：G 蛋白行识别 — GPCR 类项目原表常同时含受体与 G 蛋白（复合物组分）。
+ *  G 蛋白自身已有大量结构（如 GNAS/GNB1 晶体积压），其结构数不代表受体靶点
+ *  可行性，计入批次统计会虚高「有结构靶点/方法分布/均分」口径。识别到的
+ *  G 蛋白行：主表呈现（评分/报告完整保留 + 行内「G蛋白」徽标），但结构列
+ *  显示「—」且不计入批次统计（分布/均分/结构/结论计数全口径）。
+ *  识别依据（满足其一即判定 — 刻意保守 + 显式徽标可人工纠错）：
+ *  ① UniProt 蛋白名含「Guanine nucleotide-binding protein」（G 蛋白 α/β/γ
+ *     亚基在 UniProt 的标准命名 — GPCR 本体不含该词；排除 nucleolar/
+ *     nucleostemin/-like 的 GNL 家族假阳性）；
+ *  ② 原表标签：G蛋白 / G 蛋白 / Gα / Gβ / Gγ 开头（中文表惯用复合组分命名）；
+ *  ③ 标签首段为 G 蛋白亚基基因符号（GNAS/GNAL/GNAI、GNAO、GNAQ、GNAZ、
+ *     GNA11-15、GNAT、GNB、GNG 家族 — GN 前缀 A/B/G 家族全部为异三聚体
+ *     G 蛋白亚基）。 */
+const GPROTEIN_NAME_RE = /guanine[\s-]*nucleotide[\s-]*binding[\s-]*protein/i
+const GPROTEIN_GENE_RE = /^GN(AS|AL|AI\d*|AO\d*|AQ|AZ|A1[1-5]|AT\d*|B\d+|GT?\d+)$/i
+
+export function isGProteinRow(r: Pick<HtDashboardRow, 'proteinName' | 'label'>): boolean {
+  const pn = r.proteinName ?? ''
+  if (GPROTEIN_NAME_RE.test(pn) && !/nucleolar|nucleostemin|-like/i.test(pn)) return true
+  const label = (r.label ?? '').trim()
+  if (!label) return false
+  // G 蛋白复合组分命名（G蛋白 / G 蛋白 / Gα… 开头）— 排除「G protein-coupled receptor」
+  if (/^G[αβγ]/i.test(label) || /^G\s*蛋\s*白/i.test(label) || /^G-?protein(?!-?coupled)/i.test(label)) return true
+  const head = label.split(/[\s·,，;；(（:：\-_/|]+/)[0] ?? ''
+  return GPROTEIN_GENE_RE.test(head)
+}
+
 export function computeHtStats(rows: HtDashboardRow[], jobCount: number, importedBareCount = 0): HtDashboardStats {
   const n = rows.length
   // v2.69：解析导入行（importedFromFile）在 rows 内但不对应真实作业 —
   //  靶点总数计入、失败数不掺水（失败 = 真实作业中未加载出统计行的）
   const parsedImported = rows.filter(r => r.importedFromFile).length
   const realRows = n - parsedImported
-  const overall = rows.map(r => r.overall).sort((a, b) => a - b)
+  // v2.100：G 蛋白（受体复合物组分）行 — 主表呈现 + 完成口径计数保留，
+  //  但不参与分布/均分/结构/结论等批次统计口径（其结构数不代表受体靶点可行性）
+  const gProteinCount = rows.filter(r => isGProteinRow(r)).length
+  const statRows = gProteinCount > 0 ? rows.filter(r => !isGProteinRow(r)) : rows
+  const overall = statRows.map(r => r.overall).sort((a, b) => a - b)
   const mean = (xs: number[]): number => (xs.length ? Math.round((xs.reduce((s, x) => s + x, 0) / xs.length) * 10) / 10 : 0)
   const buckets = new Array(10).fill(0)
-  for (const r of rows) {
+  for (const r of statRows) {
     const b = Math.min(9, Math.max(0, Math.floor(r.overall)))
     buckets[b]++
   }
-  const verdicts = rows.map(r => ruleVerdict(r).verdict)
+  const verdicts = statRows.map(r => ruleVerdict(r).verdict)
   return {
     totalTargets: jobCount + importedBareCount + parsedImported,
     loadedTargets: n,
     failedTargets: Math.max(0, jobCount - realRows),
     importedTargets: rows.filter(r => r.imported).length + importedBareCount,
     overallMean: mean(overall),
-    overallMedian: n ? overall[Math.floor(n / 2)] : 0,
-    overallMin: n ? overall[0] : 0,
-    overallMax: n ? overall[n - 1] : 0,
+    overallMedian: overall.length ? overall[Math.floor(overall.length / 2)] : 0,
+    overallMin: overall.length ? overall[0] : 0,
+    overallMax: overall.length ? overall[overall.length - 1] : 0,
     overallBuckets: buckets,
     methodMeans: {
-      xray: mean(rows.map(r => r.xray)),
-      cryoem: mean(rows.map(r => r.cryoem)),
-      nmr: mean(rows.map(r => r.nmr)),
+      xray: mean(statRows.map(r => r.xray)),
+      cryoem: mean(statRows.map(r => r.cryoem)),
+      nmr: mean(statRows.map(r => r.nmr)),
     },
-    targetsWithStructures: rows.filter(r => r.directPdbCount > 0 || r.blastHitCount > 0).length,
-    targetsWithXray: rows.filter(r => r.methodXrayCount > 0).length,
-    targetsWithCryoem: rows.filter(r => r.methodCryoemCount > 0).length,
-    targetsWithNmr: rows.filter(r => r.methodNmrCount > 0).length,
-    coverageMean: mean(rows.map(r => r.coverage)),
-    targetsCoverage50: rows.filter(r => r.coverage >= 50).length,
-    targetsWithLigand: rows.filter(r => r.ligandCount > 0).length,
-    rangeTargets: rows.filter(r => r.range).length,
+    targetsWithStructures: statRows.filter(r => r.directPdbCount > 0 || r.blastHitCount > 0).length,
+    targetsWithXray: statRows.filter(r => r.methodXrayCount > 0).length,
+    targetsWithCryoem: statRows.filter(r => r.methodCryoemCount > 0).length,
+    targetsWithNmr: statRows.filter(r => r.methodNmrCount > 0).length,
+    coverageMean: mean(statRows.map(r => r.coverage)),
+    targetsCoverage50: statRows.filter(r => r.coverage >= 50).length,
+    targetsWithLigand: statRows.filter(r => r.ligandCount > 0).length,
+    rangeTargets: statRows.filter(r => r.range).length,
     verdictCounts: {
       go: verdicts.filter(v => v === 'go').length,
       caution: verdicts.filter(v => v === 'caution').length,
       no: verdicts.filter(v => v === 'no').length,
     },
+    gProteinCount,
+    statTargets: statRows.length,
   }
 }
 
@@ -1832,18 +1888,20 @@ function buildHtReportPayload(input: {
   }
 }
 
-/** v2.68：原表内容单元格渲染 — [序列 N aa] 标记处替换为一键复制按钮（data-seq 携带
- *  原文；seqs 缺失/耗尽时保留纯文本标记 — 旧快照无按钮，两端一致）。其余文本 esc。 */
+/** v2.68→v2.100：原表内容单元格渲染 — 序列列独立（v2.100）：序列原文可用
+ *  （excelSeqs）时原表文本中的 [序列 N aa] 标记一并移除（序列复制按钮已移至独立
+ *  「序列」列，表格不再重复展示，省空间）；旧快照无 seqs 时保留纯文本长度标记
+ *  （信息不丢 — 序列列显示「—」）。其余文本 esc。 */
 function renderExcelCell(text: string, seqs?: string[]): string {
   const collapsed = collapseSeqText(text)
   if (!seqs || seqs.length === 0) return esc(collapsed)
-  let i = 0
-  return esc(collapsed).replace(/\[序列 (\d+) aa\]/g, (mark, n) => {
-    const seq = seqs[i]
-    i++
-    if (!seq) return mark
-    return `<button type="button" class="xl-seq" data-seq="${esc(seq)}" title="复制该行原表的完整序列（${n} aa — 原文见原 Excel 序列列）">序列 ${n} aa ⧉</button>`
-  })
+  return esc(collapsed
+    .replace(/\s*\[序列 \d+ aa\]\s*/g, ' · ')
+    .replace(/\s*\[序列已折叠\]\s*/g, ' · ')
+    .replace(/(?:\s*·\s*){2,}/g, ' · ')
+    .replace(/^\s*·\s*|\s*·\s*$/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim())
 }
 
 /** 汇总主表（可筛选 · 可排序 · X-ray/Cryo-EM/NMR 评分分列单独排序 · 「完整报告」弹出单靶点完整报告）。
@@ -1893,6 +1951,7 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput, opts?: { pa
     //  bare 行 / 解析导入行弹出导入的报告原文（与下载的单独报告一致）；
     //  v2.70：导入行无原文时也保留按钮 — 弹出已解析评分的重建页（不再整列空白）
     const hasPopup = Boolean(rowHasReportHtml(r) || r.reportMarkdown || r.bare || r.imported || r.importedFromFile)
+    // v2.100：查看报告 / 下载 — 同尺寸同字重不同色（青绿查看 / 琥珀下载），并排单行
     const openBtn = anyBody && hasPopup
       ? `<button type="button" class="mt-open" data-i="${idx}"${rowHasReportHtml(r)
           ? r.imported
@@ -1902,9 +1961,9 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput, opts?: { pa
             ? ` title="新标签页弹出该靶点的载入说明与已解析的评分统计（导入报告原文未能内嵌 — 超出体积预算或留存失败${r.importedFile ? `；完整原文可直接打开导入的报告文件「${esc(r.importedFile)}」` : ''}）"`
             : r.bare
               ? ' title="新标签页弹出该靶点的载入说明与提交序列（导入报告原文不可用 — 评分与结论见导入的报告文件）"'
-              : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>完整报告 ↗</button>`
+              : ' title="新标签页弹出该靶点的完整评估报告（服务端报告文件不可用/缓存恢复 — 由 markdown 与统计数据重建）"'}>查看报告</button>`
       : ''
-    // v2.65：逐靶点下载按钮 — 内嵌的原文/重建页一键存盘（命名与单独报告下载同源）
+    // v2.65→v2.100：逐靶点下载按钮 — 与「查看报告」同尺寸并排（命名与单独报告下载同源）
     const dlBtn = anyBody && hasPopup
       ? `<button type="button" class="mt-dl" data-i="${idx}"${rowHasReportHtml(r)
           ? r.imported
@@ -1912,33 +1971,49 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput, opts?: { pa
             : ' title="下载该靶点的单独评估报告 HTML 文件（与弹出页及单独报告下载完全一致 — 离线自包含）"'
           : r.imported
             ? ' title="下载该靶点的载入说明与已解析评分统计页 HTML（导入报告原文未能内嵌 — 完整原文可直接打开导入的报告文件）"'
-            : ' title="下载该靶点的重建报告页 HTML（服务端报告原文已回收 — 由缓存数据重建）"'}>下载 ⤓</button>`
+            : ' title="下载该靶点的重建报告页 HTML（服务端报告原文已回收 — 由缓存数据重建）"'}>下载</button>`
       : ''
     // v2.68→v2.69：载入徽标（DB 命中行 = 统计已从服务端恢复；解析行 = 整合自导入
     //  报告文件；降级行 = 报告见导入文件/弹出页）
     const loadBadge = r.imported
       ? `<span class="tg-load" title="${r.bare
-        ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；报告无法解析出统计数据，以降级行呈现（评分与结论见导入的报告文件${rowHasReportHtml(r) ? '或「完整报告」弹出页' : ''}）`
+        ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；报告无法解析出统计数据，以降级行呈现（评分与结论见导入的报告文件${rowHasReportHtml(r) ? '或「查看报告」弹出页' : ''}）`
         : r.importedFromFile
           ? `该靶点已载入既有报告${r.importedFile ? `（${esc(r.importedFile)}）` : ''} — 本次运行未重复评估；评分/结构/结论解析自导入的报告文件，与本次评估同权`
           : '该靶点的报告来自导入的既有报告（本次运行未重复评估）— 统计数据已从服务端原作业恢复，与本次评估同权'}">载入</span>`
       : ''
-    return `<tr class="mt-row" data-job="${esc(r.jobId)}" data-overall="${r.bare ? -1 : r.overall}" data-xray="${r.bare ? -1 : r.xray}" data-cryoem="${r.bare ? -1 : r.cryoem}" data-nmr="${r.bare ? -1 : r.nmr}" data-pdb="${r.bare ? -1 : r.directPdbCount}" data-cov="${r.bare ? -1 : Math.round(r.coverage)}" data-verdict="${r.bare ? 'load' : v.verdict}"${r.imported && !r.bare ? ' data-imported="1"' : ''} data-uniprot="${esc(r.uniprotId ?? '')}" data-search="${search}">
+    // v2.100：G 蛋白（受体复合物组分）行 — 主表呈现（评分/报告保留）但不计入批次统计
+    const isGp = isGProteinRow(r)
+    const gprotBadge = isGp
+      ? `<span class="tg-gprot" title="G 蛋白（受体复合物组分）— GPCR 类项目原表常同时含受体与 G 蛋白复合物；其已有结构数不代表受体靶点可行性，结构列显示「—」且不计入批次统计（均分/分布/方法/结论口径）；行内评分与其「查看报告」完整保留">G蛋白</span>`
+      : ''
+    // v2.100：序列列 — 原表行序列格原文（excelSeqs，可多条）优先；缺省时提交序列（sequence）
+    const seqList = r.excelSeqs?.length ? r.excelSeqs : (r.sequence ? [r.sequence] : [])
+    const seqBtns = seqList.map((s) => {
+      const n = s.replace(/[^A-Za-z]/g, '').length || s.length
+      return `<button type="button" class="xl-seq" data-seq="${esc(s)}" title="一键复制该行完整序列（${n} aa${r.excelSeqs?.length ? ' — 原表序列列原文' : ' — 提交序列原文'}）">${n} aa ⧉</button>`
+    }).join('')
+    // v2.100：G 蛋白行结构列显示「—」（不计入统计 — 真实结构数见 tooltip 与单独报告）
+    const pdbCell = r.bare || isGp
+      ? `<span class="dim" title="${isGp ? `G 蛋白（受体复合物组分）— 结构数不计入统计（该靶点直接结构 ${r.directPdbCount} 个${r.blastHitCount > 0 ? `，同源命中 ${r.blastHitCount} 个` : ''}，见其单独报告）` : ''}">—</span>`
+      : `${r.directPdbCount > 0 || r.blastHitCount > 0 ? `<span class="pdb-n">${r.directPdbCount}</span>` : '<span class="pdb-n dim">0</span>'}${r.blastHitCount > 0 ? `<span class="pdb-blast" title="BLAST 同源命中 ${r.blastHitCount} 个（未计入直接结构数）">+${r.blastHitCount}</span>` : ''}${r.bestResolution != null ? `<div class="pdb-res" title="最佳分辨率">${r.bestResolution}Å</div>` : ''}`
+    return `<tr class="mt-row" data-job="${esc(r.jobId)}" data-overall="${r.bare ? -1 : r.overall}" data-xray="${r.bare ? -1 : r.xray}" data-cryoem="${r.bare ? -1 : r.cryoem}" data-nmr="${r.bare ? -1 : r.nmr}" data-pdb="${r.bare || isGp ? -1 : r.directPdbCount}" data-cov="${r.bare ? -1 : Math.round(r.coverage)}" data-verdict="${r.bare ? 'load' : v.verdict}"${r.imported && !r.bare ? ' data-imported="1"' : ''}${isGp ? ' data-gprotein="1"' : ''} data-uniprot="${esc(r.uniprotId ?? '')}" data-search="${search}">
 <td class="td-idx">${idx + 1}</td>
 <td class="td-target">
-  <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${loadBadge}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用；评估正文经「完整报告」弹出页提供">缓存恢复</span>' : ''}</div>
+  <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${loadBadge}${gprotBadge}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用；评估正文经「查看报告」弹出页提供">缓存恢复</span>' : ''}</div>
   ${!r.bare && r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<div class="tg-sub" title="${esc(r.proteinName)}">${esc(r.proteinName)}</div>` : ''}
   ${!r.bare && r.organism ? `<div class="tg-sub" title="${esc(r.organism)}">${esc(r.organism)}</div>` : ''}
-  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列标记处可一键复制原表完整序列 — 无按钮的标记为旧版快照）">${renderExcelCell(r.excelText, r.excelSeqs)}</div>` : ''}
+  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已移至「序列」列，点击该列按钮一键复制完整序列）">${renderExcelCell(r.excelText, r.excelSeqs)}</div>` : ''}
 </td>
 <td class="td-uni">${uniBadge}</td>
+<td class="td-seq">${seqBtns || '<span class="dim">—</span>'}</td>
 ${r.bare
   ? '<td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num"><span class="dim">—</span></td><td class="td-num mono"><span class="dim">—</span></td>'
   : `<td class="td-num"><span class="score ${scoreTone(r.overall)}">${r.overall}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.xray)}" title="X-ray 方法评分">${r.xray}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.cryoem)}" title="Cryo-EM 方法评分">${r.cryoem}</span></td>
 <td class="td-num"><span class="score mini ${scoreTone(r.nmr)}" title="NMR 方法评分">${r.nmr}</span></td>
-<td class="td-num">${r.directPdbCount > 0 || r.blastHitCount > 0 ? `<span class="pdb-n">${r.directPdbCount}</span>` : '<span class="pdb-n dim">0</span>'}${r.blastHitCount > 0 ? `<span class="pdb-blast" title="BLAST 同源命中 ${r.blastHitCount} 个（未计入直接结构数）">+${r.blastHitCount}</span>` : ''}${r.bestResolution != null ? `<div class="pdb-res" title="最佳分辨率">${r.bestResolution}Å</div>` : ''}</td>
+<td class="td-num">${pdbCell}</td>
 <td class="td-num mono">${Math.round(r.coverage)}%</td>`}
 <td class="td-verdict">${r.bare
   ? '<span class="vd vd-load">已载入</span><div class="vd-line">已有报告（导入匹配）— 本次运行未重复评估，评分与结论见导入的报告文件</div>'
@@ -2030,11 +2105,12 @@ h2.sec .k{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spac
 .tblwrap::after{content:'';position:absolute;top:0;right:0;bottom:0;width:52px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.78) 45%,#fff 100%);pointer-events:none}
 .tblwrap.at-end::after{display:none}
 table.mt{width:100%;min-width:1040px;border-collapse:collapse;font-size:12.5px}
-table.mt th{position:sticky;top:0;background:#f9fafb;color:var(--sub);font-weight:600;font-size:11px;padding:8px 9px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-family:var(--mono);letter-spacing:.3px}
+/* v2.100：行距收紧（用户要求节省空间）— th/td 纵向 padding 收窄 */
+table.mt th{position:sticky;top:0;background:#f9fafb;color:var(--sub);font-weight:600;font-size:11px;padding:6px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-family:var(--mono);letter-spacing:.3px}
 table.mt th.sortable{cursor:pointer;user-select:none}
 table.mt th.sortable:hover{color:var(--accent-2)}
 table.mt th .arr{font-size:9px;color:var(--accent-2);margin-left:2px}
-table.mt td{padding:8px 9px;border-bottom:1px solid var(--hairline);vertical-align:top}
+table.mt td{padding:5px 8px;border-bottom:1px solid var(--hairline);vertical-align:top}
 tr.mt-row:hover td{background:#fbfdfc}
 .td-idx{color:var(--faint);font-family:var(--mono);font-size:11px}
 .td-num{text-align:center;white-space:nowrap}
@@ -2051,16 +2127,22 @@ tr.mt-row:hover td{background:#fbfdfc}
 .uni-id{display:inline-block;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent);background:var(--accent-bg);border:1.5px solid #6ee7c7;border-radius:6px;padding:1px 9px;text-decoration:none;letter-spacing:.2px;line-height:1.7;white-space:nowrap}
 .uni-id:hover{background:#d1fae5;border-color:var(--accent-2)}
 .uni-src{font-family:var(--mono);font-size:9.5px;color:#0f766e;background:#ecfdf5;border:1px dashed #6ee7c7;border-radius:4px;padding:0 6px;line-height:1.9;display:inline-block}
-.tg-excel{margin-top:4px;padding:4px 8px;border-left:2px solid #b8e6d2;background:var(--accent-bg);font-size:10.5px;color:var(--sub);line-height:1.6;overflow-wrap:anywhere;border-radius:0 4px 4px 0}
+.tg-excel{margin-top:3px;padding:2px 7px;border-left:2px solid #b8e6d2;background:var(--accent-bg);font-size:10px;color:var(--sub);line-height:1.55;overflow-wrap:anywhere;border-radius:0 4px 4px 0}
 .tg-cache{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #fde68a;background:#fffbeb;color:#a16207;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
 /* v2.68：载入徽标（导入既有报告的靶点 — emerald 调与「缓存恢复」区分） */
 .tg-load{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #6ee7c7;background:#ecfdf5;color:#047857;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
 /* v2.68：已载入结论徽标（降级行 — 不参与推进/不建议统计） */
 .vd-load{color:#0f766e;background:#f0fdfa;border:1px dashed #6ee7c7}
-/* v2.68：原表内容序列标记的复制按钮（⧉ — 点击复制原表该行完整序列） */
-.xl-seq{display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:600;padding:0 6px;border-radius:4px;border:1px solid #a7f3d0;background:#fff;color:var(--accent-2);cursor:pointer;letter-spacing:.3px;line-height:1.8;vertical-align:1px}
+/* v2.100：G 蛋白（受体复合物组分）徽标 — 紫罗兰色调与「载入/缓存恢复」区分 */
+.tg-gprot{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #ddd6fe;background:#f5f3ff;color:#6d28d9;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
+/* v2.68：原表内容序列标记的复制按钮（⧉ — 点击复制原表该行完整序列；
+   v2.100：序列列独立后本按钮仅在「序列」列内，紧凑堆叠） */
+.xl-seq{display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:600;padding:0 6px;border-radius:4px;border:1px solid #a7f3d0;background:#fff;color:var(--accent-2);cursor:pointer;letter-spacing:.3px;line-height:1.8;vertical-align:1px;white-space:nowrap}
 .xl-seq:hover{background:var(--accent-bg);border-color:var(--accent-2)}
 .xl-seq.ok{background:var(--accent);color:#fff;border-color:var(--accent)}
+/* v2.100：序列独立列 — 按钮纵向紧凑堆叠（多序列行），无序列显示「—」 */
+.td-seq{max-width:130px;display:flex;flex-direction:column;align-items:flex-start;gap:3px}
+.td-seq .dim{font-family:var(--mono)}
 .score{display:inline-block;min-width:34px;text-align:center;border-radius:5px;padding:1px 7px;font-family:var(--mono);font-size:12px;font-weight:700}
 .score.hi{color:#0f766e;background:#ccfbf1}.score.md{color:#a16207;background:#fef3c7}.score.lo{color:#b91c1c;background:#fee2e2}
 .score.mini{min-width:26px;padding:1px 4px;font-size:11px}
@@ -2073,14 +2155,15 @@ tr.mt-row:hover td{background:#fbfdfc}
 .vd-go{color:#0f766e;background:#ccfbf1;border:1px solid #99e5d5}
 .vd-caution{color:#a16207;background:#fef3c7;border:1px solid #fde68a}
 .vd-no{color:#b91c1c;background:#fee2e2;border:1px solid #fecaca}
-.vd-line{font-size:11px;color:var(--ink);line-height:1.65;margin-top:3px;max-width:420px}
-.mt-open{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid var(--accent-2);background:var(--accent);color:#fff;cursor:pointer;white-space:nowrap}
-.mt-open:hover{background:var(--accent-2)}
-/* v2.65：报告列按钮组 — 完整报告（主）+ 下载（次）纵向排列 */
-.mt-btns{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
-.mt-dl{font-family:var(--mono);font-size:10px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid #a7f3d0;background:#fff;color:var(--accent-2);cursor:pointer;white-space:nowrap}
-.mt-dl:hover{background:var(--accent-bg);border-color:var(--accent-2)}
-.mt-links{margin-top:4px;font-size:10px;font-family:var(--mono)}
+.vd-line{font-size:10.5px;color:var(--ink);line-height:1.6;margin-top:3px;max-width:400px}
+/* v2.100：查看报告（青绿）/ 下载（琥珀）— 同尺寸同字重不同色，并排单行 */
+.mt-open{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid #0f766e;background:#0f766e;color:#fff;cursor:pointer;white-space:nowrap}
+.mt-open:hover{background:#115e59;border-color:#115e59}
+/* v2.65→v2.100：报告列按钮组 — 查看报告（青绿）/ 下载（琥珀）同尺寸同字重不同色横向并排单行 */
+.mt-btns{display:flex;flex-direction:row;align-items:center;gap:5px;flex-wrap:nowrap}
+.mt-dl{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid #b45309;background:#b45309;color:#fff;cursor:pointer;white-space:nowrap}
+.mt-dl:hover{background:#92400e;border-color:#92400e}
+.mt-links{margin-top:2px;font-size:9.5px;font-family:var(--mono)}
 .mt-links a{color:var(--accent-2);text-decoration:none;border-bottom:1px solid #a7f3d0}
 
 /* Markdown 正文（AI 报告 — 与单靶点报告 .md 风格同源；靶点正文在弹出页） */
@@ -2134,33 +2217,34 @@ ${input.goal ? `<div class="meta-grid" style="margin-bottom:26px"><div style="gr
 <div class="glance">
   <div class="glance-kicker">At a Glance · 批次画像</div>
   <div class="glance-tiles">
-    ${tile('参与靶点', `${stats.totalTargets}`, `${stats.loadedTargets} 成功${stats.importedTargets ? ` · ${stats.importedTargets} 载入` : ''}${stats.failedTargets ? ` · ${stats.failedTargets} 失败` : ''}`)}
-    ${tile('总体均分', `${stats.overallMean}<span class="u">/10</span>`, `中位 ${stats.overallMedian} · 区间 ${stats.overallMin}-${stats.overallMax}`)}
+    ${tile('参与靶点', `${stats.totalTargets}`, `${stats.loadedTargets} 成功${stats.importedTargets ? ` · ${stats.importedTargets} 载入` : ''}${stats.failedTargets ? ` · ${stats.failedTargets} 失败` : ''}${stats.gProteinCount > 0 ? ` · G蛋白 ${stats.gProteinCount} 不计` : ''}`)}
+    ${tile('总体均分', `${stats.overallMean}<span class="u">/10</span>`, `中位 ${stats.overallMedian} · 区间 ${stats.overallMin}-${stats.overallMax}${stats.gProteinCount > 0 ? ` · 不含 G蛋白 ${stats.gProteinCount} 行` : ''}`)}
     ${tile('建议推进', `${stats.verdictCounts.go}`, `谨慎 ${stats.verdictCounts.caution} · 不建议 ${stats.verdictCounts.no}`)}
-    ${tile('有结构靶点', `${stats.targetsWithStructures}/${stats.loadedTargets}`, `X-ray&nbsp;${stats.targetsWithXray} · Cryo-EM&nbsp;${stats.targetsWithCryoem} · NMR&nbsp;${stats.targetsWithNmr}`)}
+    ${tile('有结构靶点', `${stats.targetsWithStructures}/${stats.statTargets}`, `X-ray&nbsp;${stats.targetsWithXray} · Cryo-EM&nbsp;${stats.targetsWithCryoem} · NMR&nbsp;${stats.targetsWithNmr}`)}
     ${tile('平均覆盖率', `${Math.round(stats.coverageMean)}%`, `≥50%：${stats.targetsCoverage50} 个 · 带区间 ${stats.rangeTargets} 个`)}
     ${tile('带配体证据', `${stats.targetsWithLigand}`, `PDB 复合物内配体`)}
   </div>
 </div>
 
 <div class="panel" style="margin-bottom:12px">
-  <div class="mb-cap" style="margin-bottom:6px"><b style="font-size:12.5px">总分分布（0-10，十档）</b></div>
-  ${distBar(stats.overallBuckets, stats.loadedTargets)}
+  <div class="mb-cap" style="margin-bottom:6px"><b style="font-size:12.5px">总分分布（0-10，十档${stats.gProteinCount > 0 ? `，不含 G蛋白 ${stats.gProteinCount} 行` : ''}）</b></div>
+  ${distBar(stats.overallBuckets, stats.statTargets)}
 </div>
 <div class="panel">
-  ${methodBar('X-ray 射线晶体学', stats.methodMeans.xray, stats.targetsWithXray, stats.loadedTargets, '#0d9488')}
-  ${methodBar('Cryo-EM 冷冻电镜', stats.methodMeans.cryoem, stats.targetsWithCryoem, stats.loadedTargets, '#7c3aed')}
-  ${methodBar('NMR 核磁共振', stats.methodMeans.nmr, stats.targetsWithNmr, stats.loadedTargets, '#d97706')}
+  ${methodBar('X-ray 射线晶体学', stats.methodMeans.xray, stats.targetsWithXray, stats.statTargets, '#0d9488')}
+  ${methodBar('Cryo-EM 冷冻电镜', stats.methodMeans.cryoem, stats.targetsWithCryoem, stats.statTargets, '#7c3aed')}
+  ${methodBar('NMR 核磁共振', stats.methodMeans.nmr, stats.targetsWithNmr, stats.statTargets, '#d97706')}
 </div>
 
 ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.map(esc).join('；')}</div>` : ''}
 
 <h2 class="sec"><span class="k">02</span>全靶点结论总表</h2>
-<div class="sec-sub">靶点名称 / UniProt 分列 · 总分与 X-ray / Cryo-EM / NMR 评分分列（列头点击各自排序）· 回补 UniProt 徽标可点开 · 「完整报告」新标签弹出该靶点自己的单独评估报告原文，「下载」一键存盘同一份文件</div>
+<div class="sec-sub">靶点 / UniProt / 序列（一键复制完整序列）分列 · 总分与 X-ray / Cryo-EM / NMR 评分分列（列头点击各自排序）· 回补 UniProt 徽标可点开 · 「查看报告」新标签弹出单靶点报告原文，「下载」存盘同一份文件${stats.gProteinCount > 0 ? ' · 「G蛋白」行为受体复合物组分（结构数不计入批次统计）' : ''}</div>
+${stats.gProteinCount > 0 ? `<div class="warn" style="margin:-6px 0 14px">复合组分说明：检测到 ${stats.gProteinCount} 个 G 蛋白行（GPCR 类项目原表常同时含受体与 G 蛋白复合物）— G 蛋白自身已有大量结构，不代表受体靶点可行性，故结构列显示「—」且均分/分布/方法/结构/结论等批次统计均不计入（行内评分与其「查看报告」完整保留）。</div>` : ''}
 <div class="mt-tools no-print">
   <input type="search" id="mt-q" placeholder="搜索靶点 / UniProt / 蛋白名…" aria-label="筛选搜索">
   <label>结论
-    <select id="mt-verdict"><option value="all">全部</option><option value="go">建议推进</option><option value="caution">谨慎推进</option><option value="no">不建议</option><option value="load">已载入（导入）</option></select>
+    <select id="mt-verdict"><option value="all">全部</option><option value="go">建议推进</option><option value="caution">谨慎推进</option><option value="no">不建议</option><option value="load">已载入（导入）</option><option value="gprotein">G蛋白（复合组分）</option></select>
   </label>
   <label>总分 ≥
     <select id="mt-min"><option value="0">0</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option></select>
@@ -2171,21 +2255,22 @@ ${!llmOk && llmErrors.length ? `<div class="warn">AI 报告提示：${llmErrors.
 <table class="mt" id="mt-table">
 <thead><tr>
 <th>#</th>
-<th data-k="label" title="原始表靶点名称（含蛋白名 / 种属 / 原表行快照 — 序列已折叠）">靶点（原始表名称）</th>
+<th data-k="label" title="原始表靶点名称（含蛋白名 / 种属 / 原表行快照 — 序列已移至「序列」列）">靶点（原始表名称）</th>
 <th class="sortable num" data-k="uniprot" title="UniProt ID（回补的以徽标展示）— 点击排序">UniProt<span class="arr"></span></th>
+<th title="一键复制该行完整序列（原表序列列 / 提交序列原文）">序列</th>
 <th class="sortable num" data-k="overall" title="综合可行性总分 — 点击排序">总分<span class="arr"></span></th>
 <th class="sortable num" data-k="xray" title="X-ray 方法评分 — 点击单独排序">X-ray<span class="arr"></span></th>
 <th class="sortable num" data-k="cryoem" title="Cryo-EM 方法评分 — 点击单独排序">Cryo-EM<span class="arr"></span></th>
 <th class="sortable num" data-k="nmr" title="NMR 方法评分 — 点击单独排序">NMR<span class="arr"></span></th>
-<th class="sortable num" data-k="pdb" title="直接结构数（+ 同源命中）— 点击排序">结构<span class="arr"></span></th>
+<th class="sortable num" data-k="pdb" title="直接结构数（+ 同源命中）— 点击排序；G蛋白行不计入统计显示「—」">结构<span class="arr"></span></th>
 <th class="sortable num" data-k="cov" title="序列覆盖率 — 点击排序">覆盖<span class="arr"></span></th>
 <th data-k="verdict">结论（一句话能否做）</th>
 <th data-k="act">报告</th>
 </tr></thead>
-<tbody>${rowPairs || '<tr><td colspan="11" style="padding:16px;color:var(--faint)">无成功靶点</td></tr>'}</tbody>
+<tbody>${rowPairs || '<tr><td colspan="12" style="padding:16px;color:var(--faint)">无成功靶点</td></tr>'}</tbody>
 </table>
 </div>
-<div class="note">「完整报告 ↗」新标签页弹出该靶点自己的单独评估报告 — 服务器数据保留期内的靶点弹出<b>报告文件原文（与「在线/离线包」下载的单独报告完全一致，含 PDB 列表 / BLAST 同源列表 / 预测结构视图与附件等全部章节）</b>；缓存恢复的靶点（服务端文件已回收）弹出由 markdown 与统计数据重建的页面；载入的靶点弹出导入的报告原文（导入时已上传服务端留存）；导入报告原文不可用的载入靶点弹出载入说明与提交序列。「下载 ⤓」把同一份报告一键存盘（文件名与单独报告下载同源）。「离线包」链接在「批量下载全部」的 zip 解压后可用（本报告随 zip 一并打包，命名与链接一致）；「在线」链接在服务器数据保留期内可用。UniProt 列回补的 ID 以徽标展示（标注识别来源）。原表内容中带 ⧉ 的序列标记可<b>一键复制该行原表的完整序列</b>（无按钮的标记为旧版快照）；各靶点的完整序列亦见其单独报告。</div>
+<div class="note">「查看报告」新标签弹出该靶点自己的报告（服务器保留期内为报告文件原文，与「在线/离线包」下载完全一致；缓存恢复/载入靶点为重建页或导入原文）；「下载」一键存盘同一份文件。序列列按钮一键复制该行完整序列。${stats.gProteinCount > 0 ? '「G蛋白」行 = 受体复合物组分（结构数不计入批次统计）。' : ''}UniProt 列回补的 ID 以徽标展示（标注识别来源）。</div>
 
 <h2 class="sec"><span class="k">03</span>AI 整体可行性报告</h2>
 <div class="panel md">${body}</div>
@@ -2211,6 +2296,9 @@ ${rptPayload}
       //  其余选项按结论值精确匹配（恢复行的结论是真实评估结论，正常参与筛选）
       if (selV.value === 'load') {
         if (vd !== 'load' && r.getAttribute('data-imported') !== '1') return false;
+      } else if (selV.value === 'gprotein') {
+        // v2.100：「G蛋白（复合组分）」= 识别为 G 蛋白（受体复合物组分）的行
+        if (r.getAttribute('data-gprotein') !== '1') return false;
       } else if (vd !== selV.value) return false;
     }
     // v2.68：载入降级行（无评分，data-overall=-1 置底排序用）不参与总分门槛筛选

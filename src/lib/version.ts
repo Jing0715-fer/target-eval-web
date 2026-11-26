@@ -488,5 +488,24 @@
  *    alignmentForLegacyJob 回填 identityAlignment）；
  *  - 报告 head 新增 targeteval:version meta（生成器版本自标识 — 诊断与后续
  *    版本门控用）；上传响应/留存日志附 upgraded 标记（诊断字段）。
+ * v2.100：汇总报告表格四项优化（用户反馈 2026-11-26：「如果是 GPCR 类项目，
+ *  可能是存在受体和 G 蛋白复合物的情况，G 蛋白的结构数不应该统计在表格中，
+ *  复制序列单独放一列，最后一列查看报告和下载按钮样式做成一样用不同颜色
+ *  并排放，要节省空间不要留太多空白」）：
+ *  - G 蛋白（受体复合物组分）行不计入统计（ht-dashboard.ts isGProteinRow）：
+ *    三重识别（UniProt 标准名「Guanine nucleotide-binding protein」（排除
+ *    nucleolar/-like 的 GNL 家族）/ G蛋白·G·蛋白·Gα·Gβ·Gγ 命名（排除
+ *    「G protein-coupled receptor」）/ GN 前缀亚基基因符号 GNAS·GNAI1·
+ *    GNAQ·GNB1·GNG2 等）— 识别到的行主表呈现（评分/报告完整保留 +
+ *    「G蛋白」徽标）但结构列显示「—」且不计入批次统计（分布/均分/结构/
+ *    结论全口径，HtDashboardStats 新增 gProteinCount/statTargets 分母），
+ *    筛选器新增「G蛋白（复合组分）」选项 + 头部说明横幅；
+ *  - 序列列独立：复制序列按钮从原表文本内嵌标记（v2.68 ⧉ 行内按钮）移至
+ *    独立「序列」列（excelSeqs 多条全列；无 seqs 回退提交序列；旧快照
+ *    保留纯文本标记），原表行文本序列标记移除省空间；
+ *  - 报告列「查看报告」（青绿 #0f766e）/「下载」（琥珀 #b45309）同尺寸
+ *    同字重不同色横向单行并排（原纵向两行），离线/在线链接内联随行；
+ *  - 紧凑化：th/td 纵向 padding 8px→6/5px、原表内容块/结论行收紧、
+ *    表下长注解精简。
  */
-export const APP_VERSION = 'v2.99.0'
+export const APP_VERSION = 'v2.100.0'
