@@ -1,252 +1,461 @@
 <!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EBI UniProtKB 回补验证 · 28 缺失靶点</title>
+<title>EBI UniProtKB 回补验证（含序列比对） · 28 缺失靶点</title>
 <style>
-:root{--ink:#1c2430;--mut:#68758a;--line:#e3e8f0;--bg:#f6f8fb;--ok:#0b7a3d;--near:#a56a00;--far:#b3372f;--acc:#7a3ba0}
+:root{--ink:#1c2430;--mut:#68758a;--line:#e3e8f0;--bg:#f6f8fb;--ok:#0b7a3d;--near:#a56a00;--far:#b3372f;--acc:#7a3ba0;--warn:#c2410c}
 *{box-sizing:border-box}
-body{margin:0;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:var(--bg)}
+body{margin:0;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:var(--bg))}
 .wrap{max-width:1180px;margin:0 auto;padding:28px 18px 60px}
-h1{font-size:22px;margin:0 0 6px} .sub{color:var(--mut);font-size:13px;margin-bottom:18px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0 20px}
+h1{font-size:22px;margin:0 0 6px}.sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:14px 0 20px}
 .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.card .n{font-size:26px;font-weight:700} .card .t{color:var(--mut);font-size:12px}
-.card.g .n{color:var(--ok)} .card.y .n{color:var(--near)} .card.r .n{color:var(--far)}
+.card .n{font-size:26px;font-weight:700}.card .t{color:var(--mut);font-size:12px}
+.card.g .n{color:var(--ok)}.card.y .n{color:var(--near)}.card.r .n{color:var(--far)}.card.o .n{color:var(--warn)}.card.g2 .n{color:var(--acc)}
 .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-table{width:100%;min-width:860px;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:13px}
+table{width:100%;min-width:980px;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:13px}
 th{background:#eef2f8;text-align:left;padding:8px 10px;font-size:12px;color:var(--mut);border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+td:nth-child(1),td:nth-child(3){white-space:nowrap}
 tr:last-child td{border-bottom:none}
-a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
-.ok{color:var(--ok)} .near{color:var(--near)} .far{color:var(--far)} .dim{color:#9aa6b8}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.ok{color:var(--ok)}.near{color:var(--near)}.far{color:var(--far)}.dim{color:#9aa6b8}
 .badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;color:#fff;white-space:nowrap}
-.b1{background:var(--ok)} .b2{background:var(--near)} .b3{background:var(--far)} .b4{background:#8a95a6}
+.b1{background:var(--ok)}.b2{background:var(--near)}.b3{background:var(--far)}.b4{background:#8a95a6}.b5{background:var(--warn)}
 .chan{color:var(--mut);font-size:11px;margin-top:3px}
-.alt{margin:2px 0} .alt small{color:var(--mut)}
+.alt{margin:2px 0}.alt small{color:var(--mut)}
 .rec a{font-weight:600}
 .note{background:#fff;border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:8px;padding:14px 16px;margin:18px 0;font-size:13px}
-.note h3{margin:0 0 8px;font-size:14px}
-.note ul{margin:4px 0;padding-left:20px} .note li{margin:3px 0}
+.note h3{margin:0 0 8px;font-size:14px}.note ul{margin:4px 0;padding-left:20px}.note li{margin:3px 0}
 code{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:12px}
+/* ── 比对按钮/面板 ── */
+.alnbtn{border:1px solid var(--line);background:#fff;border-radius:16px;padding:3px 12px;font-size:12px;color:var(--acc);cursor:pointer;white-space:nowrap}
+.alnbtn:hover{border-color:var(--acc);background:#f6edfb}
+.alnbtn.open{background:var(--acc);color:#fff;border-color:var(--acc)}
+.alnbtn.btn-warn{color:var(--warn)}.alnbtn.btn-warn:hover{border-color:var(--warn);background:#fdf1ea}
+.alnbtn.btn-warn.open{background:var(--warn);color:#fff;border-color:var(--warn)}
+.aln-tr>td{padding:0 10px 14px;background:#fbfcfe}
+.aln-panel{border:1px solid var(--line);border-radius:10px;background:#fff;overflow:hidden}
+.aln-head{padding:12px 16px 10px;border-bottom:1px solid var(--line)}
+.aln-title{font-size:13.5px;font-weight:600}
+.aln-title a{font-family:ui-monospace,Menlo,Consolas,monospace}
+.dbchip{display:inline-block;font-size:10.5px;font-weight:600;border-radius:4px;padding:0 6px;vertical-align:1px}
+.dbchip.sp{background:#e2f2e8;color:var(--ok)}.dbchip.tr{background:#f3ecfb;color:var(--acc)}
+.aln-meta{color:var(--mut);font-size:12px;margin-top:3px}.aln-meta b{color:var(--ink)}
+.aln-warn{margin-top:8px;font-size:12px;background:#fdf1ea;color:var(--warn);border:1px solid #f3d5c3;border-radius:6px;padding:5px 10px}
+.aln-stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{font-size:11.5px;border-radius:12px;padding:1px 10px;border:1px solid var(--line);background:#fff}
+.chip.ci{color:var(--ok);border-color:#bfe3cd}.chip.cs{color:var(--near);border-color:#ecd9ae}.chip.cm{color:var(--far);border-color:#efc7c2}.chip.cg{color:#7a8496}.chip.cn{color:var(--mut)}
+.aln-legend{font-size:11.5px;color:var(--mut);margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin:0 1px 0 6px;vertical-align:-1px}
+.sw:first-child{margin-left:0}
+.sw.hyd{background:#f6e9c0}.sw.pol{background:#d9f0e0}.sw.aci{background:#fbdfe1}.sw.bas{background:#e9e1f7}.sw.cys{background:#f9dfe9}.sw.gly{background:#e9e9ee}.sw.pro{background:#fbe7d5}
+.lg-sep{display:inline-block;width:1px;height:12px;background:var(--line);margin:0 8px}
+.mi{color:var(--ok)}.ms{color:var(--near)}.mm{color:#cf5548}.mg{color:#b6bec9}
+.aln-scroll{max-height:62vh;overflow:auto;padding:12px 16px;background:linear-gradient(#fff,#fcfdff)}
+.abk{margin-bottom:14px}.abk:last-child{margin-bottom:2px}
+.al{white-space:pre;font:12.5px/1.65 ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.lb{display:inline-block;min-width:3.2em;color:var(--mut);font-size:11px}
+.pn{display:inline-block;min-width:4.2ch;text-align:right;color:#8792a6;font-size:11px;margin:0 8px}
+.sq{white-space:pre}
+.mq{color:var(--mut)}
+.r{border-radius:2px;padding:0}
+.r.c hyd,.r.chyd{background:#f6e9c0}.r.cpol{background:#d9f0e0}.r.caci{background:#fbdfe1}.r.cbas{background:#e9e1f7}.r.ccys{background:#f9dfe9}.r.cgly{background:#e9e9ee}.r.cpro{background:#fbe7d5}
+.r.gp{color:#b6bec9}
+.mt{border-radius:2px}
+.r.hl,.mt.hl{outline:1.6px solid var(--acc);background:#f3eafa}
+/* tooltip */
+.tip{display:none;position:fixed;z-index:999;background:#232a38;color:#f2f5fa;border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;box-shadow:0 6px 20px rgba(20,26,40,.35);max-width:340px}
+.tip .t1{font-family:ui-monospace,Menlo,Consolas,monospace;white-space:nowrap}
+.tip .t1 b{color:#c9a8f0;font-size:12.5px}
+.tip .t2{color:#aab6cc;margin-top:2px}
+.tip .t2.s-i{color:#7fd8a4}.tip .t2.s-s{color:#eec98a}.tip .t2.s-m{color:#f0a49b}.tip .t2.s-g{color:#9aa6b8}
+@media (max-width:640px){.aln-scroll{padding:10px}.al{font-size:11.5px}.lb{min-width:2.6em}}
 </style></head><body><div class="wrap">
 <h1>EBI UniProtKB 回补验证报告</h1>
-<div class="sub">对象：TargetEval_HT_2026-11-25（117 靶点）汇总报告中缺失 UniProt ID 的 28 个靶点 · 生成：2026-11-26 07:38</div>
+<div class="sub">对象：TargetEval_HT_2026-11-25（117 靶点）汇总报告中缺失 UniProt ID 的 28 个靶点 · 更新：2026-11-26 08:17 · v2（最高同源回填 + 序列比对视图）</div>
 
-<div class="cards">
-<div class="card"><div class="n">28</div><div class="t">缺失 UniProt ID 靶点</div></div>
-<div class="card g"><div class="n">14</div><div class="t">主链直接回补（≥85% + 覆盖≥40%）</div></div>
-<div class="card y"><div class="n">5</div><div class="t">备选链回补（2 功能链 / 3 抗体链）</div></div>
-<div class="card r"><div class="n">7</div><div class="t">未达阈值（不回补）</div></div>
+<div class="cards"><div class="card"><div class="n">28</div><div class="t">缺失 UniProt ID 靶点</div></div>
+<div class="card g"><div class="n">19</div><div class="t">精确回填 ≥85%（主链 14 + 备选链 5，含抗体链 3）</div></div>
+<div class="card o"><div class="n">7</div><div class="t">最高同源回填 48–73%（远缘参考）</div></div>
 <div class="card"><div class="n">2</div><div class="t">报告未留存序列（无法验证）</div></div>
-</div>
+<div class="card g2"><div class="n">26</div><div class="t">已指定回填条目 / 26 可验证</div></div></div>
 
-<div class="note"><h3>验证方法（与 TargetEval v2.95 身份级联同口径）</h3>
+<div class="note"><h3>回填策略与比对视图</h3>
 <ul>
-<li><b>查询序列</b>：从汇总报告各行 <code>data-seq</code>（原表完整序列）按 <code>CHAIN</code> 分隔拆链，取与提交长度最接近的链；未达标靶点追加第 2/3 候选链探索。</li>
-<li><b>T1 精确匹配</b>：UniProt Peptide Search（全库子串）→ 26 条查询全部无命中（均为突变体/构建体/毒株变异序列）。</li>
-<li><b>T2 EBI BLAST · Swiss-Prot</b>（已审校 57.6 万条，秒-分钟级）→ 主链回补 4 个。</li>
-<li><b>T3 EBI BLAST · 全库 uniprotkb</b>（含 TrEMBL ~2.5 亿条，1-6 分钟/条）→ 主链再回补 10 个，是本次回补的主力通道（毒株/物种 TrEMBL 条目）。</li>
-<li><b>判定阈值</b>：一致性 ≥85% 且查询覆盖 ≥40% 且命中为 UniProt 条目（bestCoverageHit 覆盖度加权，与管线 <code>TARGET_IDENTIFY_MIN_COV</code> 同口径）。</li>
+<li><b>精确回填（19 个）</b>：一致性 ≥85% 且覆盖 ≥40% 的命中直接回填（主链 14 + 复合物备选功能链/抗体链 5，其中抗体链 3 个按需取舍）。</li>
+<li><b>最高同源回填（7 个）</b>：未达 85% 阈值的靶点按用户指示取最高同源命中回填，一致性 48–73%，标记为<b>远缘参考</b> — 点击行尾「比对」查看逐残基证据后再行取舍。</li>
+<li><b>序列比对视图</b>：每行「比对」按钮展开 60 列/块的经典三行比对 — 残基按化学性质着色；中间行 <b class="mi">|</b> 相同 / <b class="ms">+</b> 相似（BLOSUM62 正分）/ <b class="mm">·</b> 不同；<b>悬停（或移动端点按）任一残基</b>：整列高亮并显示查询/命中两端的氨基酸位点号、残基名与匹配状态。</li>
 </ul></div>
 
-<div class="tblwrap">
-<table>
-<thead><tr><th>作业</th><th>靶点（原始标签）</th><th>提交</th><th>主链最佳命中</th><th>备选链命中（≥85%）</th><th>建议回补</th><th>判定</th></tr></thead>
+<div class="tblwrap"><table>
+<thead><tr><th>作业</th><th>靶点（原始标签）</th><th>提交</th><th>主链最佳命中</th><th>备选链命中（≥85%）</th><th>建议回补</th><th>判定</th><th>比对</th></tr></thead>
 <tbody>
-<tr>
+<tr id="row-imp-26">
 <td>imp-26</td>
 <td>GPR88_E2</td>
 <td>247aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></b> 86.6%/99.2%<br><small>G protein-coupled receptor 88</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-26">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-26" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-28">
 <td>imp-28</td>
 <td>PKU_Jinlab_GPR88_G_E2·链2</td>
 <td>246aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></b> 86.6%/99.6%<br><small>G protein-coupled receptor 88</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-28">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-28" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-31">
 <td>imp-31</td>
 <td>PKU_Jinlab_GPR88_G_E2_…0414·链2</td>
 <td>246aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></b> 86.6%/99.6%<br><small>G protein-coupled receptor 88</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A452R3J4" target="_blank" rel="noopener">A0A452R3J4</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-31">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-31" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-51">
 <td>imp-51</td>
 <td>20230905·链1</td>
 <td>445aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/Q6N9U9" target="_blank" rel="noopener">Q6N9U9</a></b> 94.9%/99.8%<br><small>Nitrogenase protein alpha chain</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/Q6N9U9" target="_blank" rel="noopener">Q6N9U9</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-51">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-51" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-52">
 <td>imp-52</td>
 <td>20230905·链2</td>
 <td>402aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></b> 89.3%/99.8%<br><small>Fe-only nitrogenase subunit beta</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-52">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-52" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-54">
 <td>imp-54</td>
 <td>20230901·链1</td>
 <td>436aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></b> 96.5%/99.8%<br><small>Fe-only nitrogenase subunit beta</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/Q6N9V1" target="_blank" rel="noopener">Q6N9V1</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-54">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-54" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-60">
 <td>imp-60</td>
 <td>Conformation1·链2</td>
 <td>100aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></b> 85%/99%<br><small>Urease subunit gamma</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-60">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-60" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-62">
 <td>imp-62</td>
 <td>Conformation2·链2</td>
 <td>100aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></b> 85%/99%<br><small>Urease subunit gamma</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A089PHY9" target="_blank" rel="noopener">A0A089PHY9</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-62">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-62" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-78">
 <td>imp-78</td>
 <td>PPRD-dimer-250623</td>
 <td>460aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A221S4Q5" target="_blank" rel="noopener">A0A221S4Q5</a></b> 96.3%/99.1%<br><small>Hemagglutinin glycoprotein</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A221S4Q5" target="_blank" rel="noopener">A0A221S4Q5</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-78">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-78" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-79">
 <td>imp-79</td>
 <td>PPRV-dimer</td>
 <td>460aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/F1C3L3" target="_blank" rel="noopener">F1C3L3</a></b> 98.3%/99.1%<br><small>Hemagglutinin glycoprotein</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/F1C3L3" target="_blank" rel="noopener">F1C3L3</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-79">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-79" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-96">
 <td>imp-96</td>
 <td>GC_trimer_model</td>
 <td>489aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A125T1E9" target="_blank" rel="noopener">A0A125T1E9</a></b> 88.1%/99.6%<br><small>M polyprotein</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A125T1E9" target="_blank" rel="noopener">A0A125T1E9</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-96">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-96" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-impb-17">
 <td>impb-17</td>
 <td>J240-coot-3</td>
 <td>1070aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></b> 93.8%/99.9%<br><small>Spike glycoprotein</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="impb-17">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-impb-17" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-impb-18">
 <td>impb-18</td>
 <td>Omicron-2P-RBD2up1down_J528</td>
 <td>1082aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></b> 93%/100%<br><small>Spike glycoprotein</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A8A1NDM2" target="_blank" rel="noopener">A0A8A1NDM2</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="impb-18">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-impb-18" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-impb-56">
 <td>impb-56</td>
 <td>RBD-fab-240816_refined…ned_006</td>
 <td>196aa</td>
 <td><span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/A0A8A5XRG7" target="_blank" rel="noopener">A0A8A5XRG7</a></b> 93.4%/99.5%<br><small>Spike glycoprotein</small></span></td>
 <td><span class="dim">—</span></td>
 <td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A8A5XRG7" target="_blank" rel="noopener">A0A8A5XRG7</a></td>
-<td><span class="badge b1">可回补</span><div class="chan">T3 全库</div></td></tr><tr>
+<td><span class="badge b1">可回补</span><div class="chan">EBI 全库</div></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="impb-56">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-impb-56" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-10">
 <td>imp-10</td>
 <td>lag3+fab·链4</td>
 <td>76aa</td>
 <td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0ACI8P9V4" target="_blank" rel="noopener">A0ACI8P9V4</a></b> 82.6%/98.7%<br><small>Lymphocyte activation gene 3 protein</small></span></td>
 <td><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P0DOX7" target="_blank" rel="noopener">P0DOX7</a></b> 88.4%/99.1%<br><small>Immunoglobulin kappa light chain</small></span></div></td>
-<td class="rec"><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P0DOX7" target="_blank" rel="noopener">P0DOX7</a></b> 88.4%/99.1%<br><small>Immunoglobulin kappa light chain</small></span></div></td>
-<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/P0DOX7" target="_blank" rel="noopener">P0DOX7</a><div class="chan">经 备选链 217 aa</div></td>
+<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-10">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-10" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-29">
 <td>imp-29</td>
 <td>PKU_Jinlab_GPR88_G_E2·链3</td>
 <td>195aa</td>
-<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0A7L1V4Y5" target="_blank" rel="noopener">A0A7L1V4Y5</a></b> 83.2%/73.5%<br><small>Guanine nucleotide-binding protein subunit alpha (Fragme</small></span></td>
+<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0A7L1V4Y5" target="_blank" rel="noopener">A0A7L1V4Y5</a></b> 83.2%/73.5%<br><small>Guanine nucleotide-binding protein subunit alpha (Fr</small></span></td>
 <td><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
-<td class="rec"><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
-<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a><div class="chan">经 备选链 95 aa</div></td>
+<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-29">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-29" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-32">
 <td>imp-32</td>
 <td>PKU_Jinlab_GPR88_G_E2_…0414·链3</td>
 <td>204aa</td>
-<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0A7L1V4Y5" target="_blank" rel="noopener">A0A7L1V4Y5</a></b> 83.2%/73.5%<br><small>Guanine nucleotide-binding protein subunit alpha (Fragme</small></span></td>
+<td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/A0A7L1V4Y5" target="_blank" rel="noopener">A0A7L1V4Y5</a></b> 83.2%/73.5%<br><small>Guanine nucleotide-binding protein subunit alpha (Fr</small></span></td>
 <td><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
-<td class="rec"><div class="alt">抗体成分链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a></b> 90.5%/98.9%<br><small>Ig kappa chain V-II region 7S34.1</small></span></div></td>
-<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/P01630" target="_blank" rel="noopener">P01630</a><div class="chan">经 备选链 95 aa</div></td>
+<td><span class="badge b2">备选链可回补（仅抗体链达标）</span></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-32">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-32" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-44">
 <td>imp-44</td>
 <td>MHC_HM443+VLBp969·链2</td>
 <td>243aa</td>
 <td><span class="near"><b><a href="https://www.uniprot.org/uniprotkb/P0DSE2" target="_blank" rel="noopener">P0DSE2</a></b> 76.9%/99.2%<br><small>M1-specific T cell receptor beta chain</small></span></td>
-<td><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
-<td class="rec"><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
-<td><span class="badge b2">备选链可回补</span></td></tr><tr>
+<td><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alph</small></span></div></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a><div class="chan">经 备选链 278 aa</div></td>
+<td><span class="badge b2">备选链可回补</span></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-44">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-44" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-45">
 <td>imp-45</td>
 <td>MHC_HM443+VLBp969·链3</td>
 <td>205aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/P0DSE1" target="_blank" rel="noopener">P0DSE1</a></b> 71.1%/99%<br><small>M1-specific T cell receptor alpha chain</small></span></td>
-<td><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
-<td class="rec"><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alpha ch</small></span></div></td>
-<td><span class="badge b2">备选链可回补</span></td></tr><tr>
+<td><div class="alt">复合物功能链：<span class="ok"><b><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a></b> 93.9%/99.6%<br><small>Class I histocompatibility antigen, Gogo-A*0201 alph</small></span></div></td>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/P30376" target="_blank" rel="noopener">P30376</a><div class="chan">经 备选链 278 aa</div></td>
+<td><span class="badge b2">备选链可回补</span></td>
+<td><button type="button" class="alnbtn btn-ok" data-job="imp-45">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-45" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-100">
 <td>imp-100</td>
 <td>GPCR75</td>
 <td>347aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A8C9I9H4" target="_blank" rel="noopener">A0A8C9I9H4</a></b> 63.5%/99.7%<br><small>Probable G protein-coupled receptor 75</small></span></td>
 <td><span class="dim">—</span></td>
-<td class="rec"></td>
-<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A8C9I9H4" target="_blank" rel="noopener">A0A8C9I9H4</a> <span class="far">· 63.5% 远缘</span><div class="chan">未达 85% 阈值，按最高同源回填</div></td>
+<td><span class="badge b5">最高同源回填</span><div class="chan">EBI 全库 · 远缘参考</div></td>
+<td><button type="button" class="alnbtn btn-warn" data-job="imp-100">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-100" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-106">
 <td>imp-106</td>
 <td>B-7-mer</td>
 <td>729aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0ABD1AVK7" target="_blank" rel="noopener">A0ABD1AVK7</a></b> 73.3%/99%<br><small>Disease resistance protein</small></span></td>
 <td><span class="dim">—</span></td>
-<td class="rec"></td>
-<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0ABD1AVK7" target="_blank" rel="noopener">A0ABD1AVK7</a> <span class="far">· 73.3% 远缘</span><div class="chan">未达 85% 阈值，按最高同源回填</div></td>
+<td><span class="badge b5">最高同源回填</span><div class="chan">EBI 全库 · 远缘参考</div></td>
+<td><button type="button" class="alnbtn btn-warn" data-job="imp-106">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-106" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-23">
 <td>imp-23</td>
 <td>PA_22f1_fab_new</td>
 <td>251aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/Q4ZE94" target="_blank" rel="noopener">Q4ZE94</a></b> 68.8%/63.1%<br><small>Protective antigen (Fragment)</small></span></td>
 <td><span class="dim">—</span></td>
-<td class="rec"></td>
-<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/Q4ZE94" target="_blank" rel="noopener">Q4ZE94</a> <span class="far">· 68.8% 远缘</span><div class="chan">未达 85% 阈值，按最高同源回填</div></td>
+<td><span class="badge b5">最高同源回填</span><div class="chan">EBI 全库 · 远缘参考</div></td>
+<td><button type="button" class="alnbtn btn-warn" data-job="imp-23">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-23" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-39">
 <td>imp-39</td>
 <td>62_C15</td>
 <td>355aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A5K7YXR9" target="_blank" rel="noopener">A0A5K7YXR9</a></b> 48.4%/99.4%<br><small>Type II secretion system protein GspD</small></span></td>
 <td><span class="dim">—</span></td>
-<td class="rec"></td>
-<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A5K7YXR9" target="_blank" rel="noopener">A0A5K7YXR9</a> <span class="far">· 48.4% 远缘</span><div class="chan">未达 85% 阈值，按最高同源回填</div></td>
+<td><span class="badge b5">最高同源回填</span><div class="chan">EBI 全库 · 远缘参考</div></td>
+<td><button type="button" class="alnbtn btn-warn" data-job="imp-39">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-39" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-40">
 <td>imp-40</td>
 <td>A1+P_final</td>
 <td>253aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0ABM8TRE4" target="_blank" rel="noopener">A0ABM8TRE4</a></b> 56%/99.2%<br><small>Curli production assembly/transport component CsgG</small></span></td>
 <td><span class="dim">—</span></td>
-<td class="rec"></td>
-<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0ABM8TRE4" target="_blank" rel="noopener">A0ABM8TRE4</a> <span class="far">· 56% 远缘</span><div class="chan">未达 85% 阈值，按最高同源回填</div></td>
+<td><span class="badge b5">最高同源回填</span><div class="chan">EBI 全库 · 远缘参考</div></td>
+<td><button type="button" class="alnbtn btn-warn" data-job="imp-40">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-40" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-59">
 <td>imp-59</td>
 <td>Conformation1·链1</td>
 <td>471aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A4P9UUN6" target="_blank" rel="noopener">A0A4P9UUN6</a></b> 63.5%/99.8%<br><small>Urease subunit alpha</small></span></td>
 <td><span class="dim">—</span></td>
-<td class="rec"></td>
-<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A4P9UUN6" target="_blank" rel="noopener">A0A4P9UUN6</a> <span class="far">· 63.5% 远缘</span><div class="chan">未达 85% 阈值，按最高同源回填</div></td>
+<td><span class="badge b5">最高同源回填</span><div class="chan">EBI 全库 · 远缘参考</div></td>
+<td><button type="button" class="alnbtn btn-warn" data-job="imp-59">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-59" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr id="row-imp-61">
 <td>imp-61</td>
 <td>Conformation2·链1</td>
 <td>453aa</td>
 <td><span class="far"><b><a href="https://www.uniprot.org/uniprotkb/A0A133XK86" target="_blank" rel="noopener">A0A133XK86</a></b> 61.6%/99.8%<br><small>Urease subunit alpha</small></span></td>
 <td><span class="dim">—</span></td>
-<td class="rec"></td>
-<td><span class="badge b3">未达 85% 阈值</span></td></tr><tr><td>imp-111</td><td>IL17A_FNQZ_fab_0910·链1</td><td>107aa</td>
-<td class="dim" colspan="3">汇总报告未留存该行原表序列（序列折叠/缺失）— 无法验证</td><td><span class="badge b4">无序列</span></td></tr><tr><td>imp-87</td><td>SavA_E148Q+FAD+acyl_pa…ne_0718</td><td>594aa</td>
-<td class="dim" colspan="3">汇总报告未留存该行原表序列（序列折叠/缺失）— 无法验证</td><td><span class="badge b4">无序列</span></td></tr>
-</tbody></table>
-</div>
+<td class="rec"><a href="https://www.uniprot.org/uniprotkb/A0A133XK86" target="_blank" rel="noopener">A0A133XK86</a> <span class="far">· 61.6% 远缘</span><div class="chan">未达 85% 阈值，按最高同源回填</div></td>
+<td><span class="badge b5">最高同源回填</span><div class="chan">EBI 全库 · 远缘参考</div></td>
+<td><button type="button" class="alnbtn btn-warn" data-job="imp-61">比对 ▾</button></td></tr>
+<tr class="aln-tr" id="aln-imp-61" hidden><td colspan="8"><div class="aln-panel"></div></td></tr><tr><td>imp-111</td><td>IL17A_FNQZ_fab_0910·链1</td><td>107aa</td>
+<td class="dim" colspan="3">汇总报告未留存该行原表序列（序列折叠/缺失）— 无法验证</td>
+<td><span class="badge b4">无序列</span></td><td class="dim">—</td></tr><tr><td>imp-87</td><td>SavA_E148Q+FAD+acyl_pa…ne_0718</td><td>594aa</td>
+<td class="dim" colspan="3">汇总报告未留存该行原表序列（序列折叠/缺失）— 无法验证</td>
+<td><span class="badge b4">无序列</span></td><td class="dim">—</td></tr>
+</tbody></table></div>
 
 <div class="note"><h3>结论</h3>
 <ul>
-<li><b>可回补 19/28（68%）</b>：主链直接回补 14 个 + 备选功能链回补 2 个（MHC-I 重链 / GPR86 复合物链等）；另有 3 个仅抗体成分链（IGKC/IGKV 种系基因）达标 — 语义上是复合物的抗体成分而非靶点主抗原，建议按需取舍。</li>
-<li><b>TrEMBL 全库通道（T3）价值关键</b>：Spike（Omicron）、PPRV H 蛋白（96-98%）、固氮酶（89-97%）、GPR88（86.6%）、HIV Env（88.1%）、脲酶 γ（85%）全部依赖 TrEMBL 毒株/物种条目，Swiss-Prot 快通道只能救回其中 4 个。</li>
-<li><b>不可回补 7 个</b>：均为工程改造构建体（纳米孔 A1+P 56%、62_C15 分泌素 48%）、种系距离过远（畜牧所脲酶 α 63%、GPCR75 64%、B-7-mer 73%）或菌株变异（PA_22f1 68.8%/覆盖 63% — 即此前 BLAST nr 超时的靶点，EBI 全库亦确认其与已知条目距离远，身份降级为近似证据属正确判定）。</li>
-<li><b>2 个无法验证</b>：IL17A_FNQZ_fab_0910·链1（序列已折叠）、SavA_E148Q（原表序列未留存）— 汇总报告建议为折叠序列保留 data-seq 快照。</li>
-<li><b>耗时</b>：全流程约 35 分钟（26 主链 T1+T2 ≈ 8 分钟；T3 全库批次并行 ≈ 25 分钟，EBI 队列中等拥堵时段）。作为 NCBI nr 失败后的兜底（v2.95 已集成），单靶点成本 T3 约 1-6 分钟，可接受。</li>
+<li><b>26/26 可验证靶点已全部指定回填条目</b>（精确 19 + 最高同源 7）；另 2 个汇总报告未留存序列，无法验证。</li>
+<li><b>TrEMBL 全库通道仍是主力</b>：Spike / PPRV 血凝素 / 固氮酶 / GPR88 / HIV Env / 脲酶 γ 等全部依赖毒株或物种 TrEMBL 条目（96–85%）；Swiss-Prot 快通道仅覆盖其中少数。</li>
+<li><b>最高同源回填的 7 个为远缘参考</b>（一致性 48–73%）：PA_22f1（炭疽保护性抗原 68.8%）、62_C15（分泌素 GspD 48.4%）、A1+P（curli 组装蛋白 56%）等均为工程改造体或种系距离过远的构建 — 请展开比对视图复核后使用。</li>
+<li><b>比对数据来源</b>：EBI ncbiblast 作业结果 HSP（qseq/hseq + 双端坐标）；相同/相似/不同由内嵌 BLOSUM62 重新计算（与 BLAST positive 同口径），缺口列为任一端空位。</li>
 </ul></div>
-</div></body></html>
+</div>
+<script>
+const LBL = {"imp-26": "GPR88_E2", "imp-28": "PKU_Jinlab_GPR88_G_E2·链2", "imp-31": "PKU_Jinlab_GPR88_G_E2_…0414·链2", "imp-51": "20230905·链1", "imp-52": "20230905·链2", "imp-54": "20230901·链1", "imp-60": "Conformation1·链2", "imp-62": "Conformation2·链2", "imp-78": "PPRD-dimer-250623", "imp-79": "PPRV-dimer", "imp-96": "GC_trimer_model", "impb-17": "J240-coot-3", "impb-18": "Omicron-2P-RBD2up1down_J528", "impb-56": "RBD-fab-240816_refined…ned_006", "imp-10": "lag3+fab·链4", "imp-29": "PKU_Jinlab_GPR88_G_E2·链3", "imp-32": "PKU_Jinlab_GPR88_G_E2_…0414·链3", "imp-44": "MHC_HM443+VLBp969·链2", "imp-45": "MHC_HM443+VLBp969·链3", "imp-100": "GPCR75", "imp-106": "B-7-mer", "imp-23": "PA_22f1_fab_new", "imp-39": "62_C15", "imp-40": "A1+P_final", "imp-59": "Conformation1·链1", "imp-61": "Conformation2·链1", "imp-111": "IL17A_FNQZ_fab_0910·链1", "imp-87": "SavA_E148Q+FAD+acyl_pa…ne_0718"};
+const ALIGN = {"imp-60":{"acc":"A0A089PHY9","desc":"Urease subunit gamma","db":"TR","os":"Pluralibacter gergoviae","entryName":"A0A089PHY9_PLUGE","hitLen":100,"channel":"T3","chainKind":"main","chainLen":101,"qfrom":2,"qto":101,"hfrom":1,"hto":100,"identity":85,"positive":93,"gaps":0,"alignLen":100,"expect":2.8e-54,"nhsp":1,"qseq":"MNLTPREQDKLLLFTAALVAERRRARGVKLNYPESVALISAHILEGARDGKTVSELMNEGRHVLTRDDVMEGIPEMVTEVQVEATFPDGTKLVTVHNPII","hseq":"MELTPREKDKLLLFTAALVAERRLARGVKLNYPESVALISAFIMEGARDGKTVASLMQEGRHVLTRDQVMEGVPEMIPDIQVEATFPDGTKLVTVHNPIL"},"imp-62":{"acc":"A0A089PHY9","desc":"Urease subunit gamma","db":"TR","os":"Pluralibacter gergoviae","entryName":"A0A089PHY9_PLUGE","hitLen":100,"channel":"T3","chainKind":"main","chainLen":101,"qfrom":2,"qto":101,"hfrom":1,"hto":100,"identity":85,"positive":93,"gaps":0,"alignLen":100,"expect":2.8e-54,"nhsp":1,"qseq":"MNLTPREQDKLLLFTAALVAERRRARGVKLNYPESVALISAHILEGARDGKTVSELMNEGRHVLTRDDVMEGIPEMVTEVQVEATFPDGTKLVTVHNPII","hseq":"MELTPREKDKLLLFTAALVAERRLARGVKLNYPESVALISAFIMEGARDGKTVASLMQEGRHVLTRDQVMEGVPEMIPDIQVEATFPDGTKLVTVHNPIL"},"imp-100":{"acc":"A0A8C9I9H4","desc":"Probable G protein-coupled receptor 75","db":"TR","os":"Piliocolobus tephrosceles","entryName":"A0A8C9I9H4_9PRIM","hitLen":540,"channel":"T3","chainKind":"main","chainLen":348,"qfrom":2,"qto":348,"hfrom":38,"hto":392,"identity":63.5,"positive":67,"gaps":23,"alignLen":397,"expect":2.2e-139,"nhsp":1,"qseq":"HTATLVTCTFLLAVIFCLGSYGNFIVFLSFFDPAFRKFRTNFDFMILNLSFCDLFICGVTAPMFTFVLFFSSASSIPDAFCFTFHLTSSGFIIMSLKTVAVIALHRLRMVL-------------VLLTLLLWATSFTLATLATL--------------------------VVDFTFCVAVVSVSYIMIAQTLRKNAQVARRQLADLEDNWETLNDNLKVIEKADNAAQVKDALTKMRAAALDAQKATPPDSPEMKDFRHGFDILVGQIDDALKLANEGKVKEAQA-----AAEQLKTTRNAYIQKYLERARSAINLSTAKDSKAVVTCVIIVLSVLVCCLPLGISLV------NGSFILYQFELFGFTLIFFKSGLNPFIYSRNSAGLRRKVLWCLQ","hseq":"HTATLVTCTFLLAVIFCLGSYGNFIVFLSFFDPAFRKFRTNFDFMILNLSFCDLFICGVTAPMFTFVLFFSSASSIPDAFCFTFHLTSSGFIIMSLKTVAVIALHRLRMVLGKQPNRMASFPCTVVLTLLLWATSFTLATLATLKTSKSHLCLPMSSLIAGKGKAILSLYVVDFTFCVAVVSVSYIMIAQTLRKNAQVRK----------------------------CPPVLT------VDASRPQPFMGVPVQG---GGDPIQCAMPALYRNQNYNKLQHVQTRGYTKSPNQLATPAASRLQLV-----SAINLSTAKDSKAVVTCVIIVLSVLVCCLPLGISLVQVVLSSNGSFILYQFELFGFTLIFFKSGLNPFIYSRNSAGLRRKVLWCLQ"},"imp-10":{"acc":"P0DOX7","desc":"Immunoglobulin kappa light chain","db":"SP","os":"Homo sapiens","entryName":"IGK_HUMAN","hitLen":214,"channel":"T2","chainKind":"alt","chainLen":217,"qfrom":3,"qto":217,"hfrom":1,"hto":214,"identity":88.4,"positive":93.5,"gaps":0,"alignLen":215,"expect":1.6e-133,"nhsp":1,"qseq":"DIRLTQSPSSLSASVGDRVTITCRASQSISSYLNWYQQKPGKAPKLLIYAASSLQGGVPSRFSGSGSGTDFTLTISSLQPEDSATYYCQQSYSTPYTFGQGTKLTVLGRTVAAPSVFIFPPSDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLTLSKADYEKHKVYACEVTHQGLSSPVTKSFNRGEC","hseq":"DIQMTQSPSTLSASVGDRVTITCRASQSINTWLAWYQQKPGKAPKLLMYKASSLESGVPSRFIGSGSGTEFTLTISSLQPDDFATYYCQQYNSDSKMFGQGTKVEVKG-TVAAPSVFIFPPSDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLTLSKADYEKHKVYACEVTHQGLSSPVTKSFNRGEC"},"imp-40":{"acc":"A0ABM8TRE4","desc":"Curli production assembly/transport component CsgG","db":"TR","os":"Cupriavidus numazuensis","entryName":"A0ABM8TRE4_9BURK","hitLen":296,"channel":"T3","chainKind":"main","chainLen":254,"qfrom":1,"qto":252,"hfrom":17,"hto":269,"identity":56,"positive":72.8,"gaps":4,"alignLen":257,"expect":2e-90,"nhsp":1,"qseq":"AGCASFSPPKGQTSIRDRAQPLSATVTRNALTKLPPPLAPIPAAVYNIKDQTGQYKPAPASNQSTAVMQGATSVLVKALLDSRWFIPLEREGLQNLLTERKIIRARDSKKD-----LSNLAAASVIIEGSIIAYDSNVRTGGAGAKYLGIGLSEQYREDQVTVNLRAINVNNGRILQSVTSTKMIFSRQLDAGAFGYIRFKKLLEIEAGYSYNEPAQLCVIDAIESALIQLIYEGVVGGTWKLKNPADIDSPIFTHY","hseq":"AGCASSRP----SSTYSPAELTPPTQVARDLTRLPEPAGRIPVAVYGMRDQTGQYKPAPDSSFSTSVTQGAASLLIKSLRDSRWFMPVERENLQNLLTERKIIRALELPQDKAQIQLPPLMPANMLIEGAIVAYESNVKTGGAGVRYLGIGPSEQYRQDQVTVNLRAVDIRTGQVMQSVTTSKTIFSIQMDFGLFRFVSTKNLLEIEAGFSRNEPVQQCVREAIETALVHLIVQGIQEGSWRLKNQDDFKNPIIQSY"},"imp-45":{"acc":"P30376","desc":"Class I histocompatibility antigen, Gogo-A*0201 alpha chain","db":"SP","os":"Gorilla gorilla gorilla","entryName":"1A02_GORGO","hitLen":365,"channel":"T2","chainKind":"alt","chainLen":278,"qfrom":2,"qto":278,"hfrom":24,"hto":300,"identity":93.9,"positive":95.3,"gaps":0,"alignLen":277,"expect":0,"nhsp":1,"qseq":"AGSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRTDAPKTHMTHHAVSDHEATLRCWALSFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGQEQRYTCHVQHEGLPKPLTLRWEP","hseq":"AGSHSMRYFSTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEEPEYWDGETRKVKAHSQTDRVNLGTLRGYYNQSEAGSHTIQKMYGCDVGSDGRFLRGYQQDAYDGKDYIALNEDLRSWTAADMAAEITKRKWEAAHFAEQLRAYLEGECVEWLRRYLENGKETLQRTDAPKTHMTHHAVSDHEAILRCWALSFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGQEQRYTCHVQHESLPKPLTLRWEP"},"imp-51":{"acc":"Q6N9U9","desc":"Nitrogenase protein alpha chain","db":"TR","os":"Rhodopseudomonas palustris (strain ATCC BAA-98 / CGA009)","entryName":"Q6N9U9_RHOPA","hitLen":522,"channel":"T3","chainKind":"main","chainLen":446,"qfrom":2,"qto":446,"hfrom":46,"hto":514,"identity":94.9,"positive":94.9,"gaps":5,"alignLen":469,"expect":0,"nhsp":1,"qseq":"ERGCAYCGAKHVIGTPMKDVIHMSHGPVGCTYDTWQTKRYISDNNNFQLKYTFATDVREKHIVFGAEGLLKQNIIEAFKACPDIKRMTIYQTCATALIGDDINAVAAEVMEEMPDVDIFTCNSPGFGGPSQSGGHHKINIAWINDKVGTVEPEITSDYVINYVGEYNIQGDQEVMLDYFTRMGIQVLSTFTGNGTYDGLRAMHRAHLNVLECARSAEYICNELRVRYGIPRLDIDGFGFEPLSQSLRKIGMFFGIEDRAEAIIAEETARWKPELDWYKERLKGKKVCLWPGGSKLWHWAHAIEEEMGVKVVSVYTKFGHQGDMEKGIARCGEDALAIDDPNELEGLEALEKLQPDIIFTGKRPGEVAKKVRVPYLNAHAYHNGPYKGFEGWVRFARDIYNGIYSPMHQLS------------------------KLPEEIAKSETLRRYTGKDDIISDLRKKNAPYFTP","hseq":"ERGCAYCGAKHVIGTPMKDVIHMSHGPVGCTYDTWQTKRYISDNNNFQLKYTFATDVREKHIVFGAEGLLKQNIIEAFKACPDIKRMTIYQTCATALIGDDINAVAAEVMEEMPDVDIFTCNSPGFGGPSQSGGHHKINIAWINDKVGTVEPEITSDYVINYVGEYNIQGDQEVMLDYFTRMGIQVLSTFTGNGTYDGLRAMHRAHLNVLECARSAEYICNELRVRYGIPRLDIDGFGFEPLSQSLRKIGMFFGIEDRAEAIIAEETARWKPELDWYKERLKGKKVCLWPGGSKLWHWAHAIEEEMGVKVVSVYTKFGHQGDMEKGIARCGEDALAIDDPNELEGLEALEKLQPDIIFTGKRPGEVAKKVRVPYLNAHAYHNGPYKGFEGWVRFARDIYNGIYSPMHQLSGLDISKDEIPADRGFVTQRMLSDAKLPEEIAKSETLRRYTGKDDIISDLRKKNAPYFTP"},"imp-59":{"acc":"A0A4P9UUN6","desc":"Urease subunit alpha","db":"TR","os":"Methylotuvimicrobium buryatense","entryName":"A0A4P9UUN6_METBY","hitLen":567,"channel":"T3","chainKind":"main","chainLen":472,"qfrom":2,"qto":472,"hfrom":14,"hto":567,"identity":63.5,"positive":72.6,"gaps":15,"alignLen":554,"expect":0,"nhsp":1,"qseq":"GPTTGDRVRLADTDLIIEVEKDLT----------------------RGTETA-DTVITNALIVDYTGIYKADIGIKDGYIAAIGSAGNPDIQDGVTFNIGAGTEVISGEGLIVTAGGIDSHVHFICPQQGAEALSSGVTTLIGGG-------NATTCTPGPWNMERMLEAAESMPVNVGYMGKGNASLPLALEEQVRSGAMGLKLHEDWGSTPAAIDCCLGVAERYDVQVAIHTDTLNEAGFVEDTIAAFKGRTIHTYHTE-------PDIIKACGMSNVLPSSTNPT-------------------------------------RETIAAEDILHDMGALSMLSSDSQAMGRVGEVITRTWQTAHKMKVQRGTLPEDSARNDNFRVKRYISKYTINPAIAHGCSDIIGSVEVGKLADLVLWKPAFFGVKPEIVLKGGFIAASMMG---------QPVHFRPMFGGIGLALPRTRVTFVSKAAADNDIKSKLGLQSIVYPVHGTRGLGKKDMVFNDYLPHIEVDPQTYIVKADGVELRCEPAKSLPLTQRYYLF","hseq":"GPTTGDRVRLADSELFIEVEKDLTIYGDEVKFGGGKVIRDGMGQSQAGSQTAMDLVITNALIVDHWGIVKADIGIKYGRIAAIGKAGNPDVQEGVDIIIGPGTEIIAGEGQILTAGGIDAHIHFICPQQVDEALMSGVTTMLGGGTGPATGTNATTCTPGPWNIHRMLQALDGLPMNFGLLGKGNASLPEALEEQIRAGAMGLKLHEDWGTTPAAIDCCLSVAERFDVQVAIHTDTLNESGFVEDTIAAFKGRTIHTYHTEGAGGGHAPDIIKACGQGNVLPSSTNPTRPYTINTVDEHLDMLMVCHHLDPGIPEDVAFAESRIRRETIAAEDILHDLGAFSMISSDSQAMGRVGEVITRTWQTAHKMKVQRGSLPEDNASHDNFRIKRYIAKYTINPAISHGISHEVGSVEVGKLADLVLWQPAFFGVKPSLILKGGFIAAAPMGDPNASIPTPQPVHYRPMFGSFGQAAASTSMMFLPQAAVVAGLADSIRLGKRIGVTRGTRSVGKHSMIHNHYQPVIEVDPQTYVVRADGVLLTCEPADVLPFAQRYFLF"},"imp-61":{"acc":"A0A133XK86","desc":"Urease subunit alpha","db":"TR","os":"Dechloromonas denitrificans","entryName":"A0A133XK86_9RHOO","hitLen":568,"channel":"T3","chainKind":"main","chainLen":454,"qfrom":2,"qto":454,"hfrom":15,"hto":568,"identity":61.6,"positive":69.4,"gaps":19,"alignLen":555,"expect":0,"nhsp":1,"qseq":"GPTTGDRVRLADTDLIIEVEKDLT-------------------------RETADTVITNALIVD-YTGIYKADIGIKDGYIAAIGSAGNPDIQDGVTFNIGAGTEVISGEGLIVTAGGIDSHVHFICPQQGAEALSSGVTTLIGGGTGPATGTNATTCTPGPWNMERMLEAAESMPVNVGYMGKGNASLPLALEEQVRSGAMGLKLHEDWGSTPAAIDCCLGVAERYDVQVAIHTD--------EDTIAAFKGRTIHTYHTE------APDIIKACGMSNVLPSSTNPT-----------------------------------------AAEDILHDMGALSMLSSDSQAMGRVGEVITRTWQTAHKMKVQRGTLPEDSARNDNFRVKRYISKYTINPAIAHGCSDIIGSVEVGKLADLVLWKPAFFGVKPEIVLKGGFIAASMM---------------------IGLALPRTRVTFVSKAAADNDIKSKLGLQSIVYPVHGTRGLGKKDMVFNDYLPHIEVDPQTYIVKADGVELRCEPAKSLPLTQRYYLF","hseq":"GPTTGDRLRLADTELIIEVEKDHTIYGEEVKFGGGKVIRDGMGQSQRVSAETVDTVITNALVVDAVTGIIKADIGLKDGRIAAIGKAGNPDIQPGVTIVIGPGTEVIAGEGMIVTAGGIDSHIHFICPQQIDEALYSGVTTMIGGGTGPATGTFATTCTPGPWHIHRMLEAADAFPMNLGFLGKGNASLPAALREQVEAGVIGLKLHEDWGTTPAAIDCCLTVADEMDVQVAIHSDTLNESGFVEATLAAFKGRTIHTFHTEGAGGGHAPDIIKAAGLPNVLPSSTNPTMPYTVNTIDEHLDMLMVCHHLDPSIAEDIAFAESRIRRETIAAEDILHDLGAFSMMSSDSQAMGRVGEVIIRTWQAAHKMKLQRGALPEDNARNDNFRVKRYIAKYTINPALTHGIAHTVGSIEVGKLADLVLWKPAFFGVKPSLILKGGMIAAAAMGDPNASIPTPQPVHYRPMFGSLGKAL-KTSVTFVSQAALQNPAVHALQLQKPLVAVSGTRTLKKSDMVHNGATPEITVDPETYVVKADGVHLVCEPATELPLAQRYFLF"},"imp-23":{"acc":"Q4ZE94","desc":"Protective antigen (Fragment)","db":"TR","os":"Bacillus anthracis","entryName":"Q4ZE94_BACAN","hitLen":561,"channel":"T3","chainKind":"main","chainLen":252,"qfrom":94,"qto":252,"hfrom":193,"hto":423,"identity":68.8,"positive":68.8,"gaps":31,"alignLen":231,"expect":1.3e-88,"nhsp":2,"qseq":"VNTGTAPIYNVLP---------------------LSQILAPNNYYP------------------------------------------VYGNIATY---------DTGSNWSEVLPQIQETTARIIFNGKDLNLVERRIAAVNPSDPLETTKPDMTLKEALKIAFGFNEPNGNLQYQGKDITEFDFNFDQQTSQNIKNQLAELNATNIYTVLDKIKLNAKMNILIRDKRFH","hseq":"VNTGTAPIYNVLPTTSLVLGKNQTLATIKAKENQLSQILAPNNYYPSKNLAPIALNAQDDFSSTPITMNYNQFLELEKTKQLRLDTDQVYGNIATYNFENGRVRVDTGSNWSEVLPQIQETTARIIFNGKDLNLVERRIAAVNPSDPLETTKPDMTLKEALKIAFGFNEPNGNLQYQGKDITEFDFNFDQQTSQNIKNQLAELNATNIYTVLDKIKLNAKMNILIRDKRFH"},"imp-26":{"acc":"A0A452R3J4","desc":"G protein-coupled receptor 88","db":"TR","os":"Ursus americanus","entryName":"A0A452R3J4_URSAM","hitLen":347,"channel":"T3","chainKind":"main","chainLen":248,"qfrom":2,"qto":247,"hfrom":30,"hto":313,"identity":86.6,"positive":86.6,"gaps":13,"alignLen":284,"expect":3.3e-161,"nhsp":1,"qseq":"RRIPVSLLYSGLAIGGTLANGMVIYLVSSFRKLQTTSNAFIVNGCAADLSVCALWMPQEAVLGLL-----------DGAGGSYRLLRGGLLGLGLTVSLLSHCLVALNRYLLITRAPATYQALYQRRHTAGMLALSWALALGLVLLLPPWA---------VHYPALLAAAALLAQTALLLHCYLGIVRRVRVSVKRV------------------SGLSVLLLCCVFLLATQPLVWVSLASGFSLPVPWGVQAASWLLCCALSALNPLLYTWRNEEFRRSVRSV","hseq":"RRIPVSLLYSGLAIGGTLANGMVIYLVSSFRKLQTTSNAFIVNGCAADLSVCALWMPQEAVLGLLPTGSAEPPADWDGAGGSYRLLRGGLLGLGLTVSLLSHCLVALNRYLLITRAPATYQALYQRRHTAGMLALSWALALGLVLLLPPWAPRPGTAPPRVHYPALLAAAALLAQTALLLHCYLGIVRRVRVSVKRVSAQPLPPALHPRRAQRRLSGLSVLLLCCVFLLATQPLVWVSLASGFSLPVPWGVQAASWLLCCALSALNPLLYTWRNEEFRRSVRSV"},"imp-29":{"acc":"P01630","desc":"Ig kappa chain V-II region 7S34.1","db":"SP","os":"Mus musculus","entryName":"KV2A6_MOUSE","hitLen":113,"channel":"T2","chainKind":"alt","chainLen":95,"qfrom":2,"qto":95,"hfrom":17,"hto":111,"identity":90.5,"positive":92.6,"gaps":1,"alignLen":95,"expect":5.6e-57,"nhsp":1,"qseq":"ESVSISCRSSKSLLHSNGNTYLYWFLQRPGQSPQLLIYRM-NLASGVPDRFSGSGSGTAFTLTISRLEAEDVGVYYCMQHLEYPLTFGAGTKLEL","hseq":"ESVSISCRSSKSLLHSNGNTYLYWFLQRPGQCPQLLIYRMSNLASGVPDRFSGSGSGTAFTLRISRVEAEDVGVYYCMQQREYPYTFGGGTKLEI"},"imp-32":{"acc":"P01630","desc":"Ig kappa chain V-II region 7S34.1","db":"SP","os":"Mus musculus","entryName":"KV2A6_MOUSE","hitLen":113,"channel":"T2","chainKind":"alt","chainLen":95,"qfrom":2,"qto":95,"hfrom":17,"hto":111,"identity":90.5,"positive":92.6,"gaps":1,"alignLen":95,"expect":5.6e-57,"nhsp":1,"qseq":"ESVSISCRSSKSLLHSNGNTYLYWFLQRPGQSPQLLIYRM-NLASGVPDRFSGSGSGTAFTLTISRLEAEDVGVYYCMQHLEYPLTFGAGTKLEL","hseq":"ESVSISCRSSKSLLHSNGNTYLYWFLQRPGQCPQLLIYRMSNLASGVPDRFSGSGSGTAFTLRISRVEAEDVGVYYCMQQREYPYTFGGGTKLEI"},"imp-44":{"acc":"P30376","desc":"Class I histocompatibility antigen, Gogo-A*0201 alpha chain","db":"SP","os":"Gorilla gorilla gorilla","entryName":"1A02_GORGO","hitLen":365,"channel":"T2","chainKind":"alt","chainLen":278,"qfrom":2,"qto":278,"hfrom":24,"hto":300,"identity":93.9,"positive":95.3,"gaps":0,"alignLen":277,"expect":0,"nhsp":1,"qseq":"AGSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRTDAPKTHMTHHAVSDHEATLRCWALSFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGQEQRYTCHVQHEGLPKPLTLRWEP","hseq":"AGSHSMRYFSTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEEPEYWDGETRKVKAHSQTDRVNLGTLRGYYNQSEAGSHTIQKMYGCDVGSDGRFLRGYQQDAYDGKDYIALNEDLRSWTAADMAAEITKRKWEAAHFAEQLRAYLEGECVEWLRRYLENGKETLQRTDAPKTHMTHHAVSDHEAILRCWALSFYPAEITLTWQRDGEDQTQDTELVETRPAGDGTFQKWAAVVVPSGQEQRYTCHVQHESLPKPLTLRWEP"},"imp-52":{"acc":"Q6N9V1","desc":"Fe-only nitrogenase subunit beta","db":"TR","os":"Rhodopseudomonas palustris (strain ATCC BAA-98 / CGA009)","entryName":"Q6N9V1_RHOPA","hitLen":461,"channel":"T3","chainKind":"main","chainLen":403,"qfrom":2,"qto":403,"hfrom":12,"hto":461,"identity":89.3,"positive":89.3,"gaps":11,"alignLen":450,"expect":0,"nhsp":1,"qseq":"GTINPIFTCQPAGAQYASIGIKDCIGIVHGGQGCVMFVRLLISQHLKESFEIASSSVHEDGAVFGALDRVEEAVDVLLMRYPHVKVVPIITTCSTEVIGDDVDGVVTKLQEELLDVKYPDREVHLIPIHCPSFVGSMVTGYDVAVRDFVKHFSKKDKPSLKINLITGWVNPGDVKELKHLLAEMQVEANVLFEIESFDSPLMPDKSAVSHGSTTIADLTATADAQGTIALNRYEGGLAATWLQTRWDVPAVIGPTPIGIRNTDTFLRNVKEMTGKPIPESLVKERGIALDAITDLAHMFLADKKVAIYGNPDLVLGLAEYCLDLEMKP------------------------------------------------ELDLILGHSKGRFVAIDYNIPMLRVGFPTYDRAGLYRYPVVGYAGATWLAEQMANTLFNDMEVKKNREWILNVW","hseq":"GTINPIFTCQPAGAQYASIGIKDCIGIVHGGQGCVMFVRLLISQHLKESFEIASSSVHEDGAVFGALDRVEEAVDVLLMRYPHVKVVPIITTCSTEVIGDDVDGVVTKLQEELLDVKYPDREVHLIPIHCPSFVGSMVTGYDVAVRDFVKHFSKKDKPSLKINLITGWVNPGDVKELKHLLAEMQVEANVLFEIESFDSPLMPDKSAVSHGSTTIADLTATADAQGTIALNRYEGGLAATWLQTRWDVPAVIGPTPIGIRNTDTFLRNVKEMTGKPIPESLVKERGIALDAITDLAHMFLADKKVAIYGNPDLVLGLAEYCLDLEMKPVLLLLGDENAGYANDPRIAALKANVDYPMEIITNADLFELEERIKNGLELDLILGHSKGRFVAIDYNIPMLRVGFPTYDRAGLYRYPVVGYAGATWLAEQMANTLFNDMEVKKNREWILNVW"},"imp-54":{"acc":"Q6N9V1","desc":"Fe-only nitrogenase subunit beta","db":"TR","os":"Rhodopseudomonas palustris (strain ATCC BAA-98 / CGA009)","entryName":"Q6N9V1_RHOPA","hitLen":461,"channel":"T3","chainKind":"main","chainLen":437,"qfrom":2,"qto":437,"hfrom":10,"hto":461,"identity":96.5,"positive":96.5,"gaps":4,"alignLen":452,"expect":0,"nhsp":1,"qseq":"RIGTINPIFTCQPAGAQYASIGIKDCIGIVHGGQGCVMFVRLLISQHLKESFEIASSSVHEDGAVFGALDRVEEAVDVLLMRYPHVKVVPIITTCSTEVIGDDVDGVVTKLQEELLDVKYPDREVHLIPIHCPSFVGSMVTGYDVAVRDFVKHFSKKDKPSLKINLITGWVNPGDVKELKHLLAEMQVEANVLFEI----------------GSTTIADLTATADAQGTIALNRYEGGLAATWLQTRWDVPAVIGPTPIGIRNTDTFLRNVKEMTGKPIPESLVKERGIALDAITDLAHMFLADKKVAIYGNPDLVLGLAEYCLDLEMKPVLLLLGDENAGYANDPRIAALKANVDYPMEIITNADLFELEERIKNGLELDLILGHSKGRFVAIDYNIPMLRVGFPTYDRAGLYRYPVVGYAGATWLAEQMANTLFNDMEVKKNREWILNVW","hseq":"RIGTINPIFTCQPAGAQYASIGIKDCIGIVHGGQGCVMFVRLLISQHLKESFEIASSSVHEDGAVFGALDRVEEAVDVLLMRYPHVKVVPIITTCSTEVIGDDVDGVVTKLQEELLDVKYPDREVHLIPIHCPSFVGSMVTGYDVAVRDFVKHFSKKDKPSLKINLITGWVNPGDVKELKHLLAEMQVEANVLFEIESFDSPLMPDKSAVSHGSTTIADLTATADAQGTIALNRYEGGLAATWLQTRWDVPAVIGPTPIGIRNTDTFLRNVKEMTGKPIPESLVKERGIALDAITDLAHMFLADKKVAIYGNPDLVLGLAEYCLDLEMKPVLLLLGDENAGYANDPRIAALKANVDYPMEIITNADLFELEERIKNGLELDLILGHSKGRFVAIDYNIPMLRVGFPTYDRAGLYRYPVVGYAGATWLAEQMANTLFNDMEVKKNREWILNVW"},"imp-96":{"acc":"A0A125T1E9","desc":"M polyprotein","db":"TR","os":"Tofla virus","entryName":"A0A125T1E9_9VIRU","hitLen":1436,"channel":"T3","chainKind":"main","chainLen":490,"qfrom":2,"qto":489,"hfrom":812,"hto":1315,"identity":88.1,"positive":94.2,"gaps":3,"alignLen":504,"expect":0,"nhsp":1,"qseq":"SVSIDAPWGAIQVESTYKPKLPVSNIELAWNSIEEQGDKIILSGKSTSILKLEERTGVQWSLGAESASEEKRLLVSVLDYTQVYSSTFQYITGDRTISEWPKATCTGDCPDRCACRTSTCLFKSWPHSRNWRCNPTWCWGVGTGCTCCGVDIERPFNKYFAVKWSTEYVRTDALVCVELTDLERHCDVVEAGSQFVIGPVRVVVSDPQNVQSKLPQEVLTVQKLDKHQHLDLMHVTNIISAKNACKLQSCTHGSPGDMQILHTDNLI----------------VNTTWMSWEGCDLDYYCTTGSWPSCTFTGVNTENTESFENLLNTEANLIDRYHFHSKRIYAQGATLQMDLKGRPKSGGGELTVLVDIKGLELHSKRVVLKGLEIKALSCTGCYSCSSGMSCTVDVRIEKPDEFTVHLRSTDPNTAISEGSIMARKLSGGPQSKVRAFTALKVSEVCVEIVEKNYCPTCKETDTKKCAKVDLQPPKDILLEHKGTLIKSQND","hseq":"SISIDAPWGAIQVESTYKPKLPVSNIELAWNSVEEQGDKIILSGKSTSILKLEEKTGVQWSLGAESASEEKRLLVSVLDYTQVYSSTFQYITGDRTISEWPKATCTGDCPDRCSCRTSTCLYKTWPHSRNWRCNPTWCWGVGTGCTCCGVDIERPFNKYFAVKWSTDYVRTDVLVCVELTDLERHCDVVEAGSQFVIGPVRVVVSDPQNVQTKLPPEVLTVQKLEKHSHLDLMHVTNIISAKNACKLQSCTHGSPGDMQILHTDNLIQNSHDDGANLAEVIPEVNTTWMSWEGCDLDYYCTTGSWPSCTFTGVNTENSDSFENLLNTEANLVDRYHFHSKRIFAQGSTLQMDLKGRPITGGGELTVLVDIKGLELHSKKVVLKGLEIKSLSCTGCYSCSSGVSCSVDVKIEKPDEFTVHLRSTDPNTVISEGSIVARKLTGGPQSKVKAFTALKAGKICVEIVEKSYCPSCKDSDVKKCINADLQPPKDILLEHKGIIIKHQNN"},"imp-106":{"acc":"A0ABD1AVK7","desc":"Disease resistance protein","db":"TR","os":"Cardamine amara subsp. amara","entryName":"A0ABD1AVK7_CARAN","hitLen":869,"channel":"T3","chainKind":"main","chainLen":730,"qfrom":5,"qto":727,"hfrom":148,"hto":865,"identity":73.3,"positive":84.3,"gaps":2,"alignLen":726,"expect":0,"nhsp":1,"qseq":"VEEMPTHPTVGQEEIFEKTWNRLMEDGVRIMGLHGMGGVGKTTLFKKINNKFVEIPGRFKIVIWVVVSKGATISRLQDDIAKHLHLFREEWKNKDESNKAIDIHKVLKNKRFVLMLDDIWDKVNLEAIGVPFPTRENGCKIAFTTRSREVCGSMGDHEPLEVKCLDWNKAWELFQNKVGDKTLSPDIVEKAKMIAKKCCGLPLALSVIGETMSTKTTVQEWDHAIDVLTISAAEFSGMENKILPILKFSYDSLKDEYVKSCFLYCALFPEDCFIVKEKLIHYWICEGFLGEDGQDIKKAMNKGYGILGTLIRAHLVMEANAEEVVMHVVVREMALWIASDLGEQKENFIVQAGVGLHEIPKVKDWKAMSRMSLMENDIKEITCASNCSEIKTLFLQNNERFVNLSGEFIQYMQKLVVLDLSNNYDFNKLPEQISELTSLQFLDLSDTSIEELPVSFQKLEKLTHLNLSYTDKLCSLSGISKLSGLRILKLMGSKVHGDVNLLKELQILKYMQVLTITISTELALKQLLNDQRLANCTEALEIIGFQQKAFDISMLASMKNLSEFRLSYSHYLETNIFDIQNPRRQCFKNLSRVFISYCGNIKDLTWLLFAPNLVFLNIRDLREVKDIINNEKAINLTGITPFLKLESLHLYNLPKLESMYWSPLPFPVLKETLVIDCPKLRKLPLNATSVPHIGEFSISM---KQEVEFEWEDEDTKNRFLPLVKR","hseq":"VEERPNQPTVGQEEILETAWNRLMEDGVGIMGLHGMGGVGKTTLFKKINNNFAEMAGRL-VVIWIVVSQGAKISKLQDVIAKKLDLFGDEWKNKDESDKAADIYRLLQGKKFVLMLDDIWEKVDLVAIGVPFPTRENGCKVAFTTRSRDVCGSMGDLDPIEVKCLEWNKAWELFQNKVGDKTLSPDIVEQAKKVAKKCRGLPLALNVIGETMAAKTTVQEWNHAVNVLTRSAAEFSNMDNKILPILKFSYDSLVDEHIKLCFLYCALFPEDCKISKENLIDYWICEGFTGEDDQAIKEAMNKGYDVLGTLIRSHLVMEANKDEVVMHDVVREMALWIASDLGKQKETFVVQAKVGLREIPKVKDWGAVRRMSLMDNDIEEITCTSKCSELTTLFLQSN-RLENLSGEFIRSMQKLVVLDLSNNCDFSELPDQISELTSLQFLDLSFTIIEQLPVGFQELKKLTYLNLAFTERLCSIRGISKLSSLRILKLLGSKVDGDVSLVKELQLLEHLQVLTINISTELGLKQLSDDQRLANCTTYLGIEDFQQQIFDISLLASMKNLSLLSVNNSHVWEINTDII------CFSNLSRVVISKCNGVKDLTWLLFAPNLFYLSCEYSDDVEEIINKEKATNLTGITPFQKLEILELERLPKLESIYWSPRPFPFLKHIEIGDCPKLRKLPLNATSVPQLEKFEISMIPEEQKTELEWENEDTKNRFLPLIRR"},"imp-28":{"acc":"A0A452R3J4","desc":"G protein-coupled receptor 88","db":"TR","os":"Ursus americanus","entryName":"A0A452R3J4_URSAM","hitLen":347,"channel":"T3","chainKind":"main","chainLen":247,"qfrom":2,"qto":247,"hfrom":30,"hto":313,"identity":86.6,"positive":86.6,"gaps":13,"alignLen":284,"expect":3.2e-161,"nhsp":1,"qseq":"RRIPVSLLYSGLAIGGTLANGMVIYLVSSFRKLQTTSNAFIVNGCAADLSVCALWMPQEAVLGLL-----------DGAGGSYRLLRGGLLGLGLTVSLLSHCLVALNRYLLITRAPATYQALYQRRHTAGMLALSWALALGLVLLLPPWA---------VHYPALLAAAALLAQTALLLHCYLGIVRRVRVSVKRV------------------SGLSVLLLCCVFLLATQPLVWVSLASGFSLPVPWGVQAASWLLCCALSALNPLLYTWRNEEFRRSVRSV","hseq":"RRIPVSLLYSGLAIGGTLANGMVIYLVSSFRKLQTTSNAFIVNGCAADLSVCALWMPQEAVLGLLPTGSAEPPADWDGAGGSYRLLRGGLLGLGLTVSLLSHCLVALNRYLLITRAPATYQALYQRRHTAGMLALSWALALGLVLLLPPWAPRPGTAPPRVHYPALLAAAALLAQTALLLHCYLGIVRRVRVSVKRVSAQPLPPALHPRRAQRRLSGLSVLLLCCVFLLATQPLVWVSLASGFSLPVPWGVQAASWLLCCALSALNPLLYTWRNEEFRRSVRSV"},"imp-31":{"acc":"A0A452R3J4","desc":"G protein-coupled receptor 88","db":"TR","os":"Ursus americanus","entryName":"A0A452R3J4_URSAM","hitLen":347,"channel":"T3","chainKind":"main","chainLen":247,"qfrom":2,"qto":247,"hfrom":30,"hto":313,"identity":86.6,"positive":86.6,"gaps":13,"alignLen":284,"expect":3.2e-161,"nhsp":1,"qseq":"RRIPVSLLYSGLAIGGTLANGMVIYLVSSFRKLQTTSNAFIVNGCAADLSVCALWMPQEAVLGLL-----------DGAGGSYRLLRGGLLGLGLTVSLLSHCLVALNRYLLITRAPATYQALYQRRHTAGMLALSWALALGLVLLLPPWA---------VHYPALLAAAALLAQTALLLHCYLGIVRRVRVSVKRV------------------SGLSVLLLCCVFLLATQPLVWVSLASGFSLPVPWGVQAASWLLCCALSALNPLLYTWRNEEFRRSVRSV","hseq":"RRIPVSLLYSGLAIGGTLANGMVIYLVSSFRKLQTTSNAFIVNGCAADLSVCALWMPQEAVLGLLPTGSAEPPADWDGAGGSYRLLRGGLLGLGLTVSLLSHCLVALNRYLLITRAPATYQALYQRRHTAGMLALSWALALGLVLLLPPWAPRPGTAPPRVHYPALLAAAALLAQTALLLHCYLGIVRRVRVSVKRVSAQPLPPALHPRRAQRRLSGLSVLLLCCVFLLATQPLVWVSLASGFSLPVPWGVQAASWLLCCALSALNPLLYTWRNEEFRRSVRSV"},"imp-39":{"acc":"A0A5K7YXR9","desc":"Type II secretion system protein GspD","db":"TR","os":"Desulfosarcina widdelii","entryName":"A0A5K7YXR9_9BACT","hitLen":669,"channel":"T3","chainKind":"main","chainLen":356,"qfrom":3,"qto":356,"hfrom":291,"hto":653,"identity":48.4,"positive":65.6,"gaps":7,"alignLen":372,"expect":5.6e-97,"nhsp":1,"qseq":"KIQVYKLNNAEAEEMAQVLQNLQK-----------AIFVSSDISITADKATNSLLIMADSADYATIEGIINELDVPKSMVYIEALIMEVSVDKAFELGIEWSVFKDTNIGND-DAVVGGGFNASSGFSNAASNLLYSSGGNVGVVSGTLDLTLGGTTVTI-----PSLGALIKALQTNEDVHILQTPKLLATDNKEATIKVGKVIPYQTRVSTTDNETYNTYDYKDVGLTLKITPHISEDRTVRLEIFQELSALTGASAEITTTLPTTLNRTVETTVVVEDQNMLVIGGLIDDTYTNKVTKVPLLGSIPLLGRLFRYDSQVGNKTNLYIFITPRVVKNPSEGTRLTDDLQDTLTPEETGIIKLY-GPLENSE","hseq":"KIHVYYLEYAAAEELVAVLKDLPKEEKTQKAGAKEAPVVSSDVTITADKATNSVIITADRDDYATLVEIIRQIDIPRAMVYIEALIMEVNAEKSFDLGTEWIVGDDVKLNNDRQGIAAGGF-----ISEDSAISIGTDGDIVPALASGFSMGLFGEAVEIAGISFPSIAAIVQAYKKDKDVNILSTPQLLTTDNQEASITVGKNIPYQTTTSTTDNDTYNSYEYRDVGKTLKITPQINKDRMVRLNISLEVSSLEST----TDFRPTTLKRTVETTVMVKNSNTVVIGGLIDDTFSQTEYKVPCLGDVPGLGWLFKTRSKGNEKSNLYIFITPKVLQNPSEAASVSQIKKDEIDKKMETQIKLYRGGGENED"},"imp-78":{"acc":"A0A221S4Q5","desc":"Hemagglutinin glycoprotein","db":"TR","os":"Morbillivirus caprinae","entryName":"A0A221S4Q5_9PARA","hitLen":609,"channel":"T3","chainKind":"main","chainLen":461,"qfrom":2,"qto":458,"hfrom":143,"hto":607,"identity":96.3,"positive":97.4,"gaps":2,"alignLen":465,"expect":0,"nhsp":1,"qseq":"PERVKINFDQFCEYKAAVKSIDHIFESPLNKSKKLQSLTLGPGTGCLGRTVTRAHFSELTLTLMDLDLEMKHNVSSVFTVVEEGLFGRTYTVWRSDA--------IGHFLRVFEIGLVRDLGLGPPVFHMTNYLTVNMSDDYRRCLLAVGELKLTALCTSSETVTLSERGVPKREPLVVVILNLAGPTLGGELYSVLPTSDPMVEKLYLSSHRGIIKDDEANWVVPSTDVRDLQNKGECLVEACKTRPPSFCNGTGSGPWSEGRIPAYGVIRVSLDLASDPDVVITSVFGPLIPHLSGMDLYNNPFSGAVWLAVPPYEQSFLGMINTIGFPNRAEVMPHILTTEIRGPRSRCHVPIELSRRVDDDIKIGSNMVILPTMDLRYITATYDVSRSEHAIVYYIYDTGRSSSYFYPVRLNFKGNPLSLRIECFPWRHKVWCYHDCLIYNTVTDEEVHTRGLTGIEVTCN","hseq":"PERVKINFDQFCEYKAAVKSIEHIFESPLNKSKKLQSLTLGPGTGCLGRTVTKAHFSELTLTLMDLDLEMKHNVSSVFTVVEEGLFGRTYTVWRSDARDPSTDLGIGHFLRVFEIGLIRDLGLGPPVFHMTNYLTVNMSDDYRRCLLAVGELKLTALCTSSETVTLSERGAPKREPLVVVILNLAGPTLGGELYSVLPTSDLMVEKLYLSSHRGIIKDDEANWVVPSTDVRDLQNKGECLVEACKTRPPSFCNGTGSGPWSEGRIPAYGVIRVSLDLASDPDVVITSVFGPLIPHLSGMDLYNNPFSRAIWLAVPPYEQSFLGMINTIGFPNRAEVMPHILTTEIRGPRGRCHVPIELSRRVDDDIKIGSNMVILPTMDLRYITATYDVSRSEHAIVYYIYDTGRSSSYFYPVRLNFKGNPLSLRIECFPWRHKVWCYHDCLIYNTITDEEVHTRGLTGIEVTCN"},"imp-79":{"acc":"F1C3L3","desc":"Hemagglutinin glycoprotein","db":"TR","os":"Peste-des-petits-ruminants virus","entryName":"F1C3L3_PPRV","hitLen":609,"channel":"T3","chainKind":"main","chainLen":461,"qfrom":2,"qto":458,"hfrom":143,"hto":607,"identity":98.3,"positive":98.3,"gaps":2,"alignLen":465,"expect":0,"nhsp":1,"qseq":"PERVKINFDQFCEYKAAVKSVEHIFESSLNRSERLRLLTLGPGTGCLGRTVTRAQFSELTLTLMDLDLEMKHNVSSVFTVVEEGLFGRTYTVWRSDT--------IGHFLRVFEIGLVRDLELGAPIFHMTNYLTVNMSDDYRSCLLAVGELKLTALCTPSETVTLSESGVPKREPLVVVILNLAGPTLGGELYSVLPTTDPTVEKLYLSSHRGIIKDNEANWVVPSTDVRDLQNKGECLVEACKTRPPSFCNGTGIGPWSEGRIPAYGVIRVSLDLASDPGVVITSVFGPLIPHLSGMDLYNNPFSRAAWLAVPPYEQSFLGMINTIGFPDRAEVMPHILTTEIRGPRGRCHVPIELSSRIDDDIKIGSNMVVLPTKDLRYITATYDVSRSEHAIVYYIYDTGRSSSYFYPVRLNFRGNPLSLRIECFPWYHKVWCYHDCLIYNTITNEEVHTRGLTGIEVTCN","hseq":"PERVKINFDQFCEYKAAVKSVEHIFESSLNRSERLRLLTLGPGTGCLGRTVTRAQFSELTLTLMDLDLEMKHNVSSVFTVVEEGLFGRTYTVWRSDTGKPSTSPGIGHFLRVFEIGLVRDLELGAPIFHMTNYLTVNMSDDYRSCLLAVGELKLTALCTPSETVTLSESGVPKREPLVVVILNLAGPTLGGELYSVLPTTDPTVEKLYLSSHRGIIKDNEANWVVPSTDVRDLQNKGECLVEACKTRPPSFCNGTGIGPWSEGRIPAYGVIRVSLDLASDPGVVITSVFGPLIPHLSGMDLYNNPFSRAAWLAVPPYEQSFLGMINTIGFPDRAEVMPHILTTEIRGPRGRCHVPIELSSRIDDDIKIGSNMVVLPTKDLRYITATYDVSRSEHAIVYYIYDTGRSSSYFYPVRLNFRGNPLSLRIECFPWYHKVWCYHDCLIYNTITNEEVHTRGLTGIEVTCN"},"impb-17":{"acc":"A0A8A1NDM2","desc":"Spike glycoprotein","db":"TR","os":"Severe acute respiratory syndrome coronavirus 2","entryName":"A0A8A1NDM2_SARS2","hitLen":1268,"channel":"T3","chainKind":"main","chainLen":1071,"qfrom":2,"qto":1071,"hfrom":14,"hto":1142,"identity":93.8,"positive":94,"gaps":5,"alignLen":1129,"expect":0,"nhsp":1,"qseq":"QCVNLRTRTQLPPAYTNSFTRGVYYPDKVFRSSVLHSTQDLFLPFFSNVTWFHAIH-------KRFDNPVLPFNDGVYFASTEKSNIIRGWIFGTTLDSKTQSLLIVNNATNVVIKVCEFQFCNDPFLGVYYHKNNKSWMESG--VYSSANNCTFEYVSQPFLMDLEGKQGNFKNLREFVFKNIDGYFKIYSKHTPINLVRDLPQGFSALEPLVDLPIGINITRFQTLLALHRS-------SSGWTAGAAAYYVGYLQPRTFLLKYNENGTITDAVDCALDPLSETKCTLKSFTVEKGIYQTSNFRVQPTESIVRFPNITNLCPFGEVFNATRFASVYAWNRKRISNCVADYSVLYNSASFSTFKCYGVSPTKLNDLCFTNVYADSFVIRGDEVRQIAPGQTGKIADYNYKLPDDFTGCVIAWNSNNLDSKVGGNYNYRYRLFRKSNLKPFERDISTEIYQAGSKPCNGVEGFNCYFPLQSYGFQPTNGVGYQPYRVVVLSFELLHAPATVCGPKKSTNLVKNKCVNFNFNGLTGTGVLTESNKKFLPFQQFGRDIADTTDAVRDPQTLEILDITPCSFGGVSVITPGTNTSNQVAVLYQGVNCTEV----------PTWRVYSTGSNVFQTRAGCLIGAEHVNNSYECDIPIGAGICASYQ-------TSQSIIAYTMSLGAENSVAYSNNSIAIPTNFTISVTTEILPVSMTKTSVDCTMYICGDSTECSNLLLQYGSFCTQLNRALTGIAVEQDKNTQEVFAQVKQIYKTPPIKDFGGFNFSQILPDPSKPSKRSFIEDLLFNKVT--------------------------KFNGLTVLPPLLTDEMIAQYTSALLAGTITSGWTFGAGAALQIPFAMQMAYRFNGIGVTQNVLYENQKLIANQFNSAIGKIQDSLSSTASALGKLQNVVNQNAQALNTLVKQLSSNFGAISSVLNDILSRLDPPEAEVQIDRLITGRLQSLQTYVTQQLIRAAEIRASANLAATKMSECVLGQSKRVDFCGKGYHLMSFPQSAPHGVVFLHVTYVPAQEKNFTTAPAICHDGKAHFPREGVFVSNGTHWFVTQRNFYEPQIITTDNTFVSGNCDVVIGIVNNTVYDPLQPELDS","hseq":"QCVNLTTRTQLPPAYTNSFTRGVYYPDKVFRSSVLYSTQDLFLPFFSNVTWFHAIHVSGTNGTKRFDNPVLPFNDGVYFASTEKSNIIRGWIFGTTLDSKTQSLLIVNNATNVVIKVCEFQFCNDPFLGVYYHKNNKSWMESEFRVYSSANNCTFEYVSQPFLMDLEGKQGNFKNLREFVFKNIDGYFKIYSKHTPINLVRDLPQGFSALEPLVDLPIGINITRFQTLLALHRSYLTPGDSSSGWTAGAAAYYVGYLQPRTFLLKYNENGTITDAVDCALDPLSETKCTLKSFTVEKGIYQTSNFRVQPTESIVRFPNITNLCPFGEVFNATRFASVYAWNRKRISNCVADYSVLYNSASFSTFKCYGVSPTKLNDLCFTNVYADSFVIRGDEVRQIAPGQTGKIADYNYKLPDDFTGCVIAWNSNNLDSKVGGNYNYLYRLFRKSNLKPFERDISTEIYQAGSTPCNGVEGFNCYFPLQSYGFQPTNGVGYQPYRVVVLSFELLHAPATVCGPKKSTNLVKNKCVNFNFNGLTGTGVLTESNKKFLPFQQFGRDIADTTDAVRDPQTLEILDITPCSFGGVSVITPGTNTSNQVAVLYQDVNCTEVPVAIHADQLTPTWRVYSTGSNVFQTRAGCLIGAEHVNNSYECDIPIGAGICASYSPRRARSVASQSIIAYTMSLGAENSVAYSNNSIAIPTNFTISVTTEILPVSMTKTSVDCTMYICGDSTECSNLLLQYGSFCTQLNRALTGIAVEQDKNTQEVFAQVKQIYKTPPIKDFGGFNFSQILPDPSKPSKRSFIEDLLFNKVTLADAGFIKQYGDCLGDIAARDLICAQKFNGLTVLPPLLTDEMIAQYTSALLAGTITSGWTFGAGAALQIPFAMQMAYRFNGIGVTQNVLYENQKLIANQFNSAIGKIQDSLSSTASALGKLQDVVNQNAQALNTLVKQLSSNFGAISSVLNDILSRLDKVEAEVQIDRLITGRLQSLQTYVTQQLIRAAEIRASANLAATKMSECVLGQSKRVDFCGKGYHLMSFPQSAPHGVVFLHVTYVPAQEKNFTTAPAICHDGKAHFPREGVFVSNGTHWFVTQRNFYEPQIITTDNTFVSGNCDVVIGIVNNTVYDPLQPELDS"},"impb-18":{"acc":"A0A8A1NDM2","desc":"Spike glycoprotein","db":"TR","os":"Severe acute respiratory syndrome coronavirus 2","entryName":"A0A8A1NDM2_SARS2","hitLen":1268,"channel":"T3","chainKind":"main","chainLen":1083,"qfrom":1,"qto":1083,"hfrom":13,"hto":1142,"identity":93,"positive":93.6,"gaps":4,"alignLen":1130,"expect":0,"nhsp":1,"qseq":"AQCVNLTTRTQLPPAYTNSFTRGVYYPDKVFRSSVLHSTQDLFLPFFSNVTWFHVI--------KRFDNPVLPFNDGVYFASIEKSNIIRGWIFGTTLDSKTQSLLIVNNATNVVIKVCEFQFCNDPFLD----------MESEFRVYSSANNCTFEYVSQPFL--------NFKNLREFVFKNIDGYFKIYSKHTPI----DLPQGFSALEPLVDLPIGINITRFQTLLALHRS---------GWTAGAAAYYVGYLQPRTFLLKYNENGTITDAVDCALDPLSETKCTLKSFTVEKGIYQTSNFRVQPTESIVRFPNITNLCPFDEVFNATRFASVYAWNRKRISNCVADYSVLYNLAPFFTFKCYGVSPTKLNDLCFTNVYADSFVIRGDEVRQIAPGQTGNIADYNYKLPDDFTGCVIAWNSNKLDSKVSGNYNYLYRLFRKSNLKPFERDISTEIYQAGNKPCNGVAGFNCYFPLRSYSFRPTYGVGHQPYRVVVLSFELLHAPATVCGPKKSTNLVKNKCVNFNFNGLKGTGVLTESNKKFLPFQQFGRDIADTTDAVRDPQTLEILDITPCSFGGVSVITPGTNTSNQVAVLYQGVNCTEVPVAIHADQLTPTWRVYSTGSNVFQTRAGCLIGAEYVNNSYECDIPIGAGICASYQ--------SQSIIAYTMSLGAENSVAYSNNSIAIPTNFTISVTTEILPVSMTKTSVDCTMYICGDSTECSNLLLQYGSFCTQLKRALTGIAVEQDKNTQEVFAQVKQIYKTPPIKYFGGFNFSQILPDPSKPSKRSFIEDLLFNKVTLADAGFIKQYGDCLGDIAARDLICAQKFKGLTVLPPLLTDEMIAQYTSALLAGTITSGWTFGAGAALQIPFAMQMAYRFNGIGVTQNVLYENQKLIANQFNSAIGKIQDSLSSTASALGKLQDVVNHNAQALNTLVKQLSSKFGAISSVLNDIFSRLDPPEAEVQIDRLITGRLQSLQTYVTQQLIRAAEIRASANLAATKMSECVLGQSKRVDFCGKGYHLMSFPQSAPHGVVFLHVTYVPAQEKNFTTAPAICHDGKAHFPREGVFVSNGTHWFVTQRNFYEPQIITTDNTFVSGNCDVVIGIVNNTVYDPLQPELDS","hseq":"SQCVNLTTRTQLPPAYTNSFTRGVYYPDKVFRSSVLYSTQDLFLPFFSNVTWFHAIHVSGTNGTKRFDNPVLPFNDGVYFASTEKSNIIRGWIFGTTLDSKTQSLLIVNNATNVVIKVCEFQFCNDPFLGVYYHKNNKSWMESEFRVYSSANNCTFEYVSQPFLMDLEGKQGNFKNLREFVFKNIDGYFKIYSKHTPINLVRDLPQGFSALEPLVDLPIGINITRFQTLLALHRSYLTPGDSSSGWTAGAAAYYVGYLQPRTFLLKYNENGTITDAVDCALDPLSETKCTLKSFTVEKGIYQTSNFRVQPTESIVRFPNITNLCPFGEVFNATRFASVYAWNRKRISNCVADYSVLYNSASFSTFKCYGVSPTKLNDLCFTNVYADSFVIRGDEVRQIAPGQTGKIADYNYKLPDDFTGCVIAWNSNNLDSKVGGNYNYLYRLFRKSNLKPFERDISTEIYQAGSTPCNGVEGFNCYFPLQSYGFQPTNGVGYQPYRVVVLSFELLHAPATVCGPKKSTNLVKNKCVNFNFNGLTGTGVLTESNKKFLPFQQFGRDIADTTDAVRDPQTLEILDITPCSFGGVSVITPGTNTSNQVAVLYQDVNCTEVPVAIHADQLTPTWRVYSTGSNVFQTRAGCLIGAEHVNNSYECDIPIGAGICASYSPRRARSVASQSIIAYTMSLGAENSVAYSNNSIAIPTNFTISVTTEILPVSMTKTSVDCTMYICGDSTECSNLLLQYGSFCTQLNRALTGIAVEQDKNTQEVFAQVKQIYKTPPIKDFGGFNFSQILPDPSKPSKRSFIEDLLFNKVTLADAGFIKQYGDCLGDIAARDLICAQKFNGLTVLPPLLTDEMIAQYTSALLAGTITSGWTFGAGAALQIPFAMQMAYRFNGIGVTQNVLYENQKLIANQFNSAIGKIQDSLSSTASALGKLQDVVNQNAQALNTLVKQLSSNFGAISSVLNDILSRLDKVEAEVQIDRLITGRLQSLQTYVTQQLIRAAEIRASANLAATKMSECVLGQSKRVDFCGKGYHLMSFPQSAPHGVVFLHVTYVPAQEKNFTTAPAICHDGKAHFPREGVFVSNGTHWFVTQRNFYEPQIITTDNTFVSGNCDVVIGIVNNTVYDPLQPELDS"},"impb-56":{"acc":"A0A8A5XRG7","desc":"Spike glycoprotein","db":"TR","os":"Severe acute respiratory syndrome coronavirus 2","entryName":"A0A8A5XRG7_SARS2","hitLen":1270,"channel":"T3","chainKind":"main","chainLen":199,"qfrom":2,"qto":199,"hfrom":329,"hto":526,"identity":93.4,"positive":95.5,"gaps":0,"alignLen":198,"expect":3.2e-126,"nhsp":1,"qseq":"ITNLCPFDEVFNATRFASVYAWNRKRISNCVADYSVLYNLAPFFTFKCYGVSPTKLNDLCFTNVYADSFVIRGDEVRQIAPGQTGNIADYNYKLPDDFTGCVIAWNSNKLDSKVSGNYNYLYRLFRKSNLKPFERDISTEIYQAGNKPCNGVAGFNCYFPLRSYSFRPTYGVGHQPYRVVVLSFELLHAPATVCGPKK","hseq":"ITNLCPFGEVFNATRFASVYAWNRKRISNCVADYSVLYNSASFSTFKCYGVSPTKLNDLCFTNVYADSFVIRGDEVRQIAPGQTGNIADYNYKLPDDFTGCVIAWNSNNLDSKVGGNYNYLYRLFRKSNLKPFERDISTEIYQAGSTPCNGVKGFNCYFPLQSYGFQPTYGVGYQPYRVVVLSFELLHAPATVCGPKK"}};
+const AA_INFO={A:['Ala','丙氨酸'],R:['Arg','精氨酸'],N:['Asn','天冬酰胺'],D:['Asp','天冬氨酸'],C:['Cys','半胱氨酸'],Q:['Gln','谷氨酰胺'],E:['Glu','谷氨酸'],G:['Gly','甘氨酸'],H:['His','组氨酸'],I:['Ile','异亮氨酸'],L:['Leu','亮氨酸'],K:['Lys','赖氨酸'],M:['Met','甲硫氨酸'],F:['Phe','苯丙氨酸'],P:['Pro','脯氨酸'],S:['Ser','丝氨酸'],T:['Thr','苏氨酸'],W:['Trp','色氨酸'],Y:['Tyr','酪氨酸'],V:['Val','缬氨酸']};
+const AA_CLS={A:'hyd',V:'hyd',L:'hyd',I:'hyd',M:'hyd',F:'hyd',W:'hyd',Y:'hyd',S:'pol',T:'pol',N:'pol',Q:'pol',D:'aci',E:'aci',K:'bas',R:'bas',H:'bas',C:'cys',G:'gly',P:'pro'};
+const B62O='ARNDCQEGHILKMFPSTWYV';
+const B62M=[[4,-1,-2,-2,0,-1,-1,0,-2,-1,-1,-1,-1,-2,-1,1,0,-3,-2,0],[-1,5,0,-2,-3,1,0,-2,0,-3,-2,2,-1,-3,-2,-1,-1,-3,-2,-3],[-2,0,6,1,-3,0,0,0,1,-3,-3,0,-2,-3,-2,1,0,-4,-2,-3],[-2,-2,1,6,-3,0,2,-1,-1,-3,-4,-1,-3,-3,-1,0,-1,-4,-3,-3],[0,-3,-3,-3,9,-3,-4,-3,-3,-1,-1,-3,-1,-2,-3,-1,-1,-2,-2,-1],[-1,1,0,0,-3,5,2,-2,0,-3,-2,1,0,-3,-1,0,-1,-2,-1,-2],[-1,0,0,2,-4,2,5,-2,0,-3,-3,1,-2,-3,-1,0,-1,-3,-2,-2],[0,-2,0,-1,-3,-2,-2,6,-2,-4,-4,-2,-3,-3,-2,0,-2,-2,-3,-3],[-2,0,1,-1,-3,0,0,-2,8,-3,-3,-1,-2,-1,-2,-1,-2,-2,2,-3],[-1,-3,-3,-3,-1,-3,-3,-4,-3,4,2,-3,1,0,-3,-2,-1,-3,-1,3],[-1,-2,-3,-4,-1,-2,-3,-4,-3,2,4,-2,2,0,-3,-2,-1,-2,-1,1],[-1,2,0,-1,-3,1,1,-2,-1,-3,-2,5,-1,-3,-1,0,-1,-3,-2,-2],[-1,-1,-2,-3,-1,0,-2,-3,-2,1,2,-1,5,0,-2,-1,-1,-1,-1,1],[-2,-3,-3,-3,-2,-3,-3,-3,-1,0,0,-3,0,6,-4,-2,-2,1,3,-1],[-1,-2,-2,-1,-3,-1,-1,-2,-2,-3,-3,-1,-2,-4,7,-1,-1,-4,-3,-2],[1,-1,1,0,-1,0,0,0,-1,-2,-2,0,-1,-2,-1,4,1,-3,-2,-2],[0,-1,0,-1,-1,-1,-1,-2,-2,-1,-1,-1,-1,-2,-1,1,5,-2,-2,0],[-3,-3,-4,-4,-2,-2,-3,-2,-2,-3,-2,-3,-1,1,-4,-3,-2,11,2,-3],[-2,-2,-2,-3,-2,-1,-2,-3,2,-1,-1,-2,-1,3,-3,-2,-2,2,7,-1],[0,-3,-3,-3,-1,-2,-2,-3,-3,3,1,-2,1,-1,-2,-2,0,-3,-1,4]];
+function b62(a,b){const i=B62O.indexOf(a),j=B62O.indexOf(b);return i<0||j<0?0:B62M[i][j]}
+function computePos(seq,from){const p=new Array(seq.length);let v=from;for(let i=0;i<seq.length;i++)p[i]=seq[i]==='-'?null:v++;return p}
+function fmtE(e){if(e==null)return '—';if(e===0)return '0';if(e<1e-4)return '1e'+Math.round(Math.log10(e));return String(Math.round(e*1000)/1000)}
+
+function renderAln(job){
+  const a=ALIGN[job];if(!a)return '<div class="dim">无比对数据</div>';
+  const q=a.qseq,h=a.hseq,N=q.length;
+  const qpos=computePos(q,a.qfrom),hpos=computePos(h,a.hfrom);
+  let nId=0,nSim=0,nMis=0,nGap=0;
+  for(let i=0;i<N;i++){
+    if(q[i]==='-'||h[i]==='-'){nGap++;continue}
+    if(q[i]===h[i]){nId++;continue}
+    if(b62(q[i],h[i])>0){nSim++}else{nMis++}
+  }
+  const pc=x=>Math.round(x/N*1000)/10;
+  const dbChip=a.db==='SP'?'<span class="dbchip sp">Swiss-Prot 已审校</span>':'<span class="dbchip tr">TrEMBL</span>';
+  const chainTag=a.chainKind==='alt'?`备选链 ${a.chainLen} aa`:`提交主链 ${a.chainLen} aa`;
+  const warn=a.identity<85?'<div class="aln-warn">远缘回填（一致性 '+a.identity+'% &lt; 85%）— 身份仅供参考，请结合下方比对人工复核</div>':'';
+  const moreHsp=a.nhsp>1?` · 另 ${a.nhsp-1} 个比对片段未展示`:'';
+  let head=`<div class="aln-head">
+<div class="aln-title">${LBL[job]||job}（${chainTag}）↔ <a href="https://www.uniprot.org/uniprotkb/${a.acc}" target="_blank" rel="noopener">${a.acc}</a> ${H.escape(a.desc)} ${dbChip}</div>
+<div class="aln-meta">${a.channel==='T3'?'EBI 全库 BLAST（uniprotkb 含 TrEMBL）':'EBI Swiss-Prot BLAST'} · 一致性 <b>${a.identity}%</b> · 相似度 <b>${a.positive}%</b> · 区段 查询 ${a.qfrom}–${a.qto} / 命中 ${a.hfrom}–${a.hto} · E 值 ${fmtE(a.expect)}${moreHsp}</div>
+${warn}
+<div class="aln-stats">
+<span class="chip ci">相同 ${nId}（${pc(nId)}%）</span><span class="chip cs">相似 ${nSim}（${pc(nSim)}%）</span>
+<span class="chip cm">不同 ${nMis}（${pc(nMis)}%）</span><span class="chip cg">缺口 ${nGap} 列</span>
+<span class="chip cn">${N} 比对列</span></div>
+<div class="aln-legend">
+<i class="sw hyd"></i>疏水 <i class="sw pol"></i>极性 <i class="sw aci"></i>酸性 <i class="sw bas"></i>碱性 <i class="sw cys"></i>Cys <i class="sw gly"></i>Gly <i class="sw pro"></i>Pro
+<span class="lg-sep"></span><b class="mi">|</b>相同 <b class="ms">+</b>相似 <b class="mm">·</b>不同 <b class="mg">–</b>缺口
+<span class="lg-sep"></span><span class="dim">悬停 / 点按残基查看双端氨基酸位点号</span></div></div>`;
+  const BLK=60;let blocks='';
+  for(let s=0;s<N;s+=BLK){
+    const e=Math.min(s+BLK,N);
+    let qL='',qR='',hL='',hR='';
+    for(let i=s;i<e;i++)if(qpos[i]!=null){qL=qpos[i];break}
+    for(let i=e-1;i>=s;i--)if(qpos[i]!=null){qR=qpos[i];break}
+    for(let i=s;i<e;i++)if(hpos[i]!=null){hL=hpos[i];break}
+    for(let i=e-1;i>=s;i--)if(hpos[i]!=null){hR=hpos[i];break}
+    let ql='',ml='',hl='';
+    for(let i=s;i<e;i++){
+      const qc=q[i],hc=h[i];
+      ql+=qc==='-'?`<span class="r gp" data-c="${i}">–</span>`:`<span class="r c${AA_CLS[qc]||''}" data-c="${i}">${qc}</span>`;
+      hl+=hc==='-'?`<span class="r gp" data-c="${i}">–</span>`:`<span class="r c${AA_CLS[hc]||''}" data-c="${i}">${hc}</span>`;
+      let sym,cls;
+      if(qc==='-'||hc==='-'){sym='&nbsp;',cls='mg'}
+      else if(qc===hc){sym='|',cls='mi'}
+      else if(b62(qc,hc)>0){sym='+',cls='ms'}
+      else{sym='·',cls='mm'}
+      ml+=`<span class="mt ${cls}" data-c="${i}">${sym}</span>`;
+    }
+    blocks+=`<div class="abk"><div class="al"><span class="lb">查询</span><span class="pn">${qL}</span><span class="sq">${ql}</span><span class="pn">${qR}</span></div>`
+      +`<div class="al"><span class="lb"></span><span class="pn"></span><span class="sq mq">${ml}</span></div>`
+      +`<div class="al"><span class="lb">命中</span><span class="pn">${hL}</span><span class="sq">${hl}</span><span class="pn">${hR}</span></div></div>`;
+  }
+  return head+`<div class="aln-scroll">${blocks}</div>`;
+}
+
+const H={escape:s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')};
+document.querySelectorAll('.alnbtn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const job=btn.dataset.job,tr=document.getElementById('aln-'+job),panel=tr.querySelector('.aln-panel');
+    if(!tr.dataset.rendered){panel.innerHTML=renderAln(job);tr.dataset.rendered='1'}
+    const show=tr.hidden;tr.hidden=!show;
+    btn.textContent=show?'比对 ▴':'比对 ▾';btn.classList.toggle('open',show);
+    if(show)tr.scrollIntoView({block:'nearest',behavior:'smooth'});
+  });
+});
+
+/* ── 悬停/点按：列高亮 + 位点号 tooltip ── */
+const tip=document.createElement('div');tip.className='tip';document.body.appendChild(tip);
+let hlEls=[];
+function clearHl(){hlEls.forEach(e=>e.classList.remove('hl'));hlEls=[]}
+function moveTip(ev){
+  const w=tip.offsetWidth,hh=tip.offsetHeight;
+  let x=ev.clientX+14,y=ev.clientY+16;
+  if(x+w>innerWidth-8)x=ev.clientX-w-12;
+  if(y+hh>innerHeight-8)y=ev.clientY-hh-12;
+  tip.style.left=x+'px';tip.style.top=y+'px';
+}
+function showTip(target,ev){
+  const scroll=target.closest('.aln-scroll');if(!scroll)return;
+  const job=scroll.closest('tr').id.slice(4);
+  const a=ALIGN[job];if(!a)return;
+  const i=+target.dataset.c;
+  const q=a.qseq[i],h=a.hseq[i];
+  const qpos=computePos(a.qseq,a.qfrom),hpos=computePos(a.hseq,a.hfrom);
+  let l1,l2,stat;
+  if(q==='-'){l1=`查询 —（缺失） ↔ 命中 <b>${h}${hpos[i]}</b>（${AA_INFO[h][1]}）`;l2=`插入（查询空位）`;stat='g'}
+  else if(h==='-'){l1=`查询 <b>${q}${qpos[i]}</b>（${AA_INFO[q][1]}） ↔ 命中 —（缺失）`;l2=`缺失（命中空位）`;stat='g'}
+  else{
+    const same=q===h,sim=!same&&b62(q,h)>0;
+    l1=`查询 <b>${q}${qpos[i]}</b>（${AA_INFO[q][1]}） ↔ 命中 <b>${h}${hpos[i]}</b>（${AA_INFO[h][1]}）`;
+    l2=same?'相同':(sim?'相似（BLOSUM62 正分）':'不同');stat=same?'i':(sim?'s':'m');
+  }
+  tip.innerHTML=`<div class="t1">${l1}</div><div class="t2 s-${stat}">${l2} · 第 ${i+1} 列</div>`;
+  tip.style.display='block';moveTip(ev);
+  clearHl();
+  scroll.querySelectorAll(`[data-c="${i}"]`).forEach(e=>{e.classList.add('hl');hlEls.push(e)});
+}
+document.addEventListener('mouseover',e=>{
+  const t=e.target.closest('.r,.mt');
+  if(t&&tip.style.display==='block'||t){if(t){showTip(t,e);return}}
+  tip.style.display='none';clearHl();
+});
+document.addEventListener('mousemove',e=>{if(tip.style.display==='block')moveTip(e)});
+document.addEventListener('click',e=>{
+  const t=e.target.closest('.r,.mt');
+  if(t){showTip(t,e);e.stopPropagation();return}
+  tip.style.display='none';clearHl();
+},true);
+</script></body></html>

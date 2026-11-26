@@ -158,12 +158,15 @@ async function main() {
   const queries = loadTasks()
   const results: Record<string, Rec> = existsSync(RES) ? JSON.parse(readFileSync(RES, 'utf-8')) : {}
   const key = (q: Query) => `${q.job}#${q.chainIdx}${db === 'uniprotkb' ? '#full' : ''}`
-  // 超时/失败的条目允许重跑（--retry-failed）
+  // 超时/失败的条目允许重跑（--retry-failed）；--force 强制重跑 --only 目标（旧结果无作业 ID 时补拉比对用）
   if (process.argv.includes('--retry-failed')) {
     for (const q of queries) {
       const r = results[key(q)]
       if (r && (r.spErr || (!r.sp && !r.peptide?.length))) delete results[key(q)]
     }
+  }
+  if (process.argv.includes('--force')) {
+    for (const q of queries) delete results[key(q)]
   }
   const pending = queries.filter(q => !results[key(q)])
   console.log(`通道=${db}${batch ? ' batch' : ''} | 查询 ${queries.length} 条 | 已完成 ${queries.length - pending.length} | 待跑 ${pending.length}`)

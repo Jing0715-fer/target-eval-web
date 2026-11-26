@@ -1,34 +1,8 @@
 {
- "generatedAt": "2026-11-26",
- "total": 14,
+ "generatedAt": "2026-11-26 08:17",
+ "policy": "未达 85% 阈值的按最高同源命中回填（bestEffort=true 为远缘参考，需人工复核）",
+ "total": 26,
  "entries": [
-  {
-   "job": "imp-60",
-   "label": "Conformation1·链2",
-   "uniprotId": "A0A089PHY9",
-   "identity": 85,
-   "coverage": 99,
-   "description": "Urease subunit gamma",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
-  },
-  {
-   "job": "imp-62",
-   "label": "Conformation2·链2",
-   "uniprotId": "A0A089PHY9",
-   "identity": 85,
-   "coverage": 99,
-   "description": "Urease subunit gamma",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
-  },
-  {
-   "job": "imp-51",
-   "label": "20230905·链1",
-   "uniprotId": "Q6N9U9",
-   "identity": 94.9,
-   "coverage": 99.8,
-   "description": "Nitrogenase protein alpha chain",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
-  },
   {
    "job": "imp-26",
    "label": "GPR88_E2",
@@ -36,34 +10,11 @@
    "identity": 86.6,
    "coverage": 99.2,
    "description": "G protein-coupled receptor 88",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
-  },
-  {
-   "job": "imp-52",
-   "label": "20230905·链2",
-   "uniprotId": "Q6N9V1",
-   "identity": 89.3,
-   "coverage": 99.8,
-   "description": "Fe-only nitrogenase subunit beta",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
-  },
-  {
-   "job": "imp-54",
-   "label": "20230901·链1",
-   "uniprotId": "Q6N9V1",
-   "identity": 96.5,
-   "coverage": 99.8,
-   "description": "Fe-only nitrogenase subunit beta",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
-  },
-  {
-   "job": "imp-96",
-   "label": "GC_trimer_model",
-   "uniprotId": "A0A125T1E9",
-   "identity": 88.1,
-   "coverage": 99.6,
-   "description": "M polyprotein",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 248
   },
   {
    "job": "imp-28",
@@ -72,7 +23,11 @@
    "identity": 86.6,
    "coverage": 99.6,
    "description": "G protein-coupled receptor 88",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 247
   },
   {
    "job": "imp-31",
@@ -81,7 +36,76 @@
    "identity": 86.6,
    "coverage": 99.6,
    "description": "G protein-coupled receptor 88",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 247
+  },
+  {
+   "job": "imp-51",
+   "label": "20230905·链1",
+   "uniprotId": "Q6N9U9",
+   "identity": 94.9,
+   "coverage": 99.8,
+   "description": "Nitrogenase protein alpha chain",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 446
+  },
+  {
+   "job": "imp-52",
+   "label": "20230905·链2",
+   "uniprotId": "Q6N9V1",
+   "identity": 89.3,
+   "coverage": 99.8,
+   "description": "Fe-only nitrogenase subunit beta",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 403
+  },
+  {
+   "job": "imp-54",
+   "label": "20230901·链1",
+   "uniprotId": "Q6N9V1",
+   "identity": 96.5,
+   "coverage": 99.8,
+   "description": "Fe-only nitrogenase subunit beta",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 437
+  },
+  {
+   "job": "imp-60",
+   "label": "Conformation1·链2",
+   "uniprotId": "A0A089PHY9",
+   "identity": 85,
+   "coverage": 99,
+   "description": "Urease subunit gamma",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 101
+  },
+  {
+   "job": "imp-62",
+   "label": "Conformation2·链2",
+   "uniprotId": "A0A089PHY9",
+   "identity": 85,
+   "coverage": 99,
+   "description": "Urease subunit gamma",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 101
   },
   {
    "job": "imp-78",
@@ -90,7 +114,11 @@
    "identity": 96.3,
    "coverage": 99.1,
    "description": "Hemagglutinin glycoprotein",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 461
   },
   {
    "job": "imp-79",
@@ -99,7 +127,24 @@
    "identity": 98.3,
    "coverage": 99.1,
    "description": "Hemagglutinin glycoprotein",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 461
+  },
+  {
+   "job": "imp-96",
+   "label": "GC_trimer_model",
+   "uniprotId": "A0A125T1E9",
+   "identity": 88.1,
+   "coverage": 99.6,
+   "description": "M polyprotein",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 490
   },
   {
    "job": "impb-17",
@@ -108,7 +153,11 @@
    "identity": 93.8,
    "coverage": 99.9,
    "description": "Spike glycoprotein",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 1071
   },
   {
    "job": "impb-18",
@@ -117,7 +166,11 @@
    "identity": 93,
    "coverage": 100,
    "description": "Spike glycoprotein",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 1083
   },
   {
    "job": "impb-56",
@@ -126,7 +179,167 @@
    "identity": 93.4,
    "coverage": 99.5,
    "description": "Spike glycoprotein",
-   "source": "EBI UniProtKB BLAST (TrEMBL 全库)"
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "exact",
+   "bestEffort": false,
+   "chainKind": "main",
+   "chainLen": 199
+  },
+  {
+   "job": "imp-10",
+   "label": "lag3+fab·链4",
+   "uniprotId": "P0DOX7",
+   "identity": 88.4,
+   "coverage": 99.1,
+   "description": "Immunoglobulin kappa light chain",
+   "source": "EBI Swiss-Prot BLAST（备选链）",
+   "mode": "alt-chain",
+   "bestEffort": false,
+   "chainKind": "alt",
+   "chainLen": 217
+  },
+  {
+   "job": "imp-29",
+   "label": "PKU_Jinlab_GPR88_G_E2·链3",
+   "uniprotId": "P01630",
+   "identity": 90.5,
+   "coverage": 98.9,
+   "description": "Ig kappa chain V-II region 7S34.1",
+   "source": "EBI Swiss-Prot BLAST（备选链）",
+   "mode": "alt-chain",
+   "bestEffort": false,
+   "chainKind": "alt",
+   "chainLen": 95
+  },
+  {
+   "job": "imp-32",
+   "label": "PKU_Jinlab_GPR88_G_E2_…0414·链3",
+   "uniprotId": "P01630",
+   "identity": 90.5,
+   "coverage": 98.9,
+   "description": "Ig kappa chain V-II region 7S34.1",
+   "source": "EBI Swiss-Prot BLAST（备选链）",
+   "mode": "alt-chain",
+   "bestEffort": false,
+   "chainKind": "alt",
+   "chainLen": 95
+  },
+  {
+   "job": "imp-44",
+   "label": "MHC_HM443+VLBp969·链2",
+   "uniprotId": "P30376",
+   "identity": 93.9,
+   "coverage": 99.6,
+   "description": "Class I histocompatibility antigen, Gogo-A*0201 alpha chain",
+   "source": "EBI Swiss-Prot BLAST（备选链）",
+   "mode": "alt-chain",
+   "bestEffort": false,
+   "chainKind": "alt",
+   "chainLen": 278
+  },
+  {
+   "job": "imp-45",
+   "label": "MHC_HM443+VLBp969·链3",
+   "uniprotId": "P30376",
+   "identity": 93.9,
+   "coverage": 99.6,
+   "description": "Class I histocompatibility antigen, Gogo-A*0201 alpha chain",
+   "source": "EBI Swiss-Prot BLAST（备选链）",
+   "mode": "alt-chain",
+   "bestEffort": false,
+   "chainKind": "alt",
+   "chainLen": 278
+  },
+  {
+   "job": "imp-100",
+   "label": "GPCR75",
+   "uniprotId": "A0A8C9I9H4",
+   "identity": 63.5,
+   "coverage": 99.7,
+   "description": "Probable G protein-coupled receptor 75",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "best-effort",
+   "bestEffort": true,
+   "chainKind": "main",
+   "chainLen": 348
+  },
+  {
+   "job": "imp-106",
+   "label": "B-7-mer",
+   "uniprotId": "A0ABD1AVK7",
+   "identity": 73.3,
+   "coverage": 99,
+   "description": "Disease resistance protein",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "best-effort",
+   "bestEffort": true,
+   "chainKind": "main",
+   "chainLen": 730
+  },
+  {
+   "job": "imp-23",
+   "label": "PA_22f1_fab_new",
+   "uniprotId": "Q4ZE94",
+   "identity": 68.8,
+   "coverage": 63.1,
+   "description": "Protective antigen (Fragment)",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "best-effort",
+   "bestEffort": true,
+   "chainKind": "main",
+   "chainLen": 252
+  },
+  {
+   "job": "imp-39",
+   "label": "62_C15",
+   "uniprotId": "A0A5K7YXR9",
+   "identity": 48.4,
+   "coverage": 99.4,
+   "description": "Type II secretion system protein GspD",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "best-effort",
+   "bestEffort": true,
+   "chainKind": "main",
+   "chainLen": 356
+  },
+  {
+   "job": "imp-40",
+   "label": "A1+P_final",
+   "uniprotId": "A0ABM8TRE4",
+   "identity": 56,
+   "coverage": 99.2,
+   "description": "Curli production assembly/transport component CsgG",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "best-effort",
+   "bestEffort": true,
+   "chainKind": "main",
+   "chainLen": 254
+  },
+  {
+   "job": "imp-59",
+   "label": "Conformation1·链1",
+   "uniprotId": "A0A4P9UUN6",
+   "identity": 63.5,
+   "coverage": 99.8,
+   "description": "Urease subunit alpha",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "best-effort",
+   "bestEffort": true,
+   "chainKind": "main",
+   "chainLen": 472
+  },
+  {
+   "job": "imp-61",
+   "label": "Conformation2·链1",
+   "uniprotId": "A0A133XK86",
+   "identity": 61.6,
+   "coverage": 99.8,
+   "description": "Urease subunit alpha",
+   "source": "EBI UniProtKB BLAST 全库（TrEMBL）",
+   "mode": "best-effort",
+   "bestEffort": true,
+   "chainKind": "main",
+   "chainLen": 454
   }
  ]
 }
