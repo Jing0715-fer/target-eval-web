@@ -1571,7 +1571,8 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, ease: 'easeOut' }}
           >
-            <BlastNrTable hits={nrHits} />
+            {/* v2.95：provider 如实标注检索通道（ebi = EBI UniProtKB 全库兜底） */}
+            <BlastNrTable hits={nrHits} provider={summary.blastNrProvider ?? 'ncbi'} />
           </motion.div>
         )}
         {/* v2.82：EBI UniProt 库序列匹配命中（身份级联 v2.44 通道 — 检索证据展示） */}

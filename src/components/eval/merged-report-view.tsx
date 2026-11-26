@@ -965,10 +965,11 @@ export function MergedReportView({ report: reportProp, targetLabels, onNewEvalua
           <div className="flex flex-col gap-5">
             {blastTargets.map(t => (
               <div key={t.jobId} className="flex flex-col gap-2">
-                <TargetGroupHeader t={t} right={t.blastHits.length > 0 ? `${t.blastHitCount} 个同源结构${(t.blastNrHits?.length ?? 0) > 0 ? ` · nr ${t.blastNrHits!.length}` : ''}${(t.uniprotBlastHits?.length ?? 0) > 0 ? ` · UniProt 匹配 ${t.uniprotBlastHits!.length}` : ''}` : ((t.blastNrHits?.length ?? 0) > 0 ? `nr ${t.blastNrHits!.length} 命中` : (t.uniprotBlastHits?.length ?? 0) > 0 ? `UniProt 匹配 ${t.uniprotBlastHits!.length} 命中` : '无命中')} />
+                <TargetGroupHeader t={t} right={t.blastHits.length > 0 ? `${t.blastHitCount} 个同源结构${(t.blastNrHits?.length ?? 0) > 0 ? ` · ${t.blastNrProvider === 'ebi' ? 'UniProt 全库' : 'nr'} ${t.blastNrHits!.length}` : ''}${(t.uniprotBlastHits?.length ?? 0) > 0 ? ` · UniProt 匹配 ${t.uniprotBlastHits!.length}` : ''}` : ((t.blastNrHits?.length ?? 0) > 0 ? `${t.blastNrProvider === 'ebi' ? 'UniProt 全库' : 'nr'} ${t.blastNrHits!.length} 命中` : (t.uniprotBlastHits?.length ?? 0) > 0 ? `UniProt 匹配 ${t.uniprotBlastHits!.length} 命中` : '无命中')} />
                 {t.blastHits.length > 0 && <BlastTable hits={t.blastHits} outsideHits={t.rangeOutsideBlastHits} rangeLabel={t.range ? `${t.range[0]}-${t.range[1]}` : undefined} />}
-                {/* v2.59：nr 全库检索命中（靶点身份识别证据 — 前 5 条直出 + 折叠） */}
-                {(t.blastNrHits?.length ?? 0) > 0 && <BlastNrTable hits={t.blastNrHits!} />}
+                {/* v2.59：nr 全库检索命中（靶点身份识别证据 — 前 5 条直出 + 折叠）。
+                    v2.95：provider 如实标注（ebi = EBI UniProtKB 全库兜底） */}
+                {(t.blastNrHits?.length ?? 0) > 0 && <BlastNrTable hits={t.blastNrHits!} provider={t.blastNrProvider ?? 'ncbi'} />}
                 {/* v2.82：EBI UniProt 库序列匹配命中（身份级联 v2.44 通道 — 检索证据展示） */}
                 {(t.uniprotBlastHits?.length ?? 0) > 0 && <BlastNrTable hits={t.uniprotBlastHits!} variant="uniprot" />}
                 <BlastNote t={t} />

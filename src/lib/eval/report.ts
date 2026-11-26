@@ -43,6 +43,9 @@ export interface ReportContext {
   /** v2.59：BLAST nr 全库检索命中（靶点身份识别级联实际执行 nr 时携带 —
    *  报告 BLAST 章节展示，前 5 条直出 + 其余折叠；未执行时缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.95：nr 命中实际检索通道：'ebi' = EBI UniProtKB 全库兜底（NCBI nr
+   *  失败后的替补 — 面板标题/说明如实标注）；缺省 = NCBI BLAST nr */
+  blastNrProvider?: 'ncbi' | 'ebi'
   /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联 v2.44 通道 —
    *  nr 检索失败/未达阈值时的识别路径；报告 BLAST 章节单独面板展示） */
   uniprotBlastHits?: BlastNrHit[]

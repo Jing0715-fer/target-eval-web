@@ -371,5 +371,28 @@
  *    在「HTTP 200 + 未出结果」路径检查，连续网络失败（30 次 fetch 超时 ≈ 18
  *    分钟 > 10 分钟墙钟）与非 200 响应（429/5xx）两条路径可无限越预算循环；
  *    轮询 fetch 组合外部信号（取消即时报出，不再等 30s 请求超时）。
+ * v2.95：BLAST nr 拥堵日超时兜底（用户实测作业 cmwx4vqdg：NCBI 队列拥堵 pdbaa
+ *  排队 242s 触发 RCSB 兜底 → nr 慢通道按「患病日」仅 90s 短预算必超时，「BLAST
+ *  nr 已提交 2 分钟仍无结果（NCBI 队列异常）」后身份识别通道全失灵 — 而同时段
+ *  EBI Swiss-Prot 直查秒级完成）：
+ *  - EBI UniProtKB 全库兜底（pipeline.ts b2 块 + uniprot-blast.ts 参数化）：
+ *    NCBI nr 失败（90s 短预算/10 分钟墙钟/FAILED/RID 过期/网络不可达）且无命中
+ *    时，自动改经 EBI ncbiblast 检索 uniprotkb 全库（含 TrEMBL ~2.5 亿条 — nr
+ *    的蛋白主体即 UniProtKB，身份识别等效且条目质量更高）；EBI 队列与 NCBI
+ *    相互独立，患病日依然健康。全库常态 1-4 分钟（实测 265s/50 命中），6 分钟
+ *    墙钟 + 段预算续跑承接；命中复用 BlastNrHit 形态喂入 nrHits — 下游身份处
+ *    理（85%/40% 阈值回填 + 近似身份）与报告 BLAST 章节零改造；NCBI nr 成功
+ *    （含 0 命中「确无同源」）时跳过 — nr ⊇ UniProtKB 无重复检索必要；
+ *  - 通道如实标注（nrEbiSourced → blastNrProvider='ebi'）：报告 BLAST 面板
+ *    标题/说明、库切换按钮、章节头计数、SOURCES 页脚、结果页/合并报告
+ *    BlastNrTable 表头均标「EBI UniProtKB 全库（NCBI 拥堵日兜底）」，不再笼统
+ *    误标 NCBI nr；身份处理日志/note 同步标注（source 仍 blast-nr 保持契约）；
+ *    检查点新字段（nrEbiBlast/nrEbiDone/nrEbiSourced）消毒校验，跨版本续跑
+ *    安全（旧检查点缺省 = 未执行兜底，语义正确）；
+ *  - uniprot-blast.ts 参数化（database/alignments/maxWallMs/maxHits/label）：
+ *    快通道（Swiss-Prot，秒级）默认行为不变；全库兜底 50 命中与 NCBI nr
+ *    HITLIST 同口径。验证：scripts/test-ebi-nr-fallback.ts（全库实测 264.9s
+ *    50 命中、TrEMBL 分类/一致性/覆盖全字段正常）+ test-ebi-provider-render.ts
+ *    （报告标注 8 断言全过）。
  */
-export const APP_VERSION = 'v2.94.0'
+export const APP_VERSION = 'v2.95.0'

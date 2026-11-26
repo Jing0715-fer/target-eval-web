@@ -19,6 +19,14 @@
  * 产出复用 BlastNrHit 形态（identity/queryCoverage/hitFrom/hitTo/db sp|tr）—
  * 管线侧身份处理与 nr 级联同口径（bestCoverageHit 覆盖度加权 + 85%/40% 阈值）。
  * best-effort：失败抛错由调用方记 warn，不影响主流程。
+ *
+ * v2.95 全库兜底通道（用户反馈「BLAST nr 已提交 2 分钟仍无结果（NCBI 队列异常）」）:
+ *  NCBI 拥堵日（pdbaa 同源检索已被迫 RCSB 兕底）nr 慢通道 90s 短预算必超时 —
+ * 而同一时段 EBI 队列依然健康（Swiss-Prot 秒级完成）。本模块参数化目标库：除
+ * 快通道 uniprotkb_swissprot 外新增 database='uniprotkb'（全库含 TrEMBL ~2.5 亿条）
+ *  — 正是 nr 身份识别的等效库（nr 的蛋白主体即 UniProtKB，且条目质量更高）。
+ * 全库检索慢于快通道（1-4 分钟）但远比挂死的 NCBI 可靠；maxWallMs/命中数/文案
+ * 一并参数化，由管线在 NCBI nr 失败后调用（详见 pipeline.ts v2.95 兕底块）。
  */
 import type { BlastNrHit } from './blast'
 
@@ -27,12 +35,16 @@ const EBI_EMAIL = process.env.EVAL_EBI_EMAIL || 'targeteval.service@gmail.com'
 const EBI_BASE = 'https://www.ebi.ac.uk/Tools/services/rest/ncbiblast'
 /** 轮询间隔（EBI 公平使用要求 ≥5s） */
 const POLL_INTERVAL_MS = 5_000
-/** 墙钟上限：Swiss-Prot 常态 5-20s；超 4 分钟视为服务异常，优雅放弃 */
+/** 墙钟上限（快通道默认）：Swiss-Prot 常态 5-20s；超 4 分钟视为服务异常，优雅放弃。
+ *  v2.95 全库兜底通道由调用方传入更宽预算（1-4 分钟常态 — 快通道口径不适配） */
 const MAX_WALL_MS = 4 * 60_000
 /** 连续网络失败上限（~90s 完全不可达才判失败） */
 const MAX_NET_FAILS = 18
-/** 收集命中上限（身份识别只需头部命中） */
+/** 收集命中上限（快通道默认；全库兜底 50 与 NCBI nr HITLIST 同口径） */
 const MAX_HITS = 20
+
+/** v2.95 目标库：快通道 Swiss-Prot（已审校 ~57.6 万条，秒级）/ 全库 uniprotkb（含 TrEMBL） */
+export type UniprotBlastDb = 'uniprotkb_swissprot' | 'uniprotkb'
 
 /** 提交状态（跨段续跑 — 随 checkpoint 持久化） */
 export interface UniprotBlastJob {
@@ -48,6 +60,12 @@ export interface UniprotBlastOpts {
   resume?: { attempts?: number; startedAt?: number }
   signal?: AbortSignal
   onProgress?: (msg: string) => void
+  /** v2.95：墙钟上限覆写（默认 4 分钟 = 快通道口径；全库兜底传 6 分钟） */
+  maxWallMs?: number
+  /** v2.95：命中数解析上限（默认 20；全库兜底 50 与提交 alignments 同口径） */
+  maxHits?: number
+  /** v2.95：进度/报错文案前缀（默认「UniProt 序列匹配」；全库兜底传「EBI UniProtKB 全库」） */
+  label?: string
 }
 
 export type UniprotBlastResult =
@@ -63,21 +81,25 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** 提交序列到 UniProtKB（Swiss-Prot）BLASTp — 返回 jobId（失败抛错） */
+/** 提交序列到 UniProtKB BLASTp — 返回 jobId（失败抛错）。
+ *  v2.95 opts.database='uniprotkb' 时走全库（含 TrEMBL）— NCBI nr 失败后的
+ *  身份识别兜底通道；opts.alignments 控制命中数上限（默认 20 = 快通道口径） */
 export async function submitUniprotSequenceBlast(
   sequence: string,
   signal?: AbortSignal,
+  opts: { database?: UniprotBlastDb; alignments?: number } = {},
 ): Promise<UniprotBlastJob> {
   const seq = sequence.replace(/[^A-Za-z]/g, '').toUpperCase()
   if (seq.length < 30) throw new Error('序列过短（<30 aa），无法序列匹配')
+  const alignments = Math.max(1, Math.min(opts.alignments ?? 20, 100))
   const body = new URLSearchParams({
     email: EBI_EMAIL,
     program: 'blastp',
     stype: 'protein',
-    database: 'uniprotkb_swissprot',
+    database: opts.database ?? 'uniprotkb_swissprot',
     matrix: 'BLOSUM62',
-    alignments: '20',
-    scores: '20',
+    alignments: String(alignments),
+    scores: String(alignments),
     exp: '10',
     gapalign: 'true',
     sequence: seq,
@@ -113,7 +135,7 @@ interface EbiBlastJson {
   }>
 }
 
-export function parseUniprotBlastJson(data: EbiBlastJson): BlastNrHit[] {
+export function parseUniprotBlastJson(data: EbiBlastJson, maxHits: number = MAX_HITS): BlastNrHit[] {
   const hits: BlastNrHit[] = []
   for (const h of data.hits ?? []) {
     const accession = (h.hit_acc ?? '').trim()
@@ -143,7 +165,7 @@ export function parseUniprotBlastJson(data: EbiBlastJson): BlastNrHit[] {
       hitTo: (hsp.hsp_hit_to ?? 0) > 0 ? hsp.hsp_hit_to : undefined,
       db,
     })
-    if (hits.length >= MAX_HITS) break
+    if (hits.length >= maxHits) break
   }
   return hits
 }
@@ -158,6 +180,9 @@ export async function collectUniprotSequenceBlast(
   opts: UniprotBlastOpts = {},
 ): Promise<UniprotBlastResult> {
   const { signal, onProgress } = opts
+  const label = opts.label ?? 'UniProt 序列匹配'
+  const wallMs = opts.maxWallMs ?? MAX_WALL_MS
+  const maxHits = opts.maxHits ?? MAX_HITS
   const startedAt = opts.resume?.startedAt ?? job.startedAt
   let attempts = opts.resume?.attempts ?? job.attempts
   let netFails = 0
@@ -166,8 +191,8 @@ export async function collectUniprotSequenceBlast(
 
   while (true) {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
-    if (Date.now() - startedAt > MAX_WALL_MS) {
-      throw new Error(`UniProt 序列匹配超时（已等 ${Math.round((Date.now() - startedAt) / 1000)}s）`)
+    if (Date.now() - startedAt > wallMs) {
+      throw new Error(`${label}超时（已等 ${Math.round((Date.now() - startedAt) / 1000)}s）`)
     }
     if (budgetLeft() < 6_000) return { stillRunning: true, job: snapshot() }
     const wait = budgetLeft() === Infinity ? POLL_INTERVAL_MS : Math.max(2_000, Math.min(POLL_INTERVAL_MS, budgetLeft() - 4_000))
@@ -181,7 +206,7 @@ export async function collectUniprotSequenceBlast(
       })
       if (!res.ok) {
         netFails++
-        if (netFails >= MAX_NET_FAILS) throw new Error(`UniProt 序列匹配轮询不可达（HTTP ${res.status}，已等 ${elapsed}s）`)
+        if (netFails >= MAX_NET_FAILS) throw new Error(`${label}轮询不可达（HTTP ${res.status}，已等 ${elapsed}s）`)
         onProgress?.(`HTTP ${res.status}，继续轮询（已等 ${elapsed}s）`)
         continue
       }
@@ -190,23 +215,23 @@ export async function collectUniprotSequenceBlast(
     } catch (e) {
       if (signal?.aborted && e instanceof DOMException && e.name === 'AbortError') throw e
       netFails++
-      if (netFails >= MAX_NET_FAILS) throw new Error(`UniProt 序列匹配轮询网络不可达（连续 ${netFails} 次失败，已等 ${elapsed}s）`)
+      if (netFails >= MAX_NET_FAILS) throw new Error(`${label}轮询网络不可达（连续 ${netFails} 次失败，已等 ${elapsed}s）`)
       onProgress?.(`网络抖动，继续轮询（已等 ${elapsed}s）`)
       continue
     }
     if (status === 'RUNNING' || status === 'QUEUED') {
-      onProgress?.(`UniProt 库序列匹配中（已等 ${elapsed}s）`)
+      onProgress?.(`${label}中（已等 ${elapsed}s）`)
       continue
     }
     if (status === 'FINISHED') {
       const resultRes = await fetch(`${EBI_BASE}/result/${encodeURIComponent(job.jobId)}/json`, {
         signal: AbortSignal.any?.([AbortSignal.timeout(20_000), ...(signal ? [signal] : [])]) ?? AbortSignal.timeout(20_000),
       })
-      if (!resultRes.ok) throw new Error(`UniProt 序列匹配结果获取失败（HTTP ${resultRes.status}）`)
+      if (!resultRes.ok) throw new Error(`${label}结果获取失败（HTTP ${resultRes.status}）`)
       const data = (await resultRes.json()) as EbiBlastJson
-      return { hits: parseUniprotBlastJson(data) }
+      return { hits: parseUniprotBlastJson(data, maxHits) }
     }
-    if (status === 'NOT_FOUND') throw new Error('UniProt 序列匹配作业已过期（NOT_FOUND）')
-    throw new Error(`UniProt 序列匹配失败（${status}）`)
+    if (status === 'NOT_FOUND') throw new Error(`${label}作业已过期（NOT_FOUND）`)
+    throw new Error(`${label}失败（${status}）`)
   }
 }

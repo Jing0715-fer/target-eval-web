@@ -737,6 +737,9 @@ export interface JobSummary {
   /** v2.59：BLAST nr 全库检索命中（靶点身份识别级联实际执行 nr 检索时存档，≤20 条；
    *  报告/结果页展示「前 5 条直出 + 其余折叠」；nr 未执行/无命中/历史作业缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.95：nr 命中实际检索通道：'ebi' = EBI UniProtKB 全库兜底（NCBI nr 失败后
+   *  的替补 — 结果页/报告面板如实标注）；历史作业缺省 = NCBI BLAST nr */
+  blastNrProvider?: 'ncbi' | 'ebi'
   /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联 v2.44 通道实际执行
    *  且有命中时存档，≤20 条；报告/结果页展示；历史作业缺省） */
   uniprotBlastHits?: BlastNrHit[]

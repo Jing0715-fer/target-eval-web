@@ -224,9 +224,12 @@ export function BlastTable({ hits, outsideHits, rangeLabel }: { hits: BlastHit[]
  *  归属 UniProt 时提交序列改查 NCBI nr 全库）。v2.67：与 HTML 报告同口径 — 全量
  *  直出（此前「前 5 条直出 + 其余折叠」），容器内滚动查看。
  *  v2.82：variant="uniprot" — EBI UniProt 库（Swiss-Prot）序列匹配命中（同款
- *  表格，标题/说明区分 — 身份级联 v2.44 通道的检索证据）。 */
-export function BlastNrTable({ hits, variant = 'nr' }: { hits: BlastNrHit[]; variant?: 'nr' | 'uniprot' }) {
+ *  表格，标题/说明区分 — 身份级联 v2.44 通道的检索证据）。
+ *  v2.95：provider="ebi" — nr 命中实来自 EBI UniProtKB 全库兜底（NCBI nr
+ *  拥堵/失败后的替补通道 — 表头/说明如实标注，不再笼统写 NCBI nr）。 */
+export function BlastNrTable({ hits, variant = 'nr', provider = 'ncbi' }: { hits: BlastNrHit[]; variant?: 'nr' | 'uniprot'; provider?: 'ncbi' | 'ebi' }) {
   const isUni = variant === 'uniprot'
+  const isEbi = provider === 'ebi'
   const rows = (list: BlastNrHit[]) => list.map((h, i) => {
     const isUniprot = h.db !== 'other' && /^[A-Z0-9]{6,10}$/.test(h.accession)
     return (
@@ -295,8 +298,8 @@ export function BlastNrTable({ hits, variant = 'nr' }: { hits: BlastNrHit[]; var
   return (
     <div className="studio-card overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/70 bg-muted/40 px-4 py-2.5">
-        <p className="text-xs font-semibold text-foreground">{isUni ? 'UniProt 库序列匹配' : 'BLAST nr 全库检索'}</p>
-        <p className="font-mono text-[10px] tracking-wide text-muted-foreground/85">{isUni ? `EBI BLAST · Swiss-Prot · ${hits.length} hits · 靶点身份识别` : `NCBI nr · ${hits.length} hits · 靶点身份识别`}</p>
+        <p className="text-xs font-semibold text-foreground">{isUni ? 'UniProt 库序列匹配' : isEbi ? 'UniProtKB 全库检索' : 'BLAST nr 全库检索'}</p>
+        <p className="font-mono text-[10px] tracking-wide text-muted-foreground/85">{isUni ? `EBI BLAST · Swiss-Prot · ${hits.length} hits · 靶点身份识别` : isEbi ? `EBI BLAST · UniProtKB 全库（NCBI 拥堵日兜底） · ${hits.length} hits · 靶点身份识别` : `NCBI nr · ${hits.length} hits · 靶点身份识别`}</p>
       </div>
       <div className="eval-scroll overflow-auto">
         <Table>
@@ -316,7 +319,9 @@ export function BlastNrTable({ hits, variant = 'nr' }: { hits: BlastNrHit[]; var
       <p className="border-t border-border/60 px-4 py-2.5 text-[11px] leading-relaxed text-muted-foreground/85">
         {isUni
           ? '靶点身份尚未确定时，提交序列自动经 EBI BLAST 直查 UniProtKB（Swiss-Prot 人工审校库）定位真实蛋白身份（v2.94 起为身份识别的第一检索通道 — 秒级；NCBI nr 全库为其后的补充通道）— 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'
-          : 'PDB 库同源不足以归属 UniProt（一致性 <85% 或覆盖 <40%，或检索失败）时，提交序列自动改查 NCBI nr 全库定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'}
+          : isEbi
+            ? 'PDB 库同源不足以归属 UniProt 且 NCBI nr 通道拥堵失败（排队超时/服务不可达）时，提交序列自动改经 EBI BLAST 检索 UniProtKB 全库（含 TrEMBL 未审校条目）定位真实蛋白身份 — NCBI 与 EBI 队列相互独立，此为拥堵日的可靠替补通道；最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'
+            : 'PDB 库同源不足以归属 UniProt（一致性 <85% 或覆盖 <40%，或检索失败）时，提交序列自动改查 NCBI nr 全库定位真实蛋白身份 — 最佳命中达「一致性 ≥85% 且覆盖 ≥40%」即回填 UniProt 元数据。Swiss-Prot = 人工审校条目；TrEMBL = 自动注释条目。'}
       </p>
     </div>
   )

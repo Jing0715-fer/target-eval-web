@@ -163,6 +163,12 @@ interface PipelineState {
   nrHits: BlastNrHit[] | null
   /** v2.16：nr 身份处理完成（回填/近似记录已落 targetIdentity — 重入守卫） */
   nrIdentityDone: boolean
+  /** v2.95：NCBI nr 失败后的 EBI UniProtKB 全库兜底作业（跨段保留） */
+  nrEbiBlast: UniprotBlastJob | null
+  /** v2.95：EBI 全库兜底已终态（成功/失败均置位 — 重入守卫） */
+  nrEbiDone: boolean
+  /** v2.95：nr 命中实际来源为 EBI 全库兜底（报告 BLAST 面板标注真实检索通道） */
+  nrEbiSourced: boolean
   /** v2.44：UniProt 序列匹配（EBI BLAST 直查 UniProtKB）提交的作业（跨段保留） */
   upBlast: UniprotBlastJob | null
   /** v2.44：UniProt 序列匹配检索完成（命中已存 upHits；jobId 不再轮询） */
@@ -281,6 +287,9 @@ function freshState(): PipelineState {
     nrBlastDone: false,
     nrHits: null,
     nrIdentityDone: false,
+    nrEbiBlast: null,
+    nrEbiDone: false,
+    nrEbiSourced: false,
     upBlast: null,
     upBlastDone: false,
     upHits: null,
@@ -429,8 +438,10 @@ function buildEvalTableIdentity(insights: FormInsights | null, sequenceHeader: s
   }
 }
 
-/** nr 命中 → 靶点身份（未达回填阈值时的近似条目记录） */
-function buildNrIdentity(best: BlastNrHit): TargetIdentityInfo {
+/** nr 命中 → 靶点身份（未达回填阈值时的近似条目记录）。
+ *  v2.95 chanLabel：检索通道标注（默认「BLAST nr」；EBI 全库兜底来源时传对应标签
+ *  — 报告/日志如实反映真实检索通道，source 仍为 blast-nr 保持下游契约稳定） */
+function buildNrIdentity(best: BlastNrHit, chanLabel = 'BLAST nr'): TargetIdentityInfo {
   return {
     name: best.description.slice(0, 100),
     source: 'blast-nr',
@@ -440,7 +451,7 @@ function buildNrIdentity(best: BlastNrHit): TargetIdentityInfo {
     uniprotEntry: best.entryName,
     organism: best.organism,
     geneName: best.geneName,
-    note: `BLAST nr 最佳命中${best.db !== 'other' ? `（UniProt ${best.accession}${best.entryName ? ` ${best.entryName}` : ''}）` : ''}，一致性 ${best.identity}%`,
+    note: `${chanLabel}最佳命中${best.db !== 'other' ? `（UniProt ${best.accession}${best.entryName ? ` ${best.entryName}` : ''}）` : ''}，一致性 ${best.identity}%`,
   }
 }
 
@@ -593,6 +604,14 @@ export function sanitizeCheckpoint(raw: unknown): PipelineCheckpoint | null {
   }
   if (st.nrBlastDone != null && typeof st.nrBlastDone !== 'boolean') return null
   if (st.nrIdentityDone != null && typeof st.nrIdentityDone !== 'boolean') return null
+  // v2.95：EBI 全库兜底作业/标记消毒（jobId 形态与 EBI 返回 ncbiblast-{id} 一致）
+  if (st.nrEbiBlast != null) {
+    if (typeof st.nrEbiBlast !== 'object' || Array.isArray(st.nrEbiBlast)) return null
+    const ne = st.nrEbiBlast as Record<string, unknown>
+    if (typeof ne.jobId !== 'string' || !/^ncbiblast-[A-Za-z0-9-]{1,64}$/.test(ne.jobId)) return null
+  }
+  if (st.nrEbiDone != null && typeof st.nrEbiDone !== 'boolean') return null
+  if (st.nrEbiSourced != null && typeof st.nrEbiSourced !== 'boolean') return null
   if (st.nrHits != null) {
     if (!Array.isArray(st.nrHits) || st.nrHits.length > 50) return null
     for (const h of st.nrHits) {
@@ -1822,7 +1841,8 @@ class SegmentRunner {
               deadline: this.cb.deadline,
               resume: st.nrBlastPoll ?? undefined,
               // 同源检索已走 RCSB 兜底 = NCBI 队列当日患病 → nr 只做 90s 短预算尝试
-              //（正常 10 分钟墙钟在拥堵日会拖垮批量队列；RCSB 兜底命中时身份亦可由
+              //（正常 10 分钟墙钟在拥堵日会拖垮批量队列；v2.95 起 90s 超时不再丢失识别
+              //  — 失败后自动转入 EBI UniProtKB 全库兜底（下方 b2 块），身份亦可由
               //  最佳 PDB 命中描述/UniProt 映射回填，非唯一依赖 nr）
               maxWallMs: (st.blastStatus.provider ?? 'ncbi') === 'rcsb' ? 90_000 : undefined,
             },
@@ -1847,9 +1867,74 @@ class SegmentRunner {
             this.log(`BLAST nr 提交被段预算切断（${msg.slice(0, 80)}）— 下一段继续提交`, 'warn')
             return this.handoff()
           }
-          this.log(`BLAST nr 识别失败（${msg}）— 靶点身份保持现有证据（评估表/同源描述），评估继续`, 'warn')
+          this.log(`BLAST nr 识别失败（${msg}）— 转入 EBI UniProtKB 全库兜底（NCBI 队列与 EBI 相互独立）`, 'warn')
         }
         st.nrBlastDone = true
+      }
+
+      // b2) v2.95 EBI UniProtKB 全库兜底：NCBI nr 失败（拥堵日 90s 短预算超时 /
+      //     10 分钟墙钟超限 / FAILED / RID 过期 / 网络不可达）且无命中时，改走 EBI
+      //     ncbiblast 全库 uniprotkb（含 TrEMBL ~2.5 亿条）定位身份 — EBI 队列与
+      //     NCBI 相互独立，NCBI 患病日依然健康（用户实测：pdbaa 排队 242s+ 触发
+      //     RCSB 兜底的同一时段，EBI Swiss-Prot 秒级完成）；nr 的蛋白主体即
+      //     UniProtKB，全库检索正是身份识别的等效通道（且条目质量更高）。
+      //     全库比 Swiss-Prot 快通道慢（1-4 分钟）— 由段预算续跑承接；命中复用
+      //     BlastNrHit 形态喂入 nrHits，下游身份处理（c 块）零改造，报告面板经
+      //     nrEbiSourced 标注真实检索通道。NCBI nr 成功（含 0 命中「确无同源」
+      //     结论）时本块跳过 — nr ⊇ UniProtKB，无重复检索必要。
+      //     （uniprotInfo/序列长度/skipped 豁免由外层守卫保证，此处不重复判断）
+      if (st.nrBlastDone && !st.nrHits && !st.nrEbiDone) {
+        const ebiGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
+        if (budgetLeft(this.cb) < ebiGateMs) {
+          return this.handoff()
+        }
+        try {
+          this.report('blast', st.nrEbiBlast
+            ? 'EBI UniProtKB 全库检索中（等待计算）…'
+            : 'NCBI nr 通道无果 — 改经 EBI UniProtKB 全库（含 TrEMBL）检索定位靶点身份…', 0.93)
+          if (!st.nrEbiBlast) {
+            st.nrEbiBlast = await submitUniprotSequenceBlast(
+              st.sequence,
+              this.deadlineSignal(),
+              { database: 'uniprotkb', alignments: 50 },
+            )
+          }
+          const outcome = await collectUniprotSequenceBlast(st.nrEbiBlast, {
+            deadline: this.cb.deadline,
+            resume: { attempts: st.nrEbiBlast.attempts, startedAt: st.nrEbiBlast.startedAt },
+            signal: this.signal,
+            // 全库合 TrEMBL 检索常态 1-4 分钟（快通道 4 分钟口径不适配）— 6 分钟
+            // 墙钟与段预算续跑兼容，超时优雅放弃（best-effort 通道）
+            maxWallMs: 6 * 60_000,
+            maxHits: 50,
+            label: 'EBI UniProtKB 全库检索',
+            onProgress: msg => this.report('blast', msg, 0.93),
+          })
+          if ('stillRunning' in outcome) {
+            // 段预算到点 — 保存作业，下一段继续轮询同一 jobId（与 upBlast 同语义）
+            st.nrEbiBlast = outcome.job
+            return this.handoff()
+          }
+          st.nrEbiDone = true
+          if (outcome.hits.length) {
+            st.nrHits = outcome.hits
+            st.nrEbiSourced = true
+            this.log(`EBI UniProtKB 全库兜底完成：${outcome.hits.length} 个命中，最佳一致性 ${Math.max(...outcome.hits.map(h => h.identity))}%（NCBI nr 通道失败的替补 — 含 TrEMBL 未审校条目）`)
+          } else {
+            this.log('EBI UniProtKB 全库兜底完成 — 无命中（全新/人工构建序列，NCBI nr 亦未检出）')
+          }
+        } catch (e) {
+          if (this.signal.aborted) throw e
+          const msg = e instanceof Error ? e.message : String(e)
+          const deadlineCut = this.cb.deadline != null && this.cb.deadline > 0 && Date.now() >= this.cb.deadline - 2_000
+          if (deadlineCut) {
+            // 段预算切断提交/轮询（非服务拒绝）— 不置 done：下一段重新提交或续跑轮询
+            this.log(`EBI UniProtKB 全库兜底被段预算切断（${msg.slice(0, 80)}）— 下一段继续`, 'warn')
+            return this.handoff()
+          }
+          this.log(`EBI UniProtKB 全库兜底失败（${msg.slice(0, 120)}）— 靶点身份保持现有证据（评估表/同源描述/UniProt 匹配），评估继续`, 'warn')
+          st.nrEbiDone = true
+        }
       }
 
       // c) 身份处理（检索已完成的命中 — 预算闸门后尽力跑完；段切断由 nrIdentityDone 重入）
@@ -1859,6 +1944,8 @@ class SegmentRunner {
           return this.handoff()
         }
         const nrHits = st.nrHits
+        // v2.95：检索通道标注（EBI 全库兜底来源时如实反映 — 日志/报告不再笼统写 NCBI nr）
+        const nrChan = st.nrEbiSourced ? 'EBI UniProtKB 全库兜底' : 'BLAST nr'
         // v2.32 覆盖度加权选择：sp/tr 命中优先（携带真实蛋白名 + accession），
         // 按 score = identity × 查询覆盖率 取最佳 — 与同源回填同口径。nr 命中主体
         // 为全长 UniProt 序列：真实靶点命中的查询覆盖率 ≈100%（含标签头时略低），
@@ -1867,13 +1954,13 @@ class SegmentRunner {
         const nrBestCov = bestCoverageHit(nrUniHits.length ? nrUniHits : nrHits, st.sequence.length)
         const best = nrBestCov?.hit
         if (best && best.identity >= 85 && best.db !== 'other' && nrBestCov.covFrac >= TARGET_IDENTIFY_MIN_COV) {
-          this.log(`BLAST nr 识别命中 UniProt ${best.accession}（${best.description.slice(0, 60)}，一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(nrBestCov.covFrac * 100)}%）— 回填元数据…`)
+          this.log(`${nrChan}识别命中 UniProt ${best.accession}（${best.description.slice(0, 60)}，一致性 ${best.identity}%，覆盖 ${best.queryCoverage}/${st.sequence.length} aa = ${Math.round(nrBestCov.covFrac * 100)}%）— 回填元数据…`)
           const info = await fetchUniprotInfo(best.accession)
           if (info) {
             st.uniprotInfo = info
             st.targetIdentity = {
-              ...buildNrIdentity(best),
-              note: `BLAST nr 识别（一致性 ${best.identity}%）→ 已归属 UniProt ${best.accession}`,
+              ...buildNrIdentity(best, nrChan),
+              note: `${nrChan}识别（一致性 ${best.identity}%）→ 已归属 UniProt ${best.accession}`,
             }
             // v2.30：nr HSP 比对坐标 → 提交序列在 UniProt 条目内的覆盖区间（在重建结构数据前
             // 落位 — 优先级低于构建比对，但两者都进入 effectiveRange 口径：非全长按截短对待）
@@ -1885,28 +1972,28 @@ class SegmentRunner {
                 const queryNote = best.queryFrom != null && best.queryTo != null && (best.queryFrom > 1 || best.queryTo < st.sequence.length)
                   ? `（查询序列 ${best.queryFrom}-${best.queryTo} 段比对 — 端部标签/未匹配段不计入）`
                   : ''
-                this.log(`BLAST nr 比对坐标：提交序列 ↔ ${best.accession} 主体 ${best.hitFrom}-${best.hitTo} → 评估区间 ${s}-${e}${queryNote}（构建比对未产出区间时采用；非全长按截短口径分流）`)
+                this.log(`${nrChan}比对坐标：提交序列 ↔ ${best.accession} 主体 ${best.hitFrom}-${best.hitTo} → 评估区间 ${s}-${e}${queryNote}（构建比对未产出区间时采用；非全长按截短口径分流）`)
               }
             }
             await this.rebuildStructureDataAfterBackfill(info)
           } else {
             // accession 查询失败（网络）→ 仍记录近似身份（有 accession 与描述）
-            st.targetIdentity = st.targetIdentity?.source === 'eval-table' ? st.targetIdentity : buildNrIdentity(best)
-            this.log(`BLAST nr 识别到 ${best.accession}，但 UniProt 元数据获取失败 — 记录近似身份（${best.description.slice(0, 60)}，${best.identity}%）`, 'warn')
+            st.targetIdentity = st.targetIdentity?.source === 'eval-table' ? st.targetIdentity : buildNrIdentity(best, nrChan)
+            this.log(`${nrChan}识别到 ${best.accession}，但 UniProt 元数据获取失败 — 记录近似身份（${best.description.slice(0, 60)}，${best.identity}%）`, 'warn')
           }
         } else if (best && best.identity >= 40) {
           // 未达「85% 一致性 + 40% 覆盖」回填阈值 / 非 UniProt 形态 → 近似身份记录
           // 命名优先级：评估表 > nr 识别 > PDB 同源推断（nr 覆盖全蛋白空间，强于 PDB 描述）
           if (!st.targetIdentity || st.targetIdentity.source === 'blast-homolog') {
-            st.targetIdentity = buildNrIdentity(best)
-            this.log(`BLAST nr 最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（${best.accession}，一致性 ${best.identity}%，覆盖 ${Math.round(nrBestCov.covFrac * 100)}%）— 未达「85% 一致性 + 40% 覆盖」回填阈值，记录为近似身份（题目采用 nr 识别名）`)
+            st.targetIdentity = buildNrIdentity(best, nrChan)
+            this.log(`${nrChan}最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（${best.accession}，一致性 ${best.identity}%，覆盖 ${Math.round(nrBestCov.covFrac * 100)}%）— 未达「85% 一致性 + 40% 覆盖」回填阈值，记录为近似身份（题目采用 nr 识别名）`)
           } else {
-            this.log(`BLAST nr 最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（一致性 ${best.identity}%，覆盖 ${Math.round(nrBestCov.covFrac * 100)}%）— 未达回填阈值；评估表命名优先保留`, 'info')
+            this.log(`${nrChan}最佳命中（覆盖度加权）：「${best.description.slice(0, 60)}」（一致性 ${best.identity}%，覆盖 ${Math.round(nrBestCov.covFrac * 100)}%）— 未达回填阈值；评估表命名优先保留`, 'info')
           }
         } else if (best) {
-          this.log(`BLAST nr 检索完成 — 覆盖度加权最佳命中（一致性 ${best.identity}%，覆盖 ${Math.round(nrBestCov.covFrac * 100)}%）均低于阈值 — 全新/人工构建序列或短片段巧合匹配，靶点身份保持现有证据`, 'warn')
+          this.log(`${nrChan}检索完成 — 覆盖度加权最佳命中（一致性 ${best.identity}%，覆盖 ${Math.round(nrBestCov.covFrac * 100)}%）均低于阈值 — 全新/人工构建序列或短片段巧合匹配，靶点身份保持现有证据`, 'warn')
         } else {
-          this.log(`BLAST nr 检索完成 — 无命中 — 全新/人工构建序列，靶点身份保持现有证据`, 'warn')
+          this.log(`${nrChan}检索完成 — 无命中 — 全新/人工构建序列，靶点身份保持现有证据`, 'warn')
         }
         st.nrIdentityDone = true
       }
@@ -2413,8 +2500,11 @@ class SegmentRunner {
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs : undefined, // v2.29：无重叠结构（折叠保留展示）
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits : undefined,
       /** v2.59：BLAST nr 全库检索命中（身份识别级联实际执行 nr 时携带 — 报告
-       *  BLAST 章节与 PDB 库同款表格全量展示；未执行时缺省。v2.67：上限 20→50） */
+       *  BLAST 章节与 PDB 库同款表格全量展示；未执行时缺省。v2.67：上限 20→50）
+       *  v2.95：blastNrProvider='ebi' = 命中来自 EBI UniProtKB 全库兜底
+       *  （NCBI nr 失败后的替补通道 — 报告面板如实标注） */
       blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 50) : undefined,
+      blastNrProvider: st.nrEbiSourced ? ('ebi' as const) : undefined,
       /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联的 v2.44 通道 —
        *  NCBI nr 患病/失败时的主力识别路径；此前只用于身份处理从不上报告，用户
        *  「搜索了库但报告不显示检索结果」的直接缺块。≤20 条与 EBI MAX_HITS 同口径） */
@@ -2670,8 +2760,11 @@ class SegmentRunner {
       rangeOutsidePdbs: st.rangeOutsidePdbs.length ? st.rangeOutsidePdbs.slice(0, 200) : undefined,
       rangeOutsideBlastHits: st.rangeOutsideBlastHits.length ? st.rangeOutsideBlastHits.slice(0, 100) : undefined,
       /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档；v2.67 ≤50 条
-       *  — 结果页/报告与 PDB 库同款表格全量展示；nr 未执行/无命中/历史作业缺省） */
+       *  — 结果页/报告与 PDB 库同款表格全量展示；nr 未执行/无命中/历史作业缺省）
+       *  v2.95：blastNrProvider='ebi' = 命中来自 EBI UniProtKB 全库兜底（NCBI nr
+       *  失败后的替补 — 前端/单独评估页如实标注检索通道；历史作业缺省 = NCBI） */
       blastNrHits: st.nrHits?.length ? st.nrHits.slice(0, 50) : undefined,
+      blastNrProvider: st.nrEbiSourced ? ('ebi' as const) : undefined,
       /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中存档（身份级联 v2.44 通道
        *  实际执行且有命中时 — 结果页/合并报告/单独评估页展示；历史作业缺省） */
       uniprotBlastHits: st.upHits?.length ? st.upHits.slice(0, 20) : undefined,

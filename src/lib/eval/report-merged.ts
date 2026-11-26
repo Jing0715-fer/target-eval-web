@@ -84,6 +84,9 @@ export interface MergedTargetData {
   /** v2.59：BLAST nr 全库检索命中（nr 级联实际执行且有命中时存档，≤20 条；
    *  单独评估页报告主体展示前 5 条 + 折叠；nr 未执行/历史作业缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.95：nr 命中实际检索通道：'ebi' = EBI UniProtKB 全库兜底（NCBI nr 失败后
+   *  的替补 — 前端表头/单独评估页如实标注；历史作业缺省 = NCBI） */
+  blastNrProvider?: 'ncbi' | 'ebi'
   /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联 v2.44 通道实际
    *  执行且有命中时存档，≤20 条；单独评估页/前端展示；历史作业缺省） */
   uniprotBlastHits?: BlastNrHit[]
@@ -155,6 +158,8 @@ export interface MergedTargetLite {
   rangeOutsideBlastHits?: BlastHit[]
   /** v2.59：BLAST nr 全库检索命中（前端 BlastNrTable 展示；历史报告缺省） */
   blastNrHits?: BlastNrHit[]
+  /** v2.95：nr 命中实际检索通道（ebi = EBI UniProtKB 全库兜底 — 表头标注；历史缺省 = NCBI） */
+  blastNrProvider?: 'ncbi' | 'ebi'
   /** v2.82：EBI UniProt 库序列匹配命中（前端/单独评估页展示；历史报告缺省） */
   uniprotBlastHits?: BlastNrHit[]
   /** v2.9：AlphaFold 预测结构元数据（前端简报卡展示；交互 3D 视图见 HTML 报告） */
@@ -199,6 +204,8 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     rangeOutsideBlastHits: t.rangeOutsideBlastHits,
     // v2.59：nr 全库检索命中（前端 BlastNrTable 展示）
     blastNrHits: t.blastNrHits,
+    // v2.95：nr 命中实际检索通道（ebi = EBI UniProtKB 全库兜底 — 表头标注）
+    blastNrProvider: t.blastNrProvider,
     // v2.82：UniProt 库序列匹配命中（前端/单独评估页展示）
     uniprotBlastHits: t.uniprotBlastHits,
     alphafold: t.alphafold,
@@ -234,6 +241,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       rangeOutsideBlastHits?: BlastHit[]
       /** v2.59：BLAST nr 全库检索命中（单独评估页/前端展示；历史作业缺省） */
       blastNrHits?: BlastNrHit[]
+      /** v2.95：nr 命中实际检索通道（ebi = EBI UniProtKB 全库兜底；历史作业缺省 = NCBI） */
+      blastNrProvider?: 'ncbi' | 'ebi'
       /** v2.82：EBI UniProt 库序列匹配命中（单独评估页/前端展示；历史作业缺省） */
       uniprotBlastHits?: BlastNrHit[]
       /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex（报告导入匹配用） */
@@ -295,6 +304,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       rangeOutsideBlastHits: summary.rangeOutsideBlastHits,
       // v2.59：nr 全库检索命中（单独评估页报告主体 BLAST 章节展示）
       blastNrHits: summary.blastNrHits,
+      // v2.95：nr 命中实际检索通道（ebi = EBI UniProtKB 全库兜底）
+      blastNrProvider: summary.blastNrProvider,
       // v2.82：UniProt 库序列匹配命中（单独评估页报告主体 BLAST 章节展示）
       uniprotBlastHits: summary.uniprotBlastHits,
       oligomer: summary.oligomer,
@@ -1520,6 +1531,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       rangeOutsideBlastHits: t.rangeOutsideBlastHits,
       // v2.59：nr 全库检索命中（报告 BLAST 章节展示前 5 条 + 折叠）
       blastNrHits: t.blastNrHits,
+      // v2.95：nr 命中实际检索通道（面板标题/说明如实标注 — ebi = EBI 全库兜底）
+      blastNrProvider: t.blastNrProvider,
       // v2.82：UniProt 库序列匹配命中（报告 BLAST 章节单独面板展示）
       uniprotBlastHits: t.uniprotBlastHits,
       directPdbs: t.directPdbs,
