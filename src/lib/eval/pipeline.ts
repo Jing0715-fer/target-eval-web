@@ -30,6 +30,8 @@ import { fetchPdbEntries, fetchPdbIdsForUniprot } from './rcsb'
 import { fetchPdbeCoverage, describeCoverage, uncoveredRanges, restrictCoverageToRange, uncoveredRangesWithin } from './pdbe'
 import { submitBlastPdb, collectBlastPdbWithRescue, enrichBlastHits, runBlastWithRetry, submitBlastNr, collectBlastNr, takePresubmittedBlast, type BlastPollState, type BlastNrHit } from './blast'
 import { submitUniprotSequenceBlast, collectUniprotSequenceBlast, type UniprotBlastJob } from './uniprot-blast'
+import { alignForIdentityEvidence } from './identity-align'
+import type { IdentityAlignment } from './types'
 import { submitPeptideSearch, collectPeptideSearch, type PeptideSearchJob } from './peptide-search'
 import { searchRcsbHomologs, fetchUniprotForEntryEntity } from './rcsb-search'
 import { buildLiteratureQuery, searchPubmed, fetchPubmedByPmids } from './pubmed'
@@ -185,6 +187,12 @@ interface PipelineState {
   psAccessions: string[] | null
   /** v2.58：精确匹配身份处理完成（回填/放弃已落 — 重入守卫） */
   psIdentityDone: boolean
+  /** v2.96：最高同源回填已终态（级联末端 best-effort 步骤 — 重入守卫；
+   *  全通道未达阈值且无命中候选时亦置位，防止每段重复尝试） */
+  beBackfillDone: boolean
+  /** v2.96：身份识别序列比对（非 100% 归属的证据可视化 — 随 checkpoint 续跑；
+   *  比对为纯 CPU 无网调，一次性计算后不再重算） */
+  idAlignment: IdentityAlignment | null
   // ── RCSB PDB ──
   totalPdbFound: number
   directPdbs: PdbEntry[]
@@ -298,6 +306,8 @@ function freshState(): PipelineState {
     psBlastDone: false,
     psAccessions: null,
     psIdentityDone: false,
+    beBackfillDone: false,
+    idAlignment: null,
     totalPdbFound: 0,
     directPdbs: [],
     pdbCompletedIds: [],
@@ -622,7 +632,37 @@ export function sanitizeCheckpoint(raw: unknown): PipelineCheckpoint | null {
     if (typeof st.targetIdentity !== 'object' || Array.isArray(st.targetIdentity)) return null
     const ti = st.targetIdentity as Record<string, unknown>
     if (typeof ti.name !== 'string' || ti.name.length < 1 || ti.name.length > 120) return null
-    if (ti.source != null && !['eval-table', 'blast-nr', 'blast-homolog'].includes(String(ti.source))) return null
+    // v2.96：补齐 v2.44/v2.58 新增 source（旧名单漏 uniprot-blast/uniprot-exact —
+    // 带该来源的检查点在续跑时被误拒，作业被迫从头重跑）+ bestEffort/coverage 消毒
+    if (ti.source != null && !['eval-table', 'blast-nr', 'blast-homolog', 'uniprot-blast', 'uniprot-exact'].includes(String(ti.source))) return null
+    if (ti.bestEffort != null && typeof ti.bestEffort !== 'boolean') return null
+    if (ti.coverage != null && (typeof ti.coverage !== 'number' || ti.coverage < 0 || ti.coverage > 100)) return null
+    if (ti.note != null && (typeof ti.note !== 'string' || ti.note.length > 400)) return null
+  }
+  // v2.96：最高同源回填终态标记 + 身份比对消毒（伪造 checkpoint 不得注入超长比对串）
+  if (st.beBackfillDone != null && typeof st.beBackfillDone !== 'boolean') return null
+  if (st.idAlignment != null) {
+    if (typeof st.idAlignment !== 'object' || Array.isArray(st.idAlignment)) return null
+    const al = st.idAlignment as Record<string, unknown>
+    if (typeof al.acc !== 'string' || !/^[A-Z0-9-]{1,16}$/i.test(al.acc)) return null
+    for (const k of ['qSeq', 'hSeq'] as const) {
+      const v = al[k]
+      if (typeof v !== 'string' || v.length < 1 || v.length > 20000) return null
+      if (!/^[A-Z*-]+$/i.test(v)) return null
+    }
+    // 中线仅允许 '|' / '+' / 空格，且与比对串等长（渲染时按列对齐消费）
+    if (typeof al.mSeq !== 'string' || al.mSeq.length !== (al.qSeq as string).length || !/^[|+ ]+$/.test(al.mSeq)) return null
+    for (const k of ['qFrom', 'qTo', 'hFrom', 'hTo', 'qLen', 'hLen', 'alignLen'] as const) {
+      const v = al[k]
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 100000) return null
+    }
+    for (const k of ['identity', 'positives', 'blastIdentity', 'gaps'] as const) {
+      const v = al[k]
+      if (v != null && (typeof v !== 'number' || v < 0 || v > 100000)) return null
+    }
+    if (al.entryName != null && (typeof al.entryName !== 'string' || al.entryName.length > 20)) return null
+    if (al.db != null && !['sp', 'tr', 'other'].includes(String(al.db))) return null
+    if (al.method != null && !['exact-substring', 'local-sw-blosum62'].includes(String(al.method))) return null
   }
   if (st.sequenceHeader != null && (typeof st.sequenceHeader !== 'string' || st.sequenceHeader.length > 80)) return null
   if (st.pdbIdsCached != null && !Array.isArray(st.pdbIdsCached)) return null
@@ -680,6 +720,8 @@ export async function runPipelineSegment(
   if (!st.rangeOutsideBlastHits) st.rangeOutsideBlastHits = []
   if (st.domainRangeDone == null) st.domainRangeDone = false
   if (!st.blastRange) st.blastRange = null // v2.30 防御性回填：旧 checkpoint 无此字段
+  if (st.beBackfillDone == null) st.beBackfillDone = false // v2.96 防御性回填
+  if (!st.idAlignment) st.idAlignment = null // v2.96 防御性回填
   const seg = new SegmentRunner(input, cb, st)
   return seg.run()
 }
@@ -2102,8 +2144,147 @@ class SegmentRunner {
       }
       st.psIdentityDone = true
     }
+
+    // ── v2.96 最高同源回填（级联末端 best-effort — 用户规则「不可回补的无论同源性
+    //    多少，取一个最高的进行回填」）──
+    //  身份级联（评估表 → PDB 同源 → EBI Swiss-Prot → NCBI nr / EBI 全库 → Peptide
+    //  Search 精确匹配）全部走完仍未归属时，不再留空：取覆盖度加权最佳命中
+    //  （score = identity × 查询覆盖率，与级联各通道同口径）**无条件回填** UniProt
+    //  元数据 — 置于级联最末端，不抢占任何可能找到更高一致性命中的先行通道。
+    //  归属标注 bestEffort（远缘参考，报告题目/刊头/结果页显式标注「最高同源 N%」
+    //  + 需人工复核），并计算提交序列 ↔ 条目序列的局部比对（报告比对面板数据源）。
+    //  刻意不调 rebuildStructureDataAfterBackfill：远缘条目的 PDB 结构是同源参考
+    //  而非本靶点结构 — 结构证据保持序列同源检索（blastHits）的诚实口径，也不设
+    //  blastRange（远缘 HSP 区间不具评估区间语义）。skipped-disabled/antibody 豁免
+    //  与级联其他通道一致。
+    if (!st.uniprotInfo && !st.beBackfillDone && st.sequence.length >= 30
+      && st.blastStatus.status !== 'skipped-disabled' && st.blastStatus.status !== 'skipped-antibody') {
+      const beGateMs = Math.min(20_000, Math.max(4_000, this.segBudgetMs * 0.35))
+      if (budgetLeft(this.cb) < beGateMs) {
+        return this.handoff()
+      }
+      // 候选池A：UniProt 通道命中（T2/T3）合并去重（同 accession 保留更高一致性）；sp/tr 优先
+      const seenAcc = new Map<string, BlastNrHit>()
+      for (const h of [...(st.upHits ?? []), ...(st.nrHits ?? [])]) {
+        const prev = seenAcc.get(h.accession)
+        if (!prev || h.identity > prev.identity) seenAcc.set(h.accession, h)
+      }
+      const dedup = [...seenAcc.values()]
+      const uniPool = dedup.filter(h => h.db !== 'other')
+      const cand = uniPool.length ? uniPool : dedup
+      const beBest = bestCoverageHit(cand, st.sequence.length)
+      if (beBest) {
+        const best = beBest.hit
+        const fromNr = (st.nrHits ?? []).some(h => h.accession === best.accession)
+        const chan = fromNr ? (st.nrEbiSourced ? 'EBI UniProtKB 全库' : 'BLAST nr') : 'UniProt 序列匹配'
+        const covPct = Math.round(beBest.covFrac * 1000) / 10
+        this.log(`身份级联所有通道均未达回填阈值 — 按最高同源命中回填：${best.accession}「${best.description.slice(0, 60)}」（${chan}最佳命中，一致性 ${best.identity}%，覆盖 ${covPct}%）— 远缘参考归属，需人工复核`)
+        try {
+          const info = await fetchUniprotInfo(best.accession)
+          if (info) {
+            st.uniprotInfo = info
+            st.targetIdentity = {
+              ...(fromNr ? buildNrIdentity(best, chan) : buildUniprotBlastIdentity(best)),
+              bestEffort: true,
+              identity: best.identity,
+              coverage: covPct,
+              note: `最高同源回填（${chan}最佳命中，一致性 ${best.identity}% / 覆盖 ${covPct}%，未达「85% 一致性 + 40% 覆盖」归属阈值）→ 按最高同源条目归属 UniProt ${best.accession} — 远缘参考，需人工复核`,
+            }
+            this.computeIdentityAlignment(info, best.identity, best.db, best.entryName)
+          } else {
+            this.log(`最高同源回填：${best.accession} 元数据获取失败（网络）— 保留既有近似身份记录（${best.identity}%）`, 'warn')
+          }
+        } catch (e) {
+          if (this.signal.aborted) throw e
+          this.log(`最高同源回填失败（${e instanceof Error ? e.message.slice(0, 100) : String(e)}）— 保留既有近似身份记录`, 'warn')
+        }
+      } else if (st.blastHits.length > 0) {
+        // 候选池B：UniProt 通道全空（EBI/NCBI 双患病日 — T2 提交失败且 T3 超时）时，
+        // 以 PDB 同源检索（RCSB 兜底/pdbaa）的覆盖度加权最佳命中作最高同源回填 —
+        // 经「PDB 实体 → UniProt 映射」（RCSB 提供方）或 pdbaa 描述 sp|ACC| 提取定位
+        // accession（与 a) 同源回填块同口径）。实测场景：EBI 双通道超时日 RCSB 命中
+        // 9XQN 一致性 84.9%×覆盖 99.7% — 距 85% 阈值 0.1%，正是本规则要兜住的证据。
+        const hb = bestCoverageHit(st.blastHits, st.sequence.length)
+        if (hb) {
+          const best = hb.hit
+          const covPct = Math.round(hb.covFrac * 1000) / 10
+          this.log(`身份级联 UniProt 通道均无可用命中 — 以 PDB 同源最佳命中 ${best.pdbId}（一致性 ${best.identity}%，覆盖 ${covPct}%）作最高同源回填（实体映射定位 UniProt）…`)
+          try {
+            const acc = (st.blastStatus.provider ?? 'ncbi') === 'rcsb'
+              ? await fetchUniprotForEntryEntity(best.pdbId, best.entityId ?? 1)
+              : uniprotFromBlastDesc(best.description)
+            if (acc) {
+              const info = await fetchUniprotInfo(acc)
+              if (info) {
+                st.uniprotInfo = info
+                st.targetIdentity = {
+                  ...buildHomologIdentity(best),
+                  bestEffort: true,
+                  identity: best.identity,
+                  coverage: covPct,
+                  uniprotId: acc,
+                  uniprotEntry: info.entryName,
+                  organism: info.organism,
+                  geneName: info.geneNames[0],
+                  note: `最高同源回填（PDB 同源 ${best.pdbId} 映射 UniProt ${acc}，一致性 ${best.identity}% / 覆盖 ${covPct}%，未达「85% 一致性 + 40% 覆盖」归属阈值）— 远缘参考，需人工复核`,
+                }
+                this.computeIdentityAlignment(info, best.identity, undefined, info.entryName)
+              } else {
+                this.log(`最高同源回填（PDB 同源路径）：${acc} 元数据获取失败（网络）— 靶点身份保持现有证据`, 'warn')
+              }
+            } else {
+              this.log(`最高同源回填（PDB 同源路径）：${best.pdbId} 实体无 UniProt 映射 — 靶点身份保持现有证据`, 'warn')
+            }
+          } catch (e) {
+            if (this.signal.aborted) throw e
+            this.log(`最高同源回填（PDB 同源路径）失败（${e instanceof Error ? e.message.slice(0, 100) : String(e)}）— 靶点身份保持现有证据`, 'warn')
+          }
+        }
+      } else {
+        this.log('身份级联各通道均无可用命中 — 无可回填的最高同源条目（全新/人工构建序列），靶点身份保持现有证据', 'warn')
+      }
+      st.beBackfillDone = true
+    }
+
+    // ── v2.96 身份比对收尾：已归属但比对尚缺（PDB 同源 / T2 / nr 通道回填后的统一补算）──
+    //  一致性口径：BLAST 归属身份（targetIdentity.identity）优先，同源回填路径
+    //  （无 targetIdentity）用构建比对（comparison.identity）；≥99.95%（含精确匹配
+    //  100%）不展示比对 — 完全归属无需比对佐证（用户规则「非 100% 才展示」）。
+    if (st.uniprotInfo && !st.idAlignment && st.sequence.length >= 8
+      && st.sequence !== st.uniprotInfo.sequence) {
+      const identPct = st.targetIdentity?.identity ?? st.comparison?.identity
+      if (identPct != null && identPct < 99.95) {
+        this.computeIdentityAlignment(st.uniprotInfo, st.targetIdentity?.identity, undefined, st.uniprotInfo.entryName)
+      }
+    }
+
     this.advance('gate')
     return null
+  }
+
+  /** v2.96：提交序列 ↔ UniProt 条目序列的局部比对（报告「序列比对」面板数据源 —
+   *  非 100% 一致性归属的证据可视化；纯 CPU 无网调，best-effort 失败静默跳过面板）。
+   *  已有比对（更高优先级通道产出）不覆盖。 */
+  private computeIdentityAlignment(
+    info: UniprotInfo,
+    blastIdentity?: number,
+    db?: string,
+    entryName?: string,
+  ): void {
+    const st = this.st
+    if (st.idAlignment || !st.sequence || !info.sequence || st.sequence === info.sequence) return
+    try {
+      const aln = alignForIdentityEvidence(st.sequence, info.sequence, {
+        acc: info.uniprotId,
+        entryName: entryName ?? info.entryName,
+        db,
+        blastIdentity,
+      })
+      if (aln) {
+        st.idAlignment = aln
+        this.log(`身份比对完成：提交序列 ${aln.qFrom}-${aln.qTo} ↔ ${info.uniprotId} 条目 ${aln.hFrom}-${aln.hTo}（比对区一致率 ${aln.identity}%，正替代 ${aln.positives}%，缺口 ${aln.gaps}，${aln.alignLen} 列）— 报告 BLAST 章节展示序列比对`)
+      }
+    } catch { /* best-effort：比对失败不影响评估 */ }
   }
 
   /** v2.16：UniProt 归属回填后补做结构数据（RCSB PDB + PDBe 覆盖率 + BLAST 去重）。
@@ -2491,6 +2672,9 @@ class SegmentRunner {
       insights: st.insights ?? undefined,
       /** v2.16：序列靶点身份（评估表名 / 同源推断 / nr 识别 — 无 UniProt 归属时的命名证据链） */
       targetIdentity: st.targetIdentity ?? undefined,
+      /** v2.96：身份识别序列比对（非 100% 一致性归属的证据可视化 — 报告 BLAST 章节
+       *  「序列比对」面板数据源；bestEffort 最高同源回填 / BLAST 归属 <100% 时携带） */
+      identityAlignment: st.idAlignment ?? undefined,
       batchNote: this.input.batchNote,
       providedSequence: st.providedSequence && st.comparison
         ? { sequence: st.providedSequence, comparison: st.comparison }
@@ -2791,6 +2975,9 @@ class SegmentRunner {
       batchNote: this.input.batchNote,
       /** v2.16：靶点身份识别证据链（识别来源/一致性/近似 UniProt — 合并报告与前端展示） */
       targetIdentity: st.targetIdentity ?? undefined,
+      /** v2.96：身份识别序列比对（非 100% 一致性归属的证据可视化 — 前端/单独
+       *  评估页/合并报告「序列比对」面板；历史作业缺省 = 无比对面板） */
+      identityAlignment: st.idAlignment ?? undefined,
       /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex
        *  （合并报告 meta 标记携带 → 单独 HTML 报告导入时 SHA/标签精确匹配） */
       sequenceHeader: st.sequenceHeader || undefined,

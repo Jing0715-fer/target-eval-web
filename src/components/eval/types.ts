@@ -4,9 +4,9 @@
  * 注意：后端并行开发中，字段可能缺失，所有可缺失字段均按可空处理。
  */
 
-import type { BlastStatusInfo, ImportedReportStats, TargetIdentityInfo } from '@/lib/eval/types'
+import type { BlastStatusInfo, ImportedReportStats, TargetIdentityInfo, IdentityAlignment } from '@/lib/eval/types'
 
-export type { BlastStatusInfo, BlastStatusCode, TargetIdentityInfo } from '@/lib/eval/types'
+export type { BlastStatusInfo, BlastStatusCode, TargetIdentityInfo, IdentityAlignment } from '@/lib/eval/types'
 export { MAX_PDB_UNLIMITED } from '@/lib/eval/types'
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'canceled'
@@ -244,6 +244,9 @@ export interface MergedTargetLite {
   esmfold?: EsmfoldSummaryInfo | null
   /** v2.16：序列靶点身份识别（无 UniProt 归属靶点的命名证据链 — 分组头/简报卡展示） */
   targetIdentity?: TargetIdentityInfo | null
+  /** v2.96：身份识别序列比对（非 100% 一致性归属 — 下载的 HTML 报告「序列比对」
+   *  面板展示；前端仅携带元数据不做渲染；历史报告缺省） */
+  identityAlignment?: IdentityAlignment
 }
 
 /** 合并评估报告（关联靶点批量生成） */
@@ -745,6 +748,9 @@ export interface JobSummary {
   batchNote?: string
   /** v2.16：靶点身份识别证据链（序列输入无 UniProt 归属时；历史作业缺省） */
   targetIdentity?: TargetIdentityInfo
+  /** v2.96：身份识别序列比对（非 100% 一致性归属的证据可视化 — HTML 报告
+   *  「序列比对」面板；前端结构页可据比对区坐标做标注；历史作业缺省） */
+  identityAlignment?: IdentityAlignment
 }
 
 export interface PdbEntry {

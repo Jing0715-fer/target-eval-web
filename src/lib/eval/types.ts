@@ -673,6 +673,12 @@ export interface TargetIdentityInfo {
   sourceLabel: string
   /** 命中一致性 %（blast-nr / blast-homolog / uniprot-blast 时存在；uniprot-exact 恒为 100） */
   identity?: number
+  /** v2.96：最高同源回填标记（身份级联全部通道未达「85% 一致性 + 40% 覆盖」阈值时，
+   *  按用户规则不再留空 — 取覆盖度加权最佳命中无条件回填 UniProt 元数据，
+   *  本标记 = 远缘参考归属，报告/结果页显式标注需人工复核） */
+  bestEffort?: boolean
+  /** v2.96：命中查询覆盖率 %（回填时的证据口径 — 比对面板/徽标展示；历史作业缺省） */
+  coverage?: number
   /** 定位到的 UniProt accession（nr 命中 sp|ACC| / tr|ACC| 形态；回填未达阈值时为近似条目） */
   uniprotId?: string
   /** UniProt 条目名（如 P53_HUMAN） */
@@ -695,11 +701,54 @@ export function describeTargetIdentitySource(source: TargetIdentityInfo['source'
   }
 }
 
-/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」「 · UniProt 匹配 96%」；评估表/精确匹配为空 — 精确匹配已是完全归属，无需百分比标注） */
+/** 报告题目中的身份后缀（如「 · 同源 45%」「 · nr 识别 98%」「 · UniProt 匹配 96%」；评估表/精确匹配为空 — 精确匹配已是完全归属，无需百分比标注）
+ *  v2.96：bestEffort（最高同源回填）→ 「 · 最高同源 N%」— 远缘参考归属的显式口径 */
 export function targetIdentityTitleSuffix(ti: TargetIdentityInfo): string {
   if (ti.source === 'eval-table' || ti.source === 'uniprot-exact') return ''
-  const tag = ti.source === 'blast-nr' ? 'nr 识别' : ti.source === 'uniprot-blast' ? 'UniProt 匹配' : '同源'
+  const tag = ti.bestEffort ? '最高同源' : ti.source === 'blast-nr' ? 'nr 识别' : ti.source === 'uniprot-blast' ? 'UniProt 匹配' : '同源'
   return ti.identity != null ? ` · ${tag} ${Math.round(ti.identity)}%` : ` · ${tag}`
+}
+
+// ─── v2.96 身份识别序列比对（报告证据可视化）────────────────────────────
+
+/** 提交序列 ↔ UniProt 条目序列的局部比对（Smith-Waterman-Gotoh / BLOSUM62 —
+ *  与 BLAST HSP 同语义；非 100% 一致性的归属在报告 BLAST 章节展示比对面板，
+ *  悬停显示双侧氨基酸残基号）。历史作业缺省 = 无比对面板。 */
+export interface IdentityAlignment {
+  /** 归属的 UniProt accession（面板标题/外链用） */
+  acc: string
+  /** UniProt 条目名（如 GPR88_HUMAN；缺省时不展示） */
+  entryName?: string
+  /** 库类型：'sp' Swiss-Prot / 'tr' TrEMBL（徽标用；缺省不展示） */
+  db?: string
+  /** BLAST 归属命中的一致性 %（与比对区一致率并列展示；缺省只展示比对统计） */
+  blastIdentity?: number
+  /** 比对区在提交序列上的起止（1-based 闭区间） */
+  qFrom: number
+  qTo: number
+  /** 比对区在 UniProt 条目编号上的起止（1-based 闭区间） */
+  hFrom: number
+  hTo: number
+  /** 对齐后的提交序列（'-' = 缺口） */
+  qSeq: string
+  /** 中线：'|' 全同 / '+' 正替代（BLOSUM62 得分>0）/ ' ' 其余 */
+  mSeq: string
+  /** 对齐后的条目序列（'-' = 缺口） */
+  hSeq: string
+  /** 比对区一致率 %（匹配列/对齐列） */
+  identity: number
+  /** 正替代率 %（含全同 — BLAST Positives 同口径） */
+  positives: number
+  /** 缺口残基总数（两侧合计） */
+  gaps: number
+  /** 对齐列数 */
+  alignLen: number
+  /** 提交序列全长 */
+  qLen: number
+  /** 条目序列全长 */
+  hLen: number
+  /** 比对方法：'exact-substring' 精确子串直铺 / 'local-sw-blosum62' 局部比对 */
+  method: 'exact-substring' | 'local-sw-blosum62'
 }
 
 export interface JobSummary {
@@ -777,6 +826,10 @@ export interface JobSummary {
   batchNote?: string
   /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链；历史作业缺省） */
   targetIdentity?: TargetIdentityInfo
+  /** v2.96：身份识别序列比对（非 100% 一致性归属的证据可视化 — 报告 BLAST 章节
+   *  「序列比对」面板数据源；bestEffort 最高同源回填 / BLAST 归属 <100% 时存档；
+   *  历史作业缺省 = 无比对面板） */
+  identityAlignment?: IdentityAlignment
   /** v2.45：序列靶点原始标签头（报告导入标签精确匹配用；历史作业缺省） */
   sequenceHeader?: string
   /** v2.45：提交序列 SHA-256 前 16 hex（报告导入 SHA 精确匹配用；历史作业缺省） */

@@ -394,5 +394,45 @@
  *    HITLIST 同口径。验证：scripts/test-ebi-nr-fallback.ts（全库实测 264.9s
  *    50 命中、TrEMBL 分类/一致性/覆盖全字段正常）+ test-ebi-provider-render.ts
  *    （报告标注 8 断言全过）。
+ * v2.96：身份识别两条新规则（用户指令 2026-11-26：「不可回补的无论同源性多少，
+ *  取一个最高的进行回填；非 100% 的话在报告中加一个序列比对的展示，悬停显示
+ *  氨基酸号」— 永久并入管线，此后所有评估按新规则运行）：
+ *  - 规则 A · 最高同源回填（pipeline.ts 级联末端 best-effort 步骤）：身份级联
+ *    （评估表 → PDB 同源 → EBI Swiss-Prot → NCBI nr / EBI UniProtKB 全库 →
+ *    Peptide Search）全部走完仍未归属时，不再留空 — 取覆盖度加权最佳命中
+ *    （identity × 查询覆盖率，与各通道同口径）无条件回填 UniProt 元数据，
+ *    targetIdentity.bestEffort 标记（报告题目「最高同源 N%」、刊头/比对面板/
+ *    结果页/合并报告「远缘参考，需人工复核」琥珀标注）。候选池两级：池A =
+ *    UniProt 通道命中（T2/T3 直接携带 accession）；池B = UniProt 通道全空
+ *    （EBI/NCBI 双患病日 — T2 提交超时且 T3 全库超时，端到端实测场景）时以
+ *    PDB 同源检索（RCSB 兜底/pdbaa）最佳命中经「PDB 实体→UniProt 映射 /
+ *    pdbaa 描述 sp|ACC| 提取」定位 accession 回填（实测 RCSB 命中 9XQN 84.9%
+ *    ×99.7% — 距阈值 0.1% 的证据不再丢失）。置于级联最末端，不抢占任何先行
+ *    通道；刻意不重建结构数据/不设 blastRange（远缘条目结构是同源参考，结构
+ *    证据保持同源检索诚实口径）；检查点新字段 beBackfillDone/idAlignment
+ *    消毒校验，跨版本续跑安全；
+ *  - 规则 B · 序列比对可视化（identity-align.ts + 报告「序列比对」面板）：非
+ *    100% 一致性的归属（BLAST 归属 85-99.9% 与最高同源回填）展示「提交序列 ↔
+ *    UniProt 条目」局部比对 — 新模块 identity-align.ts 本地 Smith-Waterman +
+ *    Gotoh 仿射缺口（BLOSUM62，缺口 11+1 — 与 BLASTp 同参数；精确子串快路径
+ *    零 DP 直铺；>6M 格的超大条目 8-mer 种子对角线投票裁窗比对，纯 CPU 无网调）。
+ *    面板三行版式（提交序列/中线/条目）60 列分块、块首尾双侧残基号、逐残基悬停
+ *    浮层显示「提交序列 第 N 位 · {acc} 第 M 位 · 残基（全同/正替代/错配/缺口）」
+ *    + 同列三行联动高亮、顶部游程合并 SVG 一致性概览条（悬停显示区间）、统计
+ *    chips（一致率/正替代/缺口/比对列数/双侧区间）、窄屏横滚 + 打印放开；
+ *    ALIGN_TIP_JS 页级脚本随单靶点报告与合并报告注入；bestEffort 时附琥珀
+ *    callout 说明回填口径。数据随 summary.identityAlignment 持久化（历史作业
+ *    缺省 = 无面板），合并报告/单独评估页经 MergedTargetData 贯通同款渲染；
+ *  - 附带修复：sanitizeCheckpoint targetIdentity.source 白名单漏 uniprot-blast/
+ *    uniprot-exact（v2.44/v2.58 起新增来源 — 带该来源的检查点续跑时被误拒，
+ *    作业被迫从头重跑）；JobSummary/前端 types 贯通 bestEffort/coverage/
+ *    identityAlignment 字段。
+ *  验证：①本地比对 vs EBI BLAST HSP 26 靶点全对（一致率/坐标/缺口逐一核对，
+ *  0-15ms/靶点）+ 超大条目窗口裁剪/精确子串/无同源/未知残基/短序列边界用例；
+ *  ②agent-browser + VLM 视觉评审两轮（7 → 9/10，零 P0：悬停浮层改屏幕底部
+ *  状态条永不遮挡 + 替代对 Q→K + 对比度/要点化修正，逐列像素对齐程序核实）；
+ *  ③真实评估端到端（imp-100 GPR75 突变序列，NCBI 拥堵日）：级联全走完后
+ *  按最高同源回填 Q6X632（60.7% × 99.7%）+ 392 列比对面板落盘，报告题目/
+ *  刊头/面板/悬停交互全链路核验，零控制台报错。
  */
-export const APP_VERSION = 'v2.95.0'
+export const APP_VERSION = 'v2.96.0'

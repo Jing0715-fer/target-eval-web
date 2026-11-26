@@ -46,7 +46,7 @@
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import type { BlastHit, BlastNrHit, LiteratureItem, ParsedImage, PdbEntry, MethodStats, UniprotInfo } from './types'
+import type { BlastHit, BlastNrHit, IdentityAlignment, LiteratureItem, ParsedImage, PdbEntry, MethodStats, TargetIdentityInfo, UniprotInfo } from './types'
 import { describeBlastStatus, targetIdentityTitleSuffix, type AfDomainRange } from './types'
 import type { InteractionAnalysis, InteractionComplexInfo, InteractionSharedPdb } from './types'
 import type { ReportContext } from './report'
@@ -1900,6 +1900,184 @@ function uniprotBlastPanelHtml(hits: BlastNrHit[]): string {
   </table></div>`
 }
 
+// ─── v2.96 身份识别序列比对面板（非 100% 一致性归属的证据可视化）──────────────
+
+/** 比对面板每块的列数（经典 BLAST 版式 — 60 列/块，等宽字体逐列对齐） */
+const ALN_BLOCK_COLS = 60
+
+/** v2.96：提交序列 ↔ UniProt 条目的双序列比对面板（用户规则：非 100% 一致性的
+ *  归属展示比对 — 样式美观、可读性强、悬停显示氨基酸残基号）。
+ *  - 三行版式：提交序列 / 中线（| 全同 + 正替代）/ UniProt 条目 — 60 列分块，
+ *    块首尾标注双侧残基号（1-based，与 BLAST 版式一致）；
+ *  - 逐残基 span 携带双侧位置（data-qp/data-hp）— 页级 ALIGN_TIP_JS 悬停浮层
+ *    显示「查询 第 N 位 · {acc} 第 M 位 · 残基（全同/正替代/错配/缺口）」，
+ *    同时整列高亮（同块三行联动）；
+ *  - 顶部一致性概览条（SVG 游程合并矩形 — 全同绿/正替代琥珀/错配灰/缺口浅灰，
+ *    悬停显示该游程的双侧区间）+ 统计 chips + 图例；
+ *  - bestEffort（最高同源回填）时附琥珀 callout（远缘参考，需人工复核）；
+ *  - 窄屏横滚（.aln-scroll — 与数据表同款模式），打印时滚动容器放开。
+ *  数据源 IdentityAlignment 由管线本地比对产出（identity-align.ts，
+ *  Smith-Waterman-Gotoh / BLOSUM62 — 与 BLAST HSP 同语义）。 */
+function identityAlignmentPanelHtml(aln: IdentityAlignment, ti?: TargetIdentityInfo): string {
+  if (!aln?.qSeq || !aln.hSeq || aln.qSeq.length !== aln.hSeq.length || aln.qSeq.length < 8) return ''
+  const cols = aln.qSeq.length
+  // 逐列状态与双侧残基号（0 = 该侧缺口）
+  const qPos: number[] = []
+  const hPos: number[] = []
+  const st: string[] = []
+  let qp = aln.qFrom
+  let hp = aln.hFrom
+  for (let k = 0; k < cols; k++) {
+    const q = aln.qSeq[k]
+    const h = aln.hSeq[k]
+    const qGap = q === '-'
+    const hGap = h === '-'
+    qPos.push(qGap ? 0 : qp)
+    hPos.push(hGap ? 0 : hp)
+    if (qGap || hGap) st.push('g')
+    else if (q === h) st.push('m')
+    else st.push(aln.mSeq[k] === '+' ? 'p' : 'x')
+    if (!qGap) qp++
+    if (!hGap) hp++
+  }
+  // 一致性概览条：游程合并的 SVG 矩形（全同/正替代/错配/缺口四色）
+  const STRIP_COLOR: Record<string, string> = { m: '#059669', p: '#d97706', x: '#d6d3d1', g: '#f0efee' }
+  const STRIP_LABEL: Record<string, string> = { m: '全同', p: '正替代', x: '错配', g: '缺口' }
+  let stripRects = ''
+  let runStart = 0
+  let runSt = st[0]
+  const runTitle = (a: number, b: number, s: string) => {
+    const qA = qPos[a] || qPos.slice(a, b + 1).find(v => v > 0) || 0
+    const hA = hPos[a] || hPos.slice(a, b + 1).find(v => v > 0) || 0
+    const qB = qPos[b] || [...qPos.slice(a, b + 1)].reverse().find(v => v > 0) || 0
+    const hB = hPos[b] || [...hPos.slice(a, b + 1)].reverse().find(v => v > 0) || 0
+    const qTxt = qA ? `查询 ${qA}-${qB}` : '查询 缺口区'
+    const hTxt = hA ? `${aln.acc} ${hA}-${hB}` : `${aln.acc} 缺口区`
+    return `列 ${a + 1}-${b + 1} · ${qTxt} · ${hTxt} · ${STRIP_LABEL[s]}`
+  }
+  const flushRun = (endIdx: number) => {
+    stripRects += `<rect x="${runStart}" y="0" width="${endIdx - runStart + 1}" height="10" fill="${STRIP_COLOR[runSt]}"><title>${esc(runTitle(runStart, endIdx, runSt))}</title></rect>`
+  }
+  for (let k = 1; k < cols; k++) {
+    if (st[k] !== runSt) { flushRun(k - 1); runStart = k; runSt = st[k] }
+  }
+  flushRun(cols - 1)
+
+  // 60 列分块的三行版式
+  const blocks: string[] = []
+  for (let s = 0; s < cols; s += ALN_BLOCK_COLS) {
+    const e = Math.min(cols, s + ALN_BLOCK_COLS)
+    const seqRow = (which: 'q' | 'h') => {
+      let out = ''
+      for (let k = s; k < e; k++) {
+        const ch = which === 'q' ? aln.qSeq[k] : aln.hSeq[k]
+        out += `<span class="aln-r aln-${st[k]}" data-qp="${qPos[k] || ''}" data-hp="${hPos[k] || ''}">${ch}</span>`
+      }
+      return out
+    }
+    const midRow = () => {
+      let out = ''
+      for (let k = s; k < e; k++) {
+        const ch = st[k] === 'm' ? '|' : st[k] === 'p' ? '+' : ' '
+        out += `<span class="aln-mid aln-${st[k]}">${ch === ' ' ? '&nbsp;' : ch}</span>`
+      }
+      return out
+    }
+    const rowSpan = (arr: number[]) => {
+      // 块内首个/末个非缺口位置（整块缺口时显示 —）
+      let first = 0
+      let last = 0
+      for (let k = s; k < e; k++) { if (arr[k] > 0) { first = first || arr[k]; last = arr[k] } }
+      return first ? `${first}<span class="aln-pos-sep">–</span>${last}` : '—'
+    }
+    blocks.push(`
+    <div class="aln-block">
+      <div class="aln-row"><span class="aln-lab">提交序列</span><span class="aln-pos">${rowSpan(qPos)}</span><span class="aln-seq">${seqRow('q')}</span></div>
+      <div class="aln-row aln-row-mid"><span class="aln-lab"></span><span class="aln-pos"></span><span class="aln-seq">${midRow()}</span></div>
+      <div class="aln-row"><span class="aln-lab">${esc(aln.acc)}</span><span class="aln-pos">${rowSpan(hPos)}</span><span class="aln-seq">${seqRow('h')}</span></div>
+    </div>`)
+  }
+
+  const dbChip = aln.db === 'sp'
+    ? '<span class="nr-chip nr-chip-sp" title="Swiss-Prot 人工审校条目">Swiss-Prot</span>'
+    : aln.db === 'tr'
+      ? '<span class="nr-chip nr-chip-tr" title="UniProt TrEMBL 自动注释条目">TrEMBL</span>'
+      : ''
+  const accLink = /^[A-Z0-9]{6,10}$/i.test(aln.acc)
+    ? `<a href="https://www.uniprot.org/uniprotkb/${esc(aln.acc)}" target="_blank" rel="noopener">${esc(aln.acc)}</a>`
+    : esc(aln.acc)
+  const beCallout = ti?.bestEffort
+    ? `<div class="callout callout-amber"><b>最高同源回填 — 远缘参考归属，需人工复核。</b><ul class="aln-be-list"><li>身份识别级联（PDB 同源 → EBI Swiss-Prot → NCBI nr / EBI UniProtKB 全库 → 精确匹配）所有通道均未达「一致性 ≥85% 且覆盖 ≥40%」归属阈值；</li><li>按规则以覆盖度加权最佳命中回填本条目：一致性 ${Math.round(ti.identity ?? aln.identity)}%${ti.coverage != null ? ` · 覆盖 ${Math.round(ti.coverage)}%` : ''}；</li><li>条目为提交序列的远缘同源参考 — 蛋白名/物种/条目信息按参考条目口径，结构证据仍以同源检索结果为准，关键决策请人工复核。</li></ul></div>`
+    : ''
+  return `
+  <h3 class="itx-h3">序列比对 <span class="itx-h3-sub">身份识别证据 · 提交序列 ↔ ${accLink}${dbChip}${aln.entryName ? ` ${esc(aln.entryName)}` : ''} · ${cols} 列</span></h3>
+  <p class="note">提交序列与归属 UniProt 条目的${aln.method === 'exact-substring' ? '精确匹配区间（提交序列为条目子串 — 完全一致）' : '局部比对（Smith-Waterman 仿射缺口 · BLOSUM62 — 与 BLAST HSP 同口径）'}：块首尾为双侧残基号（1-based），中线「|」全同 /「+」正替代（BLOSUM62 得分 &gt;0）；<b>悬停任意残基显示双侧氨基酸位置号</b>（查询位 · 条目位 · 替代类型），同列三行联动高亮；顶部概览条为全区一致性分布（悬停显示游程区间）。${aln.blastIdentity != null && aln.blastIdentity < 99.95 ? `归属命中一致性 ${aln.blastIdentity.toFixed(1)}%，比对区一致率 ${aln.identity.toFixed(1)}%（覆盖提交序列 ${aln.qFrom}-${aln.qTo} / ${aln.qLen} aa，条目 ${aln.hFrom}-${aln.hTo} / ${aln.hLen} aa）。` : ''}</p>
+  <div class="aln-panel" data-acc="${esc(aln.acc)}">
+    <div class="aln-stats">
+      <span class="aln-chip" title="比对区一致率 = 全同列 / 对齐列数">一致率 <b>${aln.identity.toFixed(1)}%</b></span>
+      <span class="aln-chip" title="正替代率 = 全同 + BLOSUM62 正得分替换列 / 对齐列数（BLAST Positives 同口径 — 含全同，故 ≥ 一致率）">正替代 <b>${aln.positives.toFixed(1)}%</b><i>含全同</i></span>
+      <span class="aln-chip">缺口 <b>${aln.gaps}</b></span>
+      <span class="aln-chip">比对 <b>${aln.alignLen}</b> 列</span>
+      <span class="aln-chip">查询 <b>${aln.qFrom}-${aln.qTo}</b><i>/${aln.qLen} aa</i></span>
+      <span class="aln-chip">${esc(aln.acc)} <b>${aln.hFrom}-${aln.hTo}</b><i>/${aln.hLen} aa</i></span>
+      ${aln.blastIdentity != null ? `<span class="aln-chip" title="BLAST 归属命中的报告一致性（级联回填口径）">命中一致性 <b>${aln.blastIdentity.toFixed(1)}%</b></span>` : ''}
+    </div>
+    ${beCallout}
+    <div class="aln-strip-wrap"><svg class="aln-strip" viewBox="0 0 ${cols} 10" preserveAspectRatio="none" role="img" aria-label="比对区一致性分布概览">${stripRects}</svg></div>
+    <div class="aln-legend"><span class="aln-lg aln-lg-m">全同</span><span class="aln-lg aln-lg-p">正替代</span><span class="aln-lg aln-lg-x">错配</span><span class="aln-lg aln-lg-g">缺口</span><span class="aln-lg-hint">悬停残基查看位置号</span></div>
+    <div class="aln-scroll">${blocks.join('')}
+    </div>
+  </div>`
+}
+
+/** v2.96：比对面板悬停信息条 + 整列联动高亮（页级脚本 — 单靶点报告外壳与合并报告
+ *  公共注入；事件委托挂 document，多面板/多视图页安全复用）。
+ *  悬停浮层为屏幕底部居中的状态条（基因浏览器 status bar 模式）：永不遮挡序列行/
+ *  概览条，位置固定易扫读；内容 = 残基徽标 + 类型色点 + 替代对（错配/正替代时
+ *  Q→K）+ 双侧残基号；同列三行联动高亮（十字准线）。 */
+export const ALIGN_TIP_JS = `<script>
+(function(){
+  var tip = null, curCol = [];
+  var KIND_COLOR = { '全同': '#34d399', '正替代': '#fbbf24', '错配': '#d6d3d1', '缺口': '#a8a29e' };
+  function hide(){ if(tip){ tip.style.display='none'; } curCol.forEach(function(el){ el.classList.remove('aln-hl'); }); curCol = []; }
+  document.addEventListener('mouseover', function(ev){
+    var el = ev.target && ev.target.closest ? ev.target.closest('.aln-r') : null;
+    if(!el){ if(ev.target && ev.target.closest && !ev.target.closest('.aln-panel')) hide(); return; }
+    var panel = el.closest('.aln-panel');
+    var acc = panel ? panel.getAttribute('data-acc') : '';
+    var qp = el.getAttribute('data-qp') || '';
+    var hp = el.getAttribute('data-hp') || '';
+    if(!qp && !hp) return;
+    var cls = el.className;
+    var kind = /aln-m\\b/.test(cls) ? '全同' : /aln-p\\b/.test(cls) ? '正替代' : /aln-g\\b/.test(cls) ? '缺口' : '错配';
+    // 列联动高亮（十字准线）：同块三行同列加亮，并取对侧残基组成替代对
+    curCol.forEach(function(c){ c.classList.remove('aln-hl'); }); curCol = [];
+    var seq = el.closest('.aln-seq');
+    var block = el.closest('.aln-block');
+    var other = null;
+    if(seq && block){
+      var idx = Array.prototype.indexOf.call(seq.children, el);
+      if(idx >= 0){
+        block.querySelectorAll('.aln-seq').forEach(function(row){
+          var c = row.children[idx];
+          if(c) { c.classList.add('aln-hl'); curCol.push(c); }
+        });
+        // curCol[0] = 提交序列行 / [1] = 中线 / [2] = 条目行（DOM 顺序）；对侧残基取非当前行的首尾
+        if(curCol.length >= 3){ other = (curCol[0] === el ? curCol[2] : curCol[0]).textContent || '-'; }
+      }
+    }
+    var own = el.textContent || '-';
+    var sub = kind === '全同' ? own : (own + ' → ' + (other || '-'));
+    var qTxt = qp ? '提交序列 第 ' + qp + ' 位' : '提交序列 缺口';
+    var hTxt = hp ? (acc ? acc : '条目') + ' 第 ' + hp + ' 位' : '条目 缺口';
+    if(!tip){ tip = document.createElement('div'); tip.className = 'aln-tip'; document.body.appendChild(tip); }
+    tip.innerHTML = '<b>' + own + '</b><span class="aln-tip-kind"><em style="background:' + (KIND_COLOR[kind] || '#d6d3d1') + '"></em>' + kind + '</span>' + (kind !== '缺口' ? '<span class="aln-tip-sub">' + sub + '</span>' : '') + '<span>' + qTxt + '</span><span>' + hTxt + '</span>';
+    tip.style.display = 'block';
+  }, true);
+  document.addEventListener('scroll', hide, true);
+})();
+</script>`
+
 /** v2.67：BLAST 结果库切换（PDB 库 / nr 全库 — 两库都有命中时表头上方分段按钮；
  *  面板显隐由 TABLE_FILTER_JS 驱动，打印时两库面板自动全展开、打印后恢复切换态）。
  *  v2.95 provider='ebi'：nr 面板实为 EBI UniProtKB 全库兜底结果 — 按钮如实标注 */
@@ -2122,9 +2300,10 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const ti = ctx.targetIdentity
   // v2.44：已归属 UniProt 但经序列匹配（UniProt 匹配 / nr 识别）定位且非全同时，
   // 题目标注同源度（用户诉求「显示同源度，避免非标准名称作题目」— 全同 100% 不注）
+  // v2.96：bestEffort（最高同源回填）→「最高同源 N%」— 远缘参考归属的显式口径
   const identityTitleSuffix = u && ti && ti.identity != null && ti.identity < 99.95
     && (ti.source === 'uniprot-blast' || ti.source === 'blast-nr')
-    ? ` · ${ti.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(ti.identity)}%`
+    ? ` · ${ti.bestEffort ? '最高同源' : ti.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(ti.identity)}%`
     : ''
   // v2.31：聚合蛋白截短题目标注（P0DTD1 不同截短均为「Replicase polyprotein 1ab」—
   // 从 PTM/Processing 加工条目归属 nsp，题目区分同名截短靶点）
@@ -2182,10 +2361,12 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   const blastNrCount = ctx.blastNrHits?.length ?? 0
   // v2.82：UniProt 库序列匹配命中存在时同样展示（身份识别证据 — EBI 通道）
   const uniBlastCount = ctx.uniprotBlastHits?.length ?? 0
+  // v2.96：身份识别序列比对（非 100% 一致性归属的证据可视化 — 比对面板）
+  const hasIdAlignment = Boolean(ctx.identityAlignment)
   // v2.95：nr 命中通道（ebi = EBI UniProtKB 全库兜底 — 章节头/切换按钮/面板标注）
   const nrProvider = ctx.blastNrProvider === 'ebi' ? 'ebi' as const : 'ncbi' as const
   const nrLibLabel = nrProvider === 'ebi' ? 'UniProt 全库' : 'nr'
-  const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus) || blastNrCount > 0 || uniBlastCount > 0
+  const showBlastSec = ctx.blastHits.length > 0 || Boolean(ctx.blastStatus) || blastNrCount > 0 || uniBlastCount > 0 || hasIdAlignment
   const ligNo = (ctx.ligands?.length ?? 0) > 0 ? nextNo() : ''
   // v2.7/v2.7.6 配体卡展示构件（ligDetailProps / ligStructFig / ligIdentFold / strategyZh）
   // 已提升为模块级共享导出 —— 单靶点与合并报告单源同版
@@ -2709,13 +2890,13 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
     <h1 class="rpt-title">${esc(proteinTitle)}</h1>
     <div class="rpt-subtitle">蛋白靶点结构解析可行性评估报告</div>
     <div class="meta-grid">
-      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）${identityTitleSuffix ? `<span class="id-src">${esc(identityTitleSuffix.trim())} — 序列靶点经同源匹配归属</span>` : ''}` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
+      <div><b>UniProt</b> ${u ? `<a href="https://www.uniprot.org/uniprotkb/${u.uniprotId}" target="_blank" rel="noopener">${u.uniprotId}</a>（${esc(u.entryName)}）${identityTitleSuffix ? `<span class="id-src">${esc(identityTitleSuffix.trim())} — 序列靶点经同源匹配归属${ti?.bestEffort ? '（最高同源回填 · 远缘参考，需人工复核）' : ''}</span>` : ti?.bestEffort ? `<span class="id-src">最高同源回填 — 远缘参考，需人工复核</span>` : ''}` : ctx.targetIdentity?.uniprotId ? `—（序列输入；nr 最近条目 <a href="https://www.uniprot.org/uniprotkb/${esc(ctx.targetIdentity.uniprotId)}" target="_blank" rel="noopener">${esc(ctx.targetIdentity.uniprotId)}</a>${ctx.targetIdentity.uniprotEntry ? ` ${esc(ctx.targetIdentity.uniprotEntry)}` : ''}）` : '—（序列直接输入）'}</div>
       <div><b>蛋白名称</b> ${esc(u?.proteinName ?? ctx.targetIdentity?.name ?? '—')}</div>
       ${procMatch ? processingRowHtml(procMatch) : ''}
       <div><b>基因</b> ${esc(geneStr)}</div>
       <div><b>物种</b> ${esc(u?.organism ?? ctx.targetIdentity?.organism ?? '—')}</div>
       <div><b>序列长度</b> ${u ? u.sequenceLength + ' aa' : ctx.sequence ? ctx.sequence.length + ' aa' : '—'}</div>
-      ${!u && ctx.targetIdentity ? `<div><b>靶点身份</b> <span class="id-src">${esc(ctx.targetIdentity.sourceLabel)}${ctx.targetIdentity.identity != null ? ` · 一致性 ${Math.round(ctx.targetIdentity.identity)}%` : ''}${ctx.targetIdentity.note ? ` · ${esc(ctx.targetIdentity.note.slice(0, 80))}` : ''}</span></div>` : ''}
+      ${!u && ctx.targetIdentity ? `<div><b>靶点身份</b> <span class="id-src">${esc(ctx.targetIdentity.sourceLabel)}${ctx.targetIdentity.identity != null ? ` · 一致性 ${Math.round(ctx.targetIdentity.identity)}%` : ''}${ctx.targetIdentity.bestEffort ? ' · 最高同源回填（远缘参考，需人工复核）' : ''}${ctx.targetIdentity.note ? ` · ${esc(ctx.targetIdentity.note.slice(0, 80))}` : ''}</span></div>` : ''}
       <div><b>结构证据</b> 直接结构 ${pdbCountHtml} · 同源 ${ctx.blastHits.length} 个 · 文献 ${ctx.literature.length} 篇${linkedLitCount ? `（${linkedLitCount} 篇与结构关联）` : ''}</div>
       ${cmp ? `<div><b>客户构建</b> ${constructHtml}</div>` : ''}
       ${ctx.batchNote ? `<div><b>批次关系</b> <span style="color:#92400e">${esc(ctx.batchNote.slice(0, 90))}${ctx.batchNote.length > 90 ? '…' : ''}</span></div>` : ''}
@@ -2800,7 +2981,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
 
   ${showBlastSec ? `
   <section class="sec" id="${idOf('blast')}">
-    <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}${blastNrCount ? ` · ${nrLibLabel} ${blastNrCount}` : ''}${uniBlastCount ? ` · UniProt 匹配 ${uniBlastCount}` : ''}`)}</h2>
+    <h2>${secHead(blastNo, 'BLAST 同源结构', `Homologs · ${ctx.blastHits.length}${blastNrCount ? ` · ${nrLibLabel} ${blastNrCount}` : ''}${uniBlastCount ? ` · UniProt 匹配 ${uniBlastCount}` : ''}${hasIdAlignment ? ' · 序列比对' : ''}`)}</h2>
     ${(ctx.blastHits.length > 0 && blastNrCount > 0) ? blastLibToggleHtml(ctx.blastHits.length, blastNrCount, nrProvider) : ''}
     ${ctx.blastHits.length ? `<div${blastNrCount > 0 ? ' data-libpanel="pdb"' : ''}><p class="note">按检索显著性排序（已排除直接结构重复项；可经表头下方「排序」切换为 Identity 降序等）；同源结构可用作分子置换模板 / Cryo-EM 初始模型 / 域边界参考。表头下方可按方法筛选、切换排序。</p>${ctx.blastStatus?.provider === 'rcsb' ? '<p class="note">NCBI BLAST 队列拥堵/故障，本章节同源结构经 RCSB 序列检索（mmseqs2）获得，命中含一致性/E 值/覆盖度，与 BLAST 同源结构等效。</p>' : ''}<div class="tbl-wrap"><table class="tbl-data tbl-blast" data-tbl="blast">
       <colgroup>
@@ -2815,6 +2996,7 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
       : `<p class="note">${esc(describeBlastStatus(ctx.blastStatus))}。同源结构证据在本报告中缺位，结论主要基于直接结构与文献证据；如需同源检索可重新评估并勾选「强制 BLAST」。</p>`}
     ${blastNrCount > 0 ? `<div${ctx.blastHits.length > 0 ? ' data-libpanel="nr" hidden' : ''}>${blastNrPanelHtml(ctx.blastNrHits ?? [], ctx.blastHits.length === 0, nrProvider)}</div>` : ''}
     ${uniBlastCount > 0 ? `<div>${uniprotBlastPanelHtml(ctx.uniprotBlastHits ?? [])}</div>` : ''}
+    ${ctx.identityAlignment ? `<div>${identityAlignmentPanelHtml(ctx.identityAlignment, ctx.targetIdentity)}</div>` : ''}
   </section>` : ''}
 
   ${ctx.literature.length ? `
@@ -3013,6 +3195,62 @@ export const SINGLE_REPORT_CSS = `  :root {
   .nr-chip-other { background:#f5f5f4; color:#78716c; }
   .rng-banner { border:1px solid #bbf7d0; background:#f0fdf4; color:#065f46; border-radius:6px; padding:10px 14px; margin:10px 0 14px; font-size:12.5px; line-height:1.8; }
   .rng-banner b { font-family:var(--mono); }
+
+  /* ── v2.96 身份识别序列比对面板（提交序列 ↔ UniProt 条目 — 悬停显示双侧残基号）── */
+  .aln-panel { margin-top:12px; }
+  .aln-stats { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 12px; }
+  .aln-chip { display:inline-flex; align-items:baseline; gap:4px; padding:2px 10px; border-radius:99px; background:#f5f5f4; border:1px solid #e7e5e4; font-size:11px; font-family:var(--mono); color:var(--sub); }
+  .aln-chip b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .aln-chip i { font-style:normal; color:var(--faint); font-size:10px; }
+  .aln-strip-wrap { border:1px solid var(--line); border-radius:6px; padding:5px 6px; background:#fcfcfb; margin-bottom:8px; }
+  .aln-strip { display:block; width:100%; height:16px; }
+  .aln-strip rect { shape-rendering:crispEdges; }
+  .aln-legend { display:flex; flex-wrap:wrap; align-items:center; gap:12px; font-size:11px; color:var(--sub); margin-bottom:10px; }
+  .aln-lg { display:inline-flex; align-items:center; gap:5px; font-family:var(--mono); }
+  .aln-lg::before { content:''; width:10px; height:10px; border-radius:3px; display:inline-block; }
+  .aln-lg-m::before { background:#059669; }
+  .aln-lg-p::before { background:#d97706; }
+  .aln-lg-x::before { background:#d6d3d1; }
+  .aln-lg-g::before { background:#f0efee; border:1px solid #e7e5e4; }
+  .aln-lg-hint { margin-left:auto; color:var(--faint); font-size:10.5px; }
+  .aln-scroll { overflow-x:auto; border:1px solid var(--line); border-radius:6px; background:#fcfcfb; padding:12px 14px; }
+  .aln-block { margin-bottom:14px; }
+  .aln-block:last-child { margin-bottom:2px; }
+  .aln-row { display:flex; align-items:baseline; font-family:var(--mono); font-size:12.5px; line-height:1.85; white-space:nowrap; }
+  .aln-row-mid { color:var(--faint); }
+  .aln-lab { flex:0 0 86px; font-size:10.5px; color:var(--sub); letter-spacing:.02em; }
+  .aln-pos { flex:0 0 76px; font-size:10.5px; color:var(--faint); text-align:right; padding-right:10px; font-variant-numeric:tabular-nums; }
+  .aln-pos-sep { padding:0 1px; color:var(--faint); }
+  .aln-seq { flex:none; }
+  .aln-r, .aln-mid { display:inline-block; width:1ch; text-align:center; border-radius:2px; }
+  .aln-r.aln-m { color:#065f46; background:rgba(5,150,105,.10); font-weight:600; }
+  .aln-r.aln-p { color:#92400e; background:rgba(217,119,6,.12); }
+  .aln-r.aln-x { color:var(--ink); background:rgba(28,25,23,.045); }
+  .aln-r.aln-g, .aln-mid.aln-g { color:#57534e; background:rgba(120,113,108,.12); }
+  .aln-mid.aln-m { color:#059669; }
+  .aln-mid.aln-p { color:#d97706; }
+  .aln-mid.aln-x { color:transparent; }
+  .aln-hl { box-shadow:inset 0 0 0 2px #f59e0b; background:#fef3c7 !important; color:var(--ink) !important; font-weight:700; }
+  .aln-tip { display:none; position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:9999; background:#1c1917; color:#fafaf9; border-radius:99px; padding:7px 20px; font-family:var(--mono); font-size:11.5px; line-height:1.6; box-shadow:0 10px 28px rgba(0,0,0,.30); pointer-events:none; white-space:nowrap; max-width:calc(100vw - 24px); overflow:hidden; text-overflow:ellipsis; }
+  .aln-tip b { display:inline-block; width:20px; height:20px; border-radius:6px; background:#fafaf9; color:#1c1917; text-align:center; line-height:20px; font-size:12.5px; margin-right:9px; vertical-align:middle; }
+  .aln-tip em { display:inline-block; width:9px; height:9px; border-radius:3px; margin:0 5px 0 0; vertical-align:baseline; }
+  .aln-tip .aln-tip-kind { display:inline-block; margin-right:12px; color:#e7e5e4; }
+  .aln-tip .aln-tip-sub { color:#fbbf24; font-weight:600; margin-right:12px; }
+  .aln-tip span { display:inline-block; }
+  .aln-tip span + span::before { content:'·'; margin:0 10px; color:#78716c; }
+  .aln-be-list { margin:6px 0 0; padding:0; list-style:none; }
+  .aln-be-list li { padding-left:1.1em; text-indent:-1.1em; margin:3px 0; }
+  @media (max-width:640px){
+    .aln-lab{ flex-basis:64px; font-size:9.5px; }
+    .aln-pos{ flex-basis:58px; font-size:9.5px; }
+    .aln-row{ font-size:11.5px; }
+    .aln-lg-hint{ margin-left:0; flex-basis:100%; }
+  }
+  @media print {
+    .aln-scroll { overflow:visible; }
+    .aln-tip { display:none !important; }
+    .aln-block { break-inside:avoid-page; }
+  }
 
   /* ── 评分卡 ── */
   .score-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:18px 22px; margin:14px 0 10px; }
@@ -3266,10 +3504,11 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
   const rangeSuffix = input.ctx.range ? ` · 残基 ${input.ctx.range[0]}-${input.ctx.range[1]}` : ''
   // v2.44：序列匹配（UniProt 匹配 / nr 识别）归属且非全同时 <title> 同步标注同源度
   //  （与 renderSingleReportBody 内 h1 同口径 — 单独报告导入匹配也从 <title> 提取）
+  //  v2.96：bestEffort（最高同源回填）→「最高同源 N%」
   const outTi = input.ctx.targetIdentity
   const outIdentitySuffix = u && outTi && outTi.identity != null && outTi.identity < 99.95
     && (outTi.source === 'uniprot-blast' || outTi.source === 'blast-nr')
-    ? ` · ${outTi.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(outTi.identity)}%`
+    ? ` · ${outTi.bestEffort ? '最高同源' : outTi.source === 'uniprot-blast' ? 'UniProt 匹配' : 'nr 识别'} ${Math.round(outTi.identity)}%`
     : ''
   const proteinTitle = u
     ? `${u.proteinName}${nspTitleSuffix(u, input.ctx.range)}（${u.uniprotId}${outIdentitySuffix}${rangeSuffix}）`
@@ -3341,6 +3580,7 @@ ${body}
 </script>
 ${UX_PAGE_JS}
 ${TABLE_FILTER_JS}
+${ALIGN_TIP_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`

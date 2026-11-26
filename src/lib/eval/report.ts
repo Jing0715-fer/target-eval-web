@@ -7,7 +7,7 @@
  *  3. 报告要求「结论先行」「已有结构研究全景（时间线/方法学/配体态/覆盖空白）」
  *     「客户目标可行性分级（高中低）+ 关键依据 + 风险」三个强化模块
  */
-import type { BlastHit, BlastNrHit, BlastStatusInfo, FormInsights, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, TargetIdentityInfo, UniprotInfo } from './types'
+import type { BlastHit, BlastNrHit, BlastStatusInfo, FormInsights, IdentityAlignment, InteractionAnalysis, LiteratureItem, MwAugmentAnalysis, OligomerAnalysis, PdbEntry, PdbeCoverageResult, Scores, SequenceComparison, TargetIdentityInfo, UniprotInfo } from './types'
 import type { ParsedImage } from './types'
 import type { AlphafoldSummaryInfo, EsmfoldSummaryInfo } from './types'
 import type { LigandResolution } from './ligand'
@@ -28,6 +28,9 @@ export interface ReportContext {
   insights?: FormInsights
   /** v2.16：序列靶点身份识别（无 UniProt 归属时的命名证据链 — 评估表名/nr 识别/同源推断） */
   targetIdentity?: TargetIdentityInfo
+  /** v2.96：身份识别序列比对（非 100% 一致性归属的证据可视化 — 报告 BLAST 章节
+   *  「序列比对」面板：提交序列 ↔ UniProt 条目局部比对，悬停显示双侧残基号） */
+  identityAlignment?: IdentityAlignment
   /** 批次关系说明（v1.8+ 非关联批量：LLM 在执行摘要中说明独立/复合物项目定位） */
   batchNote?: string
   /** 客户提供的伴随序列（合并评估：UniProt 为主 + 构建边界分析） */

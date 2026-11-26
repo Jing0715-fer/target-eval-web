@@ -684,7 +684,18 @@ export function ResultView({ job, onNewEvaluation }: ResultViewProps) {
               {u.uniprotId}
               <Database className="size-3" />
             </a>
-          ) : summary.targetIdentity ? (
+          ) : null}
+          {/* v2.96：最高同源回填徽标（bestEffort — 远缘参考归属需人工复核；下载的 HTML 报告含「序列比对」面板） */}
+          {u.uniprotId && summary.targetIdentity?.bestEffort && (
+            <span
+              className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-700 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+              title={summary.targetIdentity.note ?? '最高同源回填 — 远缘参考归属，需人工复核（证据详见报告「序列比对」面板）'}
+            >
+              最高同源{summary.targetIdentity.identity != null ? ` ${Math.round(summary.targetIdentity.identity)}%` : ''}
+              <span className="font-normal opacity-80">· 需人工复核</span>
+            </span>
+          )}
+          {!u.uniprotId && summary.targetIdentity ? (
             /* v2.16：序列靶点身份徽标（评估表/nr 识别/同源推断 — 含近似 UniProt 条目时外链） */
             <span
               className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-700 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300"

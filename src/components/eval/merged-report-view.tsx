@@ -181,6 +181,15 @@ function TargetGroupHeader({ t, right }: { t: MergedTargetLite; right?: string }
           {t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''}
         </span>
       )}
+      {/* v2.96：最高同源回填徽标（bestEffort — 远缘参考归属需人工复核；证据见单独评估页「序列比对」面板） */}
+      {t.uniprotId && t.targetIdentity?.bestEffort && (
+        <span
+          className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+          title={t.targetIdentity.note ?? '最高同源回填 — 远缘参考归属，需人工复核'}
+        >
+          最高同源{t.targetIdentity.identity != null ? ` ${Math.round(t.targetIdentity.identity)}%` : ''} · 需人工复核
+        </span>
+      )}
       <span className="truncate font-mono text-[11px] text-muted-foreground/85" title={[t.geneNames.slice(0, 3).join('/'), t.organism].filter(Boolean).join(' · ')}>
         {t.geneNames.slice(0, 2).join('/') || '—'} · {t.organism || '—'}
       </span>

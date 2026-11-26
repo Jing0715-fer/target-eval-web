@@ -32,8 +32,8 @@ import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { llmChat } from './llm'
 import { elideSequenceRuns } from './seq-elide'
-import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, TABLE_FILTER_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
-import { describeRelationType, describeBlastStatus, type AfDomainRange, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastNrHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
+import { esc, renderMarkdown, strategyZh, ligDetailProps, ligStructFig, ligIdentFold, RESPONSIVE_PAGE_CSS, LIGHTBOX_CSS, LIGHTBOX_JS, TABLE_FILTER_JS, ALIGN_TIP_JS, PRINT_PAGE_CSS, UX_PAGE_CSS, UX_PAGE_JS, SINGLE_REPORT_CSS, renderSingleReportBody, type SingleBodyCtx } from './report-html'
+import { describeRelationType, describeBlastStatus, type AfDomainRange, type AlphafoldSummaryInfo, type EsmfoldSummaryInfo, type BlastHit, type BlastNrHit, type BlastStatusInfo, type ConstructInfo, type FormInsights, type HomologPair, type IdentityAlignment, type LiteratureItem, type MethodStats, type MwAugmentAnalysis, type OligomerAnalysis, type ParsedImage, type PdbEntry, type PdbeCoverageResult, type InteractionAnalysis, type RelationJudgment, type Scores, type SequenceAttribution, type SequenceComparison, type SharedStructure, type TargetIdentityInfo, type UniprotProcessingChain } from './types'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensureLigand2dVector, type LigandResolution } from './ligand'
 import { computeSharedStructures } from './shared-structures'
@@ -90,6 +90,9 @@ export interface MergedTargetData {
   /** v2.82：EBI UniProt 库（Swiss-Prot）序列匹配命中（身份级联 v2.44 通道实际
    *  执行且有命中时存档，≤20 条；单独评估页/前端展示；历史作业缺省） */
   uniprotBlastHits?: BlastNrHit[]
+  /** v2.96：身份识别序列比对（非 100% 一致性归属 — 单独评估页「序列比对」
+   *  面板；历史作业缺省） */
+  identityAlignment?: IdentityAlignment
   /** v1.24：聚集形式（寡聚态）分析（v1.24+ 作业存在；历史作业缺省） */
   oligomer?: OligomerAnalysis
   ligands?: LigandResolution[]
@@ -162,6 +165,9 @@ export interface MergedTargetLite {
   blastNrProvider?: 'ncbi' | 'ebi'
   /** v2.82：EBI UniProt 库序列匹配命中（前端/单独评估页展示；历史报告缺省） */
   uniprotBlastHits?: BlastNrHit[]
+  /** v2.96：身份识别序列比对（非 100% 一致性归属的证据可视化 — 单独评估页
+   *  「序列比对」面板；历史作业缺省） */
+  identityAlignment?: IdentityAlignment
   /** v2.9：AlphaFold 预测结构元数据（前端简报卡展示；交互 3D 视图见 HTML 报告） */
   alphafold?: AlphafoldSummaryInfo
   /** v2.15：ESMFold 兜底预测元数据（AFDB 无收录时前端简报卡展示） */
@@ -208,6 +214,8 @@ export function toMergedTargetLite(t: MergedTargetData): MergedTargetLite {
     blastNrProvider: t.blastNrProvider,
     // v2.82：UniProt 库序列匹配命中（前端/单独评估页展示）
     uniprotBlastHits: t.uniprotBlastHits,
+    // v2.96：身份识别序列比对（单独评估页「序列比对」面板）
+    identityAlignment: t.identityAlignment,
     alphafold: t.alphafold,
     esmfold: t.esmfold ?? null,
     // v2.16：靶点身份（前端展示与单独评估页题目用）
@@ -245,6 +253,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       blastNrProvider?: 'ncbi' | 'ebi'
       /** v2.82：EBI UniProt 库序列匹配命中（单独评估页/前端展示；历史作业缺省） */
       uniprotBlastHits?: BlastNrHit[]
+      /** v2.96：身份识别序列比对（单独评估页「序列比对」面板；历史作业缺省） */
+      identityAlignment?: IdentityAlignment
       /** v2.45：序列靶点原始标签头 + 提交序列 SHA-256 前 16 hex（报告导入匹配用） */
       sequenceHeader?: string
       seqSha?: string
@@ -308,6 +318,8 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       blastNrProvider: summary.blastNrProvider,
       // v2.82：UniProt 库序列匹配命中（单独评估页报告主体 BLAST 章节展示）
       uniprotBlastHits: summary.uniprotBlastHits,
+      // v2.96：身份识别序列比对（单独评估页报告主体 BLAST 章节「序列比对」面板）
+      identityAlignment: summary.identityAlignment,
       oligomer: summary.oligomer,
       ligands: summary.ligands,
       mwAugment: summary.mwAugment ?? null,
@@ -1535,6 +1547,8 @@ export async function renderMergedReportHtml(input: MergedHtmlInput): Promise<st
       blastNrProvider: t.blastNrProvider,
       // v2.82：UniProt 库序列匹配命中（报告 BLAST 章节单独面板展示）
       uniprotBlastHits: t.uniprotBlastHits,
+      // v2.96：身份识别序列比对（报告 BLAST 章节「序列比对」面板 — 悬停显示双侧残基号）
+      identityAlignment: t.identityAlignment,
       directPdbs: t.directPdbs,
       blastHits: t.blastHits,
       blastStatus: t.blastStatus,
@@ -2001,6 +2015,7 @@ ${mtrViewerJs}
 ${viewSwitchJs}
 ${UX_PAGE_JS}
 ${TABLE_FILTER_JS}
+${ALIGN_TIP_JS}
 ${LIGHTBOX_JS}
 </body>
 </html>`
