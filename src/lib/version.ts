@@ -470,5 +470,23 @@
  *    Q6X632 392 列实盘：60.5% → 76.5%）无需重新评估即显示新口径；新报告
  *    服务端已按新口径渲染，重算幂等无变化；
  *  - pipeline 日志/types 注释同步（identity/positives 语义 = 非缺口列口径）。
+ * v2.99：上传报告自动升级（用户规则：上传报告后，旧版生成的报告更新成最新版，
+ *  补全后续版本加入的内容 — 新建 report-upgrade.ts 统一升级管线）：
+ *  - 展示层补丁链 applyReportPatchChain：响应式版心/灯箱/打印 UX/表格筛选/
+ *    比对面板自适应五函数与报告服务路由同序串接（幂等 — 新版报告零改动）；
+ *  - 比对面板内容回填 backfillAlignmentPanel：v2.96 前生成的报告无「序列比对」
+ *    面板，比对双序列不在报告 HTML 里 — 从作业 llm-ctx.json 快照（v2.51+ 落盘）
+ *    按管线 v2.96 收尾同口径（已归属 + 非 100% 一致性）现算 Smith-Waterman
+ *    （纯 CPU 无网络），注入面板 HTML + ALIGN_PANEL_CSS（自 SINGLE_REPORT_CSS
+ *    抽出同源）+ 悬停脚本（aln-tip-v1 标记幂等）+ 块宽自适应脚本；快照缺失/
+ *    规则不满足/截断文档（ht-archive 2MB 前缀件）→ 静默跳过零回归；
+ *  - 接入面：storeImportedReportHtml（上传留存 — 新写入全量升级 + 去重命中
+ *    旧记录就地治愈 tmp+rename 原子重写；contentSha 锚定原文口径 — 客户端
+ *    sourceSha/sha 自愈通道零感知）、ht-dashboard 载荷内嵌逐份升级（覆盖本版
+ *    前已落盘的旧留存）、jobs/[id]/report（在线查看/下载/PDF）、ht-archive
+ *    （zip 内作业报告）、loadMergedTargets（旧合并报告重渲染的单独评估页经
+ *    alignmentForLegacyJob 回填 identityAlignment）；
+ *  - 报告 head 新增 targeteval:version meta（生成器版本自标识 — 诊断与后续
+ *    版本门控用）；上传响应/留存日志附 upgraded 标记（诊断字段）。
  */
-export const APP_VERSION = 'v2.98.0'
+export const APP_VERSION = 'v2.99.0'

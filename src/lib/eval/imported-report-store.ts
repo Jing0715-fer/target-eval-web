@@ -24,6 +24,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { db } from '@/lib/db'
 import { ensureImportedReportTable } from './imported-report-table'
+import { upgradeReportHtml } from './report-upgrade'
 
 export interface ImportOwner {
   key: string
@@ -58,8 +59,35 @@ export function sanitizeImportedFileName(raw: string): string {
 }
 
 export type StoreImportedReportResult =
-  | { ok: true; id: string; contentSha: string; deduped: boolean }
+  | { ok: true; id: string; contentSha: string; deduped: boolean; upgraded?: boolean }
   | { ok: false; error: string }
+
+/** 留存体积上限（与上传路由同口径 — 升级产物超限时回退存原文，升级是增强不阻塞） */
+const MAX_HTML_CHARS = 32_000_000
+
+/** v2.99：旧版留存就地治愈 — 去重命中的既有记录若由旧版生成（缺升级标记），
+ *  读盘 → 全量升级（补丁链 + 比对面板回填）→ 原子重写同路径文件（tmp+rename，
+ *  并发读取不受半写影响；升级确定性 → 并发写同内容，后写覆盖无副作用）。
+ *  size 列同步为落盘实际字节数（best-effort）。任何异常静默降级（文件保持原样）。 */
+async function healLegacyRetention(rec: { id: string; htmlPath: string }): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(rec.htmlPath, 'utf-8')
+    const up = await upgradeReportHtml(raw)
+    if (!up.changed || up.html.length > MAX_HTML_CHARS) return false
+    const tmp = `${rec.htmlPath}.upg`
+    await fs.writeFile(tmp, up.html, 'utf-8')
+    await fs.rename(tmp, rec.htmlPath)
+    await db.importedReport.update({
+      where: { id: rec.id },
+      data: { size: Buffer.byteLength(up.html, 'utf-8') },
+    }).catch(() => undefined)
+    console.log(`[imported-report-store] 旧版留存已升级至最新版（${rec.id}${up.panelBackfilled ? ' — 含比对面板回填' : ''}）`)
+    return true
+  } catch (err) {
+    console.error('[imported-report-store] 旧版留存就地治愈失败（降级保留原文件）：', err instanceof Error ? err.message : String(err))
+    return false
+  }
+}
 
 /**
  * 留存一份导入报告原文（内容寻址去重 — 同归属人同内容已有可读留存直接回
@@ -72,7 +100,6 @@ export async function storeImportedReportHtml(
   html: string,
 ): Promise<StoreImportedReportResult> {
   if (typeof html !== 'string' || !html.trim()) return { ok: false, error: '报告内容为空' }
-  const MAX_HTML_CHARS = 32_000_000
   if (html.length > MAX_HTML_CHARS) return { ok: false, error: `报告内容超出体积上限（32MB — 当前 ${(html.length / 1_000_000).toFixed(1)}MB）` }
   const safeName = sanitizeImportedFileName(fileName)
   try {
@@ -82,7 +109,10 @@ export async function storeImportedReportHtml(
   }
   const contentSha = contentShaOf(html)
   // 内容寻址去重：同归属人同内容已有可读留存 → 直接回既有 id（幂等 — 直传与
-  // 导入时上传/自愈重传重复到达时零成本）
+  // 导入时上传/自愈重传重复到达时零成本）。
+  // v2.99：命中旧版留存的就地治愈 — 同原文（同 contentSha）重新到达时把落盘
+  // 文件升级到最新版（补丁链 + 比对面板回填）；contentSha 锚定原文口径不变，
+  // 客户端 sourceSha / sha 自愈通道零感知。
   try {
     const dup = await db.importedReport.findMany({
       where: { contentSha },
@@ -91,12 +121,26 @@ export async function storeImportedReportHtml(
     })
     for (const rec of dup) {
       if (await recordAlive(rec, owner.key, owner.ipKey)) {
-        return { ok: true, id: rec.id, contentSha, deduped: true }
+        const upgraded = await healLegacyRetention(rec)
+        return { ok: true, id: rec.id, contentSha, deduped: true, ...(upgraded ? { upgraded: true } : {}) }
       }
     }
   } catch (err) {
     console.error('[imported-report-store] 内容去重查询失败（继续走新建）：', err instanceof Error ? err.message : String(err))
   }
+  // v2.99：新留存写入前全量升级（旧版报告 → 最新版：补丁链 + 比对面板回填）。
+  // 升级异常/产物超限 → 回退存原文（升级是增强，绝不阻塞留存）；升级确定性
+  // → 同原文重复到达产物一致，与去重/就地治愈兼容。contentSha 始终锚定原文
+  // 口径（客户端 sourceSha / sha 自愈通道零感知）。
+  let storeHtml = html
+  let upgraded = false
+  try {
+    const up = await upgradeReportHtml(html)
+    if (up.changed && up.html.length <= MAX_HTML_CHARS) {
+      storeHtml = up.html
+      upgraded = true
+    }
+  } catch { /* 升级失败存原文 */ }
   let record: { id: string }
   try {
     record = await db.importedReport.create({
@@ -107,7 +151,7 @@ export async function storeImportedReportHtml(
         // 先建行拿 id，再落盘（路径以 id 命名 — 无用户可控路径成分）
         htmlPath: '',
         contentSha,
-        size: Buffer.byteLength(html, 'utf-8'),
+        size: Buffer.byteLength(storeHtml, 'utf-8'),
       },
     })
   } catch (err) {
@@ -117,9 +161,9 @@ export async function storeImportedReportHtml(
     const dir = path.join(process.cwd(), 'db', 'reports', 'imports')
     await fs.mkdir(dir, { recursive: true })
     const htmlPath = path.join(dir, `${record.id}.html`)
-    await fs.writeFile(htmlPath, html, 'utf-8')
+    await fs.writeFile(htmlPath, storeHtml, 'utf-8')
     await db.importedReport.update({ where: { id: record.id }, data: { htmlPath } })
-    return { ok: true, id: record.id, contentSha, deduped: false }
+    return { ok: true, id: record.id, contentSha, deduped: false, ...(upgraded ? { upgraded: true } : {}) }
   } catch (err) {
     // 落盘失败 → 清掉空行（不留死记录）
     await db.importedReport.delete({ where: { id: record.id } }).catch(() => undefined)

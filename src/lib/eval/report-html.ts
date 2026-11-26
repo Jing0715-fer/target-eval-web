@@ -53,6 +53,7 @@ import type { ReportContext } from './report'
 import { describeEvidenceSource, describeOligoConfidence } from './oligomer'
 import { ensure3DmolBundle, plddtStyleApplyJs, afToolbarJs } from './alphafold'
 import { matchProcessingSegments, type ProcessingSegmentMatch } from './uniprot'
+import { APP_VERSION } from '../version'
 // v2.45：报告内嵌机器可读标记（targeteval:target）— 提交序列 SHA-256（服务端专用模块）
 import { createHash } from 'node:crypto'
 
@@ -1920,7 +1921,7 @@ const ALN_BLOCK_COLS = 60
  *  - 窄屏横滚（.aln-scroll — 与数据表同款模式），打印时滚动容器放开。
  *  数据源 IdentityAlignment 由管线本地比对产出（identity-align.ts，
  *  Smith-Waterman-Gotoh / BLOSUM62 — 与 BLAST HSP 同语义）。 */
-function identityAlignmentPanelHtml(aln: IdentityAlignment, ti?: TargetIdentityInfo): string {
+export function identityAlignmentPanelHtml(aln: IdentityAlignment, ti?: TargetIdentityInfo): string {
   if (!aln?.qSeq || !aln.hSeq || aln.qSeq.length !== aln.hSeq.length || aln.qSeq.length < 8) return ''
   const cols = aln.qSeq.length
   // 逐列状态与双侧残基号（0 = 该侧缺口）
@@ -2038,6 +2039,7 @@ function identityAlignmentPanelHtml(aln: IdentityAlignment, ti?: TargetIdentityI
  *  概览条，位置固定易扫读；内容 = 残基徽标 + 类型色点 + 替代对（错配/正替代时
  *  Q→K）+ 双侧残基号；同列三行联动高亮（十字准线）。 */
 export const ALIGN_TIP_JS = `<script>
+/* aln-tip-v1 */
 (function(){
   var tip = null, curCol = [];
   var KIND_COLOR = { '全同': '#34d399', '正替代': '#fbbf24', '错配': '#d6d3d1', '缺口': '#a8a29e' };
@@ -3228,6 +3230,66 @@ export async function renderSingleReportBody(input: SingleReportBodyInput): Prom
   return body
 }
 
+/** v2.96 身份识别序列比对面板样式（独立导出 — 除 SINGLE_REPORT_CSS 引用外，
+ *  v2.99 report-upgrade.ts 对旧报告注入比对面板时补注入同一份，新旧同源）。 */
+export const ALIGN_PANEL_CSS = `  /* ── v2.96 身份识别序列比对面板（提交序列 ↔ UniProt 条目 — 悬停显示双侧残基号）── */
+  .aln-panel { margin-top:12px; }
+  .aln-stats { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 12px; }
+  .aln-chip { display:inline-flex; align-items:baseline; gap:4px; padding:2px 10px; border-radius:99px; background:#f5f5f4; border:1px solid #e7e5e4; font-size:11px; font-family:var(--mono); color:var(--sub); }
+  .aln-chip b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .aln-chip i { font-style:normal; color:var(--faint); font-size:10px; }
+  .aln-strip-wrap { border:1px solid var(--line); border-radius:6px; padding:5px 6px; background:#fcfcfb; margin-bottom:8px; }
+  .aln-strip { display:block; width:100%; height:16px; }
+  .aln-strip rect { shape-rendering:crispEdges; }
+  .aln-legend { display:flex; flex-wrap:wrap; align-items:center; gap:12px; font-size:11px; color:var(--sub); margin-bottom:10px; }
+  .aln-lg { display:inline-flex; align-items:center; gap:5px; font-family:var(--mono); }
+  .aln-lg::before { content:''; width:10px; height:10px; border-radius:3px; display:inline-block; }
+  .aln-lg-m::before { background:#059669; }
+  .aln-lg-p::before { background:#d97706; }
+  .aln-lg-x::before { background:#d6d3d1; }
+  .aln-lg-g::before { background:#f0efee; border:1px solid #e7e5e4; }
+  .aln-lg-hint { margin-left:auto; color:var(--faint); font-size:10.5px; }
+  .aln-scroll { overflow-x:auto; border:1px solid var(--line); border-radius:6px; background:#fcfcfb; padding:12px 14px; }
+  .aln-block { margin-bottom:14px; }
+  .aln-block:last-child { margin-bottom:2px; }
+  .aln-row { display:flex; align-items:baseline; font-family:var(--mono); font-size:12.5px; line-height:1.85; white-space:nowrap; }
+  .aln-row-mid { color:var(--faint); }
+  .aln-lab { flex:0 0 86px; font-size:10.5px; color:var(--sub); letter-spacing:.02em; }
+  .aln-pos { flex:0 0 76px; font-size:10.5px; color:var(--faint); text-align:right; padding-right:10px; font-variant-numeric:tabular-nums; }
+  .aln-pos-sep { padding:0 1px; color:var(--faint); }
+  .aln-seq { flex:none; }
+  .aln-r, .aln-mid { display:inline-block; width:1ch; text-align:center; border-radius:2px; }
+  .aln-r.aln-m { color:#065f46; background:rgba(5,150,105,.10); font-weight:600; }
+  .aln-r.aln-p { color:#92400e; background:rgba(217,119,6,.12); }
+  .aln-r.aln-x { color:var(--ink); background:rgba(28,25,23,.045); }
+  .aln-r.aln-g, .aln-mid.aln-g { color:#57534e; background:rgba(120,113,108,.12); }
+  .aln-mid.aln-m { color:#059669; }
+  .aln-mid.aln-p { color:#d97706; }
+  .aln-mid.aln-x { color:transparent; }
+  .aln-hl { box-shadow:inset 0 0 0 2px #f59e0b; background:#fef3c7 !important; color:var(--ink) !important; font-weight:700; }
+  .aln-tip { display:none; position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:9999; background:#1c1917; color:#fafaf9; border-radius:99px; padding:7px 20px; font-family:var(--mono); font-size:11.5px; line-height:1.6; box-shadow:0 10px 28px rgba(0,0,0,.30); pointer-events:none; white-space:nowrap; max-width:calc(100vw - 24px); overflow:hidden; text-overflow:ellipsis; }
+  .aln-tip b { display:inline-block; width:20px; height:20px; border-radius:6px; background:#fafaf9; color:#1c1917; text-align:center; line-height:20px; font-size:12.5px; margin-right:9px; vertical-align:middle; }
+  .aln-tip em { display:inline-block; width:9px; height:9px; border-radius:3px; margin:0 5px 0 0; vertical-align:baseline; }
+  .aln-tip .aln-tip-kind { display:inline-block; margin-right:12px; color:#e7e5e4; }
+  .aln-tip .aln-tip-sub { color:#fbbf24; font-weight:600; margin-right:12px; }
+  .aln-tip span { display:inline-block; }
+  .aln-tip span + span::before { content:'·'; margin:0 10px; color:#78716c; }
+  .aln-be-list { margin:6px 0 0; padding:0; list-style:none; }
+  .aln-be-list li { padding-left:1.1em; text-indent:-1.1em; margin:3px 0; }
+  @media (max-width:640px){
+    .aln-lab{ flex-basis:64px; font-size:9.5px; }
+    .aln-pos{ flex-basis:58px; font-size:9.5px; }
+    .aln-row{ font-size:11.5px; }
+    .aln-lg-hint{ margin-left:0; flex-basis:100%; }
+  }
+  @media print {
+    .aln-scroll { overflow:visible; }
+    .aln-tip { display:none !important; }
+    .aln-block { break-inside:avoid-page; }
+  }
+
+`
+
 /** 单靶点报告 CSS — 单靶点报告与合并报告（首页 + 各靶点单独评估页）同源同版（v2.13）；
  *  原 #llm 选择器类化为 .sec-llm（合并报告多视图页内同章节出现多次，id 前缀化后
  *  样式仍以类命中 — 单靶点报告视觉完全不变）。 */
@@ -3408,61 +3470,7 @@ export const SINGLE_REPORT_CSS = `  :root {
   .rng-banner { border:1px solid #bbf7d0; background:#f0fdf4; color:#065f46; border-radius:6px; padding:10px 14px; margin:10px 0 14px; font-size:12.5px; line-height:1.8; }
   .rng-banner b { font-family:var(--mono); }
 
-  /* ── v2.96 身份识别序列比对面板（提交序列 ↔ UniProt 条目 — 悬停显示双侧残基号）── */
-  .aln-panel { margin-top:12px; }
-  .aln-stats { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 12px; }
-  .aln-chip { display:inline-flex; align-items:baseline; gap:4px; padding:2px 10px; border-radius:99px; background:#f5f5f4; border:1px solid #e7e5e4; font-size:11px; font-family:var(--mono); color:var(--sub); }
-  .aln-chip b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
-  .aln-chip i { font-style:normal; color:var(--faint); font-size:10px; }
-  .aln-strip-wrap { border:1px solid var(--line); border-radius:6px; padding:5px 6px; background:#fcfcfb; margin-bottom:8px; }
-  .aln-strip { display:block; width:100%; height:16px; }
-  .aln-strip rect { shape-rendering:crispEdges; }
-  .aln-legend { display:flex; flex-wrap:wrap; align-items:center; gap:12px; font-size:11px; color:var(--sub); margin-bottom:10px; }
-  .aln-lg { display:inline-flex; align-items:center; gap:5px; font-family:var(--mono); }
-  .aln-lg::before { content:''; width:10px; height:10px; border-radius:3px; display:inline-block; }
-  .aln-lg-m::before { background:#059669; }
-  .aln-lg-p::before { background:#d97706; }
-  .aln-lg-x::before { background:#d6d3d1; }
-  .aln-lg-g::before { background:#f0efee; border:1px solid #e7e5e4; }
-  .aln-lg-hint { margin-left:auto; color:var(--faint); font-size:10.5px; }
-  .aln-scroll { overflow-x:auto; border:1px solid var(--line); border-radius:6px; background:#fcfcfb; padding:12px 14px; }
-  .aln-block { margin-bottom:14px; }
-  .aln-block:last-child { margin-bottom:2px; }
-  .aln-row { display:flex; align-items:baseline; font-family:var(--mono); font-size:12.5px; line-height:1.85; white-space:nowrap; }
-  .aln-row-mid { color:var(--faint); }
-  .aln-lab { flex:0 0 86px; font-size:10.5px; color:var(--sub); letter-spacing:.02em; }
-  .aln-pos { flex:0 0 76px; font-size:10.5px; color:var(--faint); text-align:right; padding-right:10px; font-variant-numeric:tabular-nums; }
-  .aln-pos-sep { padding:0 1px; color:var(--faint); }
-  .aln-seq { flex:none; }
-  .aln-r, .aln-mid { display:inline-block; width:1ch; text-align:center; border-radius:2px; }
-  .aln-r.aln-m { color:#065f46; background:rgba(5,150,105,.10); font-weight:600; }
-  .aln-r.aln-p { color:#92400e; background:rgba(217,119,6,.12); }
-  .aln-r.aln-x { color:var(--ink); background:rgba(28,25,23,.045); }
-  .aln-r.aln-g, .aln-mid.aln-g { color:#57534e; background:rgba(120,113,108,.12); }
-  .aln-mid.aln-m { color:#059669; }
-  .aln-mid.aln-p { color:#d97706; }
-  .aln-mid.aln-x { color:transparent; }
-  .aln-hl { box-shadow:inset 0 0 0 2px #f59e0b; background:#fef3c7 !important; color:var(--ink) !important; font-weight:700; }
-  .aln-tip { display:none; position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:9999; background:#1c1917; color:#fafaf9; border-radius:99px; padding:7px 20px; font-family:var(--mono); font-size:11.5px; line-height:1.6; box-shadow:0 10px 28px rgba(0,0,0,.30); pointer-events:none; white-space:nowrap; max-width:calc(100vw - 24px); overflow:hidden; text-overflow:ellipsis; }
-  .aln-tip b { display:inline-block; width:20px; height:20px; border-radius:6px; background:#fafaf9; color:#1c1917; text-align:center; line-height:20px; font-size:12.5px; margin-right:9px; vertical-align:middle; }
-  .aln-tip em { display:inline-block; width:9px; height:9px; border-radius:3px; margin:0 5px 0 0; vertical-align:baseline; }
-  .aln-tip .aln-tip-kind { display:inline-block; margin-right:12px; color:#e7e5e4; }
-  .aln-tip .aln-tip-sub { color:#fbbf24; font-weight:600; margin-right:12px; }
-  .aln-tip span { display:inline-block; }
-  .aln-tip span + span::before { content:'·'; margin:0 10px; color:#78716c; }
-  .aln-be-list { margin:6px 0 0; padding:0; list-style:none; }
-  .aln-be-list li { padding-left:1.1em; text-indent:-1.1em; margin:3px 0; }
-  @media (max-width:640px){
-    .aln-lab{ flex-basis:64px; font-size:9.5px; }
-    .aln-pos{ flex-basis:58px; font-size:9.5px; }
-    .aln-row{ font-size:11.5px; }
-    .aln-lg-hint{ margin-left:0; flex-basis:100%; }
-  }
-  @media print {
-    .aln-scroll { overflow:visible; }
-    .aln-tip { display:none !important; }
-    .aln-block { break-inside:avoid-page; }
-  }
+${ALIGN_PANEL_CSS}
 
   /* ── 评分卡 ── */
   .score-card { background:#fdfdfc; border:1px solid var(--line); border-radius:6px; padding:18px 22px; margin:14px 0 10px; }
@@ -3761,6 +3769,7 @@ export async function renderReportHtml(input: ReportRenderInput): Promise<string
 <title>靶点结构解析可行性评估报告 — ${esc(proteinTitle)}</title>
 <meta name="targeteval:target" content="${esc(JSON.stringify(metaTarget))}">
 <meta name="targeteval:job" content="${esc(JSON.stringify({ jobId: input.jobId }))}">
+<meta name="targeteval:version" content="${esc(APP_VERSION)}">
 <style>
 ${SINGLE_REPORT_CSS}${RESPONSIVE_PAGE_CSS}${LIGHTBOX_CSS}${PRINT_PAGE_CSS}${UX_PAGE_CSS}</style>
 </head>

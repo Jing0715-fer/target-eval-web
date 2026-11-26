@@ -93,6 +93,7 @@ import { createHash } from 'node:crypto'
 import { llmChat } from './llm'
 import { getEngineSummary } from './llm-provider'
 import { renderMarkdown } from './report-html'
+import { upgradeReportHtml, applyReportPatchChain } from './report-upgrade'
 import { planArchiveNames, type ArchivePlanItem } from './ht-archive-names'
 import { ensureImportedReportTable } from './imported-report-table'
 import { extractImportedStatsSections, pickImportedStats, toCleanImportedStats } from './imported-stats'
@@ -1282,8 +1283,15 @@ async function* htPayloadJsonChunks(
     let html: string | undefined
     let shareKey: string | undefined
     if (rowHasReportHtml(r)) {
-      const src = r.reportHtml ?? (r.reportHtmlPath ? await readFile(r.reportHtmlPath, 'utf-8').catch(() => null) : null)
+      let src = r.reportHtml ?? (r.reportHtmlPath ? await readFile(r.reportHtmlPath, 'utf-8').catch(() => null) : null)
       if (src && src.length <= REPORT_HTML_MAX_BYTES) {
+        // v2.99：内嵌前升级至最新版（旧版报告 → 补丁链 + 比对面板回填）—
+        // 覆盖本版之前已落盘的旧留存（上传时升级只及新写入/重传治愈）；升级
+        // 产物超预算或异常时回退内嵌原文（升级是增强，绝不因升级丢原文）
+        try {
+          const up = await upgradeReportHtml(src)
+          if (up.html.length <= REPORT_HTML_MAX_BYTES) src = up.html
+        } catch { /* 内嵌原文 */ }
         html = src
         embedded++
         const dk = r.reportHtmlPath != null ? `p:${r.reportHtmlPath}` : `m:${sharedHtmlKey(src)}`
@@ -1790,13 +1798,16 @@ function buildHtReportPayload(input: {
       // 原文报告自带 <title>，tt 仅作 Blob 打不开时的索引提示；
       // v2.71：仅内存原文走此分支 — 路径行（reportHtmlPath）在整串渲染链路
       //  降级为重建页变体（服务端链路由流式写入器延迟读盘嵌入原文）；
-      //  v2.86：内存原文进共享池，行条目输出 sk 引用
-      const dk = `m:${sharedHtmlKey(r.reportHtml)}`
+      //  v2.86：内存原文进共享池，行条目输出 sk 引用；
+      //  v2.99：内存原文同步补丁链升级（异步面板回填仅流式链路 — 此处为
+      //  fixture/单测内存路径，展示层升级即足）
+      const srcHtml = applyReportPatchChain(r.reportHtml)
+      const dk = `m:${sharedHtmlKey(srcHtml)}`
       let k = sharedKeys.get(dk)
       if (k == null) {
         k = `k${sharedKeys.size}`
         sharedKeys.set(dk, k)
-        sharedEntries.push([k, r.reportHtml])
+        sharedEntries.push([k, srcHtml])
       }
       return { tt: esc(`${r.label}${r.range ? ` 残基 ${r.range[0]}-${r.range[1]}` : ''} · 完整评估报告`), j: esc(r.jobId), fn, sk: k }
     }

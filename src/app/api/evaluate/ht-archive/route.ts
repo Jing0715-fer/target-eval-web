@@ -23,6 +23,7 @@ import JSZip from 'jszip'
 import { db } from '@/lib/db'
 import { getOwner, isOwnedBy } from '@/lib/eval/request-guard'
 import { applyResponsiveOverride, applyZoomUpgrade, applyUxUpgrade, applyAlignLayoutUpgrade } from '@/lib/eval/report-html'
+import { backfillAlignmentPanel } from '@/lib/eval/report-upgrade'
 import { planArchiveNames, HT_DASHBOARD_ZIP_NAME, type ArchivePlanItem } from '@/lib/eval/ht-archive-names'
 import { ensureHtDashboardProgressColumn } from '@/lib/eval/ht-dashboard'
 
@@ -151,6 +152,9 @@ async function buildArchiveResponse(entries: ArchiveEntryInput[], owner: ReturnT
         let html = await readHtmlPrefix(job.reportPath)
         if (html.length > MAX_HTML_BYTES) html = html.slice(0, MAX_HTML_BYTES)
         html = applyAlignLayoutUpgrade(applyUxUpgrade(applyZoomUpgrade(applyResponsiveOverride(html))))
+        // v2.99：旧版报告比对面板回填（v2.96 前；数据来自作业 llm-ctx 快照。
+        //  前缀读取的截断件无 </body> → 内部自动跳过，不会注入半成品）
+        html = await backfillAlignmentPanel(html, entry.jobId)
         loaded.push({ entry, html, kind: 'job', title: safeName(entry.label || job.uniprotId || job.title || entry.jobId) })
       } catch {
         missing.push(entry.label ?? entry.jobId)

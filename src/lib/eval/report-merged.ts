@@ -42,6 +42,7 @@ import { synthesizeScoreRationale } from './score'
 import { alphafoldStructureFor, alphafoldMetaFor, ensure3DmolBundle, plddtStyleApplyJs, afToolbarJs } from './alphafold'
 import { loadCachedEsmfoldModel } from './esmfold'
 import { splitQaChapter, parseInsightQa, QA_CHAPTER_TITLE } from './qa-chapter'
+import { alignmentForLegacyJob } from './report-upgrade'
 
 // ─── 数据结构 ─────────────────────────────────────────────────────────────────
 
@@ -269,6 +270,10 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
     try { blastHits = job.blastHits ? JSON.parse(job.blastHits) : [] } catch { /* ignore */ }
     try { literature = job.literature ? JSON.parse(job.literature) : [] } catch { /* ignore */ }
     if (!summary?.scores) continue
+    // v2.99：旧作业（v2.96 前 summary 无 identityAlignment）比对面板回填 —
+    //  从作业 llm-ctx 快照按管线同口径现算（纯本地比对）；新作业有值零开销，
+    //  快照缺失/规则不满足 → undefined（单独评估页无面板，与原行为一致）
+    const identityAlignment = summary.identityAlignment ?? (await alignmentForLegacyJob(job.id)) ?? undefined
     // v2.13：历史作业（v2.9 前摘要未持久化 rationale）评分依据合成 — 各靶点单独
     // 评估页评分卡需要；从留存的确定性数据重建，不虚构缺失信号
     const legacyScores = summary.scores as Scores & { rationale?: { xray: string; cryoem: string; nmr: string; overall: string } }
@@ -318,8 +323,9 @@ export async function loadMergedTargets(jobIds: string[]): Promise<MergedTargetD
       blastNrProvider: summary.blastNrProvider,
       // v2.82：UniProt 库序列匹配命中（单独评估页报告主体 BLAST 章节展示）
       uniprotBlastHits: summary.uniprotBlastHits,
-      // v2.96：身份识别序列比对（单独评估页报告主体 BLAST 章节「序列比对」面板）
-      identityAlignment: summary.identityAlignment,
+      // v2.96：身份识别序列比对（单独评估页报告主体 BLAST 章节「序列比对」面板；
+      //  v2.99 旧作业经快照回填，见上方 identityAlignment）
+      identityAlignment,
       oligomer: summary.oligomer,
       ligands: summary.ligands,
       mwAugment: summary.mwAugment ?? null,

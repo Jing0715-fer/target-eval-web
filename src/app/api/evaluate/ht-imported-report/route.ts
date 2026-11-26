@@ -73,7 +73,8 @@ export async function POST(req: Request) {
     console.error('[ht-imported-report] 留存失败：', stored.error)
     return NextResponse.json({ ok: false, error: `${stored.error}（不影响导入 — 汇总弹出页将降级）` }, { status: 500 })
   }
-  return NextResponse.json({ ok: true, id: stored.id, ...(stored.deduped ? { deduped: true } : {}) })
+  // v2.99：upgraded = 该留存由旧版生成、本次上传时已自动升级至最新版（诊断字段，前端可忽略）
+  return NextResponse.json({ ok: true, id: stored.id, ...(stored.deduped ? { deduped: true } : {}), ...(stored.upgraded ? { upgraded: true } : {}) })
 }
 
 /**
