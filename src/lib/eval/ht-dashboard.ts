@@ -100,6 +100,12 @@
  *  ④ 紧凑化 — th/td 纵向 padding 收窄（8/8px→6/5px）、原表内容块与结论行
  *    收紧、表下长注解精简。
  *
+ * v2.101：汇总表两处精简（用户反馈 2026-11-26 截图标注）：① 靶点列移除
+ *  「原表行快照」展示行（tg-excel — 序列列独立后剩余内容多为本地文件路径，
+ *  无评估参考价值且占行高；原表文本仍入搜索索引 data-search，按原表内容
+ *  筛选仍可命中）；② 结论列徽章与建议文字改同一行内联展开（vd-line 由块级
+ *  div 改内联 span — 徽章后不留空行，文字紧跟徽章起排、自然换行）。
+ *
  * 离线链接语义：zip 相对路径与 ht-archive 打包命名同源（planArchiveNames 共享
  * 规划器）— 「批量下载全部」zip 解压后，看板内 G01/xxx.html 链接直接可点。
  */
@@ -1888,21 +1894,10 @@ function buildHtReportPayload(input: {
   }
 }
 
-/** v2.68→v2.100：原表内容单元格渲染 — 序列列独立（v2.100）：序列原文可用
- *  （excelSeqs）时原表文本中的 [序列 N aa] 标记一并移除（序列复制按钮已移至独立
- *  「序列」列，表格不再重复展示，省空间）；旧快照无 seqs 时保留纯文本长度标记
- *  （信息不丢 — 序列列显示「—」）。其余文本 esc。 */
-function renderExcelCell(text: string, seqs?: string[]): string {
-  const collapsed = collapseSeqText(text)
-  if (!seqs || seqs.length === 0) return esc(collapsed)
-  return esc(collapsed
-    .replace(/\s*\[序列 \d+ aa\]\s*/g, ' · ')
-    .replace(/\s*\[序列已折叠\]\s*/g, ' · ')
-    .replace(/(?:\s*·\s*){2,}/g, ' · ')
-    .replace(/^\s*·\s*|\s*·\s*$/g, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim())
-}
+/** v2.101：原表行快照展示移除 — 序列列独立（v2.100）后原表行剩余内容多为
+ *  本地文件路径（如「/Volumes/One Touch/…/三叶草…」），无评估参考价值且占行高
+ *  （用户反馈「红框部分移除」）。原表行文本仍参与搜索索引（data-search —
+ *  按原表内容筛选仍可命中），序列复制按钮不受影响（「序列」列）。 */
 
 /** 汇总主表（可筛选 · 可排序 · X-ray/Cryo-EM/NMR 评分分列单独排序 · 「完整报告」弹出单靶点完整报告）。
  *  v2.71：opts.payloadMarker — 服务端生成链路传 true，载荷位置输出 MARKER 占位
@@ -2003,7 +1998,6 @@ export function renderHtDashboardHtml(input: RenderHtDashboardInput, opts?: { pa
   <div class="tg-label">${esc(r.label)}${r.range ? `<span class="tg-range">:${r.range[0]}-${r.range[1]}</span>` : ''}${loadBadge}${gprotBadge}${r.fromArchive ? '<span class="tg-cache" title="该靶点数据来自浏览器本地缓存恢复（服务端作业已过期/实例回收）— 在线/离线报告链接不可用；评估正文经「查看报告」弹出页提供">缓存恢复</span>' : ''}</div>
   ${!r.bare && r.proteinName && r.proteinName !== r.label && r.proteinName !== r.uniprotId ? `<div class="tg-sub" title="${esc(r.proteinName)}">${esc(r.proteinName)}</div>` : ''}
   ${!r.bare && r.organism ? `<div class="tg-sub" title="${esc(r.organism)}">${esc(r.organism)}</div>` : ''}
-  ${r.excelText ? `<div class="tg-excel" title="原始表该行内容（序列已移至「序列」列，点击该列按钮一键复制完整序列）">${renderExcelCell(r.excelText, r.excelSeqs)}</div>` : ''}
 </td>
 <td class="td-uni">${uniBadge}</td>
 <td class="td-seq">${seqBtns || '<span class="dim">—</span>'}</td>
@@ -2016,8 +2010,8 @@ ${r.bare
 <td class="td-num">${pdbCell}</td>
 <td class="td-num mono">${Math.round(r.coverage)}%</td>`}
 <td class="td-verdict">${r.bare
-  ? '<span class="vd vd-load">已载入</span><div class="vd-line">已有报告（导入匹配）— 本次运行未重复评估，评分与结论见导入的报告文件</div>'
-  : `<span class="vd vd-${v.verdict}">${meta.label}</span><div class="vd-line">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</div>`}</td>
+  ? '<span class="vd vd-load">已载入</span><span class="vd-line">已有报告（导入匹配）— 本次运行未重复评估，评分与结论见导入的报告文件</span>'
+  : `<span class="vd vd-${v.verdict}">${meta.label}</span><span class="vd-line">${esc(v.line)}${v.source === 'rule' ? '<span class="dim">（规则推断）</span>' : ''}</span>`}</td>
 <td class="td-act">
   ${openBtn || dlBtn ? `<div class="mt-btns">${openBtn}${dlBtn}</div>` : ''}
   ${links.length ? `<div class="mt-links">${links.join(' · ')}</div>` : ''}
@@ -2127,7 +2121,6 @@ tr.mt-row:hover td{background:#fbfdfc}
 .uni-id{display:inline-block;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--accent);background:var(--accent-bg);border:1.5px solid #6ee7c7;border-radius:6px;padding:1px 9px;text-decoration:none;letter-spacing:.2px;line-height:1.7;white-space:nowrap}
 .uni-id:hover{background:#d1fae5;border-color:var(--accent-2)}
 .uni-src{font-family:var(--mono);font-size:9.5px;color:#0f766e;background:#ecfdf5;border:1px dashed #6ee7c7;border-radius:4px;padding:0 6px;line-height:1.9;display:inline-block}
-.tg-excel{margin-top:3px;padding:2px 7px;border-left:2px solid #b8e6d2;background:var(--accent-bg);font-size:10px;color:var(--sub);line-height:1.55;overflow-wrap:anywhere;border-radius:0 4px 4px 0}
 .tg-cache{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #fde68a;background:#fffbeb;color:#a16207;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
 /* v2.68：载入徽标（导入既有报告的靶点 — emerald 调与「缓存恢复」区分） */
 .tg-load{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;border:1px solid #6ee7c7;background:#ecfdf5;color:#047857;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.5px;vertical-align:1px}
@@ -2155,7 +2148,8 @@ tr.mt-row:hover td{background:#fbfdfc}
 .vd-go{color:#0f766e;background:#ccfbf1;border:1px solid #99e5d5}
 .vd-caution{color:#a16207;background:#fef3c7;border:1px solid #fde68a}
 .vd-no{color:#b91c1c;background:#fee2e2;border:1px solid #fecaca}
-.vd-line{font-size:10.5px;color:var(--ink);line-height:1.6;margin-top:3px;max-width:400px}
+/* v2.101：结论行内联 — 徽章后不留空行，建议文字同一行紧跟展开（自然换行） */
+.vd-line{font-size:10.5px;color:var(--ink);line-height:1.6;margin-left:6px}
 /* v2.100：查看报告（青绿）/ 下载（琥珀）— 同尺寸同字重不同色，并排单行 */
 .mt-open{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid #0f766e;background:#0f766e;color:#fff;cursor:pointer;white-space:nowrap}
 .mt-open:hover{background:#115e59;border-color:#115e59}
@@ -2255,7 +2249,7 @@ ${stats.gProteinCount > 0 ? `<div class="warn" style="margin:-6px 0 14px">复合
 <table class="mt" id="mt-table">
 <thead><tr>
 <th>#</th>
-<th data-k="label" title="原始表靶点名称（含蛋白名 / 种属 / 原表行快照 — 序列已移至「序列」列）">靶点（原始表名称）</th>
+<th data-k="label" title="原始表靶点名称（含蛋白名 / 种属 — 序列已移至「序列」列）">靶点（原始表名称）</th>
 <th class="sortable num" data-k="uniprot" title="UniProt ID（回补的以徽标展示）— 点击排序">UniProt<span class="arr"></span></th>
 <th title="一键复制该行完整序列（原表序列列 / 提交序列原文）">序列</th>
 <th class="sortable num" data-k="overall" title="综合可行性总分 — 点击排序">总分<span class="arr"></span></th>
