@@ -126,6 +126,13 @@ function touchGroupForRerun(g: HTGroupState, r: HTRunState): void {
     g.status = 'pending'
     g.finishedAt = undefined
   }
+  // v2.102：清除过时的「合并报告未生成」原因 — mergedError（仅 1 个成功 /
+  // 生成失败）一旦设置从无清除路径，runGroup ③ 的 `!g.mergedError` 守卫会让
+  // 「重跑失败项凑齐 ≥2 成功」后也永远不再生成合并报告（复合物关系评估永远
+  // 缺失）。重跑即组将重走评估+合并链路：凑齐则自动补生成（重新评估路径），
+  // 仍只有 1 个成功则 runGroup 重新设置准确的新文案。mergedReportId 保留
+  // （已生成的有效报告不重复生成 — 既有「重入时已生成过则跳过」语义）。
+  if (g.mergedError) g.mergedError = undefined
   if (r.dashboardId || r.dashboardError || r.dashboardPending) {
     r.dashboardId = undefined
     r.dashboardError = undefined
@@ -809,7 +816,7 @@ export function useHighThroughputFlow() {
     // 关联但仅 1 个成功：合并报告需 ≥2 — 显式说明（同现有批量行为）
     if (!single && related && okItems.length === 1) {
       const failed = items.filter((it) => it.status === 'error').length
-      g.mergedError = `本组判定为关联复合物，但仅 1 个靶点评估成功${failed ? `（${failed} 个失败/中断）` : ''}；合并报告需要至少 2 个成功靶点，可稍后在普通模式单独重试失败靶点。`
+      g.mergedError = `本组判定为关联复合物，但仅 1 个靶点评估成功${failed ? `（${failed} 个失败/中断）` : ''}；合并报告需要至少 2 个成功靶点 — 可重跑失败靶点后继续运行，本组将自动补生成复合物合并报告。`
     }
 
     // ── ③ 合并报告（组内 ≥2 成功；重入时已生成过则跳过）──────────────

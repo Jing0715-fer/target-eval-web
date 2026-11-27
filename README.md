@@ -253,9 +253,9 @@ scripts/                         # E2E（报告 UX / 灯箱 / 响应式 / 部署
    未接代理时直连请求同属 `direct` 归属组（本地调试用；公网必须接代理隔离用户）
 2. **网关超时（v2.6/v2.6.3 可续跑分段评估）**：无状态网关切断长连接时，前端自动走分段续跑 — 到点服务端交还 checkpoint 快照，前端立即携快照续跑直至终态（BLAST RID 跨段轮询 / PDB·配体·LLM 报告增量续跑）。**v2.6.3 实测部署网关对流式响应的字节转发窗口仅 ~24-28s**（与心跳内容/节奏无关，服务端 EOF 亦不达客户端，socket ~91s 才被杀）：段预算收紧到 14s（`EVAL_SYNC_SEGMENT_MS` 可调，勿超 ~18s），checkpoint 事件安全落在窗口内；分块上传 / 后台解析 / 异步报告本身均为短请求
 3. **智能解析流式心跳（v2.6.2/v2.6.3）**：`/api/evaluate/insights` 为 NDJSON 流，心跳 beat 形态与 `/api/evaluate/sync` 一致（异步首事件 1.2s + ~1.4KB pad + 3s 周期）。**v2.6.3：LLM 预算 40s → 12s（`EVAL_INSIGHTS_BUDGET_MS` 可调，勿超 ~15s）** — 40s 的兜底 done 事件落在网关 ~24s 转发窗之外，客户端只能读流至 ~91s socket 切断抛 TypeError「network error」（用户实测报错）；12s 预算保证 done ≤ ~13s 入队；前端断流识别已覆盖英文 network error / terminated / failed to fetch，三级降级（流式 → 流式重试 → quick 规则兜底）真正生效。`/api/llm/test` 连通性探测同样收紧至 12s 快速失败
-4. **数据与备份**：`db/custom.db` 与 `db/reports/` 含用户数据；终态记录 7 天自动清理
+4. **数据与备份**：`db/custom.db` 与 `db/reports/` 含用户数据；终态记录 30 天自动清理（`EVAL_JOB_TTL_DAYS`）
 5. **部署产物体积（v2.7.1 构建修复）**：`pipeline.ts` / `report-merged.ts` 中引用运行时资源目录（`st.assetDir` = `db/reports/<id>/assets`）的 `path.join` 若不加 `/*turbopackIgnore: true*/`，Turbopack 静态分析无法确定路径，会把**整个项目根**（含 node_modules 全量、沙盒 skills/、docs/ 等，standalone 膨胀至 ~295MB）追踪进部署包，超过平台打包/上传上限 → 部署失败（"Sorry, there was a problem deploying the code"）。已修的三处：`pipeline.ts` resolveImagePath、`pipeline.ts` reportAsset.create.path、`report-merged.ts` embedImages；修复后 standalone ~180MB、部署包 ~68MB。**新增任何构建期不可静态确定的 fs 路径时，务必同样加 turbopackIgnore，或改用 `path.join(process.cwd(), 'db', ...)` 静态子目录形式**
-6. **配额环境变量**：`EVAL_MAX_QUEUE`(8) · `EVAL_MAX_ACTIVE_PER_IP`(2) · `EVAL_MAX_JOBS_PER_DAY`(30) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_JOB_CONCURRENCY`(2) · `EVAL_JOB_TTL_DAYS`(7) · `EVAL_SYNC_SEGMENT_MS`(14000，分段评估单段预算) · `EVAL_INSIGHTS_BUDGET_MS`(12000，智能解析 LLM 预算)
+6. **配额环境变量**：`EVAL_MAX_QUEUE`(16) · `EVAL_MAX_ACTIVE_PER_IP`(8) · `EVAL_MAX_JOBS_PER_DAY`(1000，v2.102 起 150→1000 — 高通量上百作业/场 + 失败重跑单日即触顶) · `EVAL_MAX_UPLOADS_PER_DAY`(20) · `EVAL_PARSE_CONCURRENCY`(2) · `EVAL_PARSE_WAIT_LIMIT`(4) · `EVAL_JOB_CONCURRENCY`(6，执行池) · `EVAL_JOB_TTL_DAYS`(30) · `EVAL_SYNC_SEGMENT_MS`(14000，分段评估单段预算) · `EVAL_INSIGHTS_BUDGET_MS`(12000，智能解析 LLM 预算)
 7. 外部 LLM API Key 明文存本地 SQLite，面向内网 / 单机沙箱设计；不可信人群公网开放前建议改用内置引擎或为配置面板加访问控制
 
 ## 版本演进

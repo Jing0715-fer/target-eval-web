@@ -516,5 +516,19 @@
  *  - 结论列徽章与建议文字同一行内联展开（vd-line 由块级 div 改内联 span，
  *    margin-top:3px→margin-left:6px）— 徽章后不留空行，文字紧跟徽章起排、
  *    超长自然换行。
+ * v2.102：高通量两项行为修正（用户反馈 2026-11-26）：
+ *  - 作业日配额 EVAL_MAX_JOBS_PER_DAY 默认 150 → 1000（gatekeeper.ts）— 用户实测
+ *    「近 24 小时内已创建 150 次评估」限流：高通量一场大清单（102 行 ≈ 100+
+ *    作业）+ 失败重跑/续跑（重跑即新建作业再计一次）单日即触顶自动暂停跨日
+ *    才能跑完；150 改 1000，真正节流仍由并发上限（≤8 活跃 + 队列 16）与 LLM
+ *    限流自动暂停承担，日配额仅防脚本滥用；
+ *  - 复合物合并报告补生成修复（use-high-throughput-flow.ts touchGroupForRerun）：
+ *    多靶点组判定为关联复合物但仅 1 个评估成功（或合并生成失败）时设置的
+ *    mergedError 此前从无清除路径 — runGroup ③ 的 `!g.mergedError` 守卫使
+ *    「重跑失败靶点凑齐 ≥2 成功」后合并报告也永远不再生成（复合物关系评估
+ *    报告永久缺失）。现重跑（retryItem/retryGroupFailures/retryFailed 共同
+ *    经 touchGroupForRerun）即清除过时原因，组重走链路：凑齐自动补生成，
+ *    仍不齐则重设准确新文案（文案同步指向组内重跑而非「普通模式单独重试」）；
+ *    mergedReportId 保留 — 已生成的有效报告不重复生成（既有语义）。
  */
-export const APP_VERSION = 'v2.101.0'
+export const APP_VERSION = 'v2.102.0'

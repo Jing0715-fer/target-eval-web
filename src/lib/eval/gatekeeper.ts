@@ -29,11 +29,13 @@ export const MAX_GLOBAL_PENDING = num(process.env.EVAL_MAX_QUEUE, 16)
  *  内存不受影响 */
 export const MAX_ACTIVE_PER_IP = num(process.env.EVAL_MAX_ACTIVE_PER_IP, 8)
 /**
- * 每 IP 24h 作业创建配额。v2.23.1：30 → 150 — 高通量评估一次运行动辄上百作业
- * （如 102 行靶点清单 ≈ 100+ 作业），30/日使高通量当天即触发自动暂停、跨多日
- * 才能跑完；并发上限（≤6 活跃 + 全局队列 16）与 LLM 限流自动暂停仍是主要节流。
+ * 每 IP 24h 作业创建配额。v2.23.1：30 → 150（高通量上百作业单日触顶自动暂停）；
+ * v2.102：150 → 1000 — 用户实测 150 单日即触顶（102 行清单 ≈ 100+ 作业/场，
+ * 多场运行 + 失败重跑当天即超），限流文案「近 24 小时内已创建 150 次评估」即此；
+ * 计数含重跑/续跑新建的作业，重跑一次大清单即双倍消耗。真正节流由并发上限
+ * （≤8 活跃 + 全局队列 16）与 LLM 限流自动暂停承担 — 1000/日仅防脚本滥用。
  */
-export const MAX_JOBS_PER_DAY = num(process.env.EVAL_MAX_JOBS_PER_DAY, 150)
+export const MAX_JOBS_PER_DAY = num(process.env.EVAL_MAX_JOBS_PER_DAY, 1000)
 export const MAX_UPLOADS_PER_DAY = num(process.env.EVAL_MAX_UPLOADS_PER_DAY, 20)
 /** docx 解析全局并发（mammoth/sharp/VLM 内存重负载） */
 export const PARSE_CONCURRENCY = num(process.env.EVAL_PARSE_CONCURRENCY, 2)
