@@ -93,7 +93,13 @@ export async function POST(req: Request) {
     if (!quota.ok && quota.error) throw quota.error
   } catch (e) {
     if (e instanceof QuotaError) return quotaResponse(e)
-    return NextResponse.json({ ok: false, error: '配额检查失败，请稍后重试' }, { status: 500 })
+    // v2.103：真实异常必须落日志（用户实测「配额检查失败」暂停整场运行时
+    //  dev.log 零痕迹 — count 查询撞 DB 锁等瞬时错误全靠猜）；文案同时避开
+    //  前端 isRateLimitError 的限流关键词（「配额」二字曾把 500 误判成 429
+    //  限流 → pauseWithReason 整场暂停 — 瞬时错误只应标该靶点 error）
+    console.error('[evaluate] 配额检查异常（DB count 查询失败，非真实限流）：',
+      e instanceof Error ? `${e.constructor.name}: ${e.message}` : String(e))
+    return NextResponse.json({ ok: false, error: '服务暂时不可用，请稍后重试' }, { status: 500 })
   }
 
   // v1.23 评估范围限定（UniProt 残基编号，1-based 闭区间）：仅 UniProt 单靶点无伴随序列时有效

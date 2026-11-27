@@ -92,10 +92,14 @@ function groupFolderLabel(index: number): string {
  * 限流 / 配额特征指纹（v2.22）：
  *  - LLM 供应商侧：429 / too many requests / rate limit
  *  - 系统自身配额（gatekeeper QuotaError 文本）：排队评估较多 / 同时最多 / 每日上限 / 近 24 小时内已创建
+ * - v2.103：删除「配额|quota」关键词 — 唯一含「配额」的用户可见文案是 evaluate 路由 500
+ *   兜底「配额检查失败（现改『服务暂时不可用』）」= DB count 查询瞬时异常（撞锁），
+ *   被它误判成限流后 pauseWithReason 整场暂停（用户实测 TI_CM006_17_B3 提交暂停）；
+ *   真实 429 文案均不含「配额/quota」字样，删除后真限流仍全覆盖
  */
 export function isRateLimitError(text: string | null | undefined): boolean {
   if (!text) return false
-  return /\b429\b|too many requests|rate ?limit|rate_limit|限流|频率过高|配额|quota|每日上限|近 24 小时内已创建|同时最多|排队评估较多/i.test(text)
+  return /\b429\b|too many requests|rate ?limit|rate_limit|限流|频率过高|每日上限|近 24 小时内已创建|近 24 小时内已上传|同时最多|排队评估较多|服务器繁忙/i.test(text)
 }
 
 /** 组状态 → 图标 + 文案（组状态与靶点状态在视图层组装，此处只给状态） */

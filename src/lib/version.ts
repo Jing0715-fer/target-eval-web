@@ -530,5 +530,20 @@
  *    经 touchGroupForRerun）即清除过时原因，组重走链路：凑齐自动补生成，
  *    仍不齐则重设准确新文案（文案同步指向组内重跑而非「普通模式单独重试」）；
  *    mergedReportId 保留 — 已生成的有效报告不重复生成（既有语义）。
+ * v2.103：「配额检查失败」误判限流整场暂停修复（用户实测 2026-11-27：
+ *  高通量提交序列靶点 TI_CM006_17_B3 · 245aa 时被暂停，文案「评估作业被限流：
+ *  配额检查失败，请稍后重试」）：
+ *  - 根因链：checkJobQuota 的 3 个 evaluationJob.count（DB 读）在 SQLite 默认
+ *    DELETE 日志模式下被并发写事务（作业状态更新 / TTL 清理删除；服务重启窗口
+ *    新旧实例短暂并存操作同一 db 文件 — dev.log 实证 EADDRINUSE 瞬间）锁阻塞
+ *    抛非 QuotaError 异常 → evaluate 路由 500 兜底文案「配额检查失败，请稍后
+ *    重试」→ 前端 isRateLimitError 按「配额」关键词误判为限流 → pauseWithReason
+ *    整场暂停（瞬时 DB 错误只应标该靶点 error，不应暂停整场）；
+ *  - 三层修复：① db.ts 模块加载时幂等 PRAGMA journal_mode=WAL（持久属性，
+ *    读不阻塞写/写不阻塞读，跨进程并发安全；已对当前库立即执行生效）；②
+ *    evaluate 路由 500 兜底文案改「服务暂时不可用，请稍后重试」且 catch 落
+ *    console.error（本次事故 dev.log 零痕迹）；③ isRateLimitError 删除
+ *    「配额|quota」关键词（真实 429 文案均不含该词，唯一含的是 500 兜底 —
+ *    误判源），补「近 24 小时内已上传/服务器繁忙」覆盖上传配额文案。
  */
-export const APP_VERSION = 'v2.102.0'
+export const APP_VERSION = 'v2.103.0'
